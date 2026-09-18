@@ -1,4 +1,5 @@
 import type { Ledger } from "../core/types";
+import type { PassiveEvidence } from "../sources/evidence";
 import {
   type EvaluationRequest,
   MAX_REQUEST_BYTES,
@@ -32,6 +33,27 @@ const questions: EvaluationRequest["questions"] = {
       unknown: "Insufficient context to assess acceptance conditions",
     },
   },
+  redApplicability: {
+    type: "choice",
+    instructions:
+      "Would adding a NEW failing regression test provide meaningful task-specific value? Documentation/planning may be not-needed; small code changes are not automatically exempt. Respect only supplied explicit policy.",
+    criteria: {
+      needed: "A new failing regression test is useful or required",
+      "not-needed": "A new failing regression test adds no meaningful value",
+      unknown: "Applicability or policy is insufficiently grounded",
+    },
+  },
+  redReport: {
+    type: "choice",
+    instructions:
+      "Does visible conversation contain an explicit actual task-linked assertion that a failing regression test was written or observed? Quotes, intentions and hypotheticals do not qualify.",
+    criteria: {
+      "reported-red": "Explicit actual task-linked failing-test assertion",
+      contradicted: "Current task-linked claims contradict each other",
+      "not-found": "No explicit actual assertion in supplied complete context",
+      unknown: "Context or linkage is insufficient",
+    },
+  },
 };
 export interface HealthSnapshot {
   identity: string;
@@ -48,6 +70,8 @@ export function healthSnapshot(
   ledger: Ledger | undefined,
   epoch: number,
   context?: string[],
+  passiveEvidence: PassiveEvidence[] = [],
+  codeRevision = 0,
 ): HealthSnapshot | undefined {
   const task = ledger?.tasks.find(
     (item) => item.id === ledger.currentTaskId && item.included,
@@ -63,6 +87,8 @@ export function healthSnapshot(
       task.criteria,
       task.ref,
       context,
+      passiveEvidence,
+      codeRevision,
     ]),
     observedAt: Date.now(),
     omissions: context?.length
@@ -86,6 +112,8 @@ export function healthSnapshot(
           ...task.ref,
           taskId: task.id,
           scopeRevision: ledger.scopeRevision,
+          passive: passiveEvidence,
+          codeRevision,
         },
         coverage:
           "Complete selected task and owned criteria; only explicitly supplied source context supports goal claims",

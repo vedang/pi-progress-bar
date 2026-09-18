@@ -16,6 +16,7 @@ import {
   type ConversationCheckpoint,
   type ConversationSource,
 } from "../sources/conversation";
+import { EvidenceStore } from "../sources/evidence";
 import {
   applyScopeRelations,
   scopeAnswers,
@@ -54,6 +55,7 @@ export class Monitor {
   epoch = 0;
   health?: HealthResult;
   conversation = new Conversation();
+  readonly evidence = new EvidenceStore();
   readonly gateway: JevGateway;
   readonly analysis: AnalysisScheduler;
   private timer?: ReturnType<typeof setInterval>;
@@ -85,11 +87,42 @@ export class Monitor {
   }
 
   snapshot() {
+    const recent = this.conversation.trajectory.messages
+      .slice(-8)
+      .map((item) => `${item.role}: ${item.text.slice(0, 2000)}`);
     return healthSnapshot(
       this.ledger,
       this.epoch,
-      this.source ? this.conversation.context(this.source) : undefined,
+      this.source
+        ? [...this.conversation.context(this.source), ...recent]
+        : recent,
+      this.evidence.snapshot(),
+      this.evidence.codeRevision(),
     );
+  }
+
+  observeToolStart(
+    callId: string,
+    toolName: string,
+    args: unknown,
+    entryId?: string,
+  ) {
+    if (!this.enabled) return;
+    this.evidence.start(callId, toolName, args, Date.now(), entryId);
+  }
+
+  observeToolEnd(
+    callId: string,
+    toolName: string,
+    result: unknown,
+    isError: boolean,
+  ) {
+    if (!this.enabled) return;
+    const value =
+      result && typeof result === "object"
+        ? { ...(result as object), isError }
+        : { isError };
+    this.evidence.finish(callId, toolName, value, Date.now());
   }
 
   enqueueAnalysis(
@@ -197,6 +230,7 @@ export class Monitor {
   private clearRuntime() {
     this.analysis.clear();
     this.gateway.pause();
+    this.evidence.clearPending();
     this.runtimeIdentity = undefined;
     this.evidenceIdentity = undefined;
     this.health = undefined;

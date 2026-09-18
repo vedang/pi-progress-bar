@@ -4,6 +4,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { countReported } from "../core/ledger";
 import type { Monitor } from "../core/monitor";
+import { redEvidenceLabel } from "../sources/evidence";
 
 export const widgetName = "pi-progress-bar";
 const plain = (text: string) => text.replace(/[\p{Cc}\p{Cf}]/gu, " ");
@@ -25,9 +26,22 @@ export function clarityLabel(score: unknown): string {
 function signals(monitor: Monitor): string[] {
   const clarity = monitor.health?.result.answers.clarity;
   const acceptance = monitor.health?.result.answers.acceptance;
+  const applicability = monitor.health?.result.answers.redApplicability;
+  const report = monitor.health?.result.answers.redReport;
+  const red = redEvidenceLabel({
+    applicability:
+      applicability?.type === "choice"
+        ? (applicability.choice as "needed" | "not-needed" | "unknown")
+        : "unknown",
+    reported: report?.type === "choice" && report.choice === "reported-red",
+    contradiction:
+      report?.type === "choice" && report.choice === "contradicted",
+    observed: monitor.evidence.redObservation(),
+  });
   return [
     `Requirements: ${clarity?.type === "score" ? clarityLabel(clarity.score) : "unknown"}`,
     `Acceptance: ${acceptance?.type === "choice" ? acceptance.choice : "unknown"}`,
+    `Red test: ${red}`,
   ];
 }
 

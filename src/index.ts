@@ -79,13 +79,25 @@ export default function progressBar(pi: ExtensionAPI): void {
     monitor.observe(() => ctx.sessionManager.getBranch());
     paint(ctx, monitor);
   });
-  pi.on("tool_execution_start", (_event, ctx) => {
+  pi.on("tool_execution_start", (event, ctx) => {
     if (!monitor.enabled) return;
+    monitor.observeToolStart(
+      event.toolCallId,
+      event.toolName,
+      event.args,
+      ctx.sessionManager.getLeafId() ?? undefined,
+    );
     monitor.activity = "Tool active";
     paint(ctx, monitor);
   });
-  pi.on("tool_execution_end", (_event, ctx) => {
+  pi.on("tool_execution_end", (event, ctx) => {
     if (!monitor.enabled) return;
+    monitor.observeToolEnd(
+      event.toolCallId,
+      event.toolName,
+      event.result,
+      event.isError,
+    );
     monitor.activity = ctx.isIdle() ? "Idle" : "Agent active";
     paint(ctx, monitor);
   });

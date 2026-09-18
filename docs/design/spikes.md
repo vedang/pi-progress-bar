@@ -78,7 +78,7 @@ This distinguishes policy discussion from an actual completion claim in this exa
 
 Estimated input cost **$0.000473298** (about 0.047 US cents), using published **$0.042 per million input tokens**; output tokens free per current model docs. This is a calculated estimate, not a billing statement. Four successful POST attempts, no retries. Wall times include network/response handling, not just model inference.
 
-These small manual samples fit a ten-second refresh budget in this environment. They do not establish production latency, service availability, calibrated accuracy, or cost for arbitrary session sizes.
+These small manual samples fit the original ten-second refresh target in this environment. The user subsequently confirmed configurable refresh with a 15-second default; no additional live calls were needed for that design change. They do not establish production latency, service availability, calibrated accuracy, or cost for arbitrary session sizes.
 
 ## Read-only source findings
 

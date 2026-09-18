@@ -20,7 +20,7 @@ Typed output validates the interface only. Vendor latency and confidence calibra
 | Unknown identity | Ambiguous task/report mapping leaves unknown or conflicting state; no silent reassignment by recency alone. |
 | History | Abandoned Pi branches do not contribute completion; fork/tree/reload restore only applicable source state. A compaction summary is not fabricated firsthand test evidence. |
 | Active task | Task switch invalidates old task judgments and temporal window. Unknown active task does not inherit last task's healthy meters. |
-| API ownership | One request in flight; obsolete identity responses discarded; same-task aged data explicitly marked as-of/stale. No replay backlog from ten-second ticks. |
+| API ownership | One request in flight; obsolete identity responses discarded; same-task aged data explicitly marked as-of/stale. No replay backlog from configured refresh ticks (default 15s). |
 | Missing service | Structured reported counts remain available without Jev; semantic/prose interpretations show unavailable or clearly aged, not silently refreshed. |
 | Consent and privacy | No remote calls before explicit enablement; no source bodies/credentials in debug logs or persisted metadata; private `!!` output excluded. |
 | Evidence boundaries | Path resolution, source-read and payload budgets enforced before network; symlinks cannot bypass allowed workspace boundary. Omitted evidence is declared. |
@@ -67,7 +67,7 @@ Cover happy paths, insufficient evidence, contradictions, hostile embedded text,
 - Treat false `Not needed`, false `Appears complete`, false stuck/drift, and false completion-report mappings separately. Costs differ; don't collapse to one average accuracy number.
 - Choose thresholds on a tuning set, then evaluate held-out examples and fresh sessions. Pin model when tuning; rerun comparisons before changing it.
 - Do not prescribe universal `0.8`/`0.9` gates or fabricate success targets before baseline results and user risk preferences. First prototype labels judgments experimental and exposes raw distributions; missing-evidence gates remain deterministic.
-- Temporal windows and persistence rules are tunable hypotheses. Ten seconds is refresh cadence, not evidence of a meaningful stagnation interval.
+- Temporal windows and persistence rules are tunable hypotheses. Configured refresh cadence (default 15s) is not evidence of a meaningful stagnation interval.
 - The first opted-in live exercise measures actual request usage/latency and checks how Jev interprets examples. Passing deterministic tests is not a claim of semantic accuracy.
 - Product release needs both contract checks and an explicitly reviewed interpretation baseline. Future agent nudges need a separate, stricter decision and remain out of product v1.
 

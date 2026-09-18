@@ -12,7 +12,7 @@ Status: user endorsed overall design direction and requested explicit `Not neede
 | R0 | Help a human supervise coding-agent work with a persistent, passive display. | Core goal |
 | R1 | Show reported completed tasks versus total scoped plan tasks, not estimated effort or time remaining. | Must-have |
 | R2 | Show requirements clarity, acceptance criteria/tests, red tests, implementation completeness, meaningful progress, stuck state, and drift for the current task. | Must-have |
-| R3 | Refresh every 10 seconds without blocking the agent or requiring a full-transcript inference request. | Must-have |
+| R3 | Refresh at a configurable interval (default 15 seconds) without blocking the agent or requiring a full-transcript inference request. | Must-have |
 | R4 | Work with Beads and without it; interpret explicit completion reports for known prose-plan tasks. | Must-have |
 | R5 | Distinguish observed facts, reported states, model judgments, and insufficient evidence. | Must-have |
 | R6 | Deliver main-session Pi support first while keeping host-specific collection and rendering outside shared logic. | Must-have |
@@ -28,7 +28,7 @@ This is a design-mechanism fit, not implementation or accuracy verification. ✅
 | R0 | Help a human supervise coding-agent work with a persistent, passive display. | Core goal | ✅ |
 | R1 | Show reported completed tasks versus total scoped plan tasks, not estimated effort or time remaining. | Must-have | ✅ |
 | R2 | Show requirements clarity, acceptance criteria/tests, red tests, implementation completeness, meaningful progress, stuck state, and drift for the current task. | Must-have | ❌ |
-| R3 | Refresh every 10 seconds without blocking the agent or requiring a full-transcript inference request. | Must-have | ✅ |
+| R3 | Refresh at a configurable interval (default 15 seconds) without blocking the agent or requiring a full-transcript inference request. | Must-have | ✅ |
 | R4 | Work with Beads and without it; interpret explicit completion reports for known prose-plan tasks. | Must-have | ❌ |
 | R5 | Distinguish observed facts, reported states, model judgments, and insufficient evidence. | Must-have | ✅ |
 | R6 | Deliver main-session Pi support first while keeping host-specific collection and rendering outside shared logic. | Must-have | ✅ |
@@ -49,7 +49,7 @@ This is a design-mechanism fit, not implementation or accuracy verification. ✅
 | A4 | Snapshot builder selects goal, active task, criteria, relevant evidence, and rolling-window observations within fixed budgets. | Evidence-selection quality must be evaluated. |
 | A5 | Jev evaluates independent narrow questions; code handles unknowns, freshness, temporal persistence, and presentation labels. | Rubrics and thresholds are not calibrated yet. |
 | A6 | Named Pi widget displays reported bar plus seven status/meter rows, with source/freshness and on-demand evidence details. | Final layout and command names need user confirmation. |
-| A7 | Session-scoped scheduler refreshes locally every 10s, performs single-flight changed-state inference, cancels on shutdown, and rejects cross-session/task results. | End-to-end latency and cost require measurement. |
+| A7 | Session-scoped scheduler refreshes at the configured interval (default 15s), performs single-flight changed-state inference, cancels on shutdown, and rejects cross-session/task results. | End-to-end latency and cost require measurement. |
 
 These are understood architectural seams, not a claim that automatic plan inference or health judgments have been validated. The proposed mechanisms are detailed in [breadboard.md](breadboard.md) and sequenced in [slices.md](slices.md). This review packet does not authorize implementation.
 
@@ -77,7 +77,7 @@ These are understood architectural seams, not a claim that automatic plan infere
 | Red tests | First assess whether a new failing test adds meaningful validation for this task, using task kind, risk, existing coverage, and explicit test policy. An explicit agent assertion is sufficient for reported red; independently observed file/run/assertion/order evidence can establish observed red. Jev judges report meaning and task relevance. | `Not needed (Jev assessment)`, `Reported red`, `Observed red`, `Written; red unreported`, or `Unknown`. | Reported is sufficient under user policy but is not independently verified. Contradictory evidence remains visible. Not needed does not waive validation. A generic process failure or file existence alone is not red evidence. Do not rerun tests from monitor. |
 | Implementation | Per criterion Choice: evidence supports / contradicts / insufficient evidence, paired with actual check outcomes if observed. | `Appears complete`, `Partial`, `Unverified`, plus criterion evidence details. | Cannot certify arbitrary code correct or all requirements satisfied from a bounded snapshot. Passing tests may be incomplete or stale. |
 | Meaningful progress | Noul or Choice on whether selected changes/observations reduce unresolved work against active goal over a longer window. Include investigation and narrowed hypotheses, not just edits. | `Advancing`, `No advance observed`, `Unclear`, with window label. | Activity, token count, commit count, or lines changed are not progress measures. No meaningful change is not necessarily stuck. |
-| Stuck | Code computes elapsed times, repeated failures and activity state. Jev Choice assesses repeated unproductive attempts / explicit blocker / productive exploration / insufficient evidence from a trajectory. | `Possible loop`, `Blocked (reported)`, `No stuck signal`, `Observing`; idle/waiting/tool-running labeled separately. | Inactivity cannot prove stuck. A 10s refresh is not a 10s stuck threshold. Main session cannot judge unseen child internals. |
+| Stuck | Code computes elapsed times, repeated failures and activity state. Jev Choice assesses repeated unproductive attempts / explicit blocker / productive exploration / insufficient evidence from a trajectory. | `Possible loop`, `Blocked (reported)`, `No stuck signal`, `Observing`; idle/waiting/tool-running labeled separately. | Inactivity cannot prove stuck. The refresh interval is not a stuck threshold. Main session cannot judge unseen child internals. |
 | Off track | Choice on recent work relation to current goal: direct work / necessary supporting work / unrelated / conflicting / insufficient evidence. | `Aligned`, `Possible drift`, or `Unclear`; evidence available on demand. | A detour can be necessary. Respect user-approved scope changes and task transitions. |
 
 [tag:evidence_not_verification] Typed answers guarantee interface shape, not truth. Choice/Score confidence summarizes distribution concentration; Noul is probability of yes and has no separate confidence. No signal is permission for the extension to act on the agent.
@@ -185,7 +185,7 @@ Reference patterns: Ralph status clearing and lifecycle; Exa bounded, injected n
 
 ## Scheduler, privacy, and failure semantics
 
-- Refresh display every 10s. Mark relevant evidence dirty as events arrive; skip duplicate inference for unchanged semantics. A time-window transition can change state even without an edit.
+- Refresh display at a configurable interval, default 15s. Proposed `/progress interval <seconds>` changes this session's display cadence, not semantic thresholds or permission to call Jev. Mark relevant evidence dirty as events arrive; skip duplicate inference for unchanged semantics. A time-window transition can change state even without an edit.
 - One request in flight; cap deadline/retries, coalesce new work, respect retry-after/backoff, and never accumulate tick backlog.
 - Snapshot carries session/lineage generation, plan revision, task ID, evidence revision, and observation time. Discard cross-identity results. Same-task older snapshot may only display with explicit as-of/stale status; do not present it as current verification. Avoid starvation from invalidating on every streamed token.
 - API unavailable/missing credentials: reported structured progress remains available; semantic judgments show unavailable. Conversation-derived interpretations may remain last-known with age but cannot be refreshed without Jev.
@@ -197,7 +197,7 @@ Reference patterns: Ralph status clearing and lifecycle; Exa bounded, injected n
 
 ## First runnable experiment (recommendation, not approved implementation plan)
 
-The first experiment spans two runnable slices: first a small explicitly selected checklist and reported-completion bar, then two Jev signals (requirements clarity and acceptance criteria). This keeps every increment working while separating observed counting from the first model call. Compare a few labeled clear/vague/contradictory/missing-evidence examples and inspect raw answers. Establish Pi widget and ten-second refresh in the first slice; add consent, state budget and nonblocking/unknown inference behavior with the first Jev slice.
+The first experiment spans two runnable slices: first a small explicitly selected checklist and reported-completion bar, then two Jev signals (requirements clarity and acceptance criteria). This keeps every increment working while separating observed counting from the first model call. Compare a few labeled clear/vague/contradictory/missing-evidence examples and inspect raw answers. Establish Pi widget and configurable refresh (default 15s) in the first slice; add consent, state budget and nonblocking/unknown inference behavior with the first Jev slice.
 
 Then extend the same working product with automatic plan/report selection and optional Beads sourcing; add observed red-test history and per-criterion implementation judgments; finally evaluate temporal progress/stuck/drift. The detailed proposed sequence is in [slices.md](slices.md); all slices remain unimplemented.
 
@@ -216,7 +216,7 @@ Acceptance probes before broad use:
 The raw researcher report is evidence, not design authority. Corrections:
 - Reject 'stuck is fully deterministic': inactivity/repetition are facts; stuck is contextual inference.
 - Reject 'only per-window delta' as universal input: retain task/criteria and relevant historical evidence.
-- Do not claim 10s end-to-end cadence validated from vendor typical-latency statement.
+- Do not claim end-to-end refresh cadence validated from vendor typical-latency statements.
 - Do not describe evidence display as reconstructed internal rationale; show excerpts and judgment only.
 - Count confidence/uncertainty separately from missing evidence.
 - Scout line references were approximate; parent read extensions.md, tui.md, session-format.md and packages.md in full and checked source patterns.

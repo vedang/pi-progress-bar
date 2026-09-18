@@ -13,6 +13,20 @@
 
 The shape owns requirements and mechanisms. Breadboard tables own affordance IDs and wiring. Slices reference those IDs and own implementation order. When changing one, update the others in the same task.
 
+## Proposed delivery sequence
+
+| Slice | Visible increment                                                              |
+|-------|--------------------------------------------------------------------------------|
+| V1    | Explicit checklist → reported bar and source inspection.                       |
+| V2    | Consent → first Jev clarity/acceptance signals and raw answers.                |
+| V3    | Actual Pi trajectory → plan discovery and explicit report mapping.             |
+| V4    | Scoped Beads export → reported counts without br/bv installation.              |
+| V5    | Red-test applicability → Not needed / Reported red / Observed red.             |
+| V6    | Criterion evidence → implementation assessment independent of reported status. |
+| V7    | Task trajectory → meaningful progress, possible stuck state and direction.     |
+
+V1 plus V2 is the first end-to-end Jev learning experiment. Every slice includes its own safety/failure handling and acceptance checks; there is no deferred horizontal hardening phase.
+
 ## Non-negotiable boundaries
 
 - Overall percentage is **reported completed tasks / scoped total tasks**, not effort, ETA, or model-estimated completeness.

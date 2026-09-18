@@ -11,6 +11,11 @@ import {
   type ConversationCheckpoint,
   type ConversationSource,
 } from "../sources/conversation";
+import {
+  applyScopeRelations,
+  scopeAnswers,
+  scopeRequest,
+} from "../sources/scope";
 import { reconcileLedger } from "./ledger";
 import type { Ledger, Task } from "./types";
 
@@ -51,6 +56,7 @@ export class Monitor {
   private runtimeIdentity?: string;
   private evidenceIdentity?: string;
   private scheduling = false;
+  private scopedCandidates = new Set<string>();
 
   constructor(
     private readonly changed: () => void,
@@ -106,6 +112,7 @@ export class Monitor {
     this.source = source;
     this.ledger = ledger;
     this.conversation.select(source);
+    this.scopedCandidates.add(proposal.candidate.id);
     this.evidenceIdentity = undefined;
     this.save();
   }
@@ -116,6 +123,26 @@ export class Monitor {
     try {
       if (this.branch) this.conversation.update(this.branch());
       this.adoptProposal();
+      const scopeProposal = this.ledger
+        ? this.conversation.proposals.find(
+            (item) => !this.scopedCandidates.has(item.candidate.id),
+          )
+        : undefined;
+      if (scopeProposal && this.ledger) {
+        const startingLedger = this.ledger;
+        const candidates = scopeProposal.snapshot.tasks;
+        const request = scopeRequest(startingLedger, candidates);
+        this.enqueueAnalysis("scope", request, (result) => {
+          if (!this.enabled || this.ledger !== startingLedger) return;
+          this.ledger = applyScopeRelations(
+            startingLedger,
+            candidates,
+            scopeAnswers(candidates, result),
+          );
+          this.scopedCandidates.add(scopeProposal.candidate.id);
+          this.save();
+        });
+      }
       const snapshot = this.snapshot();
       if (snapshot?.identity !== this.evidenceIdentity) {
         this.analysis.discard("health");
@@ -259,6 +286,7 @@ export class Monitor {
     this.clearRuntime();
     this.epoch++;
     this.conversation = new Conversation();
+    this.scopedCandidates.clear();
     this.ledger = undefined;
     this.source = undefined;
     this.error = undefined;

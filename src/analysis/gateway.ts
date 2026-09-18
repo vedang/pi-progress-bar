@@ -161,6 +161,11 @@ async function readBounded(
 /** One transport authority; identities scope consent, input hashes suppress retries. */
 export class JevGateway {
   status = "Disabled: consent required";
+  /** Actual HTTP dispatch for this enabled runtime; never a tick/cache/result time. */
+  private lastDispatchAt?: number;
+  get lastCallAt() {
+    return this.lastDispatchAt;
+  }
   private identity?: string;
   private paused = true;
   private generation = 0;
@@ -176,6 +181,7 @@ export class JevGateway {
   enable(identity: string) {
     this.pause();
     this.identity = identity;
+    this.lastDispatchAt = undefined;
     this.paused = false;
     this.failures = 0;
     this.nextAttempt = -Infinity;
@@ -275,6 +281,9 @@ export class JevGateway {
     });
     try {
       const work = async () => {
+        // This is transport truth: update immediately before fetch, so failed
+        // HTTP responses, throws and timeouts remain visible as real attempts.
+        this.lastDispatchAt = this.now();
         const response = await this.options.fetch(ENDPOINT, {
           method: "POST",
           headers: {

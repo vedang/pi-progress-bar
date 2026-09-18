@@ -164,6 +164,45 @@ describe("ordered conversation reports", () => {
     expect(f.conversation.cursor?.id).toBe("working");
   });
 
+  it("resumes a checkpointed partial report without rebilling accepted chunks", () => {
+    const f = fixture(23);
+    const done = message("done", "All 23 tasks are finished");
+    f.conversation.update([f.plan, done]);
+    const first = f.schedule();
+    if (!first) throw new Error("Missing first report chunk");
+    first.admit(answer(first.request, "done"));
+    expect(countReported(f.ledger()).done).toBe(0);
+    const checkpoint = f.conversation.checkpoint(f.ledger());
+    expect(JSON.stringify(checkpoint)).not.toContain("All 23 tasks");
+    expect(JSON.stringify(checkpoint)).not.toContain("probabilities");
+    const restored = new Conversation();
+    restored.update([f.plan, done]);
+    let ledger = reconcileLedger(undefined, restored.rehydrate(f.source));
+    restored.restore(ledger, checkpoint, f.source);
+    let nextRequest: EvaluationRequest | undefined;
+    for (let i = 0; i < 5 && restored.cursor?.id !== "done"; i++) {
+      restored.scheduleReports(
+        ledger,
+        f.source,
+        2,
+        (_purpose, request, admit) => {
+          nextRequest ??= request;
+          admit(answer(request, "done"));
+        },
+        () => ledger,
+        (next) => {
+          ledger = next;
+        },
+      );
+    }
+    expect(nextRequest).toBeDefined();
+    for (const id of Object.keys(first.request.questions).filter(
+      (id) => id !== "__current",
+    ))
+      expect(nextRequest?.questions[id]).toBeUndefined();
+    expect(countReported(ledger).done).toBe(23);
+  });
+
   it("does not admit a late answer after branch invalidation", () => {
     const f = fixture();
     f.conversation.update([f.plan, message("done", "Everything finished")]);

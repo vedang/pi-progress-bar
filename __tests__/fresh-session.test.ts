@@ -150,9 +150,11 @@ function runtime(initial: Entry[] = replayEntries(4), respond = verdict) {
   vi.stubGlobal("fetch", fetch);
   let entries = initial;
   const checkpoints: Checkpoint[] = [];
-  const monitor = new Monitor(vi.fn(), (checkpoint) =>
-    checkpoints.push(structuredClone(checkpoint)),
-  );
+  const saveRequestCounts: number[] = [];
+  const monitor = new Monitor(vi.fn(), (checkpoint) => {
+    checkpoints.push(structuredClone(checkpoint));
+    saveRequestCounts.push(requests.length);
+  });
   monitor.observe(() => entries);
   monitor.turnOn("/nonexistent-offline-fixture");
   const settle = async (id: string) => {
@@ -179,6 +181,7 @@ function runtime(initial: Entry[] = replayEntries(4), respond = verdict) {
   return {
     monitor,
     checkpoints,
+    saveRequestCounts,
     requests,
     fetch,
     settle,
@@ -377,6 +380,81 @@ describe("fresh-session ordered production controller", () => {
       expect(
         r.monitor.ledger?.tasks.filter((task) => task.included)[0]?.text,
       ).toContain("CSV export");
+    } finally {
+      r.monitor.stop();
+    }
+  });
+
+  it("keeps an unresolved denominator historical after reload and provider backoff", async () => {
+    const r = runtime(replayEntries(4), (request) => {
+      const result = verdict(request);
+      if (request.questions.scope)
+        result.answers.scope = {
+          type: "choice",
+          choice: "ambiguous",
+          confidence: 1,
+          probabilities: { continue: 0, "new-goal": 0, ambiguous: 1 },
+        };
+      return result;
+    });
+    try {
+      for (let i = 0; i < 50; i++) {
+        r.monitor.scheduleAnalysis();
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      expect(renderWidget(r.monitor)[0]).toMatch(/historical|unresolved/);
+      const checkpoint = r.checkpoints.at(-1);
+      expect(checkpoint).toBeDefined();
+      r.fetch.mockResolvedValueOnce(new Response(null, { status: 503 }));
+      await r.monitor.restore("/nonexistent-offline-fixture", checkpoint);
+      expect(renderWidget(r.monitor)[0]).toMatch(/historical|unresolved/);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(renderWidget(r.monitor)[0]).toMatch(/historical|unresolved/);
+    } finally {
+      r.monitor.stop();
+    }
+  });
+
+  it("resumes persisted partial scope without rebilling accepted relation chunks", async () => {
+    const original = replayEntries(1)[0];
+    if (!original) throw new Error("Missing initial goal");
+    const r = runtime([
+      original,
+      {
+        type: "message",
+        id: "29acae97",
+        parentId: original.id,
+        message: {
+          role: "user",
+          content: Array.from(
+            { length: 27 },
+            (_, i) => `${i + 1}. New task ${i + 1}`,
+          ).join("\n"),
+        },
+      },
+    ]);
+    try {
+      await r.settle("29acae97");
+      const savedIndex = r.saveRequestCounts.findIndex(
+        (count) =>
+          r.requests
+            .slice(0, count)
+            .filter((request) => request.questions.scope).length === 1,
+      );
+      expect(savedIndex).toBeGreaterThanOrEqual(0);
+      const checkpoint = r.checkpoints[savedIndex];
+      expect(JSON.stringify(checkpoint)).not.toContain("New task");
+      const before = r.requests.length;
+      await r.monitor.restore("/nonexistent-offline-fixture", checkpoint);
+      await r.settle("29acae97");
+      expect(countReported(r.monitor.ledger).total).toBe(27);
+      const resumed = r.requests
+        .slice(before)
+        .filter((request) => request.questions.scope);
+      expect(resumed.length).toBeGreaterThan(0);
+      expect(
+        resumed.every((request) => !Object.hasOwn(request.questions, "0")),
+      ).toBe(true);
     } finally {
       r.monitor.stop();
     }

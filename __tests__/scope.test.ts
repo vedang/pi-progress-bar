@@ -53,6 +53,58 @@ const candidate = (text: string): SourceTask => ({
 });
 
 describe("automatic evolving scope", () => {
+  it.each(["done", "reopened", "cancelled", "not-a-report"])(
+    "abstains from weak same-observation %s rather than replacing done with conflict",
+    (status) => {
+      const before = ledger();
+      const candidates = [candidate("Implement parser")];
+      const request = scopeChunks(before, candidates)[0]?.request;
+      if (!request) throw new Error("Missing scope request");
+      const answers = Object.fromEntries(
+        Object.entries(request.questions).map(([id, question]) => {
+          const choice =
+            id === "0"
+              ? "same:t1"
+              : id === "scope"
+                ? "continue"
+                : id === "current"
+                  ? "unknown"
+                  : status;
+          const weak = id.startsWith("status:");
+          const keys = Object.keys(question.criteria);
+          return [
+            id,
+            {
+              type: "choice" as const,
+              choice,
+              confidence: weak ? 0.1 : 1,
+              probabilities: Object.fromEntries(
+                keys.map((key) => [
+                  key,
+                  weak
+                    ? key === choice
+                      ? 0.3
+                      : 0.7 / (keys.length - 1)
+                    : key === choice
+                      ? 1
+                      : 0,
+                ]),
+              ),
+            },
+          ];
+        }),
+      );
+      const interpreted = scopeAnswers(candidates, {
+        model: request.model,
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+      expect(interpreted.states?.[0]).toBeUndefined();
+      expect(
+        applyScopeRelations(before, candidates, interpreted).tasks[0]?.status,
+      ).toBe("done");
+    },
+  );
   it.each(["continue", "new-goal"] as const)(
     "rejects entire %s transaction with mixed ambiguous task relations",
     (scope) => {

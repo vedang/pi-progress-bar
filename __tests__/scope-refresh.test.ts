@@ -25,6 +25,11 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.mocked(readBeadsExport).mockResolvedValue({
+    complete: false,
+    records: new Map(),
+    note: "unavailable",
+  });
 });
 
 function fixture() {
@@ -118,6 +123,55 @@ describe("scope transactions across background refresh", () => {
     monitor.setInterval(15, "/offline-fixture");
     await vi.advanceTimersByTimeAsync(15_000);
     expect(monitor.ledger.tasks[0]?.beads).toEqual(beads);
+    monitor.stop();
+  });
+
+  it("preserves grounded epic and child metadata when readable export omits records", async () => {
+    const { monitor, persist } = fixture();
+    if (!monitor.ledger) throw new Error("Missing ledger");
+    const first = monitor.ledger.tasks[0];
+    if (!first) throw new Error("Missing first task");
+    monitor.ledger.tasks = [
+      {
+        ...first,
+        text: "Work on proj-epic",
+        included: false,
+        beads: {
+          id: "proj-epic",
+          title: "Parent",
+          issueType: "epic",
+          conflict: false,
+        },
+      },
+      {
+        ...first,
+        id: `${first.id}:child`,
+        text: "Work on proj-child",
+        included: true,
+        beads: { id: "proj-child", title: "Child", conflict: false },
+      },
+    ];
+    const original = structuredClone(monitor.ledger.tasks);
+    vi.mocked(readBeadsExport).mockResolvedValue({
+      complete: true,
+      records: new Map([
+        [
+          "proj-epic",
+          {
+            id: "proj-epic",
+            title: "Parent",
+            issueType: "epic",
+            parentIds: [],
+          },
+        ],
+      ]),
+      note: "readable but missing child",
+    });
+    monitor.setInterval(15, "/offline-fixture");
+    persist.mockClear();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(monitor.ledger.tasks).toEqual(original);
+    expect(persist).not.toHaveBeenCalled();
     monitor.stop();
   });
 

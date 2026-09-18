@@ -37,7 +37,8 @@ For people supervising a coding agent who want to see reported plan completion a
 - Local reference extensions: `~/src/vedang/pi-ralph-loop/pi-ralph-loop.root/` and `~/src/vedang/pi-exa/pi-exa.root/`.
 - Current Pi extension, TUI, package, and session-format documentation.
 - Live TypeSafe documentation for Jev primitives, state, confidence, model limits, and verification patterns.
-- No monitor implementation, representative evaluation results, measured latency, or calibrated thresholds yet.
+- Four authorized Jev calls on manually selected excerpts from this actual Pi session are recorded in [docs/design/spikes.md](docs/design/spikes.md): 11,269 input tokens, roughly 1.2–1.3 seconds each, estimated total input cost $0.000473298.
+- No monitor implementation, representative accuracy baseline, automatic retrieval validation, or calibrated thresholds yet.
 
 ## Future direction (not v1)
 

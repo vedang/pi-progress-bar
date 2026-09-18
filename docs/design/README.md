@@ -8,7 +8,8 @@
 2. [Shape](shape.md) — requirements, signal semantics, UX, source discovery, boundaries and future direction.
 3. [Breadboard](breadboard.md) — proposed UI/code/store affordances, control/data wiring and user journeys.
 4. [Vertical slices](slices.md) — small working increments, dependencies, demos, acceptance checks and deferrals.
-5. [Evaluation](evaluation.md) — how to distinguish observer correctness from Jev interpretation quality and user usefulness.
+5. [Spike findings](spikes.md) — R2/R4 source research plus four actual Jev calls on this session, including mismatches, uncertainty, usage and limitations.
+6. [Evaluation](evaluation.md) — how to distinguish observer correctness from Jev interpretation quality and user usefulness.
 
 The shape owns requirements and mechanisms. Breadboard tables own affordance IDs and wiring. Slices reference those IDs and own implementation order. When changing one, update the others in the same task.
 
@@ -16,7 +17,7 @@ The shape owns requirements and mechanisms. Breadboard tables own affordance IDs
 
 - Overall percentage is **reported completed tasks / scoped total tasks**, not effort, ETA, or model-estimated completeness.
 - Product v1 is **display-only, main Pi session only**. No automatic nudges, alerts, tool blocking, issue updates or child-agent instrumentation.
-- **Not needed** is a first-class assessment for adding a new red test; it is not missing evidence and does not waive existing validation or explicit test policy.
+- **Not needed** is a first-class assessment for adding a new red test; it is not missing evidence and does not waive existing validation or explicit test policy. Explicit agent assertion suffices for **Reported red**; label it separately from **Observed red**.
 - No trustworthy denominator means no percentage. Unknown, stale, offline, waiting, not-needed and failed are distinct states.
 - Beads is optional. Proposed initial adapter reads exported JSONL without installing or invoking br/bv; export freshness is not database freshness.
 - No outbound project content without explicit Jev enablement/consent. Credentials and private shell output are not monitoring evidence.

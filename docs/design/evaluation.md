@@ -1,6 +1,6 @@
 # Evaluation and review gates
 
-Status: proposed checks for implementation, not results from a built monitor. No paid calls or tests were run to establish model accuracy during planning.
+Status: proposed checks for implementation, not results from a built monitor. A four-call authorized exercise on selected real-session excerpts is reported in [spikes.md](spikes.md). It establishes narrow observations, not general model accuracy or calibrated thresholds; no monitor tests have been implemented or run.
 
 ## Separate three kinds of correctness
 

@@ -3,7 +3,7 @@ shaping: true
 ---
 # pi-progress-bar — proposed shape
 
-Status: user endorsed overall design direction and requested explicit `Not needed` for red tests. Future nudging is desired if signals prove accurate; implementation details and calibration remain proposed. No integration code or live inference calls in this pass.
+Status: user endorsed overall design direction and requested explicit `Not needed` for red tests. Future nudging is desired if signals prove accurate; implementation details and calibration remain proposed. No extension integration code. A later authorized four-call real-trajectory spike is documented in [spikes.md](spikes.md).
 
 ## Requirements
 
@@ -147,7 +147,7 @@ Recommendation, not yet explicit user approval:
 
 The actual Pi-stored trajectory is primary evidence for plan extraction and task judgments. Files and Beads can enrich a selected source but do not replace trajectory context. One selected source owns scope/status; other sources can flag conflicts, not silently change counts.
 
-1. Collect actual current-branch user/assistant text and successful observed file read/write/edit references. Treat tool output/quoted external text as evidence, not instructions.
+1. Collect actual current-branch user/assistant text and successful observed file read/write/edit references. Known interactive-question results may contain actual user answers (confirmed in the live spike) and must preserve that provenance; never promote arbitrary tool output to user authority. Treat other tool output/quoted external text as evidence, not instructions.
 2. Split candidate source blocks in code (headings, list items, paragraphs), assign opaque IDs and bounded excerpts. Jev selects among supplied candidates; include none/ambiguous. It does not invent tasks, filenames, or a summary.
 3. For prose, classify/select source spans and map explicit subsequent reports to known task IDs. Multi-task reports need one question per candidate task, not a Choice that can select only one.
 4. Retain a local plan index with source entry/path/span, source revision, task IDs/text, status-report references, active-task evidence, and coverage/uncertainty. Prefer verbatim snippets over recursive model summaries.
@@ -190,7 +190,7 @@ Reference patterns: Ralph status clearing and lifecycle; Exa bounded, injected n
 - Snapshot carries session/lineage generation, plan revision, task ID, evidence revision, and observation time. Discard cross-identity results. Same-task older snapshot may only display with explicit as-of/stale status; do not present it as current verification. Avoid starvation from invalidating on every streamed token.
 - API unavailable/missing credentials: reported structured progress remains available; semantic judgments show unavailable. Conversation-derived interpretations may remain last-known with age but cannot be refreshed without Jev.
 - Do not execute project tests/scripts just to observe progress. Only collect results agent already produced or approved structured sources.
-- Before first live use, disclose third-party transfer of selected plan/source/tool text and obtain consent; allow inspection of outbound snapshot. No background inference during installation. Keep credentials out of persisted state.
+- Before first live use, disclose third-party transfer of selected plan/source/tool text and obtain consent; allow inspection of outbound snapshot. User approved this session's bounded live spike; that approval does not extend to other users or unrelated sessions. No background inference during installation. Keep credentials out of persisted state.
 - Read within approved workspace/source boundaries, enforce realpath/size limits, exclude secret files and private `!!` output, and acknowledge redaction cannot guarantee removal of every secret.
 - Avoid request-body debug logging. Raw tool/file text is untrusted and must not control code actions, network destinations, or source reads outside policy.
 - Stuck/drift displays are advisory. Waiting for user, running tests, compaction, retries, and invisible delegated work should not be treated as observed failure.

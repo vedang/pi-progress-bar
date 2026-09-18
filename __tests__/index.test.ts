@@ -104,6 +104,7 @@ afterEach(async () => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   await Promise.all(
     directories
       .splice(0)
@@ -163,6 +164,92 @@ describe("Pi host integration", () => {
     expect(h.render().join(" ")).toMatch(/2\s*\/\s*5/);
     await h.event("session_tree");
     expect(h.render().join(" ")).not.toMatch(/2\s*\/\s*5/);
+    await h.event("session_shutdown");
+  });
+
+  it("requires consent then displays separate Jev signals without changing reported counts", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", "unit-key-never-in-state");
+    const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      const answers = Object.fromEntries(
+        Object.entries(body.questions).map(([id, raw]) => {
+          const question = raw as {
+            type: string;
+            criteria: string[] | Record<string, string>;
+          };
+          if (question.type === "score") {
+            const levels = question.criteria as string[];
+            return [
+              id,
+              {
+                type: "score",
+                score: levels.length - 1,
+                legend: Object.fromEntries(
+                  levels.map((label, i) => [String(i), label]),
+                ),
+                probabilities: Object.fromEntries(
+                  levels.map((_, i) => [
+                    String(i),
+                    i === levels.length - 1 ? 1 : 0,
+                  ]),
+                ),
+                confidence: 1,
+              },
+            ];
+          }
+          const keys = Object.keys(question.criteria);
+          const choice = keys.find((key) => key === "explicit") ?? keys[0];
+          return [
+            id,
+            {
+              type: "choice",
+              choice,
+              probabilities: Object.fromEntries(
+                keys.map((key) => [key, key === choice ? 1 : 0]),
+              ),
+              confidence: 1,
+            },
+          ];
+        }),
+      );
+      return Response.json({
+        model: body.model,
+        answers,
+        usage: { input_tokens: 100, output_tokens: 0 },
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const h = await harness();
+    h.ui.select.mockImplementation(async (title, options) =>
+      /current task/i.test(title) ? options[1] : options[0],
+    );
+    await writeFile(
+      join(h.cwd, "plan.md"),
+      "# Tasks\n- [ ] Implement cancellation that stops pending requests\n  - Criteria: cancelling aborts pending requests\n- [ ] Other",
+    );
+    await h.event("session_start");
+    await h.command("source plan.md#Tasks");
+    expect(fetcher).not.toHaveBeenCalled();
+    h.ui.confirm.mockResolvedValueOnce(false);
+    await h.command("enable");
+    expect(fetcher).not.toHaveBeenCalled();
+    await h.command("enable");
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(h.render().join(" ")).toMatch(/clarity:\s*3\/3/i),
+    );
+    expect(h.render().join(" ")).toMatch(/acceptance:\s*explicit/i);
+    expect(h.render().join(" ")).toMatch(/0\s*\/\s*2/);
+    expect(String(fetcher.mock.calls[0]?.[1]?.body)).not.toContain(
+      "unit-key-never-in-state",
+    );
+    expect(JSON.stringify(h.api.appendEntry.mock.calls)).not.toContain(
+      "unit-key-never-in-state",
+    );
+    await h.command("pause");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(h.render().join(" ")).toMatch(/paused/i);
     await h.event("session_shutdown");
   });
 

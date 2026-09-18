@@ -8,6 +8,23 @@ import type { Monitor } from "../core/monitor";
 export const widgetName = "pi-progress-bar";
 // Do not let source text supply terminal escape sequences.
 export const plain = (text: string) => text.replace(/[\p{Cc}\p{Cf}]/gu, " ");
+function signals(monitor: Monitor): string[] {
+  const health = monitor.health;
+  const freshness = health
+    ? `as-of ${new Date(health.evaluatedAt).toISOString()}${monitor.gateway.status === "Current" ? "" : " • aged"}`
+    : "Unknown; no inference as-of";
+  const clarity = health?.result.answers.clarity;
+  const acceptance = health?.result.answers.acceptance;
+  const status = !monitor.consent
+    ? "Disabled: consent required"
+    : !monitor.snapshot()
+      ? "Unknown: select current task / essential coverage unavailable"
+      : monitor.gateway.status;
+  return [
+    `Experimental clarity: ${clarity?.type === "score" ? `${clarity.score}/3 • confidence ${clarity.confidence}` : "Unknown"} • ${freshness}`,
+    `Experimental acceptance: ${acceptance?.type === "choice" ? `${acceptance.choice} • confidence ${acceptance.confidence}` : "Unknown"} • ${status}`,
+  ];
+}
 export function paint(ctx: ExtensionContext, monitor: Monitor) {
   if (ctx.mode !== "tui") return;
   ctx.ui.setWidget(widgetName, (_tui, theme) => ({
@@ -35,6 +52,7 @@ export function paint(ctx: ExtensionContext, monitor: Monitor) {
           "muted",
           `${monitor.activity} • Refresh ${monitor.interval}s${monitor.error ? ` • ${monitor.error}` : ""}`,
         ),
+        ...signals(monitor).map((line) => theme.fg("muted", plain(line))),
       ];
       return lines.flatMap(
         (line) =>
@@ -48,11 +66,34 @@ export function paint(ctx: ExtensionContext, monitor: Monitor) {
 export async function details(ctx: ExtensionContext, monitor: Monitor) {
   if (!ctx.hasUI) return;
   const ledger = monitor.ledger;
+  const snapshot = monitor.health?.snapshot ?? monitor.snapshot();
   const lines = [
     "Reported completion only; not verified correctness.",
     `Source: ${monitor.source ? plain(`${monitor.source.path}${monitor.source.section ? `#${monitor.source.section}` : ""}`) : "None"}`,
     `Refresh: ${monitor.interval}s • ${monitor.activity}`,
-    monitor.error ?? "Local file markers; no remote analysis.",
+    monitor.error ??
+      "Local file markers determine counts; health never changes ledger.",
+    ...signals(monitor),
+    "Health rubric v1 • experimental • not verified correctness or proof tests exist/pass.",
+    ...(monitor.health
+      ? [
+          `Model: ${monitor.health.result.model} • evidence observed ${new Date(monitor.health.snapshot.observedAt).toISOString()} • inference as-of ${new Date(monitor.health.evaluatedAt).toISOString()}`,
+          `Raw answers (legend, probabilities, confidence): ${plain(JSON.stringify(monitor.health.result.answers))}`,
+          `Usage: ${JSON.stringify(monitor.health.result.usage)}`,
+        ]
+      : [
+          "No validated health response. Current task and essential evidence required; no hidden default task.",
+        ]),
+    ...(snapshot
+      ? [
+          `Payload model: ${snapshot.request.model} • evidence observed ${new Date(snapshot.observedAt).toISOString()}`,
+          `Raw questions: ${plain(JSON.stringify(snapshot.request.questions))}`,
+          `Evidence: ${plain(JSON.stringify(snapshot.request.state))}`,
+          `Omissions: ${snapshot.omissions.join("; ")}`,
+        ]
+      : [
+          "Essential coverage unavailable or payload exceeds 24 KiB; no evidence truncated or sent.",
+        ]),
     `Current task: ${plain(ledger?.tasks.find((task) => task.id === ledger.currentTaskId)?.text ?? "Unknown")}`,
     ...(ledger?.tasks.map(
       (task, i) =>

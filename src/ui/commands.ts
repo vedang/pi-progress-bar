@@ -19,9 +19,42 @@ export async function command(
         "Select source",
         "Details",
         "Interval",
+        "Enable",
+        "Pause",
+        "Resume",
       ]);
       if (!choice || !current()) return;
       action = choice === "Select source" ? "source" : choice.toLowerCase();
+    }
+    if (action === "enable") {
+      if (!ctx.hasUI) return;
+      const snapshot = monitor.snapshot();
+      const disclosure = [
+        "Experimental third-party analysis: sends selected checklist task, its owned criteria, task-local goal and evidence references to TypeSafe (https://api.typesafe.ai/v1/systemone), model jev-1.13.0.",
+        "Permission covers future revisions of this selected source during this session only. Selecting a source again, reload or tree navigation requires new consent. No conversation or other files sent in this slice.",
+        "Paid-work budget: at most 60 dispatch attempts per enablement, one per 15 seconds, one in flight, 10-second deadline, 24 KiB / 20 questions. No automatic retries of failed unchanged input. Enable renews the budget. Set TYPESAFE_API_KEY; key is never stored in checkpoints.",
+        "Health never changes reported completion. Accuracy not live-validated. Pause retains local counts; resume can retry unchanged input.",
+        snapshot
+          ? `Current payload:\n${JSON.stringify(snapshot.request, null, 2)}\nOmissions: ${snapshot.omissions.join("; ")}`
+          : "Current payload: none. Current task or essential evidence is Unknown; no request until selected evidence is available.",
+      ].join("\n\n");
+      if (
+        (await ctx.ui.confirm(
+          "Enable experimental Jev analysis?",
+          plain(disclosure),
+        )) &&
+        current()
+      )
+        monitor.enableAnalysis();
+      return;
+    }
+    if (action === "pause") {
+      monitor.pauseAnalysis();
+      return;
+    }
+    if (action === "resume") {
+      monitor.resumeAnalysis();
+      return;
     }
     if (action === "details") {
       await details(ctx, monitor);
@@ -44,7 +77,7 @@ export async function command(
     }
     if (action !== "source" && !action.startsWith("source "))
       throw new Error(
-        "Use /progress [source path.md#Section | details | interval seconds]",
+        "Use /progress [source path.md#Section | details | interval seconds | enable | pause | resume]",
       );
     if (!ctx.hasUI) return;
     const reference =

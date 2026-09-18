@@ -1,4 +1,11 @@
 import { createHash } from "node:crypto";
+import {
+  type EvaluationRequest,
+  JevGateway,
+  type ValidatedResult,
+} from "../analysis/gateway";
+import { type HealthResult, healthSnapshot } from "../analysis/health";
+import { AnalysisScheduler } from "../analysis/scheduler";
 import { readSource } from "../sources/read-source";
 import { reconcileLedger } from "./ledger";
 import type { Ledger, Task } from "./types";
@@ -32,6 +39,73 @@ export class Monitor {
   epoch = 0;
   private timer?: ReturnType<typeof setInterval>;
   private reading = false;
+  health?: HealthResult;
+  consent = false;
+  private consentIdentity?: string;
+  private evidenceIdentity?: string;
+  readonly gateway = new JevGateway({
+    fetch: (url, init) => globalThis.fetch(url, init),
+    getApiKey: () => process.env.TYPESAFE_API_KEY,
+  });
+  readonly analysis = new AnalysisScheduler(this.gateway, () => this.changed());
+  snapshot() {
+    return healthSnapshot(this.ledger, this.epoch);
+  }
+  enableAnalysis() {
+    this.consent = true;
+    this.consentIdentity = JSON.stringify([this.epoch, this.source]);
+    this.gateway.enable(this.consentIdentity);
+    this.scheduleAnalysis();
+  }
+  pauseAnalysis() {
+    this.analysis.clear();
+    this.gateway.pause();
+    this.changed();
+  }
+  resumeAnalysis() {
+    if (!this.consent)
+      throw new Error("Use /progress enable to review and consent first");
+    this.gateway.resume();
+    this.scheduleAnalysis();
+  }
+  /** Shared submission seam. Consumers own lossless queues and result admission. */
+  enqueueAnalysis(
+    purpose: string,
+    request: EvaluationRequest,
+    admit: (result: ValidatedResult) => void,
+  ) {
+    if (!this.consent || !this.consentIdentity) return;
+    this.analysis.enqueue(purpose, {
+      request,
+      consentIdentity: this.consentIdentity,
+      admit,
+    });
+  }
+  scheduleAnalysis() {
+    const snapshot = this.snapshot();
+    if (snapshot?.identity !== this.evidenceIdentity) {
+      this.analysis.clear();
+      this.health = undefined;
+      this.evidenceIdentity = snapshot?.identity;
+    }
+    if (snapshot && this.consent && this.consentIdentity) {
+      this.enqueueAnalysis("health", snapshot.request, (result) => {
+        if (this.snapshot()?.identity === snapshot.identity && this.consent) {
+          this.health = { snapshot, result, evaluatedAt: Date.now() };
+        }
+      });
+    }
+    this.analysis.tick();
+    this.changed();
+  }
+  private resetAnalysis() {
+    this.consent = false;
+    this.consentIdentity = undefined;
+    this.evidenceIdentity = undefined;
+    this.health = undefined;
+    this.analysis.clear();
+    this.gateway.pause();
+  }
   constructor(
     private readonly changed: () => void,
     private readonly persist: (checkpoint: Checkpoint) => void,
@@ -57,6 +131,7 @@ export class Monitor {
     this.persist(this.checkpoint());
   }
   stop() {
+    this.resetAnalysis();
     this.epoch++;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
@@ -76,6 +151,7 @@ export class Monitor {
     this.changed();
   }
   apply(ledger: Ledger, source: NonNullable<Checkpoint["source"]>) {
+    this.resetAnalysis();
     this.epoch++;
     this.ledger = ledger;
     this.source = source;
@@ -105,7 +181,7 @@ export class Monitor {
       if (this.ledger) this.ledger = { ...this.ledger, stale: true };
     } finally {
       this.reading = false;
-      if (epoch === this.epoch) this.changed();
+      if (epoch === this.epoch) this.scheduleAnalysis();
     }
   }
   async restore(cwd: string, data: unknown) {

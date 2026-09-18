@@ -1,3 +1,4 @@
+export type WorkKind = "action" | "response";
 export type ReportState =
   | "done"
   | "reopened"
@@ -15,6 +16,8 @@ export interface SourceRef {
 }
 export interface SourceTask {
   text: string;
+  /** Jev-derived deliverable kind; non-persisted adapters may default absent values to action. */
+  workKind?: WorkKind;
   status: ReportState;
   anchor?: string;
   criteria: string[];

@@ -59,6 +59,9 @@ export interface HealthSnapshot {
   identity: string;
   /** Task/evidence identity. Unlike fresh conversation context, it gates batches. */
   taskIdentity: string;
+  /** Validated local task/revision binding for presentation-only retention. */
+  taskId: string;
+  taskRevision: string;
   observedAt: number;
   omissions: string[];
   /** First resumable request, retained for existing callers/preview. */
@@ -211,6 +214,7 @@ export function healthSnapshot(
     ledger.scopeRevision,
     task.id,
     task.revision ?? ledger.sourceRevision,
+    task.workKind ?? "action",
     task.text,
     task.criteria,
     task.ref,
@@ -220,6 +224,8 @@ export function healthSnapshot(
   return {
     identity: JSON.stringify([taskIdentity, context]),
     taskIdentity,
+    taskId: task.id,
+    taskRevision: task.revision ?? ledger.sourceRevision,
     observedAt: Date.now(),
     omissions: [
       ...(context?.length

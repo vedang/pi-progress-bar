@@ -19,12 +19,20 @@ const states = new Set<ReportState>([
   "unknown",
   "conflict",
 ]);
-const identity = (task: { text: string; anchor?: string }) =>
-  task.anchor ? `anchor:${task.anchor}` : `text:${task.text}`;
+const identity = (task: {
+  text: string;
+  anchor?: string;
+  workKind?: "action" | "response";
+}) => {
+  const workKind = task.workKind ?? "action";
+  return task.anchor
+    ? `anchor:${task.anchor}:${workKind}`
+    : `text:${task.text}:${workKind}`;
+};
 const structure = (tasks: Task[]) =>
   JSON.stringify(
     tasks
-      .map(({ id, text, included }) => [id, text, included])
+      .map(({ id, text, workKind, included }) => [id, text, workKind, included])
       .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
   );
 
@@ -61,6 +69,9 @@ export function reconcileLedger(
     const key = identity(task);
     if (
       !task.text.trim() ||
+      (task.workKind !== undefined &&
+        task.workKind !== "action" &&
+        task.workKind !== "response") ||
       !states.has(task.status) ||
       task.ref.sourceId !== snapshot.sourceId ||
       seen.has(key)
@@ -76,6 +87,7 @@ export function reconcileLedger(
     const prior = priorTasks.get(identity(task));
     return {
       ...task,
+      workKind: task.workKind ?? "action",
       criteria: [...task.criteria],
       ...(task.criterionRefs
         ? { criterionRefs: task.criterionRefs.map((ref) => ({ ...ref })) }

@@ -1,6 +1,11 @@
 import type { EvaluationRequest, ValidatedResult } from "../analysis/gateway";
 import { applyReportBatch } from "../core/ledger";
-import type { Ledger, ReportState, SourceSnapshot } from "../core/types";
+import type {
+  Ledger,
+  ReportState,
+  SourceSnapshot,
+  WorkKind,
+} from "../core/types";
 import {
   type CandidateContext,
   candidateRequest,
@@ -34,6 +39,8 @@ export interface ConversationSource {
     id: string;
     start: number;
     end: number;
+    /** Explicit checkpoint schema field; legacy sources are rejected. */
+    workKind: WorkKind;
     criteria: [number, number][];
   }[];
   context: [number, number][];
@@ -189,6 +196,10 @@ export class Conversation {
   }
   hasPendingDiscovery() {
     return !!this.discovery || this.candidatesPending.length > 0;
+  }
+  /** Lets memory-only presentation distinguish unbound fixtures from live branch loss. */
+  hasVisibleObservations() {
+    return this.allObservations().length > 0;
   }
   isCatchingUp() {
     return !!this.trajectory.hasMore;
@@ -646,6 +657,7 @@ export class Conversation {
         id: task.anchor ?? "",
         start: task.ref.start,
         end: task.ref.end,
+        workKind: task.workKind ?? "action",
         criteria: (task.criterionRefs ?? []).map((ref) => [ref.start, ref.end]),
       })),
       context: candidate.spans
@@ -720,6 +732,7 @@ export class Conversation {
         span.id.length > 256 ||
         !Number.isSafeInteger(span.start) ||
         !Number.isSafeInteger(span.end) ||
+        (span.workKind !== "action" && span.workKind !== "response") ||
         !Array.isArray(span.criteria) ||
         span.criteria.length > 512
       )
@@ -736,7 +749,13 @@ export class Conversation {
         seenCriteria.add(key);
         return [start, end] as [number, number];
       });
-      return { id: live.id, start: live.start, end: live.end, criteria };
+      return {
+        id: live.id,
+        start: live.start,
+        end: live.end,
+        workKind: span.workKind,
+        criteria,
+      };
     });
     const anchors = new Set<string>();
     for (const span of spans) {
@@ -769,6 +788,7 @@ export class Conversation {
       tasks: canonical.spans.map((span) => ({
         text: message.text.slice(span.start, span.end),
         anchor: span.id,
+        workKind: span.workKind,
         criteria: span.criteria.map(([start, end]) =>
           message.text.slice(start, end),
         ),

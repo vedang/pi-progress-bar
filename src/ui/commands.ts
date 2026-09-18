@@ -1,5 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { Monitor } from "../core/monitor";
+import { lastJevCallLabel } from "./freshness";
 
 const COMMANDS = `How to use:
   /progress                         Show this help and current state
@@ -12,7 +13,9 @@ const help = (monitor: Monitor) => `Automatic progress monitor
 State: ${monitor.enabled ? "ON" : "OFF"}
 Analysis interval: ${monitor.interval}s
 Jev usage: ${monitor.usage.calls} calls • ${monitor.usage.inputTokens} input tokens • ${monitor.usage.outputTokens} output tokens
+Last Jev call: ${lastJevCallLabel(monitor.gateway.lastCallAt)}
 Progress: ${monitor.progressState()}
+Service: ${monitor.error ? `${monitor.error} • ${monitor.gateway.status}` : monitor.gateway.status}
 Diagnostics: ${monitor.diagnosticSummary()}
 
 ${COMMANDS}

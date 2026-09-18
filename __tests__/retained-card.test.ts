@@ -120,66 +120,81 @@ describe("retained task card", () => {
     expect(next).not.toContain("Requirements: mostly clear");
     f.monitor.stop();
   });
-  it("retains observed-red and implementation labels at their original assessment revision", () => {
-    const f = fixture();
-    f.first.criteria.push("Parser accepts valid input");
-    if (!f.monitor.ledger) throw new Error("Missing ledger");
-    f.monitor.ledger.currentTaskId = f.first.id;
-    const link = f.monitor.evidenceLink();
-    if (!link) throw new Error("Missing evidence link");
-    f.monitor.evidence.start(
-      "edit-first",
-      "edit",
-      { path: "parser.ts" },
-      1,
-      undefined,
-      link,
-    );
-    f.monitor.evidence.finish("edit-first", "edit", { isError: false }, 2);
-    f.monitor.evidence.start(
-      "red-first",
-      "bash",
-      { command: "npm test" },
-      3,
-      undefined,
-      link,
-    );
-    f.monitor.evidence.finish(
-      "red-first",
-      "bash",
-      {
-        isError: true,
-        content: [
-          { type: "text", text: "AssertionError: expected valid input" },
-        ],
-      },
-      4,
-    );
-    f.assess(f.first.id, 2.7);
-    if (!f.monitor.health) throw new Error("Missing assessment");
-    f.monitor.health.snapshot.implementationEvidenceComplete = true;
-    f.monitor.health.result.answers["criterion:0"] = {
-      type: "choice",
-      choice: "supports",
-      confidence: 1,
-      probabilities: { supports: 1, contradicts: 0, insufficient: 0 },
-    };
-    const assessed = f.text();
-    expect(assessed).toContain("Red evidence: Observed red");
-    expect(assessed).toContain("Implementation: appears complete");
-    f.first.status = "done";
-    f.monitor.ledger.currentTaskId = undefined;
-    f.monitor.health = undefined;
-    f.monitor.evidence.start("later-edit", "edit", { path: "another.ts" }, 5);
-    f.monitor.evidence.finish("later-edit", "edit", { isError: false }, 6);
-    expect(f.monitor.evidence.redObservation(link)).toBeUndefined();
-    const retained = f.text();
-    expect(retained).toContain("Red evidence: Observed red");
-    expect(retained).toContain("Implementation: appears complete");
-    expect(retained).toMatch(/retained|as.of|last assessed/i);
-    expect(f.monitor.evidenceLink()).toBeUndefined();
-    f.monitor.stop();
-  });
+  it.each([true, false])(
+    "captures evidence at health admission, before first render=%s",
+    (renderFirst) => {
+      const f = fixture();
+      f.first.criteria.push("Parser accepts valid input");
+      if (!f.monitor.ledger) throw new Error("Missing ledger");
+      f.monitor.ledger.currentTaskId = f.first.id;
+      const link = f.monitor.evidenceLink();
+      if (!link) throw new Error("Missing evidence link");
+      f.monitor.evidence.start(
+        "edit-first",
+        "edit",
+        { path: "parser.ts" },
+        1,
+        undefined,
+        link,
+      );
+      f.monitor.evidence.finish("edit-first", "edit", { isError: false }, 2);
+      f.monitor.evidence.start(
+        "red-first",
+        "bash",
+        { command: "npm test" },
+        3,
+        undefined,
+        link,
+      );
+      f.monitor.evidence.finish(
+        "red-first",
+        "bash",
+        {
+          isError: true,
+          content: [
+            { type: "text", text: "AssertionError: expected valid input" },
+          ],
+        },
+        4,
+      );
+      f.assess(f.first.id, 2.7);
+      if (!f.monitor.health) throw new Error("Missing assessment");
+      f.monitor.health.snapshot.implementationEvidenceComplete = true;
+      f.monitor.health.result.answers["criterion:0"] = {
+        type: "choice",
+        choice: "supports",
+        confidence: 1,
+        probabilities: { supports: 1, contradicts: 0, insufficient: 0 },
+      };
+      const acceptedResult = f.monitor.health.result;
+      f.monitor.health = undefined;
+      vi.spyOn(f.monitor, "enqueueAnalysis").mockImplementation(
+        (purpose, _request, admit) => {
+          if (purpose === "health") admit(acceptedResult);
+        },
+      );
+      // Exercise actual health admission without a widget render callback.
+      f.monitor.scheduleAnalysis();
+      expect(f.monitor.health).toBeDefined();
+      if (renderFirst) {
+        const assessed = f.text();
+        expect(assessed).toContain("Red evidence: Observed red");
+        expect(assessed).toContain("Implementation: appears complete");
+      }
+      f.first.status = "done";
+      f.monitor.ledger.currentTaskId = undefined;
+      f.monitor.health = undefined;
+      f.monitor.evidence.start("later-edit", "edit", { path: "another.ts" }, 5);
+      f.monitor.evidence.finish("later-edit", "edit", { isError: false }, 6);
+      expect(f.monitor.evidence.redObservation(link)).toBeUndefined();
+      const retained = f.text();
+      expect(retained).toContain("Red evidence: Observed red");
+      expect(retained).toContain("Implementation: appears complete");
+      expect(retained).toMatch(/retained|as.of|last assessed/i);
+      expect(f.monitor.evidenceLink()).toBeUndefined();
+      f.monitor.stop();
+    },
+  );
 
   it("does not attach old-revision labels to a revised task title", () => {
     const f = fixture();

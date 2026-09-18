@@ -14,7 +14,11 @@ import {
   classificationRequest,
   proposal,
 } from "../../src/sources/candidates";
-import { reportRequest, reportStates } from "../../src/sources/reports";
+import {
+  reportChunks,
+  reportRequest,
+  reportStates,
+} from "../../src/sources/reports";
 import {
   collectTrajectory,
   findCandidates,
@@ -450,3 +454,80 @@ it("status questions preserve ongoing work and repeated requests do not inherit 
     monitor.stop();
   }
 });
+
+it.each([
+  [
+    "answer intention",
+    "assistant",
+    "I will explain Unicode identifier support tomorrow.",
+    false,
+  ],
+  [
+    "quoted answer",
+    "assistant",
+    "Example answer only, not my response: 'Unicode identifiers include letters beyond ASCII.' I have not supplied the requested explanation.",
+    false,
+  ],
+  ["unrelated answer", "assistant", "I updated the README formatting.", false],
+  [
+    "answer correction",
+    "user",
+    "Your explanation was incorrect. Reopen this explanation task and correct it.",
+    "reopened",
+  ],
+  [
+    "answer cancellation",
+    "user",
+    "Cancel the requested Unicode identifier explanation; I no longer want that answer.",
+    "cancelled",
+  ],
+] as const)(
+  "response lifecycle semantics: %s",
+  async (name, role, text, expected) => {
+    const candidate = findCandidates(
+      collectTrajectory([
+        {
+          type: "message",
+          id: "response-request",
+          parentId: null,
+          message: {
+            role: "user",
+            content: "Explain Unicode identifier support.",
+          },
+        },
+      ]),
+    )[0];
+    if (!candidate) throw new Error("Missing response candidate");
+    const source = proposal(
+      candidate,
+      Object.fromEntries(candidate.spans.map((span) => [span.id, "response"])),
+    );
+    const ledger = reconcileLedger(undefined, source.snapshot);
+    const task = ledger.tasks[0];
+    if (!task) throw new Error("Missing response task");
+    if (expected === "reopened") task.status = "done";
+    const request = reportChunks(ledger, {
+      id: name,
+      role,
+      text,
+      hash: hashText(text),
+    })[0];
+    if (!request) throw new Error("Missing target-local response request");
+    const gateway = new JevGateway({
+      fetch: (url, init) => globalThis.fetch(url, init),
+      getApiKey: () => process.env.TYPESAFE_API_KEY,
+    });
+    gateway.enable(name);
+    try {
+      const result = await gateway.evaluate(request, name);
+      expect(result, gateway.status).toBeDefined();
+      if (!result) return;
+      const states = reportStates(ledger, request, result);
+      record({ type: "response-lifecycle", name, expected, states });
+      if (expected) expect(states[task.id]).toBe(expected);
+      else expect(states[task.id]).not.toBe("done");
+    } finally {
+      gateway.pause();
+    }
+  },
+);

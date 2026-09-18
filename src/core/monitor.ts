@@ -9,6 +9,7 @@ import {
   type HealthSnapshot,
   healthSnapshot,
 } from "../analysis/health";
+import { implementationFromResult } from "../analysis/implementation";
 import { AnalysisScheduler } from "../analysis/scheduler";
 import {
   type BeadsExport,
@@ -21,7 +22,11 @@ import {
   type ConversationCheckpoint,
   type ConversationSource,
 } from "../sources/conversation";
-import { type EvidenceLink, EvidenceStore } from "../sources/evidence";
+import {
+  type EvidenceLink,
+  EvidenceStore,
+  redEvidenceLabel,
+} from "../sources/evidence";
 import {
   applyScopeRelations,
   type ScopeChunk,
@@ -35,7 +40,11 @@ import type { Ledger, ReportState, SourceRef, SourceTask, Task } from "./types";
 
 const taskKey = (task: Task) =>
   createHash("sha256")
-    .update(task.anchor ? `anchor:${task.anchor}` : `text:${task.text}`)
+    .update(
+      task.anchor
+        ? `anchor:${task.anchor}:${task.workKind ?? "action"}`
+        : `text:${task.text}:${task.workKind ?? "action"}`,
+    )
     .digest("hex");
 
 interface PartialScopeCheckpoint {
@@ -60,8 +69,36 @@ interface UnresolvedScopeCheckpoint {
   overflow?: boolean;
 }
 const MAX_UNRESOLVED_SCOPE_REFS = 200;
+export interface PresentationAssessment {
+  requirements: string;
+  acceptance: string;
+  newRedTest: string;
+  redEvidence: string;
+  implementation: string;
+}
+export interface PresentationTaskCard {
+  /** Display-only copy; never changes ledger current/evidence authority. */
+  task: Pick<Task, "id" | "text" | "criteria" | "revision" | "ref" | "beads">;
+  /** True only for Jev-selected semantic current work. */
+  current: boolean;
+  /** Known-task fallback when semantic current remains unknown. */
+  selected: boolean;
+  /** Values are a same-task/revision prior assessment. */
+  retained: boolean;
+  /** A different current task exists but has no complete replacement assessment. */
+  replacementPending: boolean;
+  /** Immutable display labels captured with this task/revision assessment. */
+  assessment?: PresentationAssessment;
+  assessedAt?: number;
+}
+interface RetainedTaskCard {
+  task: PresentationTaskCard["task"];
+  assessment: PresentationAssessment;
+  assessedAt: number;
+}
 export interface Checkpoint {
-  version: 2;
+  /** v3 requires explicit work kinds in source and task references. */
+  version: 3;
   enabled: boolean;
   interval: number;
   source?: ConversationSource;
@@ -74,6 +111,7 @@ export interface Checkpoint {
   tasks: {
     id: string;
     status: Task["status"];
+    workKind: Task["workKind"];
     included: boolean;
     anchor?: string;
     revision?: string;
@@ -137,6 +175,7 @@ const scopeIdentity = (ledger: Ledger) =>
         tasks: ledger.tasks.map((task) => ({
           id: task.id,
           text: task.text,
+          workKind: task.workKind ?? "action",
           status: task.status,
           criteria: task.criteria,
           included: task.included,
@@ -223,6 +262,8 @@ export class Monitor {
   private scopeUnresolvedOverflow = false;
   /** Reloaded unchanged evidence stays unknown; never rebill history for health. */
   private healthDeferred = false;
+  /** Memory-only display continuity. It is deliberately absent from checkpoints. */
+  private retainedTaskCard?: RetainedTaskCard;
 
   constructor(
     private readonly changed: () => void,
@@ -302,7 +343,14 @@ export class Monitor {
 
   observe(branch: () => readonly unknown[]) {
     this.branch = branch;
-    if (this.enabled) this.conversation.update(branch());
+    if (this.enabled) {
+      this.conversation.update(branch());
+      if (
+        this.retainedTaskCard &&
+        !this.retainedCardIsLive(this.retainedTaskCard)
+      )
+        this.retainedTaskCard = undefined;
+    }
   }
 
   evidenceLink(): EvidenceLink | undefined {
@@ -319,6 +367,201 @@ export class Monitor {
       taskRevision: task.revision ?? this.ledger.sourceRevision,
       scopeRevision: this.ledger.scopeRevision,
     };
+  }
+
+  private copyPresentationTask(task: Task): PresentationTaskCard["task"] {
+    return {
+      id: task.id,
+      text: task.text,
+      criteria: [...task.criteria],
+      ...(task.revision ? { revision: task.revision } : {}),
+      ref: { ...task.ref },
+      ...(task.beads ? { beads: { ...task.beads } } : {}),
+    };
+  }
+
+  private retainedCardIsLive(card: RetainedTaskCard) {
+    const { task } = card;
+    if (!task.revision || !task.ref.entryId) return false;
+    const source = this.conversation.observation({
+      id: task.ref.entryId,
+      hash: task.revision,
+    });
+    if (!source) return !this.conversation.hasVisibleObservations();
+    return (
+      source.text.slice(task.ref.start, task.ref.end) === task.text &&
+      task.ref.sourceId === `conversation:${task.ref.entryId}`
+    );
+  }
+
+  private cardHealthFor(task: Task) {
+    const health = this.health;
+    const revision = task.revision ?? this.ledger?.sourceRevision;
+    return health &&
+      health.snapshot.taskId === task.id &&
+      health.snapshot.taskRevision === revision
+      ? health
+      : undefined;
+  }
+
+  private presentationAssessment(
+    task: Task,
+    health: HealthResult,
+    link: EvidenceLink,
+  ): PresentationAssessment {
+    const clarity = health.result.answers.clarity;
+    const requirements =
+      clarity?.type === "score" &&
+      Number.isFinite(clarity.score) &&
+      clarity.score >= 0 &&
+      clarity.score <= 3
+        ? clarity.score < 1
+          ? "unclear"
+          : clarity.score < 2
+            ? "partly clear"
+            : clarity.score < 3
+              ? "mostly clear"
+              : "clear"
+        : "unknown";
+    const acceptance = health.result.answers.acceptance;
+    const applicability = health.result.answers.redApplicability;
+    const newRedTest =
+      applicability?.type === "choice" && applicability.choice === "not-needed"
+        ? "Not needed"
+        : applicability?.type === "choice" && applicability.choice === "needed"
+          ? "Needed"
+          : "Unknown";
+    const redReport = health.result.answers.redReport;
+    return {
+      requirements,
+      acceptance: acceptance?.type === "choice" ? acceptance.choice : "unknown",
+      newRedTest,
+      redEvidence: redEvidenceLabel({
+        applicability:
+          applicability?.type === "choice" &&
+          ["needed", "not-needed", "unknown"].includes(applicability.choice)
+            ? (applicability.choice as "needed" | "not-needed" | "unknown")
+            : undefined,
+        reported:
+          redReport?.type === "choice" && redReport.choice === "reported-red",
+        contradiction:
+          redReport?.type === "choice" && redReport.choice === "contradicted",
+        observed: this.evidence.redObservation(link),
+      }),
+      implementation: implementationFromResult(
+        task.criteria,
+        health.result,
+        this.evidence.snapshot(link),
+        this.evidence.codeRevision(),
+        health.snapshot.implementationEvidenceComplete,
+      ),
+    };
+  }
+
+  private copyRetainedTask(task: RetainedTaskCard["task"]) {
+    return {
+      ...task,
+      criteria: [...task.criteria],
+      ref: { ...task.ref },
+      ...(task.beads ? { beads: { ...task.beads } } : {}),
+    };
+  }
+
+  private retainTaskCard(task: Task, health: HealthResult, link: EvidenceLink) {
+    this.retainedTaskCard = {
+      task: this.copyPresentationTask(task),
+      assessment: this.presentationAssessment(task, health, link),
+      assessedAt: health.evaluatedAt,
+    };
+  }
+
+  /**
+   * Presentation only. A retained/selected card never establishes semantic
+   * current work or evidence ownership; callers must use evidenceLink() for
+   * analysis authority.
+   */
+  taskCard(): PresentationTaskCard | undefined {
+    const ledger = this.ledger;
+    if (!ledger) return;
+    const current = ledger.tasks.find(
+      (task) =>
+        task.id === ledger.currentTaskId &&
+        task.included &&
+        task.status !== "cancelled",
+    );
+    const existing = this.retainedTaskCard;
+    const retained =
+      existing && this.retainedCardIsLive(existing) ? existing : undefined;
+    if (existing && !retained) this.retainedTaskCard = undefined;
+    if (current) {
+      const health = this.cardHealthFor(current);
+      const link = health && this.evidenceLink();
+      const currentRevision = current.revision ?? ledger.sourceRevision;
+      if (
+        health &&
+        link &&
+        (!retained ||
+          retained.task.id !== current.id ||
+          retained.task.revision !== currentRevision ||
+          retained.assessedAt !== health.evaluatedAt)
+      )
+        this.retainTaskCard(current, health, link);
+      const latest = this.retainedTaskCard;
+      if (latest && this.retainedCardIsLive(latest)) {
+        const sameTask =
+          latest.task.id === current.id &&
+          latest.task.revision === currentRevision;
+        if (sameTask)
+          return {
+            task: this.copyPresentationTask(current),
+            current: true,
+            selected: false,
+            retained: !health,
+            replacementPending: false,
+            assessment: { ...latest.assessment },
+            assessedAt: latest.assessedAt,
+          };
+        return {
+          task: this.copyRetainedTask(latest.task),
+          current: false,
+          selected: false,
+          retained: true,
+          replacementPending: true,
+          assessment: { ...latest.assessment },
+          assessedAt: latest.assessedAt,
+        };
+      }
+      return {
+        task: this.copyPresentationTask(current),
+        current: true,
+        selected: false,
+        retained: false,
+        replacementPending: false,
+      };
+    }
+    if (retained)
+      return {
+        task: this.copyRetainedTask(retained.task),
+        current: false,
+        selected: false,
+        retained: true,
+        replacementPending: false,
+        assessment: { ...retained.assessment },
+        assessedAt: retained.assessedAt,
+      };
+    const selected =
+      ledger.tasks.find(
+        (task) => task.included && task.status !== "cancelled",
+      ) ?? ledger.tasks.find((task) => task.included);
+    return selected
+      ? {
+          task: this.copyPresentationTask(selected),
+          current: false,
+          selected: true,
+          retained: false,
+          replacementPending: false,
+        }
+      : undefined;
   }
 
   snapshot() {
@@ -755,6 +998,10 @@ export class Monitor {
         result: work.result,
         evaluatedAt: Date.now(),
       };
+      // Capture at admission, not at the first (potentially much later) render.
+      const link = this.evidenceLink();
+      const task = this.ledger?.tasks.find((item) => item.id === link?.taskId);
+      if (task && link) this.retainTaskCard(task, this.health, link);
       this.healthWork = undefined;
     });
   }
@@ -1193,7 +1440,7 @@ export class Monitor {
   checkpoint(): Checkpoint {
     const partialScope = this.partialScopeCheckpoint();
     return {
-      version: 2,
+      version: 3,
       enabled: this.enabled,
       interval: this.interval,
       source: this.source
@@ -1229,6 +1476,7 @@ export class Monitor {
         this.ledger?.tasks.map((task) => ({
           id: task.id,
           status: task.status,
+          workKind: task.workKind ?? "action",
           included: task.included,
           ...(task.anchor ? { anchor: task.anchor } : {}),
           ...(task.revision ? { revision: task.revision } : {}),
@@ -1261,6 +1509,7 @@ export class Monitor {
     this.scopeUnresolved = false;
     this.scopeUnresolvedOverflow = false;
     this.healthDeferred = false;
+    this.retainedTaskCard = undefined;
     this.diagnosticCounts.clear();
     this.evidence.reset();
     this.beadsExport = undefined;
@@ -1275,7 +1524,7 @@ export class Monitor {
       if (data && typeof data === "object") {
         const cp = data as Partial<Checkpoint>;
         // Old manual checkpoints are intentionally ignored, not migrated.
-        if (cp.version === 2) {
+        if (cp.version === 3) {
           if (
             typeof cp.enabled !== "boolean" ||
             !validInterval(cp.interval ?? Number.NaN) ||
@@ -1345,6 +1594,8 @@ export class Monitor {
                 saved.id.length > 256 ||
                 restoredIds.has(saved.id) ||
                 typeof saved.included !== "boolean" ||
+                (saved.workKind !== "action" &&
+                  saved.workKind !== "response") ||
                 ![
                   "done",
                   "reopened",
@@ -1393,8 +1644,14 @@ export class Monitor {
                     ref: { ...ref },
                     text: message.text.slice(ref.start, ref.end),
                   }),
+                  ...(base && base.workKind !== saved.workKind
+                    ? (() => {
+                        throw new Error("Saved task work kind changed");
+                      })()
+                    : {}),
                   id: saved.id,
                   text: message.text.slice(ref.start, ref.end),
+                  workKind: saved.workKind,
                   status: saved.status,
                   included: saved.included,
                   ...(saved.anchor ? { anchor: saved.anchor } : {}),
@@ -1422,7 +1679,16 @@ export class Monitor {
               )
             )
               ledger.currentTaskId = cp.currentTaskId;
-            this.conversation.restore(ledger, cp.conversation, source);
+            const emptyReportHistory =
+              !cp.conversation ||
+              (!cp.conversation.cursor &&
+                cp.conversation.initialReportPending !== true &&
+                cp.conversation.order === 0 &&
+                Array.isArray(cp.conversation.proofs) &&
+                cp.conversation.proofs.length === 0 &&
+                !cp.conversation.partialReport);
+            if (emptyReportHistory) this.conversation.select(source, false);
+            else this.conversation.restore(ledger, cp.conversation, source);
             this.source = source;
             this.ledger = ledger;
             try {

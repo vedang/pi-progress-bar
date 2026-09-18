@@ -48,6 +48,14 @@ const sufficientChoice = (
  * relation and same-observation status question, so scopeChunks keeps it below
  * the 20-question/24KiB gateway bounds.
  */
+// [tag:response_identity_transfer] A settled answer cannot satisfy fresh response work.
+// Jev still chooses new/revised/context; this only excludes an invalid identity transfer.
+const workKindOf = (task: Pick<SourceTask, "workKind">) =>
+  task.workKind ?? "action";
+const sameIsAllowed = (task: SourceTask) =>
+  workKindOf(task) !== "response" ||
+  (task.status !== "done" && task.status !== "cancelled");
+
 function scopeRequest(
   ledger: Ledger,
   candidates: SourceTask[],
@@ -55,20 +63,31 @@ function scopeRequest(
 ): EvaluationRequest {
   if (indexes.length !== candidates.length)
     throw new Error("Invalid scope candidate indexes");
-  const meanings = Object.fromEntries(
-    ledger.tasks
-      .filter((task) => task.included)
-      .flatMap((task) => [
-        [
-          `same:${task.id}`,
-          `Same bounded work as ${JSON.stringify(task.text)} with criteria ${JSON.stringify(task.criteria)}`,
-        ],
-        [
-          `revised:${task.id}`,
-          `Materially expanded or changed version of ${JSON.stringify(task.text)}`,
-        ],
-      ]),
-  );
+  const meaningsFor = (candidate: SourceTask) =>
+    Object.fromEntries(
+      ledger.tasks
+        .filter(
+          (task) => task.included && workKindOf(task) === workKindOf(candidate),
+        )
+        .flatMap((task) => [
+          ...(sameIsAllowed(task)
+            ? [
+                [
+                  `same:${task.id}`,
+                  workKindOf(candidate) === "action"
+                    ? `Same requested deliverable or answer and boundaries as ${JSON.stringify(task.text)} with criteria ${JSON.stringify(task.criteria)}; shared project topic alone is not same`
+                    : `Same outstanding response outcome: ${JSON.stringify(task.text)}; not merely the same topic`,
+                ],
+              ]
+            : []),
+          [
+            `revised:${task.id}`,
+            workKindOf(candidate) === "action"
+              ? `Same deliverable or answer materially changed from ${JSON.stringify(task.text)}; prior completion cannot transfer`
+              : `Changed requirements of this exact bounded task, not added work under a broad goal or repeat delivery: ${JSON.stringify(task.text)} [${task.status}]`,
+          ],
+        ]),
+    );
   const candidateChoices = Object.fromEntries(
     candidates.map((candidate, index) => [
       `candidate:${indexes[index]}`,
@@ -80,17 +99,22 @@ function scopeRequest(
     state: {
       goal: ledger.tasks
         .filter((task) => task.included)
-        .map(({ id, text, criteria, status, revision }) => ({
+        .map(({ id, text, workKind, criteria, status, revision }) => ({
           id,
           text,
+          workKind,
           criteria,
           status,
           revision,
         })),
+      allCurrentTasksSettled: ledger.tasks
+        .filter((task) => task.included)
+        .every((task) => task.status === "done" || task.status === "cancelled"),
       candidates: candidates.map(
-        ({ text, criteria, ref, revision }, index) => ({
+        ({ text, workKind, criteria, ref, revision }, index) => ({
           index: indexes[index],
           text,
+          workKind: workKind ?? "action",
           criteria,
           ref,
           revision,
@@ -106,11 +130,19 @@ function scopeRequest(
               String(candidateIndex),
               {
                 type: "choice" as const,
-                instructions: `Relate exact candidate ${JSON.stringify(candidate.text)} to current goal tasks. Similar wording alone is insufficient. Same requires same work and boundaries; revised means prior completion cannot transfer. Quotes, alternatives and hypotheticals are context. Uncertain identity is ambiguous.`,
+                // Distinct Jev-derived deliverables use separate identity rubrics.
+                instructions:
+                  workKindOf(candidate) === "action"
+                    ? `Relate exact candidate ${JSON.stringify(candidate.text)} to current goal tasks. Similar wording alone is insufficient. A substantive user question, request for explanation/status/plan or correction requiring its own answer is distinct new work in the continued goal, even when it refers to an existing task; do not turn that request into a status mutation of the existing task. When state.allCurrentTasksSettled is true, a distinct fresh user assignment is new rather than same/revised merely because it shares a project topic. A short approval or clarification that only refers to existing work is context, not a duplicate task. Same requires same work and boundaries; revised means prior completion cannot transfer. A new request for another answer does not inherit an earlier task's completion. Quotes, alternatives, reports and hypotheticals are context. Uncertain identity is ambiguous.`
+                    : `Relate exact candidate ${JSON.stringify(candidate.text)} to current goal tasks. Similar wording alone is insufficient. A substantive user question, request for explanation/status/plan or correction requiring its own answer is distinct new work in the continued goal, even when it refers to an existing task; do not turn that request into a status mutation of the existing task. For a response candidate, a fresh user request after matching response work is done needs a new delivery even if question/topic wording is identical: choose new, never same/revised, because the historical answer cannot satisfy this later request. When state.allCurrentTasksSettled is true, a distinct fresh user assignment is new rather than same/revised merely because it shares a project topic. A short approval or clarification that only refers to existing work is context, not a duplicate task. Same requires same currently outstanding work and boundaries; revised means prior completion cannot transfer. Quotes, alternatives, reports and hypotheticals are context. Uncertain identity is ambiguous.`,
                 criteria: {
-                  ...meanings,
-                  new: "New committed work in the current goal",
-                  context: "Not committed work",
+                  ...meaningsFor(candidate),
+                  new:
+                    workKindOf(candidate) === "action"
+                      ? "Distinct requested deliverable or answer, whether in continued work or a fresh goal"
+                      : "New bounded outcome, including distinct added work after a completed goal or another delivery of a previously completed answer; can continue the goal",
+                  context:
+                    "Background, acknowledgement, boundary, report or other text with no requested action or answer",
                   ambiguous: "Identity or commitment is unresolved",
                 },
               },
@@ -119,7 +151,7 @@ function scopeRequest(
               `status:${candidateIndex}`,
               {
                 type: "choice" as const,
-                instructions: `Does this same supplied observation contain an explicit actual status assertion for candidate ${JSON.stringify(candidate.text)}? Do not infer status from activity, plans, quotations, examples or intentions.`,
+                instructions: `Does this same supplied observation contain an explicit actual status assertion for candidate ${JSON.stringify(candidate.text)} itself? This applies only to the candidate's requested work, never an underlying existing task it mentions. Do not infer status from activity, plans, quotations, examples or intentions.`,
                 criteria: {
                   done: "Explicitly reports this work finished",
                   reopened: "Explicitly reopens this work",
@@ -138,7 +170,7 @@ function scopeRequest(
       current: {
         type: "choice",
         instructions:
-          "Infer current task only from actual user direction or assistant present-work statement. Never default to first unchecked. Unknown remains unknown.",
+          "Infer current task only from actual user direction or assistant present-work statement. When a fresh direct user assignment is distinct and state.allCurrentTasksSettled is true, choose its supplied candidate rather than a completed historical task. Never default to first unchecked. Unknown remains unknown.",
         criteria: {
           ...Object.fromEntries(
             ledger.tasks
@@ -152,10 +184,12 @@ function scopeRequest(
       scope: {
         type: "choice",
         instructions:
-          "Does supplied candidate continue current conversational goal, clearly establish a new goal, or leave scope ambiguous? Uncertainty must remain ambiguous.",
+          "Does supplied candidate continue current conversational goal, clearly establish a new goal, or leave scope ambiguous? When state.allCurrentTasksSettled is true and every substantive candidate is distinct new work, choose new-goal: do not continue a broad historical goal or retain its denominator. A related status question must not archive unfinished implementation. Approval or clarification alone normally continues existing work. Uncertainty must remain ambiguous.",
         criteria: {
-          continue: "Continues current goal",
-          "new-goal": "Clear new user goal replacing active denominator",
+          continue:
+            "Continues unfinished current goal, including a separate requested answer while active work remains",
+          "new-goal":
+            "Fresh user assignment after current goal is settled, or explicit replacement; replaces the old denominator",
           ambiguous: "Cannot safely determine goal boundary",
         },
       },
@@ -250,7 +284,7 @@ export function scopeTransactionIsAdmissible(
 ): boolean {
   if (answers.scope === "ambiguous") return false;
   let newTasks = 0;
-  for (const [index] of candidates.entries()) {
+  for (const [index, candidate] of candidates.entries()) {
     const relation = answers[index];
     if (!relation || relation === "ambiguous") return false;
     if (relation === "new") {
@@ -261,10 +295,16 @@ export function scopeTransactionIsAdmissible(
     const separator = relation.indexOf(":");
     const kind = relation.slice(0, separator);
     const id = relation.slice(separator + 1);
+    const existing = ledger.tasks.find(
+      (task) => task.id === id && task.included,
+    );
+    // [ref:response_identity_transfer] Enforce the option constraint at admission too.
     if (
       (kind !== "same" && kind !== "revised") ||
       !id ||
-      !ledger.tasks.some((task) => task.id === id && task.included)
+      !existing ||
+      workKindOf(existing) !== workKindOf(candidate) ||
+      (kind === "same" && !sameIsAllowed(existing))
     )
       return false;
     if (answers.scope === "new-goal") return false;

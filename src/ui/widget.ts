@@ -2,10 +2,9 @@ import {
   type ExtensionContext,
   truncateToVisualLines,
 } from "@earendil-works/pi-coding-agent";
-import { implementationFromResult } from "../analysis/implementation";
 import { countReported } from "../core/ledger";
-import type { Monitor } from "../core/monitor";
-import { redEvidenceLabel } from "../sources/evidence";
+import type { Monitor, PresentationTaskCard } from "../core/monitor";
+import { gatewayStatusLabel, lastJevCallLabel } from "./freshness";
 
 export const widgetName = "pi-progress-bar";
 const plain = (text: string) => text.replace(/[\p{Cc}\p{Cf}]/gu, " ");
@@ -24,46 +23,14 @@ export function clarityLabel(score: unknown): string {
   return "clear";
 }
 
-function signals(monitor: Monitor): string[] {
-  const clarity = monitor.health?.result.answers.clarity;
-  const acceptance = monitor.health?.result.answers.acceptance;
-  const applicability = monitor.health?.result.answers.redApplicability;
-  const report = monitor.health?.result.answers.redReport;
-  const applicabilityLabel =
-    applicability?.type === "choice"
-      ? applicability.choice === "not-needed"
-        ? "Not needed"
-        : applicability.choice === "needed"
-          ? "Needed"
-          : "Unknown"
-      : "Unknown";
-  const red = redEvidenceLabel({
-    reported: report?.type === "choice" && report.choice === "reported-red",
-    contradiction:
-      report?.type === "choice" && report.choice === "contradicted",
-    observed: monitor.evidence.redObservation(monitor.evidenceLink()),
-  });
-  const task = monitor.ledger?.tasks.find(
-    (item) =>
-      item.id === monitor.ledger?.currentTaskId &&
-      item.included &&
-      item.status !== "cancelled",
-  );
-  const implementation = task
-    ? implementationFromResult(
-        task.criteria,
-        monitor.health?.result,
-        monitor.evidence.snapshot(monitor.evidenceLink()),
-        monitor.evidence.codeRevision(),
-        monitor.health?.snapshot.implementationEvidenceComplete ?? false,
-      )
-    : "unverified";
+function signals(card: PresentationTaskCard | undefined): string[] {
+  const assessment = card?.assessment;
   return [
-    `Requirements: ${clarity?.type === "score" ? clarityLabel(clarity.score) : "unknown"}`,
-    `Acceptance: ${acceptance?.type === "choice" ? acceptance.choice : "unknown"}`,
-    `New red test: ${applicabilityLabel}`,
-    `Red evidence: ${red}`,
-    `Implementation: ${implementation}`,
+    `Requirements: ${assessment?.requirements ?? "unknown"}`,
+    `Acceptance: ${assessment?.acceptance ?? "unknown"}`,
+    `New red test: ${assessment?.newRedTest ?? "Unknown"}`,
+    `Red evidence: ${assessment?.redEvidence ?? "Unknown"}`,
+    `Implementation: ${assessment?.implementation ?? "unverified"}`,
   ];
 }
 
@@ -84,27 +51,33 @@ export function paint(ctx: ExtensionContext, monitor: Monitor) {
         unresolvedScope || count.percent === null
           ? ""
           : `[${"#".repeat(filled)}${"-".repeat(10 - filled)}] `;
-      const task = monitor.ledger?.tasks.find(
-        (item) =>
-          item.id === monitor.ledger?.currentTaskId &&
-          item.included &&
-          item.status !== "cancelled",
-      );
+      const card = monitor.taskCard();
+      const task = card?.task;
+      const taskLabel = card?.current
+        ? "Task"
+        : card?.selected
+          ? "Selected task (current unknown)"
+          : "Last task";
+      const retained = card?.retained
+        ? ` • retained last assessed${card.assessedAt ? ` as-of ${new Date(card.assessedAt).toISOString()}` : ""}${card.replacementPending ? " • replacement assessment pending" : ""}`
+        : card?.current && !card.assessment
+          ? " • assessment pending"
+          : "";
       const lines = [
         theme.fg("accent", bar + label),
         theme.fg(
           "muted",
-          `Task: ${plain(task?.text ?? "unknown").slice(0, 160)}${task?.beads ? ` • Beads ${plain(task.beads.id)}${task.beads.conflict ? " (export disagreement)" : ""}` : ""}`,
+          `${taskLabel}: ${plain(task?.text ?? "unknown").slice(0, 160)}${retained}${task?.beads ? ` • Beads ${plain(task.beads.id)}${task.beads.conflict ? " (export disagreement)" : ""}` : ""}`,
         ),
         theme.fg(
           "muted",
-          `${monitor.activity} • analysis every ${monitor.interval}s • ${plain(monitor.error ?? monitor.gateway.status)}`,
+          `${monitor.activity} • analysis every ${monitor.interval}s • Last Jev call: ${lastJevCallLabel(monitor.gateway.lastCallAt)} • ${plain(monitor.error ?? gatewayStatusLabel(monitor.gateway.status))}`,
         ),
         theme.fg(
           "muted",
           `Progress state: ${monitor.progressState()} • diagnostics: ${monitor.diagnosticSummary()}`,
         ),
-        ...signals(monitor).map((line) => theme.fg("muted", plain(line))),
+        ...signals(card).map((line) => theme.fg("muted", plain(line))),
       ];
       return lines.flatMap(
         (line) => truncateToVisualLines(line, 2, width, 0).visualLines,

@@ -3,7 +3,7 @@ import {
   MODEL,
   type ValidatedResult,
 } from "../analysis/gateway";
-import type { Ledger, ReportState } from "../core/types";
+import type { Ledger, ReportState, Task } from "../core/types";
 import { fits } from "./candidates";
 import type { Observation } from "./trajectory";
 
@@ -33,7 +33,9 @@ export function reportRequest(
 ): EvaluationRequest {
   const tasks = ledger.tasks.filter(
     (task) =>
-      task.included && (!optionalTaskIds || optionalTaskIds.includes(task.id)),
+      task.included &&
+      task.workKind !== "response" &&
+      (!optionalTaskIds || optionalTaskIds.includes(task.id)),
   );
   if (
     optionalTaskIds &&
@@ -85,6 +87,60 @@ export function reportRequest(
           "Infer current task only from this original user direction or assistant present-work statement. Never default to first unchecked task. A status report alone does not choose current work. If no unambiguous current known task is stated, choose unknown.",
         criteria: {
           ...Object.fromEntries(tasks.map((task) => [task.id, task.text])),
+          unknown: "No unambiguous current task",
+        },
+      },
+    },
+  };
+}
+
+/** One Jev-derived response task gets a target-local fulfillment judgment. */
+function responseReportRequest(
+  task: Task,
+  observation: Observation,
+): EvaluationRequest {
+  return {
+    model: MODEL,
+    state: {
+      task: {
+        id: task.id,
+        text: task.text,
+        workKind: task.workKind,
+        criteria: task.criteria,
+        status: task.status,
+      },
+      observation: {
+        id: observation.id,
+        role: observation.role,
+        text: observation.text,
+      },
+    },
+    questions: {
+      [task.id]: {
+        type: "choice",
+        instructions:
+          "Classify only the lifecycle of supplying the answer requested in state.task.text. What does this observation say or do to that answer? An assistant giving requested information completes the ANSWER even if the underlying work remains undone. An explicit user demand to redo or correct a previous answer reopens the ANSWER. A user request itself is not an answer. Ignore future intentions, quoted examples and unrelated activity.",
+        criteria: {
+          done: "Requested information is actually provided by the assistant",
+          reopened:
+            "User explicitly requests redo or correction of a previous answer, or revokes its completion",
+          cancelled: "The request for this answer is withdrawn",
+          "not-started": "Preparation of this answer is explicitly not started",
+          "in-progress":
+            "This answer itself is still being prepared, not the work it discusses",
+          unknown: "The status of supplying this answer is explicitly unknown",
+          "not-a-report":
+            "No requested answer is supplied and no answer-lifecycle change is asserted",
+          ambiguous:
+            "Conflicting or unclear assertions about supplying this answer",
+        },
+      },
+      [CURRENT]: {
+        type: "choice",
+        instructions:
+          "Infer current task only from this original user direction or assistant present-work statement. Never infer current work from a status report. If this known task is not unambiguously current, choose unknown.",
+        criteria: {
+          [task.id]: task.text,
           unknown: "No unambiguous current task",
         },
       },
@@ -159,7 +215,9 @@ export function reportChunks(
 ): EvaluationRequest[] {
   const requests: EvaluationRequest[] = [];
   let ids: string[] = [];
-  for (const task of ledger.tasks.filter((t) => t.included)) {
+  for (const task of ledger.tasks.filter(
+    (task) => task.included && task.workKind !== "response",
+  )) {
     const next = [...ids, task.id];
     if (!fits(reportRequest(ledger, observation, next))) {
       if (!ids.length)
@@ -171,5 +229,13 @@ export function reportChunks(
     } else ids = next;
   }
   if (ids.length) requests.push(reportRequest(ledger, observation, ids));
+  for (const task of ledger.tasks.filter(
+    (task) => task.included && task.workKind === "response",
+  )) {
+    const request = responseReportRequest(task, observation);
+    if (!fits(request))
+      throw new Error("Essential response report exceeds 24 KiB");
+    requests.push(request);
+  }
   return requests;
 }

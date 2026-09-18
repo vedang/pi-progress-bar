@@ -164,6 +164,46 @@ describe("ordered conversation reports", () => {
     expect(f.conversation.cursor?.id).toBe("working");
   });
 
+  it.each([1, 23])(
+    "validates same-report current against post-status ledger (%s tasks)",
+    (tasks) => {
+      const f = fixture(tasks);
+      const id = f.ledger().tasks[0]?.id;
+      if (!id) throw new Error("Missing task");
+      const cancel = message(
+        "cancel-current",
+        "Cancel this task; it is the current topic.",
+      );
+      const reopen = message(
+        "reopen-current",
+        "Reopen this task; I am working on it now.",
+      );
+      const apply = (entry: ReturnType<typeof message>, status: string) => {
+        for (let i = 0; i < 5 && f.conversation.cursor?.id !== entry.id; i++) {
+          const job = f.schedule();
+          if (!job) throw new Error("Missing report chunk");
+          const q = job.request.questions.__current;
+          job.admit(
+            answer(
+              job.request,
+              status,
+              q && Object.hasOwn(q.criteria, id) ? id : "unknown",
+            ),
+          );
+        }
+        expect(f.conversation.cursor?.id).toBe(entry.id);
+      };
+      f.conversation.update([f.plan, cancel]);
+      apply(cancel, "cancelled");
+      expect(f.ledger().tasks[0]?.status).toBe("cancelled");
+      expect.soft(f.ledger().currentTaskId).toBeUndefined();
+      f.conversation.update([f.plan, cancel, reopen]);
+      apply(reopen, "reopened");
+      expect(f.ledger().tasks[0]?.status).toBe("reopened");
+      expect(f.ledger().currentTaskId).toBe(id);
+    },
+  );
+
   it("resumes a checkpointed partial report without rebilling accepted chunks", () => {
     const f = fixture(23);
     const done = message("done", "All 23 tasks are finished");

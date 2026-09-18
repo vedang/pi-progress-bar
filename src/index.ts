@@ -65,8 +65,8 @@ export default function progressBar(pi: ExtensionAPI): void {
   });
   pi.on("message_end", (_event, ctx) => {
     if (!monitor.enabled) return;
+    // Pi may emit before persistence; collect now, settled/timer observations catch originals.
     monitor.observe(() => ctx.sessionManager.getBranch());
-    monitor.scheduleAnalysis();
   });
   pi.on("agent_start", (_event, ctx) => {
     if (!monitor.enabled) return;
@@ -77,7 +77,6 @@ export default function progressBar(pi: ExtensionAPI): void {
     if (!monitor.enabled) return;
     monitor.activity = "Idle";
     monitor.observe(() => ctx.sessionManager.getBranch());
-    monitor.scheduleAnalysis();
     paint(ctx, monitor);
   });
   pi.on("tool_execution_start", (_event, ctx) => {

@@ -55,7 +55,7 @@ describe("shared analysis scheduling", () => {
         consentIdentity: "consented",
         admit,
       });
-      scheduler.tick();
+      scheduler.startCycle(1);
       await evaluate.mock.results.at(-1)?.value;
       await Promise.resolve();
       now += 15000;
@@ -85,7 +85,7 @@ describe("shared analysis scheduling", () => {
       consentIdentity: "consented",
       admit,
     });
-    scheduler.tick();
+    scheduler.startCycle(1);
     scheduler.discard("health");
     expect(signal?.aborted).toBe(false);
     finish(response());

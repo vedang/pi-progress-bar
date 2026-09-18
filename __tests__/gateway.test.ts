@@ -86,7 +86,7 @@ describe("shared Jev gateway", () => {
     expect(await gateway.evaluate(request, "scope-b")).toBeUndefined();
   });
 
-  it("rejects malformed responses and prevents repeated retries of unchanged failed input", async () => {
+  it("retries malformed responses with bounded backoff then a five-minute cooldown", async () => {
     let now = 0;
     const fetcher = vi.fn(async () =>
       Response.json({
@@ -102,11 +102,17 @@ describe("shared Jev gateway", () => {
       now: () => now,
     });
     gateway.enable("scope-a");
+    for (const at of [0, 60_000, 180_000]) {
+      now = at;
+      expect(await gateway.evaluate(request, "scope-a")).toBeUndefined();
+    }
+    now = 240_000;
     expect(await gateway.evaluate(request, "scope-a")).toBeUndefined();
-    now = 20_000;
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(gateway.status).toMatch(/cooldown|error|offline|invalid/i);
+    now = 480_000;
     expect(await gateway.evaluate(request, "scope-a")).toBeUndefined();
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(gateway.status).toMatch(/error|offline|invalid/i);
+    expect(fetcher).toHaveBeenCalledTimes(4);
   });
 
   it("enforces request size and question caps before transport", async () => {
@@ -139,7 +145,7 @@ describe("shared Jev gateway", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it("stops at the 60-attempt budget and resume cannot renew it", async () => {
+  it("continues beyond sixty successful requests without a lifetime wall", async () => {
     let now = 0;
     const fetcher = vi.fn(async () => Response.json(result));
     const gateway = new JevGateway({
@@ -148,8 +154,8 @@ describe("shared Jev gateway", () => {
       now: () => now,
     });
     gateway.enable("scope-a");
-    for (let i = 0; i < 60; i++) {
-      now = i * 15_000;
+    for (let i = 0; i < 65; i++) {
+      now = i * 1_000;
       expect(
         await gateway.evaluate(
           { ...request, state: { task: String(i) } },
@@ -157,16 +163,8 @@ describe("shared Jev gateway", () => {
         ),
       ).toBeDefined();
     }
-    now += 15_000;
-    gateway.resume();
-    expect(
-      await gateway.evaluate(
-        { ...request, state: { task: "one too many" } },
-        "scope-a",
-      ),
-    ).toBeUndefined();
-    expect(fetcher).toHaveBeenCalledTimes(60);
-    expect(gateway.status).toMatch(/budget/i);
+    expect(fetcher).toHaveBeenCalledTimes(65);
+    expect(gateway.status).toBe("Current");
   });
 
   it("respects Retry-After even for changed state", async () => {

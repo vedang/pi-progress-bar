@@ -6,8 +6,9 @@ export const MAX_REQUEST_BYTES = 24 * 1024;
 const MAX_RESPONSE_BYTES = 128 * 1024;
 const MAX_QUESTIONS = 20;
 const DEADLINE_MS = 10_000;
-const DISPATCH_MS = 0;
-const MAX_ATTEMPTS = 60;
+const MIN_BACKOFF_MS = 60_000;
+const COOLDOWN_MS = 5 * 60_000;
+const MAX_BURST_FAILURES = 3;
 type Question =
   | {
       type: "choice";
@@ -155,9 +156,9 @@ export class JevGateway {
   private identity?: string;
   private paused = true;
   private generation = 0;
-  private attempts = 0;
+  private failures = 0;
   private seen = new Set<string>();
-  private nextDispatch = -Infinity;
+  private nextAttempt = -Infinity;
   private retryAfter = -Infinity;
   private flight?: { controller: AbortController; cancel: () => void };
   private readonly now: () => number;
@@ -168,7 +169,9 @@ export class JevGateway {
     this.pause();
     this.identity = identity;
     this.paused = false;
-    this.attempts = 0;
+    this.failures = 0;
+    this.nextAttempt = -Infinity;
+    this.retryAfter = -Infinity;
     this.seen.clear();
     this.status = "Ready";
   }
@@ -185,16 +188,8 @@ export class JevGateway {
     this.status = "Paused";
   }
   resume() {
-    if (!this.identity) {
-      this.status = "Disabled: consent required";
-      return;
-    }
-    if (this.attempts >= MAX_ATTEMPTS) {
-      this.status = "Paused: budget exhausted; enable to renew";
-      return;
-    }
+    if (!this.identity) return;
     this.paused = false;
-    this.seen.clear();
     this.status = "Ready";
   }
   async evaluate(
@@ -250,18 +245,10 @@ export class JevGateway {
       this.status = "Offline: missing TYPESAFE_API_KEY";
       return;
     }
-    if (this.attempts >= MAX_ATTEMPTS) {
-      this.paused = true;
-      this.status = "Paused: budget exhausted; enable to renew";
+    if (this.now() < Math.max(this.nextAttempt, this.retryAfter)) {
+      this.status = "Pending: retry backoff / cooldown / Retry-After";
       return;
     }
-    if (this.now() < Math.max(this.nextDispatch, this.retryAfter)) {
-      this.status = "Pending: dispatch rate / Retry-After";
-      return;
-    }
-    this.attempts++;
-    this.seen.add(hash);
-    this.nextDispatch = this.now() + DISPATCH_MS;
     const generation = this.generation;
     const controller = new AbortController();
     let cancel!: () => void;
@@ -320,19 +307,32 @@ export class JevGateway {
       };
       const result = await Promise.race([work(), timeout, cancelled]);
       if (generation !== this.generation) return;
-      if (result) this.status = "Current";
+      if (result) {
+        this.seen.add(hash);
+        this.failures = 0;
+        this.nextAttempt = -Infinity;
+        this.retryAfter = -Infinity;
+        this.status = "Current";
+      }
       return result;
     } catch {
-      if (generation === this.generation)
-        this.status = "Offline / invalid response / timeout error";
+      if (generation === this.generation) {
+        this.failures++;
+        if (this.failures >= MAX_BURST_FAILURES) {
+          this.failures = 0;
+          this.nextAttempt = this.now() + COOLDOWN_MS;
+          this.status = "Offline: retry cooldown (5 minutes)";
+        } else {
+          this.nextAttempt =
+            this.now() + MIN_BACKOFF_MS * 2 ** (this.failures - 1);
+          this.status =
+            "Offline / invalid response / timeout; retry backed off";
+        }
+      }
       return;
     } finally {
       if (timer) clearTimeout(timer);
       if (this.flight === flight) this.flight = undefined;
-      if (generation === this.generation && this.attempts >= MAX_ATTEMPTS) {
-        this.paused = true;
-        this.status = "Paused: budget exhausted; enable to renew";
-      }
     }
   }
 }

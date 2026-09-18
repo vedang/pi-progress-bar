@@ -15,6 +15,7 @@ export class AnalysisScheduler {
   private runningPurpose?: string;
   private generation = 0;
   private purposeGeneration = new Map<string, number>();
+  private cycleRemaining = 0;
   constructor(
     readonly gateway: JevGateway,
     private readonly changed: () => void,
@@ -35,10 +36,15 @@ export class AnalysisScheduler {
   enqueue(purpose: string, job: Job) {
     this.pending.set(purpose, job);
   }
+  startCycle(limit = 3) {
+    if (this.cycleRemaining === 0) this.cycleRemaining = limit;
+    this.tick();
+  }
   tick() {
-    if (this.running) return;
+    if (this.running || this.cycleRemaining <= 0) return;
     const entry = this.pending.entries().next().value;
     if (!entry) return;
+    this.cycleRemaining--;
     const [purpose, job] = entry;
     this.pending.delete(purpose);
     const generation = this.generation;
@@ -64,6 +70,7 @@ export class AnalysisScheduler {
         this.running = false;
         this.runningPurpose = undefined;
         this.changed();
+        if (this.cycleRemaining > 0) queueMicrotask(() => this.tick());
       });
     this.changed();
   }

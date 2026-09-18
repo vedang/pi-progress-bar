@@ -69,6 +69,7 @@ export class Monitor {
     });
     this.analysis = new AnalysisScheduler(this.gateway, () => {
       this.changed();
+      if (this.enabled) queueMicrotask(() => this.scheduleAnalysis(false));
     });
   }
 
@@ -117,7 +118,7 @@ export class Monitor {
     this.save();
   }
 
-  scheduleAnalysis() {
+  scheduleAnalysis(startCycle = true) {
     if (!this.enabled || this.scheduling) return;
     this.scheduling = true;
     try {
@@ -172,7 +173,8 @@ export class Monitor {
             this.save();
           },
         );
-      this.analysis.tick();
+      if (startCycle) this.analysis.startCycle(3);
+      else this.analysis.tick();
       this.changed();
     } finally {
       this.scheduling = false;

@@ -6,7 +6,7 @@ export const MAX_REQUEST_BYTES = 24 * 1024;
 const MAX_RESPONSE_BYTES = 128 * 1024;
 const MAX_QUESTIONS = 20;
 const DEADLINE_MS = 10_000;
-const DISPATCH_MS = 15_000;
+const DISPATCH_MS = 0;
 const MAX_ATTEMPTS = 60;
 type Question =
   | {
@@ -43,6 +43,7 @@ interface Options {
   fetch: (url: string, init?: RequestInit) => Promise<Response>;
   getApiKey: () => string | undefined;
   now?: () => number;
+  onPermanentError?: (message: string) => void;
 }
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
@@ -173,8 +174,10 @@ export class JevGateway {
   }
   invalidate() {
     this.generation++;
-    this.flight?.controller.abort();
-    this.flight?.cancel();
+    const flight = this.flight;
+    this.flight = undefined;
+    flight?.controller.abort();
+    flight?.cancel();
   }
   pause() {
     this.invalidate();
@@ -265,7 +268,8 @@ export class JevGateway {
     const cancelled = new Promise<undefined>((resolve) => {
       cancel = () => resolve(undefined);
     });
-    this.flight = { controller, cancel };
+    const flight = { controller, cancel };
+    this.flight = flight;
     this.status = "Pending";
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
@@ -290,6 +294,13 @@ export class JevGateway {
           return;
         }
         if (!response.ok) {
+          if (response.status === 401 || response.status === 403) {
+            this.status = "OFF: TYPESAFE_API_KEY was rejected";
+            this.paused = true;
+            this.options.onPermanentError?.(this.status);
+            void response.body?.cancel().catch(() => {});
+            return;
+          }
           const retry = response.headers.get("retry-after");
           if (retry) {
             const seconds = /^\d+(?:\.\d+)?$/.test(retry) ? Number(retry) : NaN;
@@ -317,7 +328,7 @@ export class JevGateway {
       return;
     } finally {
       if (timer) clearTimeout(timer);
-      this.flight = undefined;
+      if (this.flight === flight) this.flight = undefined;
       if (generation === this.generation && this.attempts >= MAX_ATTEMPTS) {
         this.paused = true;
         this.status = "Paused: budget exhausted; enable to renew";

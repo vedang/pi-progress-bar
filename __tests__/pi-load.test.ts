@@ -36,7 +36,14 @@ it("loads and shuts down the real Pi package offline without tools or network", 
     expect(child.error).toBeUndefined();
     expect(child.signal).toBeNull();
     expect(child.status, child.stderr).toBe(0);
-    expect(child.stdout).toBe("");
+    const lines = child.stdout.trim().split("\n").filter(Boolean);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({
+      type: "extension_ui_request",
+      method: "notify",
+      notifyType: "error",
+    });
+    expect(lines[0]).toMatch(/TYPESAFE_API_KEY.*OFF/i);
     expect(child.stderr.trim()).toBe(MARKER);
   } finally {
     await rm(agentDir, { recursive: true, force: true });

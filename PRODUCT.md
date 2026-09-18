@@ -12,7 +12,7 @@ For people supervising a coding agent who want to see reported plan completion a
 
 ## Confirmed scope
 
-**Current delivery: plan-v2 replacement plus V4–V6, tracked in Beads epic `pi-progress-barroot-pyp` and children `.1`–`.8`.** Those issues are the portable implementation specification and supersede older manual-workflow design instructions. Existing code still implements the previous UX; the new batch is not delivered yet.
+**Current delivery: automatic plan-v2 replacement plus V4–V6, tracked in Beads epic `pi-progress-barroot-pyp` and children `.1`–`.8`.** Those issues are the portable implementation specification and supersede older manual-workflow design instructions. V7 remains excluded.
 
 - Start monitoring automatically when loaded. Require `TYPESAFE_API_KEY`; missing/blank or rejected credentials produce an error and OFF. No consent or local-only operating mode.
 - Use only real TypeSafe Jev calls for runtime semantic judgments. No separate general-purpose/reasoning LLM, generated task descriptions/summaries, or model-written display labels.
@@ -45,9 +45,9 @@ For people supervising a coding agent who want to see reported plan completion a
 - Current Pi extension, TUI, package, and session-format documentation.
 - Live TypeSafe documentation for Jev primitives, state, confidence, model limits, and verification patterns.
 - Four authorized Jev calls on manually selected excerpts from this actual Pi session are recorded in [docs/design/spikes.md](docs/design/spikes.md): 11,269 input tokens, roughly 1.2–1.3 seconds each, estimated total input cost $0.000473298.
-- Previous V1–V3 implementation provides reusable ledger, gateway, host and test code, but its manual checklist/source/consent UX is superseded by the new direction. See [README](README.md) for what currently runs, not the new target contract.
-- Self-contained Beads epic `pi-progress-barroot-pyp` covers the replacement and V4–V6. V7 remains outside this batch. The old full-batch reviewer timed out without a verdict.
-- Deterministic tests and an isolated offline Pi package-load check exercise mechanics; representative live accuracy, automatic retrieval quality and calibrated thresholds remain unvalidated.
+- Previous manual V1–V3 checklist/source/consent UX has been removed. Reused ledger, gateway, host and test mechanics now serve the automatic runtime documented in [README](README.md).
+- Self-contained Beads epic `pi-progress-barroot-pyp` covers the replacement and V4–V6. V7 remains outside this batch. A fresh independent full-batch review returned ten P1 findings; remediation and main-owned regressions cover the concrete blockers.
+- Deterministic tests and an isolated offline Pi package-load check exercise mechanics. Bounded live validation used 16 Jev requests total: six direct rubric fixtures, two earlier three-call actual-Pi runs, and one post-review four-call actual-Pi production-path run. The final run reached the expected 1/2 reported state with 3,064 input and 590 output tokens. This is limited release evidence, not broad accuracy or threshold calibration; one earlier explicit Reported-red fixture was a false negative.
 
 ## Future direction (not v1)
 
@@ -61,7 +61,7 @@ Any future guidance should separate observations, model assessments, user/reposi
 
 ## Open decisions
 
-- Validate automatic candidate recall, task identity/revision matching and uncertainty handling on real conversations. No arbitrary confidence cutoff or highest-probability choice establishes accuracy.
+- Continue validating automatic candidate recall, task identity/revision matching and uncertainty handling on real conversations. Current admission is deliberately conservative and rejects low-concentration results (including the observed weak identity result); the initial safety thresholds are not an accuracy claim and still require broader calibration.
 - Verify concrete supported Beads export and passive test/code evidence formats; unsupported observations stay unknown. No universal tool/runner compatibility layer.
 - Runtime automatically sends relevant context to TypeSafe when installed with a key; README must disclose costs and privacy. Engineering live evaluation needs a finite recorded request budget, separate from offline default tests.
 - Existing stack: TypeScript ESM, Bun 1.3.14, Biome, TypeScript, Knip, Vitest unit/integration, Make gates. Node >=22.19.0; previous host tests used `@earendil-works/pi-coding-agent` 0.84.2. Verify actual installed APIs before extending adapters.

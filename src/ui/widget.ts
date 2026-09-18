@@ -29,31 +29,40 @@ function signals(monitor: Monitor): string[] {
   const acceptance = monitor.health?.result.answers.acceptance;
   const applicability = monitor.health?.result.answers.redApplicability;
   const report = monitor.health?.result.answers.redReport;
+  const applicabilityLabel =
+    applicability?.type === "choice"
+      ? applicability.choice === "not-needed"
+        ? "Not needed"
+        : applicability.choice === "needed"
+          ? "Needed"
+          : "Unknown"
+      : "Unknown";
   const red = redEvidenceLabel({
-    applicability:
-      applicability?.type === "choice"
-        ? (applicability.choice as "needed" | "not-needed" | "unknown")
-        : "unknown",
     reported: report?.type === "choice" && report.choice === "reported-red",
     contradiction:
       report?.type === "choice" && report.choice === "contradicted",
-    observed: monitor.evidence.redObservation(),
+    observed: monitor.evidence.redObservation(monitor.evidenceLink()),
   });
   const task = monitor.ledger?.tasks.find(
-    (item) => item.id === monitor.ledger?.currentTaskId && item.included,
+    (item) =>
+      item.id === monitor.ledger?.currentTaskId &&
+      item.included &&
+      item.status !== "cancelled",
   );
   const implementation = task
     ? implementationFromResult(
         task.criteria,
         monitor.health?.result,
-        monitor.evidence.snapshot(),
+        monitor.evidence.snapshot(monitor.evidenceLink()),
         monitor.evidence.codeRevision(),
+        monitor.health?.snapshot.implementationEvidenceComplete ?? false,
       )
     : "unverified";
   return [
     `Requirements: ${clarity?.type === "score" ? clarityLabel(clarity.score) : "unknown"}`,
     `Acceptance: ${acceptance?.type === "choice" ? acceptance.choice : "unknown"}`,
-    `Red test: ${red}`,
+    `New red test: ${applicabilityLabel}`,
+    `Red evidence: ${red}`,
     `Implementation: ${implementation}`,
   ];
 }
@@ -73,7 +82,10 @@ export function paint(ctx: ExtensionContext, monitor: Monitor) {
           ? ""
           : `[${"#".repeat(filled)}${"-".repeat(10 - filled)}] `;
       const task = monitor.ledger?.tasks.find(
-        (item) => item.id === monitor.ledger?.currentTaskId,
+        (item) =>
+          item.id === monitor.ledger?.currentTaskId &&
+          item.included &&
+          item.status !== "cancelled",
       );
       const lines = [
         theme.fg("accent", bar + label),

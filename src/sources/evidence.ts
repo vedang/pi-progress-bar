@@ -1,9 +1,16 @@
+export interface EvidenceLink {
+  sourceId: string;
+  taskId: string;
+  taskRevision: string;
+  scopeRevision: string;
+}
 interface PendingCall {
   callId: string;
   toolName: string;
   args: unknown;
   order: number;
   entryId?: string;
+  link?: EvidenceLink;
 }
 export interface PassiveEvidence {
   kind: "observed-red" | "code-change" | "test-pass";
@@ -11,6 +18,8 @@ export interface PassiveEvidence {
   toolName: string;
   order: number;
   entryId?: string;
+  /** Bound at tool start to the current source/task/revision. */
+  link?: EvidenceLink;
   summary: string;
   revision: number;
 }
@@ -36,9 +45,10 @@ const commandOf = (args: unknown) =>
 const pathOf = (args: unknown) =>
   record(args) && typeof args.path === "string" ? args.path : "";
 const testCommand = (command: string) =>
-  /(?:^|\s)(?:bun|npm|pnpm|yarn|npx|uv|python(?:3)?\s+-m|cargo|go)?\s*(?:test|vitest|pytest|jest|mocha)(?:\s|$)/i.test(
-    command,
-  ) || /(?:cargo|go)\s+test(?:\s|$)/i.test(command);
+  !/[;&|`$()<>\n\r]/.test(command) &&
+  /^(?:(?:bun|npm|pnpm|yarn)\s+test|npx\s+(?:vitest|jest|mocha)|(?:uv\s+run\s+|python(?:3)?\s+-m\s+)?pytest|cargo\s+test|go\s+test)(?:\s|$)/i.test(
+    command.trim(),
+  );
 const assertionFailure = (output: string) =>
   /(?:AssertionError|assertion failed|\bFAIL(?:ED)?\b.*(?:test|spec)|expected[\s\S]{0,200}(?:received|to be|but got))/i.test(
     output,
@@ -56,10 +66,18 @@ export class EvidenceStore {
     args: unknown,
     order: number,
     entryId?: string,
+    link?: EvidenceLink,
   ) {
     if (!callId || this.pending.has(callId)) return;
     if (!["bash", "edit", "write"].includes(toolName)) return;
-    this.pending.set(callId, { callId, toolName, args, order, entryId });
+    this.pending.set(callId, {
+      callId,
+      toolName,
+      args,
+      order,
+      entryId,
+      ...(link ? { link: { ...link } } : {}),
+    });
   }
 
   finish(callId: string, toolName: string, result: ToolResult, order: number) {
@@ -81,6 +99,7 @@ export class EvidenceStore {
           toolName,
           order,
           ...(call.entryId ? { entryId: call.entryId } : {}),
+          ...(call.link ? { link: { ...call.link } } : {}),
           summary:
             output
               .match(
@@ -96,6 +115,7 @@ export class EvidenceStore {
           toolName,
           order,
           ...(call.entryId ? { entryId: call.entryId } : {}),
+          ...(call.link ? { link: { ...call.link } } : {}),
           summary: output.slice(0, 500),
           revision: this.revision,
         });
@@ -109,6 +129,7 @@ export class EvidenceStore {
         toolName,
         order,
         ...(call.entryId ? { entryId: call.entryId } : {}),
+        ...(call.link ? { link: { ...call.link } } : {}),
         summary: pathOf(call.args).slice(0, 500) || "bounded file mutation",
         revision: this.revision,
       });
@@ -120,14 +141,35 @@ export class EvidenceStore {
     this.facts = this.facts.slice(-100);
   }
 
-  redObservation() {
+  redObservation(link?: EvidenceLink) {
     return [...this.facts]
       .reverse()
-      .find((item) => item.kind === "observed-red");
+      .find(
+        (item) =>
+          item.kind === "observed-red" &&
+          item.revision === this.revision &&
+          (!link ||
+            (item.link?.sourceId === link.sourceId &&
+              item.link.taskId === link.taskId &&
+              item.link.taskRevision === link.taskRevision &&
+              item.link.scopeRevision === link.scopeRevision)),
+      );
   }
 
-  snapshot() {
-    return this.facts.map((item) => ({ ...item }));
+  snapshot(link?: EvidenceLink) {
+    return this.facts
+      .filter(
+        (item) =>
+          !link ||
+          (item.link?.sourceId === link.sourceId &&
+            item.link.taskId === link.taskId &&
+            item.link.taskRevision === link.taskRevision &&
+            item.link.scopeRevision === link.scopeRevision),
+      )
+      .map((item) => ({
+        ...item,
+        ...(item.link ? { link: { ...item.link } } : {}),
+      }));
   }
 
   codeRevision() {
@@ -136,6 +178,12 @@ export class EvidenceStore {
 
   clearPending() {
     this.pending.clear();
+  }
+
+  reset() {
+    this.pending.clear();
+    this.facts = [];
+    this.revision = 0;
   }
 }
 

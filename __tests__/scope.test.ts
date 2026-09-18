@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { countReported } from "../src/core/ledger";
 import type { Ledger, SourceTask } from "../src/core/types";
-import { applyScopeRelations } from "../src/sources/scope";
+import {
+  applyScopeRelations,
+  scopeAnswers,
+  scopeChunks,
+} from "../src/sources/scope";
 
 const task = (
   id: string,
@@ -73,6 +77,66 @@ describe("automatic evolving scope", () => {
       status: "not-started",
     });
     expect(countReported(next).done).toBe(0);
+  });
+
+  it("abstains on a weak identity choice instead of transferring completion", () => {
+    const answers = scopeAnswers([candidate("Build parser")], {
+      model: "jev-1.13.0",
+      answers: {
+        "0": {
+          type: "choice",
+          choice: "same:task:1",
+          confidence: 0.28,
+          probabilities: {
+            "same:task:1": 0.46,
+            ambiguous: 0.32,
+            new: 0.22,
+          },
+        },
+        "status:0": {
+          type: "choice",
+          choice: "not-a-report",
+          confidence: 1,
+          probabilities: { "not-a-report": 1 },
+        },
+        current: {
+          type: "choice",
+          choice: "candidate:0",
+          confidence: 0.4,
+          probabilities: { "candidate:0": 0.6, unknown: 0.4 },
+        },
+        scope: {
+          type: "choice",
+          choice: "continue",
+          confidence: 0.3,
+          probabilities: { continue: 0.55, ambiguous: 0.45 },
+        },
+      },
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    expect(answers).toMatchObject({
+      0: "ambiguous",
+      current: "unknown",
+      scope: "ambiguous",
+    });
+  });
+
+  it("batches every candidate under request limits without dropping suffix work", () => {
+    const candidates = Array.from({ length: 27 }, (_, index) =>
+      candidate(`Additional work ${index}`),
+    );
+    const chunks = scopeChunks(ledger(), candidates);
+    expect(chunks.flatMap((chunk) => chunk.indexes)).toEqual(
+      Array.from({ length: 27 }, (_, index) => index),
+    );
+    for (const chunk of chunks) {
+      expect(Object.keys(chunk.request.questions).length).toBeLessThanOrEqual(
+        20,
+      );
+      expect(
+        Buffer.byteLength(JSON.stringify(chunk.request)),
+      ).toBeLessThanOrEqual(24 * 1024);
+    }
   });
 
   it("archives old denominator on a clear new goal and keeps ambiguity unresolved", () => {

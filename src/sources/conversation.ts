@@ -35,9 +35,12 @@ export interface ConversationSource {
 interface Reference {
   id: string;
   hash: string;
+  /** Present only for a committed subwindow of an oversized original. */
+  offset?: number;
 }
 export interface ConversationCheckpoint {
   cursor?: Reference;
+  discoveryCursor?: Reference;
   order: number;
   asOf?: number;
   gap?: string;
@@ -76,7 +79,13 @@ export class Conversation {
   asOf?: number;
   gap?: string;
   proofs = new Map<string, ConversationCheckpoint["proofs"][number]>();
-  private discoveryKey = "";
+  private discoveryGeneration = 0;
+  private discoveryCursor?: Reference;
+  private seenCandidates = new Set<string>();
+  private branchEntries: readonly unknown[] = [];
+  private reportTrajectory?: Trajectory;
+  private sourceObservation?: Observation;
+  private cursorObservation?: Observation;
   private selectionRequests: EvaluationRequest[] = [];
   private selectionIndex = 0;
   private selected: Candidate[] = [];
@@ -99,8 +108,16 @@ export class Conversation {
     this.updateCandidates();
   }
   update(entries: readonly unknown[]) {
-    this.trajectory = collectTrajectory(entries);
+    this.branchEntries = entries;
+    this.trajectory = collectTrajectory(entries, {
+      chronological: true,
+      ...(this.discoveryCursor ? { after: this.discoveryCursor } : {}),
+    });
     this.updateCandidates();
+    this.updateReportTrajectory();
+  }
+  private candidateKey(candidate: Candidate) {
+    return `${candidate.id}:${candidate.hash}`;
   }
   private updateCandidates() {
     this.candidates = findCandidates(
@@ -114,36 +131,67 @@ export class Conversation {
         : this.trajectory,
     );
     this.omissions = [...this.trajectory.omissions];
-    if (this.trajectory.messages.length > 12)
-      this.omissions.push(
-        "Candidate shortlist limited to 12 recent plan-bearing entries; not a complete-plan claim. Narrow explicitly with /progress source conversation#entryId",
-      );
-    const key = this.candidates.map((c) => c.hash + c.id).join(":");
-    if (key === this.discoveryKey) return;
-    this.discoveryKey = key;
-    this.selectionIndex = 0;
-    this.selectionRequests = [];
-    this.selected = [];
-    this.classified.clear();
-    this.classification = undefined;
-    this.proposals = [];
-    this.discoveryEvidence = [];
+    const additions = this.candidates.filter((candidate) => {
+      const key = this.candidateKey(candidate);
+      if (this.seenCandidates.has(key)) return false;
+      this.seenCandidates.add(key);
+      return true;
+    });
+    if (!additions.length) return;
     this.discoveryStatus = "Pending: conversation source suggestions";
-    let group: Candidate[] = [];
-    for (const candidate of this.candidates) {
-      if (!fits(candidateRequest([...group, candidate]))) {
-        if (group.length) this.selectionRequests.push(candidateRequest(group));
-        group = [];
-        if (!fits(candidateRequest([candidate]))) {
-          this.omissions.push(
-            `Candidate ${candidate.entryId} exceeds 24 KiB; unavailable for semantic selection`,
-          );
-          continue;
-        }
+    // Append work instead of resetting an in-flight prefix when messages arrive.
+    for (const candidate of additions) {
+      const request = candidateRequest([candidate]);
+      if (!fits(request)) {
+        this.omissions.push(
+          `Candidate ${candidate.entryId} exceeds 24 KiB; unavailable for semantic selection`,
+        );
+        continue;
       }
-      group.push(candidate);
+      this.selectionRequests.push(request);
     }
-    if (group.length) this.selectionRequests.push(candidateRequest(group));
+  }
+  private original(reference: Reference): Observation | undefined {
+    const cached = [this.sourceObservation, this.cursorObservation].find(
+      (item) => item?.id === reference.id && item.hash === reference.hash,
+    );
+    if (cached) return cached;
+    return collectTrajectory(this.branchEntries, {
+      chronological: true,
+      unbounded: true,
+    }).messages.find(
+      (message) =>
+        message.id === reference.id && message.hash === reference.hash,
+    );
+  }
+  observation(reference: {
+    id: string;
+    hash: string;
+  }): Observation | undefined {
+    return this.original(reference);
+  }
+  observationById(id: string): Observation | undefined {
+    return collectTrajectory(this.branchEntries, {
+      chronological: true,
+      unbounded: true,
+    }).messages.find((message) => message.id === id);
+  }
+  private updateReportTrajectory() {
+    if (!this.cursor) {
+      this.reportTrajectory = undefined;
+      return;
+    }
+    const cursor = this.original(this.cursor);
+    const next = collectTrajectory(this.branchEntries, {
+      chronological: true,
+      after: this.cursor,
+      wholeEntries: true,
+    });
+    this.cursorObservation = cursor;
+    this.reportTrajectory = {
+      ...next,
+      messages: cursor ? [cursor, ...next.messages] : [],
+    };
   }
   preview(ledger?: Ledger) {
     let report = this.pending?.requests[this.pending.index];
@@ -169,8 +217,10 @@ export class Conversation {
     };
   }
   scheduleDiscovery(enqueue: Enqueue, valid: () => boolean) {
-    const key = this.discoveryKey;
-    const current = () => valid() && key === this.discoveryKey;
+    const generation = this.discoveryGeneration;
+    // New tail entries append requests; they never invalidate this committed
+    // chronological prefix.
+    const current = () => valid() && generation === this.discoveryGeneration;
     const request = this.selectionRequests[this.selectionIndex];
     if (request) {
       const index = this.selectionIndex;
@@ -181,8 +231,14 @@ export class Conversation {
           { request, result, at: Date.now() },
         ].slice(-12);
         const answer = result.answers.source;
-        const candidate =
+        const probability =
           answer?.type === "choice"
+            ? (answer.probabilities[answer.choice] ?? 0)
+            : 0;
+        const candidate =
+          answer?.type === "choice" &&
+          answer.confidence >= 0.5 &&
+          probability >= 0.8
             ? this.candidates.find((c) => c.id === answer.choice)
             : undefined;
         if (candidate) this.selected.push(candidate);
@@ -192,10 +248,26 @@ export class Conversation {
       return;
     }
     if (!this.classification) {
-      const candidate = this.selected.find((c) => !this.classified.has(c.id));
+      const candidate = this.selected.find(
+        (c) => !this.classified.has(this.candidateKey(c)),
+      );
       if (!candidate) {
+        if (this.trajectory.hasMore) {
+          const last = this.trajectory.messages.at(-1);
+          if (last) {
+            this.discoveryCursor = {
+              id: last.id,
+              hash: last.hash,
+              ...(last.offset === undefined ? {} : { offset: last.offset }),
+            };
+            this.discoveryGeneration++;
+            this.discoveryStatus =
+              "Pending: advancing chronological conversation catch-up";
+            return;
+          }
+        }
         this.discoveryStatus = this.proposals.length
-          ? "Suggestions ready; explicit Apply required"
+          ? "Suggestions ready for automatic scope reconciliation"
           : "Unknown: no actionable plan suggested";
         return;
       }
@@ -206,7 +278,7 @@ export class Conversation {
           if (spans.length) chunks.push(spans);
           spans = [];
           if (!fits(classificationRequest(candidate, [span]))) {
-            this.classified.add(candidate.id);
+            this.classified.add(this.candidateKey(candidate));
             this.discoveryStatus =
               "Unknown: essential classification context exceeds 24 KiB";
             return;
@@ -232,7 +304,7 @@ export class Conversation {
       ].slice(-12);
       batch.index++;
       if (batch.index === batch.chunks.length) {
-        this.classified.add(batch.candidate.id);
+        this.classified.add(this.candidateKey(batch.candidate));
         try {
           this.proposals.push(proposal(batch.candidate, batch.classes));
         } catch (error) {
@@ -252,11 +324,7 @@ export class Conversation {
         id: task.anchor ?? "",
         start: task.ref.start,
         end: task.ref.end,
-        criteria: task.criteria.map((text) => {
-          const span = candidate.spans.find((s) => s.text === text);
-          if (!span) throw new Error("Missing criterion reference");
-          return [span.start, span.end];
-        }),
+        criteria: (task.criterionRefs ?? []).map((ref) => [ref.start, ref.end]),
       })),
       context: candidate.spans
         .filter((s) => item.context.includes(s.text))
@@ -264,9 +332,7 @@ export class Conversation {
     };
   }
   rehydrate(source: ConversationSource): SourceSnapshot {
-    const message = this.trajectory.messages.find(
-      (m) => m.id === source.entryId && m.hash === source.hash,
-    );
+    const message = this.original({ id: source.entryId, hash: source.hash });
     if (
       !message ||
       !Array.isArray(source.spans) ||
@@ -306,6 +372,14 @@ export class Conversation {
           text: text(span.start, span.end),
           anchor: span.id,
           criteria: span.criteria.map(([start, end]) => text(start, end)),
+          criterionRefs: span.criteria.map(([start, end]) => ({
+            sourceId,
+            entryId: source.entryId,
+            start,
+            end,
+            provenance: message.role,
+          })),
+          revision: source.hash,
           status: "not-started",
           ref: {
             sourceId,
@@ -319,15 +393,15 @@ export class Conversation {
     };
   }
   context(source: ConversationSource) {
-    const message = this.trajectory.messages.find(
-      (m) => m.id === source.entryId && m.hash === source.hash,
-    );
+    const message = this.original({ id: source.entryId, hash: source.hash });
     return message
       ? source.context.map(([start, end]) => message.text.slice(start, end))
       : [];
   }
   select(source: ConversationSource) {
     this.cursor = { id: source.entryId, hash: source.hash };
+    this.sourceObservation = this.original(this.cursor);
+    this.cursorObservation = this.sourceObservation;
     this.pending = undefined;
     this.proofs.clear();
     this.reportEvidence = [];
@@ -339,6 +413,7 @@ export class Conversation {
   checkpoint(ledger: Ledger): ConversationCheckpoint {
     return {
       cursor: this.cursor,
+      discoveryCursor: this.discoveryCursor,
       order: ledger.reportOrder,
       asOf: this.asOf,
       gap: this.gap,
@@ -354,14 +429,19 @@ export class Conversation {
       checkpoint.order < 0
     )
       throw new Error("Invalid report metadata");
+    const all = collectTrajectory(this.branchEntries, {
+      chronological: true,
+      unbounded: true,
+    }).messages;
     const valid = (ref: Reference) =>
-      ref &&
-      this.trajectory.messages.some(
-        (m) => m.id === ref.id && m.hash === ref.hash,
-      );
+      !!ref && all.some((m) => m.id === ref.id && m.hash === ref.hash);
     if (!checkpoint.cursor || !valid(checkpoint.cursor))
       throw new Error("Report cursor original unavailable");
+    if (checkpoint.discoveryCursor && !valid(checkpoint.discoveryCursor))
+      throw new Error("Discovery cursor original unavailable");
     this.cursor = checkpoint.cursor;
+    this.cursorObservation = this.original(this.cursor);
+    this.discoveryCursor = checkpoint.discoveryCursor;
     this.asOf =
       typeof checkpoint.asOf === "number" && Number.isFinite(checkpoint.asOf)
         ? checkpoint.asOf
@@ -378,9 +458,7 @@ export class Conversation {
       "unknown",
       "conflict",
     ]);
-    const cursorIndex = this.trajectory.messages.findIndex(
-      (m) => m.id === this.cursor?.id,
-    );
+    const cursorIndex = all.findIndex((m) => m.id === this.cursor?.id);
     for (const proof of checkpoint.proofs) {
       const task = ledger.tasks.find(
         (t) => t.id === proof.taskId && t.included,
@@ -390,8 +468,7 @@ export class Conversation {
         !statuses.has(proof.status) ||
         !valid(proof.report) ||
         this.proofs.has(proof.taskId) ||
-        this.trajectory.messages.findIndex((m) => m.id === proof.report.id) >
-          cursorIndex
+        all.findIndex((m) => m.id === proof.report.id) > cursorIndex
       )
         throw new Error("Invalid original report proof");
       task.status = proof.status;
@@ -437,27 +514,24 @@ export class Conversation {
       fail(this.gap);
       return;
     }
-    if (!this.trajectory.complete) {
+    const timeline = this.reportTrajectory ?? this.trajectory;
+    if (!timeline.complete) {
       fail("Incomplete report history; recover originals and reselect source");
       return;
     }
-    if (
-      !this.trajectory.messages.some(
-        (m) => m.id === source.entryId && m.hash === source.hash,
-      )
-    ) {
+    if (!this.original({ id: source.entryId, hash: source.hash })) {
       fail("Selected plan changed or original missing");
       return;
     }
     const cursor = this.cursor;
-    const index = this.trajectory.messages.findIndex(
+    const index = timeline.messages.findIndex(
       (m) => m.id === cursor?.id && m.hash === cursor.hash,
     );
     if (index < 0) {
       fail("Ordered report cursor missing or changed");
       return;
     }
-    const report = this.trajectory.messages[index + 1];
+    const report = timeline.messages[index + 1];
     if (!report) {
       this.reportStatus = `Conversation-reported • ${this.asOf ? `as-of ${new Date(this.asOf).toISOString()}` : "no interpreted reports"}`;
       return;
@@ -487,7 +561,7 @@ export class Conversation {
       fail("Empty report scope");
       return;
     }
-    this.reportStatus = `Pending: ${this.trajectory.messages.length - index - 1} ordered reports; chunk ${batch.index + 1}/${batch.requests.length}${this.asOf ? ` • as-of ${new Date(this.asOf).toISOString()}` : ""}`;
+    this.reportStatus = `Pending: ${timeline.messages.length - index - 1} ordered reports; chunk ${batch.index + 1}/${batch.requests.length}${this.asOf ? ` • as-of ${new Date(this.asOf).toISOString()}` : ""}`;
     const chunk = batch.index;
     enqueue("reports", request, (result) => {
       const live = current();
@@ -498,8 +572,8 @@ export class Conversation {
         batch.index !== chunk ||
         this.cursor?.id !== cursor?.id ||
         this.cursor?.hash !== cursor?.hash ||
-        !this.trajectory.complete ||
-        !this.trajectory.messages.some(
+        !timeline.complete ||
+        !timeline.messages.some(
           (m) => m.id === report.id && m.hash === report.hash,
         )
       )
@@ -530,6 +604,7 @@ export class Conversation {
         -20,
       );
       this.cursor = { id: report.id, hash: hashText(report.text) };
+      this.cursorObservation = report;
       this.asOf = Date.now();
       this.pending = undefined;
       this.reportStatus = `Conversation-reported • as-of ${new Date(this.asOf).toISOString()}`;

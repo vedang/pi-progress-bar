@@ -6,7 +6,7 @@ export type ReportState =
   | "cancelled"
   | "unknown"
   | "conflict";
-interface SourceRef {
+export interface SourceRef {
   sourceId: string;
   entryId?: string;
   start: number;
@@ -18,6 +18,10 @@ export interface SourceTask {
   status: ReportState;
   anchor?: string;
   criteria: string[];
+  /** Exact original spans for criteria. Text is deliberately not checkpointed. */
+  criterionRefs?: SourceRef[];
+  /** Hash of the original entry containing this task. */
+  revision?: string;
   ref: SourceRef;
 }
 export interface SourceSnapshot {

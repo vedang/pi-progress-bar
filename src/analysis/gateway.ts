@@ -281,8 +281,16 @@ export class JevGateway {
           return;
         }
         if (!response.ok) {
-          if (response.status === 401 || response.status === 403) {
-            this.status = "OFF: TYPESAFE_API_KEY was rejected";
+          if (
+            response.status >= 400 &&
+            response.status < 500 &&
+            response.status !== 408 &&
+            response.status !== 429
+          ) {
+            this.status =
+              response.status === 401 || response.status === 403
+                ? "OFF: TYPESAFE_API_KEY was rejected"
+                : `OFF: permanent Jev request/model error (${response.status})`;
             this.paused = true;
             this.options.onPermanentError?.(this.status);
             void response.body?.cancel().catch(() => {});

@@ -85,6 +85,8 @@ export function proposal(
         status: "not-started",
         anchor: span.id,
         criteria: [],
+        criterionRefs: [],
+        revision: candidate.hash,
         ref: {
           sourceId,
           entryId: candidate.entryId,
@@ -95,8 +97,16 @@ export function proposal(
       });
     } else if (classification === "criterion") {
       const owner = tasks.at(-1);
-      if (owner) owner.criteria.push(span.text);
-      else {
+      if (owner) {
+        owner.criteria.push(span.text);
+        owner.criterionRefs?.push({
+          sourceId,
+          entryId: candidate.entryId,
+          start: span.start,
+          end: span.end,
+          provenance: candidate.role,
+        });
+      } else {
         ambiguous = true;
         context.push(span.text);
       }
@@ -125,7 +135,13 @@ export function classifications(
     Object.keys(request.questions).map((id) => {
       const answer = result.answers[id];
       if (answer?.type !== "choice") throw new Error("Missing classification");
-      return [id, answer.choice];
+      const probability = answer.probabilities[answer.choice] ?? 0;
+      return [
+        id,
+        answer.confidence >= 0.5 && probability >= 0.8
+          ? answer.choice
+          : "ambiguous",
+      ];
     }),
   );
 }

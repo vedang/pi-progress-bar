@@ -2,7 +2,7 @@
   "name": "pi-progress-bar",
   "version": "0.1.0",
   "packageManager": "bun@1.3.14",
-  "description": "Scaffold for a Pi progress bar extension.",
+  "description": "Automatic passive Jev progress and task-health monitor for Pi.",
   "type": "module",
   "main": "./src/index.ts",
   "files": [

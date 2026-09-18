@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { MAX_TASKS } from "../sources/checklist";
+
+const MAX_TASKS = 200;
+
 import type {
   Ledger,
   ReportBatch,
@@ -75,6 +77,10 @@ export function reconcileLedger(
     return {
       ...task,
       criteria: [...task.criteria],
+      ...(task.criterionRefs
+        ? { criterionRefs: task.criterionRefs.map((ref) => ({ ...ref })) }
+        : {}),
+      revision: task.revision ?? snapshot.revision,
       ref: { ...task.ref },
       id: prior?.id ?? `${prefix}:task:${nextTaskId++}`,
       included: prior?.included ?? !explicitSelection,
@@ -124,7 +130,10 @@ export function countReported(ledger: Ledger | undefined): {
   total: number;
   percent: number | null;
 } {
-  const included = ledger?.tasks.filter((task) => task.included) ?? [];
+  const included =
+    ledger?.tasks.filter(
+      (task) => task.included && task.status !== "cancelled",
+    ) ?? [];
   const done = included.filter((task) => task.status === "done").length;
   return {
     done,
@@ -170,13 +179,18 @@ export function applyReportBatch(ledger: Ledger, batch: ReportBatch): Ledger {
   )
     throw new Error("Invalid report task or state");
   const validated: ReportBatch = { ...batch, states: { ...batch.states } };
+  const tasks = ledger.tasks.map((task) =>
+    Object.hasOwn(validated.states, task.id)
+      ? { ...task, status: validated.states[task.id] as ReportState }
+      : task,
+  );
+  const current = tasks.find((task) => task.id === ledger.currentTaskId);
   return {
     ...ledger,
-    tasks: ledger.tasks.map((task) =>
-      Object.hasOwn(validated.states, task.id)
-        ? { ...task, status: validated.states[task.id] as ReportState }
-        : task,
-    ),
+    tasks,
+    ...(current?.status === "cancelled"
+      ? { currentTaskId: undefined }
+      : { currentTaskId: ledger.currentTaskId }),
     reportOrder: batch.order,
     reports: [...ledger.reports, validated],
   };

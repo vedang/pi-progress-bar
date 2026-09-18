@@ -4,7 +4,11 @@ import {
   JevGateway,
   type ValidatedResult,
 } from "../analysis/gateway";
-import { type HealthResult, healthSnapshot } from "../analysis/health";
+import {
+  type HealthResult,
+  type HealthSnapshot,
+  healthSnapshot,
+} from "../analysis/health";
 import { AnalysisScheduler } from "../analysis/scheduler";
 import {
   type BeadsExport,
@@ -16,14 +20,15 @@ import {
   type ConversationCheckpoint,
   type ConversationSource,
 } from "../sources/conversation";
-import { EvidenceStore } from "../sources/evidence";
+import { type EvidenceLink, EvidenceStore } from "../sources/evidence";
 import {
   applyScopeRelations,
+  type ScopeChunk,
   scopeAnswers,
-  scopeRequest,
+  scopeChunks,
 } from "../sources/scope";
 import { reconcileLedger } from "./ledger";
-import type { Ledger, Task } from "./types";
+import type { Ledger, ReportState, SourceRef, SourceTask, Task } from "./types";
 
 const taskKey = (task: Task) =>
   createHash("sha256")
@@ -36,13 +41,42 @@ export interface Checkpoint {
   interval: number;
   source?: ConversationSource;
   conversation?: ConversationCheckpoint;
+  sourceRevision?: string;
+  scopeRevision?: string;
   mappings: { hash: string; id: string }[];
+  tasks: {
+    id: string;
+    status: Task["status"];
+    included: boolean;
+    anchor?: string;
+    revision?: string;
+    ref: Task["ref"];
+    criterionRefs?: SourceRef[];
+  }[];
   currentTaskId?: string;
   nextTaskId: number;
+  usage: { calls: number; inputTokens: number; outputTokens: number };
 }
 
 const validInterval = (seconds: number) =>
   Number.isSafeInteger(seconds) && seconds >= 5 && seconds <= 86_400;
+
+interface ScopeWork {
+  proposalId: string;
+  starting: Ledger;
+  candidates: SourceTask[];
+  chunks: ScopeChunk[];
+  index: number;
+  relations: Record<number, ReturnType<typeof scopeAnswers>[number]>;
+  states: Record<number, ReportState | undefined>;
+  scopes: Set<"continue" | "new-goal" | "ambiguous">;
+  currents: Set<string>;
+}
+interface HealthWork {
+  snapshot: HealthSnapshot;
+  index: number;
+  result?: ValidatedResult;
+}
 
 /** Automatic, passive current-branch controller. */
 export class Monitor {
@@ -54,6 +88,7 @@ export class Monitor {
   error?: string;
   epoch = 0;
   health?: HealthResult;
+  usage = { calls: 0, inputTokens: 0, outputTokens: 0 };
   conversation = new Conversation();
   readonly evidence = new EvidenceStore();
   readonly gateway: JevGateway;
@@ -64,6 +99,8 @@ export class Monitor {
   private evidenceIdentity?: string;
   private scheduling = false;
   private scopedCandidates = new Set<string>();
+  private scopeWork?: ScopeWork;
+  private healthWork?: HealthWork;
   private beadsExport?: BeadsExport;
 
   constructor(
@@ -86,17 +123,34 @@ export class Monitor {
     if (this.enabled) this.conversation.update(branch());
   }
 
+  evidenceLink(): EvidenceLink | undefined {
+    const task = this.ledger?.tasks.find(
+      (item) =>
+        item.id === this.ledger?.currentTaskId &&
+        item.included &&
+        item.status !== "cancelled",
+    );
+    if (!this.ledger || !task) return;
+    return {
+      sourceId: this.ledger.sourceId,
+      taskId: task.id,
+      taskRevision: task.revision ?? this.ledger.sourceRevision,
+      scopeRevision: this.ledger.scopeRevision,
+    };
+  }
+
   snapshot() {
     const recent = this.conversation.trajectory.messages
       .slice(-8)
       .map((item) => `${item.role}: ${item.text.slice(0, 2000)}`);
+    const link = this.evidenceLink();
     return healthSnapshot(
       this.ledger,
       this.epoch,
       this.source
         ? [...this.conversation.context(this.source), ...recent]
         : recent,
-      this.evidence.snapshot(),
+      link ? this.evidence.snapshot(link) : [],
       this.evidence.codeRevision(),
     );
   }
@@ -108,7 +162,14 @@ export class Monitor {
     entryId?: string,
   ) {
     if (!this.enabled) return;
-    this.evidence.start(callId, toolName, args, Date.now(), entryId);
+    this.evidence.start(
+      callId,
+      toolName,
+      args,
+      Date.now(),
+      entryId,
+      this.evidenceLink(),
+    );
   }
 
   observeToolEnd(
@@ -134,15 +195,20 @@ export class Monitor {
     this.analysis.enqueue(purpose, {
       request,
       consentIdentity: this.runtimeIdentity,
-      admit,
+      admit: (result) => {
+        this.usage.calls++;
+        this.usage.inputTokens += result.usage.input_tokens;
+        this.usage.outputTokens += result.usage.output_tokens;
+        admit(result);
+      },
     });
   }
 
   private adoptProposal() {
     if (this.ledger || !this.conversation.proposals.length) return;
-    const proposal = [...this.conversation.proposals]
-      .reverse()
-      .find((item) => !item.ambiguous);
+    const proposal = this.conversation.proposals.find(
+      (item) => !item.ambiguous,
+    );
     if (!proposal) return;
     const source = this.conversation.source(proposal);
     const ledger = reconcileLedger(
@@ -154,9 +220,144 @@ export class Monitor {
     this.source = source;
     this.ledger = ledger;
     this.conversation.select(source);
-    this.scopedCandidates.add(proposal.candidate.id);
+    this.scopedCandidates.add(
+      `${proposal.candidate.id}:${proposal.candidate.hash}`,
+    );
     this.evidenceIdentity = undefined;
     this.save();
+  }
+
+  private scheduleScope() {
+    if (this.scopeWork && this.ledger !== this.scopeWork.starting)
+      this.scopeWork = undefined;
+    if (!this.scopeWork && this.ledger) {
+      const proposal = this.conversation.proposals.find(
+        (item) =>
+          !item.ambiguous &&
+          !this.scopedCandidates.has(
+            `${item.candidate.id}:${item.candidate.hash}`,
+          ),
+      );
+      if (proposal) {
+        try {
+          this.scopeWork = {
+            proposalId: `${proposal.candidate.id}:${proposal.candidate.hash}`,
+            starting: this.ledger,
+            candidates: proposal.snapshot.tasks,
+            chunks: scopeChunks(this.ledger, proposal.snapshot.tasks),
+            index: 0,
+            relations: {},
+            states: {},
+            scopes: new Set(),
+            currents: new Set(),
+          };
+        } catch {
+          // Essential scope context cannot be clipped into a transaction.
+          this.scopedCandidates.add(
+            `${proposal.candidate.id}:${proposal.candidate.hash}`,
+          );
+          return;
+        }
+      }
+    }
+    const work = this.scopeWork;
+    const chunk = work?.chunks[work.index];
+    if (!work || !chunk) return;
+    const index = work.index;
+    this.enqueueAnalysis("scope", chunk.request, (result) => {
+      if (
+        !this.enabled ||
+        this.scopeWork !== work ||
+        this.ledger !== work.starting ||
+        work.index !== index
+      )
+        return;
+      const partial = scopeAnswers(
+        work.candidates.filter((_candidate, candidateIndex) =>
+          chunk.indexes.includes(candidateIndex),
+        ),
+        result,
+        chunk.indexes,
+      );
+      for (const candidateIndex of chunk.indexes) {
+        work.relations[candidateIndex] = partial[candidateIndex];
+        work.states[candidateIndex] = partial.states?.[candidateIndex];
+      }
+      work.scopes.add(partial.scope);
+      if (partial.current !== "unknown") work.currents.add(partial.current);
+      work.index++;
+      if (work.index < work.chunks.length) {
+        this.scheduleScope();
+        return;
+      }
+      const scope =
+        work.scopes.size === 1
+          ? ([...work.scopes][0] ?? "ambiguous")
+          : "ambiguous";
+      const current =
+        work.currents.size === 1
+          ? ([...work.currents][0] ?? "unknown")
+          : "unknown";
+      this.ledger = applyScopeRelations(work.starting, work.candidates, {
+        ...work.relations,
+        current,
+        scope,
+        states: work.states,
+      });
+      if (this.beadsExport)
+        this.ledger.tasks = enrichBeadsTasks(
+          this.ledger.tasks,
+          this.beadsExport,
+        );
+      this.scopedCandidates.add(work.proposalId);
+      this.scopeWork = undefined;
+      this.save();
+    });
+  }
+
+  private scheduleHealth(snapshot: HealthSnapshot | undefined) {
+    if (!snapshot) return;
+    if (this.health?.snapshot.identity === snapshot.identity) return;
+    if (
+      !this.healthWork ||
+      this.healthWork.snapshot.taskIdentity !== snapshot.taskIdentity
+    )
+      this.healthWork = { snapshot, index: 0 };
+    const work = this.healthWork;
+    const request = work.snapshot.requests[work.index];
+    if (!request) return;
+    const index = work.index;
+    this.enqueueAnalysis("health", request, (result) => {
+      if (
+        !this.enabled ||
+        this.healthWork !== work ||
+        work.index !== index ||
+        this.snapshot()?.taskIdentity !== work.snapshot.taskIdentity
+      )
+        return;
+      const previous = work.result;
+      work.result = {
+        model: result.model,
+        answers: { ...(previous?.answers ?? {}), ...result.answers },
+        usage: {
+          input_tokens:
+            (previous?.usage.input_tokens ?? 0) + result.usage.input_tokens,
+          output_tokens:
+            (previous?.usage.output_tokens ?? 0) + result.usage.output_tokens,
+        },
+      };
+      work.index++;
+      if (work.index < work.snapshot.requests.length) {
+        this.scheduleHealth(work.snapshot);
+        return;
+      }
+      this.health = {
+        snapshot: work.snapshot,
+        result: work.result,
+        evaluatedAt: Date.now(),
+      };
+      this.healthWork = undefined;
+    });
   }
 
   scheduleAnalysis(startCycle = true) {
@@ -165,42 +366,21 @@ export class Monitor {
     try {
       if (this.branch) this.conversation.update(this.branch());
       this.adoptProposal();
-      const scopeProposal = this.ledger
-        ? this.conversation.proposals.find(
-            (item) => !this.scopedCandidates.has(item.candidate.id),
-          )
-        : undefined;
-      if (scopeProposal && this.ledger) {
-        const startingLedger = this.ledger;
-        const candidates = scopeProposal.snapshot.tasks;
-        const request = scopeRequest(startingLedger, candidates);
-        this.enqueueAnalysis("scope", request, (result) => {
-          if (!this.enabled || this.ledger !== startingLedger) return;
-          this.ledger = applyScopeRelations(
-            startingLedger,
-            candidates,
-            scopeAnswers(candidates, result),
-          );
-          if (this.beadsExport)
-            this.ledger.tasks = enrichBeadsTasks(
-              this.ledger.tasks,
-              this.beadsExport,
-            );
-          this.scopedCandidates.add(scopeProposal.candidate.id);
-          this.save();
-        });
-      }
+      this.scheduleScope();
       const snapshot = this.snapshot();
       if (snapshot?.identity !== this.evidenceIdentity) {
-        this.analysis.discard("health");
-        this.health = undefined;
+        const incompatible =
+          !this.healthWork ||
+          !snapshot ||
+          this.healthWork.snapshot.taskIdentity !== snapshot.taskIdentity;
+        if (incompatible) {
+          this.analysis.discard("health");
+          this.health = undefined;
+          this.healthWork = undefined;
+        }
         this.evidenceIdentity = snapshot?.identity;
       }
-      if (snapshot)
-        this.enqueueAnalysis("health", snapshot.request, (result) => {
-          if (this.enabled && this.snapshot()?.identity === snapshot.identity)
-            this.health = { snapshot, result, evaluatedAt: Date.now() };
-        });
+      this.scheduleHealth(snapshot);
       const epoch = this.epoch;
       this.conversation.scheduleDiscovery(
         this.enqueueAnalysis.bind(this),
@@ -234,6 +414,8 @@ export class Monitor {
     this.runtimeIdentity = undefined;
     this.evidenceIdentity = undefined;
     this.health = undefined;
+    this.healthWork = undefined;
+    this.scopeWork = undefined;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
   }
@@ -328,6 +510,8 @@ export class Monitor {
       enabled: this.enabled,
       interval: this.interval,
       source: this.source,
+      sourceRevision: this.ledger?.sourceRevision,
+      scopeRevision: this.ledger?.scopeRevision,
       conversation:
         this.source && this.ledger
           ? this.conversation.checkpoint(this.ledger)
@@ -337,8 +521,23 @@ export class Monitor {
           hash: taskKey(task),
           id: task.id,
         })) ?? [],
+      tasks:
+        this.ledger?.tasks.map((task) => ({
+          id: task.id,
+          status: task.status,
+          included: task.included,
+          ...(task.anchor ? { anchor: task.anchor } : {}),
+          ...(task.revision ? { revision: task.revision } : {}),
+          ...(task.criterionRefs
+            ? {
+                criterionRefs: task.criterionRefs.map((ref) => ({ ...ref })),
+              }
+            : {}),
+          ref: { ...task.ref },
+        })) ?? [],
       currentTaskId: this.ledger?.currentTaskId,
       nextTaskId: this.ledger?.nextTaskId ?? 1,
+      usage: { ...this.usage },
     };
   }
 
@@ -353,6 +552,8 @@ export class Monitor {
     this.epoch++;
     this.conversation = new Conversation();
     this.scopedCandidates.clear();
+    this.evidence.reset();
+    this.beadsExport = undefined;
     this.ledger = undefined;
     this.source = undefined;
     this.error = undefined;
@@ -370,15 +571,32 @@ export class Monitor {
             !validInterval(cp.interval ?? Number.NaN) ||
             !Array.isArray(cp.mappings) ||
             cp.mappings.length > 200 ||
+            !Array.isArray(cp.tasks) ||
+            cp.tasks.length > 200 ||
             !Number.isSafeInteger(cp.nextTaskId) ||
-            (cp.nextTaskId ?? 0) < 1
+            (cp.nextTaskId ?? 0) < 1 ||
+            !cp.usage ||
+            ![
+              cp.usage.calls,
+              cp.usage.inputTokens,
+              cp.usage.outputTokens,
+            ].every((value) => Number.isSafeInteger(value) && value >= 0)
           )
             throw new Error("Invalid automatic checkpoint");
           savedEnabled = cp.enabled;
           this.interval = cp.interval as number;
+          this.usage = { ...cp.usage };
           if (cp.source) {
             const snapshot = this.conversation.rehydrate(cp.source);
             const ledger = reconcileLedger(undefined, snapshot);
+            if (
+              cp.sourceRevision !== snapshot.revision ||
+              typeof cp.scopeRevision !== "string" ||
+              !/^[A-Za-z0-9_-]{1,128}:\d+$/.test(cp.scopeRevision)
+            )
+              throw new Error("Invalid saved source or scope revision");
+            ledger.sourceRevision = cp.sourceRevision;
+            ledger.scopeRevision = cp.scopeRevision;
             const maps = new Map(cp.mappings.map((item) => [item.hash, item]));
             const ids = new Set<string>();
             let next = cp.nextTaskId as number;
@@ -392,8 +610,106 @@ export class Monitor {
               ids.add(id);
               return { ...task, id, included: true };
             });
+            const baseById = new Map(
+              ledger.tasks.map((task) => [task.id, task]),
+            );
+            const restoredIds = new Set<string>();
+            const restoreRef = (ref: SourceRef) => {
+              if (
+                !ref.entryId ||
+                ref.sourceId !== `conversation:${ref.entryId}` ||
+                !Number.isSafeInteger(ref.start) ||
+                !Number.isSafeInteger(ref.end) ||
+                ref.start < 0 ||
+                ref.end <= ref.start ||
+                !["user", "assistant"].includes(ref.provenance)
+              )
+                throw new Error("Invalid saved task reference");
+              return ref;
+            };
+            const restoredTasks = cp.tasks.flatMap((saved) => {
+              if (
+                typeof saved.id !== "string" ||
+                !saved.id ||
+                saved.id.length > 256 ||
+                restoredIds.has(saved.id) ||
+                typeof saved.included !== "boolean" ||
+                ![
+                  "done",
+                  "reopened",
+                  "not-started",
+                  "in-progress",
+                  "cancelled",
+                  "unknown",
+                  "conflict",
+                ].includes(saved.status)
+              )
+                throw new Error("Invalid saved task");
+              restoredIds.add(saved.id);
+              const ref = restoreRef(saved.ref);
+              const revision =
+                typeof saved.revision === "string" && saved.revision
+                  ? saved.revision
+                  : undefined;
+              const message = this.conversation.observationById(
+                ref.entryId ?? "",
+              );
+              if (
+                !message ||
+                !revision ||
+                revision !== message.hash ||
+                ref.end > message.text.length
+              )
+                throw new Error("Saved task original or revision unavailable");
+              const criterionRefs = saved.criterionRefs?.map((criterion) => {
+                const checked = restoreRef(criterion);
+                const criterionMessage = this.conversation.observationById(
+                  checked.entryId ?? "",
+                );
+                if (
+                  !criterionMessage ||
+                  criterionMessage.hash !== revision ||
+                  checked.end > criterionMessage.text.length
+                )
+                  throw new Error("Saved criterion original unavailable");
+                return { ...checked };
+              });
+              const base = baseById.get(saved.id);
+              return [
+                {
+                  ...(base ?? {
+                    criteria: [],
+                    ref: { ...ref },
+                    text: message.text.slice(ref.start, ref.end),
+                  }),
+                  id: saved.id,
+                  text: message.text.slice(ref.start, ref.end),
+                  status: saved.status,
+                  included: saved.included,
+                  ...(saved.anchor ? { anchor: saved.anchor } : {}),
+                  ...(revision ? { revision } : {}),
+                  ...(criterionRefs
+                    ? {
+                        criterionRefs,
+                        criteria: criterionRefs.map((criterion) =>
+                          message.text.slice(criterion.start, criterion.end),
+                        ),
+                      }
+                    : {}),
+                  ref: { ...ref },
+                },
+              ];
+            });
+            if (restoredTasks.length) ledger.tasks = restoredTasks;
             ledger.nextTaskId = next;
-            if (ledger.tasks.some((task) => task.id === cp.currentTaskId))
+            if (
+              ledger.tasks.some(
+                (task) =>
+                  task.id === cp.currentTaskId &&
+                  task.included &&
+                  task.status !== "cancelled",
+              )
+            )
               ledger.currentTaskId = cp.currentTaskId;
             this.conversation.restore(ledger, cp.conversation);
             this.source = cp.source;

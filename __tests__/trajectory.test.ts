@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { reconcileLedger } from "../src/core/ledger";
-import { parseChecklist } from "../src/sources/checklist";
 import { reportRequest, reportStates } from "../src/sources/reports";
 import { collectTrajectory, findCandidates } from "../src/sources/trajectory";
 
@@ -80,7 +79,7 @@ describe("actual-lineage trajectory normalization", () => {
     expect(trajectory.messages.length).toBeLessThanOrEqual(512);
     expect(trajectory.messages.at(-1)?.id).toBe("entry-619");
     expect(trajectory.messages.some((item) => item.id === "entry-0")).toBe(
-      false,
+      true,
     );
     const candidates = findCandidates(trajectory);
     expect(candidates.length).toBeGreaterThan(12);
@@ -92,6 +91,29 @@ describe("actual-lineage trajectory normalization", () => {
         );
         expect(original?.text.slice(span.start, span.end)).toBe(span.text);
       }
+  });
+
+  it("chronologically catches up past 512 entries with a committed cursor", () => {
+    const entries = Array.from({ length: 620 }, (_, i) =>
+      message(`entry-${i}`, "user", `Plan ${i}`),
+    );
+    const seen: string[] = [];
+    let after: { id: string; hash: string; offset?: number } | undefined;
+    for (let page = 0; page < 4; page++) {
+      const window = collectTrajectory(entries, { chronological: true, after });
+      seen.push(...window.messages.map((item) => item.id));
+      const last = window.messages.at(-1);
+      if (!last || !window.hasMore) break;
+      after = {
+        id: last.id,
+        hash: last.hash,
+        ...(last.offset === undefined ? {} : { offset: last.offset }),
+      };
+    }
+    expect(seen).toHaveLength(620);
+    expect(seen[0]).toBe("entry-0");
+    expect(seen.at(-1)).toBe("entry-619");
+    expect(new Set(seen).size).toBe(seen.length);
   });
 
   it("subchunks oversized messages with exact original offsets", () => {
@@ -170,11 +192,22 @@ describe("actual-lineage trajectory normalization", () => {
 
 describe("explicit report questions and atomic interpretation", () => {
   const source = {
-    ...parseChecklist("# Tasks\n- [ ] Research\n- [ ] Build\n- [ ] Check", {
-      sourceId: "plan",
-      section: "Tasks",
-    }),
+    sourceId: "plan",
+    revision: "plan-v1",
+    complete: true,
     kind: "conversation" as const,
+    tasks: ["Research", "Build", "Check"].map((text, index) => ({
+      text,
+      status: "not-started" as const,
+      criteria: [],
+      ref: {
+        sourceId: "plan",
+        entryId: "plan",
+        start: index,
+        end: index + text.length,
+        provenance: "user" as const,
+      },
+    })),
   };
   const ledger = reconcileLedger(undefined, source);
   const report = collectTrajectory([

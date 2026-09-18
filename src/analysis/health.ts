@@ -46,7 +46,7 @@ const questions: EvaluationRequest["questions"] = {
   redReport: {
     type: "choice",
     instructions:
-      "Does visible conversation contain an explicit actual task-linked assertion that a failing regression test was written or observed? Quotes, intentions and hypotheticals do not qualify.",
+      "Does visible task-linked conversation context contain an explicit actual assertion that a failing regression test was written or observed for this exact task revision? An explicit actual assertion is sufficient for Reported red without observed execution; do not demand a run. Quotes, intentions and hypotheticals do not qualify.",
     criteria: {
       "reported-red": "Explicit actual task-linked failing-test assertion",
       contradicted: "Current task-linked claims contradict each other",
@@ -57,15 +57,56 @@ const questions: EvaluationRequest["questions"] = {
 };
 export interface HealthSnapshot {
   identity: string;
+  /** Task/evidence identity. Unlike fresh conversation context, it gates batches. */
+  taskIdentity: string;
   observedAt: number;
   omissions: string[];
+  /** First resumable request, retained for existing callers/preview. */
   request: EvaluationRequest;
+  /** Core plus every criterion batch; all must settle before implementation is shown. */
+  requests: EvaluationRequest[];
+  implementationEvidenceComplete: boolean;
 }
 export interface HealthResult {
   snapshot: HealthSnapshot;
   result: ValidatedResult;
   evaluatedAt: number;
 }
+
+const requestFits = (request: EvaluationRequest) =>
+  Object.keys(request.questions).length <= 20 &&
+  Buffer.byteLength(JSON.stringify(request)) <= MAX_REQUEST_BYTES;
+const criterionQuestion = (criterion: string) => ({
+  type: "choice" as const,
+  instructions: `Assess whether bounded passive implementation evidence supports exact criterion ${JSON.stringify(criterion)}. Agent self-report alone is insufficient. Missing, stale, truncated or unlinked evidence is insufficient; explicit contrary current evidence contradicts.`,
+  criteria: {
+    supports: "Current linked passive evidence supports this criterion",
+    contradicts: "Current linked passive evidence contradicts this criterion",
+    insufficient: "Evidence is missing, stale, unlinked, or incomplete",
+  },
+});
+
+function boundedEvidence(evidence: PassiveEvidence[]) {
+  const kept: PassiveEvidence[] = [];
+  let bytes = 0;
+  for (const item of evidence) {
+    const copy = {
+      ...item,
+      ...(item.link ? { link: { ...item.link } } : {}),
+    };
+    const size = Buffer.byteLength(JSON.stringify(copy));
+    if (bytes + size > 12 * 1024) return { evidence: kept, complete: false };
+    kept.push(copy);
+    bytes += size;
+  }
+  return { evidence: kept, complete: true };
+}
+
+/**
+ * Builds independent criterion batches instead of silently dropping a suffix.
+ * An oversized core rubric is Unknown, while its exact criterion spans still
+ * continue through resumable bounded batches.
+ */
 export function healthSnapshot(
   ledger: Ledger | undefined,
   epoch: number,
@@ -74,74 +115,134 @@ export function healthSnapshot(
   codeRevision = 0,
 ): HealthSnapshot | undefined {
   const task = ledger?.tasks.find(
-    (item) => item.id === ledger.currentTaskId && item.included,
+    (item) =>
+      item.id === ledger.currentTaskId &&
+      item.included &&
+      item.status !== "cancelled",
   );
   if (!ledger || ledger.stale || !task?.text.trim()) return;
-  const snapshot: HealthSnapshot = {
-    identity: JSON.stringify([
-      epoch,
-      ledger.sourceId,
-      ledger.scopeRevision,
-      task.id,
-      task.text,
-      task.criteria,
-      task.ref,
-      context,
-      passiveEvidence,
-      codeRevision,
-    ]),
-    observedAt: Date.now(),
-    omissions: context?.length
-      ? [
-          "Only confirmed source context and selected task supplied; other conversation, implementation and test execution omitted",
-        ]
-      : [
-          "Other tasks, conversation, implementation and test execution omitted",
-          "Goal is the explicitly selected task; broader project goal unavailable",
-        ],
-    request: {
-      model: MODEL,
-      state: {
-        goal: context?.length ? context.join("\n") : task.text,
-        goalScope: context?.length
-          ? "Confirmed source goal/context (not an inferred broader project goal)"
-          : "Selected task only",
-        task: task.text,
-        criteria: task.criteria,
-        evidence: {
-          ...task.ref,
-          taskId: task.id,
-          scopeRevision: ledger.scopeRevision,
-          passive: passiveEvidence,
-          codeRevision,
+  const bounded = boundedEvidence(passiveEvidence);
+  const evidence = {
+    ...task.ref,
+    taskId: task.id,
+    taskRevision: task.revision ?? ledger.sourceRevision,
+    scopeRevision: ledger.scopeRevision,
+    passive: bounded.evidence,
+    codeRevision,
+  };
+  const commonState = {
+    goal: context?.length ? context.join("\n") : task.text,
+    goalScope: context?.length
+      ? "Confirmed source goal/context (not an inferred broader project goal)"
+      : "Selected task only",
+    task: task.text,
+    criteria: task.criteria,
+    evidence,
+    coverage:
+      "Complete selected task and owned criteria; only explicitly supplied source context supports goal claims",
+  };
+  const coreQuestions: EvaluationRequest["questions"] = { ...questions };
+  const core: EvaluationRequest = {
+    model: MODEL,
+    state: commonState,
+    questions: coreQuestions,
+  };
+  const requests: EvaluationRequest[] = [];
+  let firstCriterion = 0;
+  // The core batch can carry up to 16 criterion questions (four core rows).
+  if (requestFits(core)) {
+    for (; firstCriterion < task.criteria.length; firstCriterion++) {
+      const candidate: EvaluationRequest = {
+        ...core,
+        questions: {
+          ...core.questions,
+          [`criterion:${firstCriterion}`]: criterionQuestion(
+            task.criteria[firstCriterion] ?? "",
+          ),
         },
-        coverage:
-          "Complete selected task and owned criteria; only explicitly supplied source context supports goal claims",
-      },
-      questions: {
-        ...questions,
-        ...Object.fromEntries(
-          task.criteria.slice(0, 16).map((criterion, index) => [
-            `criterion:${index}`,
-            {
-              type: "choice" as const,
-              instructions: `Assess whether bounded passive implementation evidence supports exact criterion ${JSON.stringify(criterion)}. Agent self-report alone is insufficient. Missing, stale, truncated or unlinked evidence is insufficient; explicit contrary current evidence contradicts.`,
-              criteria: {
-                supports:
-                  "Current linked passive evidence supports this criterion",
-                contradicts:
-                  "Current linked passive evidence contradicts this criterion",
-                insufficient:
-                  "Evidence is missing, stale, unlinked, or incomplete",
-              },
-            },
+      };
+      if (!requestFits(candidate)) break;
+      core.questions = candidate.questions;
+    }
+    requests.push(core);
+  }
+
+  for (let start = firstCriterion; start < task.criteria.length; ) {
+    const indexes: number[] = [];
+    let batch: EvaluationRequest | undefined;
+    for (let index = start; index < task.criteria.length; index++) {
+      const nextIndexes = [...indexes, index];
+      const request: EvaluationRequest = {
+        model: MODEL,
+        state: {
+          task: task.text,
+          criteria: nextIndexes.map((i) => task.criteria[i]),
+          criterionIndexes: nextIndexes,
+          evidence,
+          coverage: {
+            totalCriteria: task.criteria.length,
+            suppliedIndexes: nextIndexes,
+            evidenceComplete: bounded.complete,
+          },
+        },
+        questions: Object.fromEntries(
+          nextIndexes.map((i) => [
+            `criterion:${i}`,
+            criterionQuestion(task.criteria[i] ?? ""),
           ]),
         ),
-      },
-    },
+      };
+      if (!requestFits(request)) {
+        if (!indexes.length) return;
+        break;
+      }
+      indexes.push(index);
+      batch = request;
+    }
+    if (!batch) return;
+    requests.push(batch);
+    start += indexes.length;
+  }
+  const request = requests[0];
+  if (!request) return;
+  const taskIdentity = JSON.stringify([
+    epoch,
+    ledger.sourceId,
+    ledger.scopeRevision,
+    task.id,
+    task.revision ?? ledger.sourceRevision,
+    task.text,
+    task.criteria,
+    task.ref,
+    passiveEvidence,
+    codeRevision,
+  ]);
+  return {
+    identity: JSON.stringify([taskIdentity, context]),
+    taskIdentity,
+    observedAt: Date.now(),
+    omissions: [
+      ...(context?.length
+        ? [
+            "Only confirmed source context and selected task supplied; other conversation, implementation and test execution omitted",
+          ]
+        : [
+            "Other tasks, conversation, implementation and test execution omitted",
+            "Goal is the explicitly selected task; broader project goal unavailable",
+          ]),
+      ...(bounded.complete
+        ? []
+        : [
+            "Passive evidence exceeded the bounded request context; implementation cannot appear complete",
+          ]),
+      ...(requests.length > 1
+        ? [
+            `Implementation criteria are being evaluated in ${requests.length} resumable bounded batches`,
+          ]
+        : []),
+    ],
+    request,
+    requests,
+    implementationEvidenceComplete: bounded.complete,
   };
-  // Essential task/criteria never clipped to fit an outbound request.
-  if (Buffer.byteLength(JSON.stringify(snapshot.request)) > MAX_REQUEST_BYTES)
-    return;
-  return snapshot;
 }

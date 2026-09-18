@@ -4,10 +4,38 @@ import {
   countReported,
   reconcileLedger,
 } from "../src/core/ledger";
-import { parseChecklist } from "../src/sources/checklist";
+import type { SourceSnapshot } from "../src/core/types";
 
-const parse = (text: string) =>
-  parseChecklist(text, { sourceId: "plan.md", section: "Tasks" });
+const parse = (text: string): SourceSnapshot => {
+  const lines = text.split("\n");
+  const end = lines.findIndex((line, index) => index > 0 && /^# /.test(line));
+  return {
+    sourceId: "conversation:plan",
+    kind: "conversation",
+    revision: text,
+    complete: true,
+    tasks: lines.slice(0, end < 0 ? undefined : end).flatMap((line, index) => {
+      const match = /^- \[([ xX])\] (.+)$/.exec(line);
+      return match
+        ? [
+            {
+              text: match[2] ?? "",
+              status:
+                match[1] === " " ? ("not-started" as const) : ("done" as const),
+              criteria: [],
+              ref: {
+                sourceId: "conversation:plan",
+                entryId: "plan",
+                start: index,
+                end: index + line.length,
+                provenance: "user" as const,
+              },
+            },
+          ]
+        : [];
+    }),
+  };
+};
 const fixture =
   "# Tasks\n- [x] First\n  - [ ] Nested criterion\n- [ ] Second\n- [x] Third\n- [ ] Fourth\n- [ ] Fifth\n# Notes\n- [x] Not scoped";
 
@@ -38,21 +66,6 @@ describe("reported task ledger", () => {
     ).toBeNull();
   });
 
-  it("ignores fenced checkboxes but rejects ambiguous tasks", () => {
-    expect(
-      parse("# Tasks\n```md\n- [x] Example\n```\n- [ ] Real").tasks,
-    ).toHaveLength(1);
-    for (const text of [
-      "# Tasks\n- [ ] Same\n- [x] Same",
-      "# Tasks\n- [ ] ",
-      "# Tasks\n- [ ] A\n* [ ] B",
-      "# Tasks\n- [ ] A <!-- progress:id=x -->\n- [ ] B <!-- progress:id=x -->",
-    ]) {
-      expect(() => parse(text)).toThrow();
-    }
-    expect(() => parse("# Other\n- [ ] Task")).toThrow();
-  });
-
   it("preserves identities on reorder and distinguishes content from scope changes", () => {
     const first = reconcileLedger(
       undefined,
@@ -71,7 +84,8 @@ describe("reported task ledger", () => {
       parse("# Tasks\n- [ ] B\n- [ ] A"),
     );
     expect(unchecked.scopeRevision).toBe(first.scopeRevision);
-    expect(countReported(unchecked).done).toBe(0);
+    // Conversation markers do not overwrite ordered report authority.
+    expect(countReported(unchecked).done).toBe(1);
     const renamed = reconcileLedger(
       unchecked,
       parse("# Tasks\n- [ ] B\n- [ ] Different"),
@@ -138,12 +152,23 @@ describe("reported task ledger", () => {
       }),
     ).toThrow();
     expect(countReported(first).done).toBe(0);
-    const cancelled = applyReportBatch(reopened, {
+    const cancelled = applyReportBatch(
+      { ...reopened, currentTaskId: b },
+      {
+        ...report,
+        order: 3,
+        entryId: "report-3",
+        states: { [b]: "cancelled" },
+      },
+    );
+    expect(countReported(cancelled)).toMatchObject({ done: 0, total: 2 });
+    expect(cancelled.currentTaskId).toBeUndefined();
+    const restored = applyReportBatch(cancelled, {
       ...report,
-      order: 3,
-      entryId: "report-3",
-      states: { [b]: "cancelled" },
+      order: 4,
+      entryId: "report-4",
+      states: { [b]: "reopened" },
     });
-    expect(countReported(cancelled)).toMatchObject({ done: 0, total: 3 });
+    expect(countReported(restored)).toMatchObject({ done: 0, total: 3 });
   });
 });

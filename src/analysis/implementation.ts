@@ -13,6 +13,7 @@ export function aggregateImplementation(
   answers: string[],
   evidence: PassiveEvidence[],
   codeRevision: number,
+  evidenceComplete = true,
 ): ImplementationLabel {
   if (!criteria.length) return "unverified";
   const bounded = answers.slice(0, criteria.length);
@@ -22,6 +23,7 @@ export function aggregateImplementation(
   );
   if (!currentEvidence) return "unverified";
   if (
+    evidenceComplete &&
     bounded.length === criteria.length &&
     bounded.every((answer) => answer === "supports")
   )
@@ -35,6 +37,7 @@ export function implementationFromResult(
   result: ValidatedResult | undefined,
   evidence: PassiveEvidence[],
   codeRevision: number,
+  evidenceComplete = true,
 ): ImplementationLabel {
   const answers: CriterionAnswer[] = criteria.flatMap((_, index) => {
     const answer = result?.answers[`criterion:${index}`];
@@ -43,5 +46,11 @@ export function implementationFromResult(
       ? [answer.choice as CriterionAnswer]
       : [];
   });
-  return aggregateImplementation(criteria, answers, evidence, codeRevision);
+  return aggregateImplementation(
+    criteria,
+    answers,
+    evidence,
+    codeRevision,
+    evidenceComplete,
+  );
 }

@@ -1,6 +1,8 @@
 # Progress monitor — review packet
 
-**Status: V1–V3 implemented; V4–V7 remain proposed.** See the [runtime README](../../README.md) for shipped commands and limitations. Detailed execution planning remains in ignored task artifacts; steps are tracked in Beads. Design affordance names below are conceptual, not necessarily repository symbols. Deterministic mechanics and offline Pi loading are tested; semantic accuracy is not live-validated. Source suggestions require explicit Apply; interactive tool answers are excluded without verified provenance.
+**Current implementation target: automatic plan-v2 replacement plus V4–V6, Beads epic `pi-progress-barroot-pyp` (children `.1`–`.8`).** Issue bodies are self-contained for cross-machine execution; detailed plans remain ignored. [PRODUCT.md](../../PRODUCT.md) summarizes the corrected contract: default ON, required real Jev, only on/off/interval, automatic evolving tasks, and deterministic labels. V7 is deferred.
+
+**Historical design packet below:** its manual source/Apply/consent/inspector affordances and selected Beads-source workflow are superseded. Retain its useful signal semantics and evidence distinctions, not its obsolete UX. The [runtime README](../../README.md) still documents the previous implemented version until the replacement ships. Existing deterministic/load tests do not establish new behavior or live semantic accuracy; the previous independent review timed out.
 
 ## Read in this order
 

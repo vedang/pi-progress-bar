@@ -1,5 +1,7 @@
 # pi-progress-bar
 
+> **Replacement planned:** Beads epic `pi-progress-barroot-pyp` contains the self-contained implementation backlog for automatic, default-on, key-required Jev monitoring through V6. See [PRODUCT.md](PRODUCT.md) for the corrected contract. The commands below describe the **existing manual-workflow version**, not the new target behavior.
+
 Read-only reported checklist progress with optional, consented experimental Jev
 requirements-clarity, acceptance and conversation plan/report signals for Pi (V1–V3). Tested with
 `@earendil-works/pi-coding-agent` 0.84.2; Node.js >=22.19.0.

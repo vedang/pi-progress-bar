@@ -12,9 +12,15 @@ For people supervising a coding agent who want to see reported plan completion a
 
 ## Confirmed scope
 
-- Refresh the display every X seconds. (default 15 seconds, configurable)
+**Current delivery: plan-v2 replacement plus V4–V6, tracked in Beads epic `pi-progress-barroot-pyp` and children `.1`–`.8`.** Those issues are the portable implementation specification and supersede older manual-workflow design instructions. Existing code still implements the previous UX; the new batch is not delivered yet.
+
+- Start monitoring automatically when loaded. Require `TYPESAFE_API_KEY`; missing/blank or rejected credentials produce an error and OFF. No consent or local-only operating mode.
+- Use only real TypeSafe Jev calls for runtime semantic judgments. No separate general-purpose/reasoning LLM, generated task descriptions/summaries, or model-written display labels.
+- Expose only `/progress on`, `/progress off`, and `/progress interval <seconds>`; bare command shows usage/state, not a menu. Remove manual source/scope/current-task selection and details/enable/pause/resume.
+- Interval controls analysis-cycle starts, not only display redraws. Plan-v2 default is 60 seconds, configurable 5–86,400 seconds; no new evidence means no new inference. Process bounded chunks, at most three serial requests per cycle.
 - Show overall **reported task completion**, not a model-estimated percentage, effort estimate, or ETA.
-- Show current-task signals for requirements clarity, acceptance criteria/tests, red tests, implementation completeness, meaningful progress, stuck state, and off-track work.
+- This batch shows requirements clarity, acceptance criteria, red-test applicability/evidence, and implementation assessment for the automatically inferred current task. Meaningful progress, stuck and off-track assessment (V7) remain deferred.
+- Map typed Jev answers to readable text in local code. Requirements Score 2.7 renders `Requirements: mostly clear`; display wording never requires another model call.
 - Red-test status includes **Not needed**, distinct from missing or unobserved tests. Assess whether a new failing test adds meaningful value for this task; do not demand tests simply because work occurred.
 - An explicit agent report of writing a failing regression test is sufficient for **Reported red** even without a matching observed run. Preserve Reported versus Observed provenance; do not relabel a claim as independently verified.
 - V1 is passive: display only. No automatic warnings, agent nudges, tool blocking, or workflow changes.
@@ -22,7 +28,8 @@ For people supervising a coding agent who want to see reported plan completion a
 - Support users with and without Beads. Existing use of Beads in this repository is not an installation requirement for the extension.
 - For prose plans, interpret explicit completion reports and map them to known tasks. Do not infer reported completion solely from code activity.
 - Use the actual agent trajectory as stored by Pi as primary evidence for both task-health judgments and plan/report extraction. Avoid sending the full conversation to Jev; select and retain relevant trajectory context.
-- One selected source owns overall scope/status. Auto-select only when unambiguous; expose conflicts rather than silently merging Beads, checklist and conversation.
+- Automatically reconcile task identities and evolving scope across conversation entries; preserve ordered reports and explicit corrections. Unclear scope/current task remains unknown, not a configuration prompt.
+- Conversation reports own completion in this batch. Automatically recognized Beads IDs and bounded relevant export records enrich identity/context; stale exports cannot silently replace report statuses or pull the whole backlog into scope.
 - Keep the design open to Claude, Codex, and OpenCode integrations later; those integrations are not V1 deliverables.
 
 ## Principles
@@ -38,7 +45,8 @@ For people supervising a coding agent who want to see reported plan completion a
 - Current Pi extension, TUI, package, and session-format documentation.
 - Live TypeSafe documentation for Jev primitives, state, confidence, model limits, and verification patterns.
 - Four authorized Jev calls on manually selected excerpts from this actual Pi session are recorded in [docs/design/spikes.md](docs/design/spikes.md): 11,269 input tokens, roughly 1.2–1.3 seconds each, estimated total input cost $0.000473298.
-- V1–V3 are implemented: local checklist progress, consented clarity/acceptance, and current-branch plan/report interpretation with explicit source confirmation. See [README](README.md) for actual commands and limits. V4–V7 remain proposed.
+- Previous V1–V3 implementation provides reusable ledger, gateway, host and test code, but its manual checklist/source/consent UX is superseded by the new direction. See [README](README.md) for what currently runs, not the new target contract.
+- Self-contained Beads epic `pi-progress-barroot-pyp` covers the replacement and V4–V6. V7 remains outside this batch. The old full-batch reviewer timed out without a verdict.
 - Deterministic tests and an isolated offline Pi package-load check exercise mechanics; representative live accuracy, automatic retrieval quality and calibrated thresholds remain unvalidated.
 
 ## Future direction (not v1)
@@ -49,12 +57,11 @@ Any future guidance should separate observations, model assessments, user/reposi
 
 ## Review packet
 
-[docs/design/README.md](docs/design/README.md) links the complete proposed shape, breadboard, vertical slices, and evaluation approach. Implementation awaits user review and next-step instructions.
+[docs/design/README.md](docs/design/README.md) links the historical shape, breadboard, slices and evaluation approach. They remain useful for signal semantics, but the current Beads epic governs implementation when activation, source selection or UI instructions conflict. Detailed `plan_v2.md` remains in ignored task artifacts; another machine does not need it because the issue bodies contain the relevant requirements and acceptance checks.
 
 ## Open decisions
 
-- Proposed: optional Beads adapter reading scoped `.beads/issues.jsonl` exports, without bundling, auto-installing, or invoking `br` or `bv`. Export observation does not guarantee live database freshness.
-- Exact source-selection rules, plan revision/reconciliation behavior, and UI layout need approval and prototype validation.
-- Define evidence rubrics, temporal windows, and uncertainty thresholds through representative examples, not arbitrary confidence cutoffs.
-- User approved a bounded billable Jev spike using this actual conversation. General extension enablement/consent UX still needs implementation; this approval is not blanket consent for future users or unrelated sessions.
-- Proposed stack: TypeScript ESM, following the reference extension packaging and deterministic-test conventions. Dependencies and minimum Pi version remain implementation decisions.
+- Validate automatic candidate recall, task identity/revision matching and uncertainty handling on real conversations. No arbitrary confidence cutoff or highest-probability choice establishes accuracy.
+- Verify concrete supported Beads export and passive test/code evidence formats; unsupported observations stay unknown. No universal tool/runner compatibility layer.
+- Runtime automatically sends relevant context to TypeSafe when installed with a key; README must disclose costs and privacy. Engineering live evaluation needs a finite recorded request budget, separate from offline default tests.
+- Existing stack: TypeScript ESM, Bun 1.3.14, Biome, TypeScript, Knip, Vitest unit/integration, Make gates. Node >=22.19.0; previous host tests used `@earendil-works/pi-coding-agent` 0.84.2. Verify actual installed APIs before extending adapters.

@@ -2,6 +2,7 @@ import {
   type ExtensionContext,
   truncateToVisualLines,
 } from "@earendil-works/pi-coding-agent";
+import { implementationFromResult } from "../analysis/implementation";
 import { countReported } from "../core/ledger";
 import type { Monitor } from "../core/monitor";
 import { redEvidenceLabel } from "../sources/evidence";
@@ -38,10 +39,22 @@ function signals(monitor: Monitor): string[] {
       report?.type === "choice" && report.choice === "contradicted",
     observed: monitor.evidence.redObservation(),
   });
+  const task = monitor.ledger?.tasks.find(
+    (item) => item.id === monitor.ledger?.currentTaskId && item.included,
+  );
+  const implementation = task
+    ? implementationFromResult(
+        task.criteria,
+        monitor.health?.result,
+        monitor.evidence.snapshot(),
+        monitor.evidence.codeRevision(),
+      )
+    : "unverified";
   return [
     `Requirements: ${clarity?.type === "score" ? clarityLabel(clarity.score) : "unknown"}`,
     `Acceptance: ${acceptance?.type === "choice" ? acceptance.choice : "unknown"}`,
     `Red test: ${red}`,
+    `Implementation: ${implementation}`,
   ];
 }
 

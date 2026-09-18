@@ -118,7 +118,26 @@ export function healthSnapshot(
         coverage:
           "Complete selected task and owned criteria; only explicitly supplied source context supports goal claims",
       },
-      questions,
+      questions: {
+        ...questions,
+        ...Object.fromEntries(
+          task.criteria.slice(0, 16).map((criterion, index) => [
+            `criterion:${index}`,
+            {
+              type: "choice" as const,
+              instructions: `Assess whether bounded passive implementation evidence supports exact criterion ${JSON.stringify(criterion)}. Agent self-report alone is insufficient. Missing, stale, truncated or unlinked evidence is insufficient; explicit contrary current evidence contradicts.`,
+              criteria: {
+                supports:
+                  "Current linked passive evidence supports this criterion",
+                contradicts:
+                  "Current linked passive evidence contradicts this criterion",
+                insufficient:
+                  "Evidence is missing, stale, unlinked, or incomplete",
+              },
+            },
+          ]),
+        ),
+      },
     },
   };
   // Essential task/criteria never clipped to fit an outbound request.

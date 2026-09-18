@@ -46,6 +46,7 @@ describe("bounded progress diagnostics", () => {
     );
     const help = notify.mock.calls[0]?.[0];
     expect(help).toContain("Progress: Monitoring off");
+    expect(help).toMatch(/Last Jev call[^\n]*never/i);
     expect(help).toContain("Diagnostics: candidate-rejected:1");
     expect(help).toContain("/progress interval <seconds>");
     expect(help).not.toContain("/progress reset");

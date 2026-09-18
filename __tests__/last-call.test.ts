@@ -26,6 +26,27 @@ const result = {
 };
 
 describe("actual Jev dispatch timestamp", () => {
+  it("records dispatch before a throwing transport and preserves it across pause/resume", async () => {
+    let now = 4000;
+    const fetch = vi.fn(async () => {
+      expect(gateway.lastCallAt).toBe(4000);
+      throw new Error("Network offline");
+    });
+    const gateway = new JevGateway({
+      fetch,
+      getApiKey: () => "test",
+      now: () => now,
+    });
+    gateway.enable("session");
+    await gateway.evaluate(request, "session");
+    expect(gateway.lastCallAt).toBe(4000);
+    now = 5000;
+    gateway.pause();
+    gateway.resume();
+    gateway.invalidate();
+    expect(gateway.lastCallAt).toBe(4000);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
   it("updates on real dispatch, not cache hits or redraw/scheduling", async () => {
     let now = 1000;
     const fetch = vi.fn(async () => Response.json(result));

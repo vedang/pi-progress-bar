@@ -120,6 +120,47 @@ describe("retained task card", () => {
     expect(next).not.toContain("Requirements: mostly clear");
     f.monitor.stop();
   });
+  it("does not attach old-revision labels to a revised task title", () => {
+    const f = fixture();
+    f.assess(f.first.id, 2.7);
+    f.text();
+    f.first.text = "Implement strict parser";
+    f.first.revision = "revised-task";
+    f.monitor.health = undefined;
+    const pending = f.text();
+    expect(pending).toContain("Implement parser");
+    expect(pending).not.toContain("Task: Implement strict parser");
+    expect(pending).toContain("Requirements: mostly clear");
+    expect(pending).toMatch(/retained|previous|pending|as.of/i);
+    f.assess(f.first.id, 1.5);
+    const fresh = f.text();
+    expect(fresh).toContain("Task: Implement strict parser");
+    expect(fresh).toContain("Requirements: partly clear");
+    expect(fresh).not.toContain("Requirements: mostly clear");
+    f.monitor.stop();
+  });
+
+  it("does not present another task's still-present assessment as current", () => {
+    const f = fixture();
+    f.assess(f.first.id, 2.7);
+    f.text();
+    if (!f.monitor.ledger) throw new Error("Missing ledger");
+    f.monitor.ledger.currentTaskId = f.second.id;
+    const pending = f.text();
+    expect(pending).toContain("Implement parser");
+    expect(pending).not.toContain("Task: Improve help");
+    expect(pending).toMatch(/retained|previous|pending|as.of/i);
+    f.monitor.stop();
+  });
+
+  it("shows never before actual inference without hiding failure state", () => {
+    const f = fixture();
+    f.monitor.error = "Provider unavailable";
+    expect(f.text()).toMatch(/Last Jev call[^\n]*never/i);
+    expect(f.text()).toContain("Provider unavailable");
+    f.monitor.stop();
+  });
+
   it("does not leak retained task text into a different session", async () => {
     const f = fixture();
     f.assess(f.first.id, 2.7);

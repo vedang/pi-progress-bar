@@ -9,7 +9,11 @@ import {
 } from "../../src/analysis/gateway";
 import { countReported, reconcileLedger } from "../../src/core/ledger";
 import { Monitor } from "../../src/core/monitor";
-import { proposal } from "../../src/sources/candidates";
+import {
+  candidateRequest,
+  classificationRequest,
+  proposal,
+} from "../../src/sources/candidates";
 import { reportRequest, reportStates } from "../../src/sources/reports";
 import {
   collectTrajectory,
@@ -17,12 +21,13 @@ import {
   hashText,
 } from "../../src/sources/trajectory";
 import { replayEntries } from "../fixtures/live-session";
+import { renderWidget } from "../fixtures/render-widget";
 
 // [tag:live_budget] All paid calls, including failed/aborted ones, pass this
 // process-wide cap. No retries/reruns or hidden direct semantic substitutes.
-const MAX_ATTEMPTS = Number(process.env.PROGRESS_LIVE_MAX_ATTEMPTS ?? 24);
+const MAX_ATTEMPTS = Number(process.env.PROGRESS_LIVE_MAX_ATTEMPTS ?? 64);
 const directory = resolve(
-  ".agents/plans/20260918T165248--repair-session-progress-correctness__active",
+  ".agents/plans/20260918T230453--retain-tasks-show-freshness__active",
 );
 const artifact = resolve(directory, `live-${Date.now()}.jsonl`);
 const realFetch = globalThis.fetch;
@@ -38,9 +43,9 @@ beforeAll(() => {
   if (
     !Number.isSafeInteger(MAX_ATTEMPTS) ||
     MAX_ATTEMPTS < 1 ||
-    MAX_ATTEMPTS > 24
+    MAX_ATTEMPTS > 64
   )
-    throw new Error("Live attempt budget must be an integer from 1 through 24");
+    throw new Error("Live attempt budget must be an integer from 1 through 64");
   if (process.env.PROGRESS_LIVE !== "1")
     throw new Error("Paid suite requires explicit PROGRESS_LIVE=1");
   if (!process.env.TYPESAFE_API_KEY?.trim())
@@ -122,7 +127,12 @@ afterAll(() => {
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 it("fresh-session production pipeline follows a changed goal and consumes completion only after scope", async () => {
-  let entries = replayEntries(4);
+  let entries: {
+    type: string;
+    id: string;
+    parentId: string | null;
+    message: { role: string; content: string };
+  }[] = replayEntries(4);
   const monitor = new Monitor(
     () => {},
     () => {},
@@ -173,7 +183,23 @@ it("fresh-session production pipeline follows a changed goal and consumes comple
     });
     expect(current?.text).toContain("15s");
 
-    entries = replayEntries();
+    entries = [
+      ...replayEntries(5),
+      {
+        type: "message",
+        id: "approval",
+        parentId: "working",
+        message: {
+          role: "user",
+          content: "Yes, proceed with those same two changes.",
+        },
+      },
+    ];
+    await settleThrough("approval");
+    expect(countReported(monitor.ledger).total).toBe(2);
+    const final = replayEntries().at(-1);
+    if (!final) throw new Error("Missing final report");
+    entries = [...entries, { ...final, parentId: "approval" }];
     await settleThrough("2fd7cc52");
     record({
       type: "final-checkpoint",
@@ -186,6 +212,9 @@ it("fresh-session production pipeline follows a changed goal and consumes comple
       total: 2,
       percent: 100,
     });
+    const widget = renderWidget(monitor).join("\n");
+    expect(widget).not.toMatch(/Task: unknown/i);
+    expect(widget).toMatch(/Last Jev call/i);
     // Same history may hit local cache, but must never generate new paid requests.
     const before = attempts;
     for (let i = 0; i < 20; i++) {
@@ -263,5 +292,161 @@ it.each([
     else expect(Object.values(states)).not.toContain("done");
   } finally {
     gateway.pause();
+  }
+});
+
+it.each([
+  ["explanation", "Explain how this parser handles Unicode."],
+  ["status question", "What is left to do on the parser change?"],
+  ["fresh answer", "List the health fields again, please."],
+  ["code directive", "Change the parser to accept Unicode identifiers."],
+])("conversational user work: %s", async (name, text) => {
+  const candidate = findCandidates(
+    collectTrajectory([
+      {
+        type: "message",
+        id: `user-${name}`,
+        parentId: null,
+        message: { role: "user", content: text },
+      },
+    ]),
+  )[0];
+  if (!candidate) throw new Error("Missing original user candidate");
+  const gateway = new JevGateway({
+    fetch: (url, init) => globalThis.fetch(url, init),
+    getApiKey: () => process.env.TYPESAFE_API_KEY,
+  });
+  const identity = `user-work:${name}`;
+  gateway.enable(identity);
+  try {
+    const selected = await gateway.evaluate(
+      candidateRequest([candidate]),
+      identity,
+    );
+    expect(selected?.answers.source).toMatchObject({
+      type: "choice",
+      choice: candidate.id,
+    });
+    const classified = await gateway.evaluate(
+      classificationRequest(candidate, candidate.spans),
+      identity,
+    );
+    expect(classified, gateway.status).toBeDefined();
+    const choices = Object.fromEntries(
+      Object.entries(classified?.answers ?? {}).map(([id, answer]) => [
+        id,
+        answer.type === "choice" ? answer.choice : "unknown",
+      ]),
+    );
+    const work = proposal(candidate, choices);
+    record({ type: "user-work", name, taskCount: work.snapshot.tasks.length });
+    expect(work.snapshot.tasks).toHaveLength(1);
+    expect(work.snapshot.tasks[0]?.text).toBe(text);
+  } finally {
+    gateway.pause();
+  }
+});
+
+it("status questions preserve ongoing work and repeated requests do not inherit completion", async () => {
+  let entries = [
+    {
+      type: "message",
+      id: "parser-task",
+      parentId: null as string | null,
+      message: {
+        role: "user",
+        content:
+          "Implement Unicode identifier support in the parser and add regression tests.",
+      },
+    },
+  ];
+  const monitor = new Monitor(
+    () => {},
+    () => {},
+  );
+  monitor.observe(() => entries);
+  const settle = async (id: string) => {
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      if (blocked) throw new Error(`Live cap reached: ${artifact}`);
+      monitor.scheduleAnalysis();
+      if (monitor.conversation.cursor?.id === id && active === 0) return;
+      await pause(25);
+    }
+    throw new Error(
+      `Unsettled conversational turn ${id}: ${monitor.progressState()}; ${artifact}`,
+    );
+  };
+  const append = (id: string, role: string, content: string) => {
+    entries = [
+      ...entries,
+      {
+        type: "message",
+        id,
+        parentId: entries.at(-1)?.id ?? null,
+        message: { role, content },
+      },
+    ];
+  };
+  try {
+    expect(monitor.turnOn("/nonexistent-live-fixture")).toBeUndefined();
+    await settle("parser-task");
+    const original =
+      monitor.ledger?.tasks
+        .filter((task) => task.included)
+        .map((task) => task.id) ?? [];
+    expect(original.length).toBeGreaterThan(0);
+    append(
+      "status-question",
+      "user",
+      "While that implementation is still in progress, explain what work remains. This is a status question, not a replacement for the implementation.",
+    );
+    await settle("status-question");
+    expect(
+      monitor.ledger?.tasks.filter(
+        (task) => task.included && original.includes(task.id),
+      ).length,
+    ).toBe(original.length);
+    const questions =
+      monitor.ledger?.tasks.filter(
+        (task) => task.included && task.ref.entryId === "status-question",
+      ) ?? [];
+    expect(questions.length).toBeGreaterThan(0);
+    append(
+      "status-answer",
+      "assistant",
+      "Here is the requested status: Unicode identifier implementation and its regression tests remain unfinished. That answers your status question; implementation is still in progress.",
+    );
+    await settle("status-answer");
+    expect(
+      monitor.ledger?.tasks
+        .filter((task) => original.includes(task.id))
+        .every((task) => task.status !== "done"),
+    ).toBe(true);
+    expect(
+      monitor.ledger?.tasks
+        .filter((task) => questions.some((question) => question.id === task.id))
+        .some((task) => task.status === "done"),
+    ).toBe(true);
+    append(
+      "repeat-question",
+      "user",
+      "Please explain what work remains again. I want a fresh status answer; keep the implementation task active.",
+    );
+    await settle("repeat-question");
+    const repeated =
+      monitor.ledger?.tasks.filter(
+        (task) => task.included && task.ref.entryId === "repeat-question",
+      ) ?? [];
+    record({ type: "repeated-question", tasks: monitor.ledger?.tasks });
+    expect(repeated.length).toBeGreaterThan(0);
+    expect(repeated.every((task) => task.status !== "done")).toBe(true);
+    expect(
+      monitor.ledger?.tasks.filter(
+        (task) => task.included && original.includes(task.id),
+      ).length,
+    ).toBe(original.length);
+  } finally {
+    monitor.stop();
   }
 });

@@ -1,8 +1,21 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { Monitor } from "../core/monitor";
 
-const USAGE =
-  "Usage: /progress on | /progress off | /progress interval <5-86400>";
+const COMMANDS = `How to use:
+  /progress                         Show this help and current state
+  /progress on                      Start or resume automatic monitoring
+  /progress off                     Stop monitoring and hide the widget
+  /progress interval <seconds>      Set analysis interval (5-86400)`;
+
+const help = (monitor: Monitor) => `Automatic progress monitor
+
+State: ${monitor.enabled ? "ON" : "OFF"}
+Analysis interval: ${monitor.interval}s
+Jev usage: ${monitor.usage.calls} calls • ${monitor.usage.inputTokens} input tokens • ${monitor.usage.outputTokens} output tokens
+
+${COMMANDS}
+
+Monitoring starts automatically when TYPESAFE_API_KEY is available.`;
 
 /** Deliberately small control surface: monitoring is automatic, never configured here. */
 export async function command(
@@ -13,11 +26,7 @@ export async function command(
   const action = args.trim();
   try {
     if (!action) {
-      if (ctx.hasUI)
-        ctx.ui.notify(
-          `${USAGE}. State: ${monitor.enabled ? "ON" : "OFF"}; interval ${monitor.interval}s.`,
-          "info",
-        );
+      if (ctx.hasUI) ctx.ui.notify(help(monitor), "info");
       return;
     }
     if (action === "off") {
@@ -35,7 +44,7 @@ export async function command(
       monitor.setInterval(Number(match[1]), ctx.cwd);
       return;
     }
-    throw new Error(USAGE);
+    throw new Error(`Unknown progress command.\n\n${COMMANDS}`);
   } catch (error) {
     if (ctx.hasUI)
       ctx.ui.notify(

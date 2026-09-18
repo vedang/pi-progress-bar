@@ -59,7 +59,7 @@ chronological windows of at most 512 entries / 256 KiB, committing a hash/offset
 source references are rehydrated only from the live active branch. Exact original offsets are
 preserved. Requests are at most 24 KiB and 20 questions; responses at most 128 KiB. Uncertain
 source, identity, scope, or current-task Choices abstain instead of mutating state. One request is in
-flight, at most three serial requests start per analysis cycle, default every 60 seconds, with
+flight, at most three serial requests start per analysis cycle, default every 15 seconds, with
 a 10-second deadline. Successful unchanged evidence is not resent. Transient failures use bounded
 exponential backoff, Retry-After, three-attempt bursts, and five-minute cooldown/probe behavior.
 There is no lifetime request wall.

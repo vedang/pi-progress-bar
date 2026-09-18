@@ -17,7 +17,7 @@ For people supervising a coding agent who want to see reported plan completion a
 - Start monitoring automatically when loaded. Require `TYPESAFE_API_KEY`; missing/blank or rejected credentials produce an error and OFF. No consent or local-only operating mode.
 - Use only real TypeSafe Jev calls for runtime semantic judgments. No separate general-purpose/reasoning LLM, generated task descriptions/summaries, or model-written display labels.
 - Expose only `/progress on`, `/progress off`, and `/progress interval <seconds>`; bare command shows usage/state, not a menu. Remove manual source/scope/current-task selection and details/enable/pause/resume.
-- Interval controls analysis-cycle starts, not only display redraws. Plan-v2 default is 60 seconds, configurable 5–86,400 seconds; no new evidence means no new inference. Process bounded chunks, at most three serial requests per cycle.
+- Interval controls analysis-cycle starts, not only display redraws. Default is 15 seconds, configurable 5–86,400 seconds; no new evidence means no new inference. Process bounded chunks, at most three serial requests per cycle.
 - Show overall **reported task completion**, not a model-estimated percentage, effort estimate, or ETA.
 - This batch shows requirements clarity, acceptance criteria, red-test applicability/evidence, and implementation assessment for the automatically inferred current task. Meaningful progress, stuck and off-track assessment (V7) remain deferred.
 - Map typed Jev answers to readable text in local code. Requirements Score 2.7 renders `Requirements: mostly clear`; display wording never requires another model call.

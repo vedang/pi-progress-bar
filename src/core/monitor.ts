@@ -58,6 +58,7 @@ export interface Checkpoint {
   usage: { calls: number; inputTokens: number; outputTokens: number };
 }
 
+const DEFAULT_INTERVAL_SECONDS = 15;
 const validInterval = (seconds: number) =>
   Number.isSafeInteger(seconds) && seconds >= 5 && seconds <= 86_400;
 
@@ -82,7 +83,7 @@ interface HealthWork {
 export class Monitor {
   ledger?: Ledger;
   source?: ConversationSource;
-  interval = 60;
+  interval = DEFAULT_INTERVAL_SECONDS;
   enabled = false;
   activity = "Idle";
   error?: string;
@@ -559,7 +560,7 @@ export class Monitor {
     this.error = undefined;
     this.activity = "Idle";
     let savedEnabled = true;
-    this.interval = 60;
+    this.interval = DEFAULT_INTERVAL_SECONDS;
     if (this.branch) this.conversation.update(this.branch());
     try {
       if (data && typeof data === "object") {

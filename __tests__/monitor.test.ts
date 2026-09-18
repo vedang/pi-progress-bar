@@ -16,10 +16,10 @@ afterEach(() => {
 });
 
 describe("automatic monitor lifecycle", () => {
-  it("defaults to 60 seconds and refuses to turn on without a key", () => {
+  it("defaults to 15 seconds and refuses to turn on without a key", () => {
     delete process.env.TYPESAFE_API_KEY;
     const monitor = new Monitor(vi.fn(), vi.fn());
-    expect(monitor.interval).toBe(60);
+    expect(monitor.interval).toBe(15);
     expect(monitor.turnOn("/workspace")).toMatch(/TYPESAFE_API_KEY.*OFF/i);
     expect(monitor.enabled).toBe(false);
   });
@@ -38,7 +38,7 @@ describe("automatic monitor lifecycle", () => {
     expect(checkpoint).toMatchObject({
       version: 2,
       enabled: true,
-      interval: 60,
+      interval: 15,
     });
     expect(JSON.stringify(checkpoint)).not.toContain("Private alpha");
     expect(JSON.stringify(checkpoint)).not.toContain("secret-key");
@@ -152,7 +152,7 @@ describe("automatic monitor lifecycle", () => {
       false,
     );
     expect(monitor.enabled).toBe(true);
-    expect(monitor.interval).toBe(60);
+    expect(monitor.interval).toBe(15);
     monitor.setInterval(7, "/workspace");
     monitor.turnOff();
     await monitor.restore("/workspace", undefined, true);

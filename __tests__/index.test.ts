@@ -270,9 +270,15 @@ describe("automatic Pi host contract", () => {
     const h = await harness();
     await h.event("session_start");
     await h.command("");
-    expect(h.ui.notify.mock.calls.at(-1)?.join(" ")).toMatch(
-      /\/progress (on|off|interval)/i,
-    );
+    const help = String(h.ui.notify.mock.calls.at(-1)?.[0]);
+    expect(help).toContain("Automatic progress monitor");
+    expect(help).toContain("State: ON");
+    expect(help).toContain("Analysis interval: 15s");
+    expect(help).toContain("/progress on");
+    expect(help).toContain("/progress off");
+    expect(help).toContain("/progress interval <seconds>");
+    expect(help).toContain("5-86400");
+    expect(help).toMatch(/Jev usage: \d+ calls/i);
     expect(h.ui.select).not.toHaveBeenCalled();
     for (const obsolete of [
       "source conversation",

@@ -5,7 +5,11 @@ import type {
 } from "../src/analysis/gateway";
 import { reconcileLedger } from "../src/core/ledger";
 import { Monitor } from "../src/core/monitor";
-import { proposal } from "../src/sources/candidates";
+import {
+  candidateRequest,
+  classificationRequest,
+  proposal,
+} from "../src/sources/candidates";
 import { Conversation } from "../src/sources/conversation";
 import { replayEntries } from "./fixtures/live-session";
 
@@ -30,6 +34,34 @@ function answer(request: EvaluationRequest, choice: string): ValidatedResult {
 }
 
 describe("chronological grounded discovery", () => {
+  it.each([
+    "Explain how this parser handles Unicode.",
+    "What is left to do?",
+    "List the health fields again, please.",
+  ])("supports conversational work contract: %s", (text) => {
+    const conversation = new Conversation();
+    conversation.update([
+      {
+        type: "message",
+        id: "question",
+        parentId: null,
+        message: { role: "user", content: text },
+      },
+    ]);
+    const candidate = conversation.candidates[0];
+    if (!candidate) throw new Error("Missing question candidate");
+    const selection = candidateRequest([candidate]);
+    const classification = classificationRequest(candidate, candidate.spans);
+    expect(JSON.stringify(selection.state)).toContain(text);
+    expect(selection.questions.source?.instructions).toMatch(
+      /question|conversational|explanation/i,
+    );
+    expect(
+      Object.values(classification.questions).some((question) =>
+        /question|conversational|explanation/i.test(question.instructions),
+      ),
+    ).toBe(true);
+  });
   it("includes source role and applicable prior user request in assistant discovery evidence", () => {
     const conversation = new Conversation();
     conversation.update(replayEntries(2));

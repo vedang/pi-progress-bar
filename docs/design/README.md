@@ -1,6 +1,6 @@
 # Progress monitor — review packet
 
-**Status: proposed design and implementation sequence. No extension implementation has started.** The user will review this packet and decide next steps. No source code, test execution, SDK installation, or live Jev call is implied by the acceptance checks below.
+**Status: V1–V3 selected as the next combined implementation batch; no extension implementation has started.** The detailed execution plan is ready for review. No source code, test execution, SDK installation, or live Jev call is implied by the acceptance checks below.
 
 ## Read in this order
 
@@ -10,6 +10,7 @@
 4. [Vertical slices](slices.md) — small working increments, dependencies, demos, acceptance checks and deferrals.
 5. [Spike findings](spikes.md) — R2/R4 source research plus four actual Jev calls on this session, including mismatches, uncertainty, usage and limitations.
 6. [Evaluation](evaluation.md) — how to distinguish observer correctness from Jev interpretation quality and user usefulness.
+7. [V1–V3 implementation plan](implementation-v1-v3.md) — concrete modules/contracts, ordered work packages, test ownership, safety limits, demos and combined delivery gates.
 
 The shape owns requirements and mechanisms. Breadboard tables own affordance IDs and wiring. Slices reference those IDs and own implementation order. When changing one, update the others in the same task.
 

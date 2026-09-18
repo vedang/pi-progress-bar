@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { reconcileLedger } from "../core/ledger";
-import type { Monitor } from "../core/monitor";
+import type { Checkpoint, Monitor } from "../core/monitor";
+import type { SourceSnapshot } from "../core/types";
 import { readSource } from "../sources/read-source";
 import { details, plain } from "./widget";
 
@@ -30,8 +31,9 @@ export async function command(
       if (!ctx.hasUI) return;
       const snapshot = monitor.snapshot();
       const disclosure = [
-        "Experimental third-party analysis: sends selected checklist task, its owned criteria, task-local goal and evidence references to TypeSafe (https://api.typesafe.ai/v1/systemone), model jev-1.13.0.",
-        "Permission covers future revisions of this selected source during this session only. Selecting a source again, reload or tree navigation requires new consent. No conversation or other files sent in this slice.",
+        "Experimental third-party analysis: sends selected task, owned criteria, source goal/context, and visible user/assistant text from the current active Pi branch to TypeSafe (https://api.typesafe.ai/v1/systemone), model jev-1.13.0. Includes plan candidates, exact task spans and original reports. No sibling sessions, system/thinking/private shell/tool bodies, summaries or monitor metadata sent. Interactive tool answers excluded: no verified provenance adapter.",
+        "Permission covers future visible current-branch conversation and selected-source revisions during this session only. Enable without a file permits discovery. Selecting a source again, reload or tree navigation requires new consent. No automatic source replacement. Suggestions require confirmation; interpreted reports are experimental, not observed completion.",
+        `Trajectory bounds: 512 entries / 256 KiB; 12 candidates and 200 selected tasks. Current discovery/report sample and omissions:\n${JSON.stringify(monitor.conversation.preview(monitor.ledger), null, 2)}`,
         "Paid-work budget: at most 60 dispatch attempts per enablement, one per 15 seconds, one in flight, 10-second deadline, 24 KiB / 20 questions. No automatic retries of failed unchanged input. Enable renews the budget. Set TYPESAFE_API_KEY; key is never stored in checkpoints.",
         "Health never changes reported completion. Accuracy not live-validated. Pause retains local counts; resume can retry unchanged input.",
         snapshot
@@ -77,7 +79,7 @@ export async function command(
     }
     if (action !== "source" && !action.startsWith("source "))
       throw new Error(
-        "Use /progress [source path.md#Section | details | interval seconds | enable | pause | resume]",
+        "Use /progress [source path.md#Section | source conversation | details | interval seconds | enable | pause | resume]",
       );
     if (!ctx.hasUI) return;
     const reference =
@@ -87,16 +89,51 @@ export async function command(
     const split = reference.indexOf("#");
     const path = split < 0 ? reference : reference.slice(0, split);
     const section = split < 0 ? undefined : reference.slice(split + 1);
-    const snapshot = await readSource(ctx.cwd, path, section);
+    let snapshot: SourceSnapshot;
+    let source: NonNullable<Checkpoint["source"]>;
+    let ambiguous = false;
+    const isConversation = path === "conversation";
+    if (isConversation) {
+      if (section) {
+        monitor.conversation.narrow(section);
+        monitor.scheduleAnalysis();
+      }
+      const proposals = monitor.conversation.proposals;
+      if (!proposals.length)
+        throw new Error(
+          `No conversation proposal ready. Use /progress enable, wait, then select again. ${monitor.conversation.discoveryStatus}. Interactive tool answers excluded: no verified provenance adapter.`,
+        );
+      const labels = proposals.map(
+        (item, i) =>
+          `${i + 1}. Entry ${item.candidate.entryId}: ${plain(item.candidate.text).slice(0, 160)}${item.ambiguous ? " • ambiguous; explicit task numbers required" : ""}`,
+      );
+      const choice = await ctx.ui.select(
+        "Conversation plan suggestion (not automatic authority)",
+        labels,
+      );
+      if (!choice || !current()) return;
+      const item = proposals[labels.indexOf(choice)];
+      if (!item) return;
+      source = monitor.conversation.source(item);
+      snapshot = monitor.conversation.rehydrate(source);
+      ambiguous = item.ambiguous;
+    } else {
+      snapshot = await readSource(ctx.cwd, path, section);
+      source = { path, section };
+    }
     if (!current()) return;
     const draft = reconcileLedger(undefined, snapshot);
     const listing = draft.tasks
-      .map((task, i) => `${i + 1}. ${plain(task.text)}`)
+      .map((task, i) => `${i + 1}. ${plain(task.text).slice(0, 240)}`)
       .join("\n");
     const scope = await ctx.ui.input(
       `Included task numbers, comma-separated; blank = all\n${listing}`,
     );
     if (scope === undefined || !current()) return;
+    if (ambiguous && !scope.trim())
+      throw new Error(
+        "Ambiguous segmentation: explicitly choose task numbers; blank cannot establish denominator",
+      );
     const numbers = scope.trim()
       ? scope.split(",").map((part) => {
           if (!/^\d+$/.test(part.trim()))
@@ -112,7 +149,9 @@ export async function command(
     const included = draft.tasks.filter((_, i) => numbers.includes(i + 1));
     const options = [
       "Unknown",
-      ...included.map((task, i) => `${i + 1}. ${plain(task.text)}`),
+      ...included.map(
+        (task, i) => `${i + 1}. ${plain(task.text).slice(0, 240)}`,
+      ),
     ];
     const currentChoice = await ctx.ui.select(
       "Current task (optional)",
@@ -127,12 +166,12 @@ export async function command(
     if (
       !(await ctx.ui.confirm(
         "Apply progress source?",
-        `${plain(reference)}\n${included.length} included tasks. Counts are reported, not verified.\n${included.map((task) => `${task.status}: ${plain(task.text)}`).join("\n")}`,
+        `${plain(reference)}\n${included.length} included tasks. Counts are reported, not verified.\n${included.map((task) => `${task.status}: ${plain(task.text).slice(0, 240)}`).join("\n")}\n${isConversation ? monitor.conversation.omissions.join("; ") : ""}`,
       )) ||
       !current()
     )
       return;
-    monitor.apply(selected, { path, section });
+    monitor.apply(selected, source);
   } catch (error) {
     if (current() && ctx.hasUI)
       ctx.ui.notify(

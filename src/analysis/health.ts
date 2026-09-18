@@ -47,6 +47,7 @@ export interface HealthResult {
 export function healthSnapshot(
   ledger: Ledger | undefined,
   epoch: number,
+  context?: string[],
 ): HealthSnapshot | undefined {
   const task = ledger?.tasks.find(
     (item) => item.id === ledger.currentTaskId && item.included,
@@ -61,17 +62,24 @@ export function healthSnapshot(
       task.text,
       task.criteria,
       task.ref,
+      context,
     ]),
     observedAt: Date.now(),
-    omissions: [
-      "Other tasks, conversation, implementation and test execution omitted",
-      "Goal is the explicitly selected task; broader project goal unavailable",
-    ],
+    omissions: context?.length
+      ? [
+          "Only confirmed source context and selected task supplied; other conversation, implementation and test execution omitted",
+        ]
+      : [
+          "Other tasks, conversation, implementation and test execution omitted",
+          "Goal is the explicitly selected task; broader project goal unavailable",
+        ],
     request: {
       model: MODEL,
       state: {
-        goal: task.text,
-        goalScope: "Selected task only",
+        goal: context?.length ? context.join("\n") : task.text,
+        goalScope: context?.length
+          ? "Confirmed source goal/context (not an inferred broader project goal)"
+          : "Selected task only",
         task: task.text,
         criteria: task.criteria,
         evidence: {
@@ -80,7 +88,7 @@ export function healthSnapshot(
           scopeRevision: ledger.scopeRevision,
         },
         coverage:
-          "Complete selected checklist task and owned criteria; no broader goal claim",
+          "Complete selected task and owned criteria; only explicitly supplied source context supports goal claims",
       },
       questions,
     },

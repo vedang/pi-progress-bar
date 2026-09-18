@@ -12,7 +12,9 @@ interface Job {
 export class AnalysisScheduler {
   private pending = new Map<string, Job>();
   private running = false;
+  private runningPurpose?: string;
   private generation = 0;
+  private purposeGeneration = new Map<string, number>();
   constructor(
     readonly gateway: JevGateway,
     private readonly changed: () => void,
@@ -21,6 +23,14 @@ export class AnalysisScheduler {
     this.generation++;
     this.pending.clear();
     this.gateway.invalidate();
+  }
+  discard(purpose: string) {
+    this.purposeGeneration.set(
+      purpose,
+      (this.purposeGeneration.get(purpose) ?? 0) + 1,
+    );
+    this.pending.delete(purpose);
+    if (this.runningPurpose === purpose) this.gateway.invalidate();
   }
   enqueue(purpose: string, job: Job) {
     this.pending.set(purpose, job);
@@ -32,11 +42,17 @@ export class AnalysisScheduler {
     const [purpose, job] = entry;
     this.pending.delete(purpose);
     const generation = this.generation;
+    const purposeGeneration = this.purposeGeneration.get(purpose) ?? 0;
     this.running = true;
+    this.runningPurpose = purpose;
     void this.gateway
       .evaluate(job.request, job.consentIdentity)
       .then((result) => {
-        if (generation !== this.generation) return;
+        if (
+          generation !== this.generation ||
+          purposeGeneration !== (this.purposeGeneration.get(purpose) ?? 0)
+        )
+          return;
         if (result) job.admit(result);
         else if (
           this.gateway.status.startsWith("Pending: dispatch") &&
@@ -46,6 +62,7 @@ export class AnalysisScheduler {
       })
       .finally(() => {
         this.running = false;
+        this.runningPurpose = undefined;
         this.changed();
       });
     this.changed();

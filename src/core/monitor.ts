@@ -6,6 +6,11 @@ import {
 } from "../analysis/gateway";
 import { type HealthResult, healthSnapshot } from "../analysis/health";
 import { AnalysisScheduler } from "../analysis/scheduler";
+import {
+  Conversation,
+  type ConversationCheckpoint,
+  type ConversationSource,
+} from "../sources/conversation";
 import { readSource } from "../sources/read-source";
 import { reconcileLedger } from "./ledger";
 import type { Ledger, Task } from "./types";
@@ -17,7 +22,10 @@ const key = (task: Task) =>
 export interface Checkpoint {
   version: 1;
   interval: number;
-  source?: { path: string; section?: string };
+  source?:
+    | { kind?: "file"; path: string; section?: string }
+    | ConversationSource;
+  conversation?: ConversationCheckpoint;
   revision?: string;
   mappings: { hash: string; id: string; included: boolean }[];
   currentTaskId?: string;
@@ -43,13 +51,25 @@ export class Monitor {
   consent = false;
   private consentIdentity?: string;
   private evidenceIdentity?: string;
+  conversation = new Conversation();
+  private branch?: () => readonly unknown[];
+  observe(branch: () => readonly unknown[]) {
+    this.branch = branch;
+    this.conversation.update(branch());
+  }
   readonly gateway = new JevGateway({
     fetch: (url, init) => globalThis.fetch(url, init),
     getApiKey: () => process.env.TYPESAFE_API_KEY,
   });
   readonly analysis = new AnalysisScheduler(this.gateway, () => this.changed());
   snapshot() {
-    return healthSnapshot(this.ledger, this.epoch);
+    return healthSnapshot(
+      this.ledger,
+      this.epoch,
+      this.source?.kind === "conversation"
+        ? this.conversation.context(this.source)
+        : undefined,
+    );
   }
   enableAnalysis() {
     this.consent = true;
@@ -84,7 +104,7 @@ export class Monitor {
   scheduleAnalysis() {
     const snapshot = this.snapshot();
     if (snapshot?.identity !== this.evidenceIdentity) {
-      this.analysis.clear();
+      this.analysis.discard("health");
       this.health = undefined;
       this.evidenceIdentity = snapshot?.identity;
     }
@@ -95,6 +115,25 @@ export class Monitor {
         }
       });
     }
+    const epoch = this.epoch;
+    const enqueue = this.enqueueAnalysis.bind(this);
+    if (this.consent)
+      this.conversation.scheduleDiscovery(
+        enqueue,
+        () => epoch === this.epoch && this.consent,
+      );
+    if (this.ledger && this.source?.kind === "conversation")
+      this.conversation.scheduleReports(
+        this.ledger,
+        this.source,
+        epoch,
+        enqueue,
+        () => (epoch === this.epoch && this.consent ? this.ledger : undefined),
+        (ledger) => {
+          this.ledger = ledger;
+          this.save();
+        },
+      );
     this.analysis.tick();
     this.changed();
   }
@@ -116,6 +155,10 @@ export class Monitor {
       version: 1,
       interval: this.interval,
       source: this.source,
+      conversation:
+        this.source?.kind === "conversation" && this.ledger
+          ? this.conversation.checkpoint(this.ledger)
+          : undefined,
       revision: this.ledger?.sourceRevision,
       mappings:
         this.ledger?.tasks.map((task) => ({
@@ -151,16 +194,23 @@ export class Monitor {
     this.changed();
   }
   apply(ledger: Ledger, source: NonNullable<Checkpoint["source"]>) {
+    if (source.kind === "conversation") this.conversation.rehydrate(source);
     this.resetAnalysis();
     this.epoch++;
     this.ledger = ledger;
     this.source = source;
+    if (source.kind === "conversation") this.conversation.select(source);
     this.error = undefined;
     this.save();
     this.changed();
   }
   async refresh(cwd: string) {
-    if (this.reading || !this.source) return;
+    if (this.branch) this.conversation.update(this.branch());
+    if (this.reading) return;
+    if (!this.source || this.source.kind === "conversation") {
+      this.scheduleAnalysis();
+      return;
+    }
     const epoch = this.epoch;
     this.reading = true;
     try {
@@ -186,6 +236,8 @@ export class Monitor {
   }
   async restore(cwd: string, data: unknown) {
     this.stop();
+    this.conversation = new Conversation();
+    if (this.branch) this.conversation.update(this.branch());
     const epoch = this.epoch;
     this.ledger = undefined;
     this.source = undefined;
@@ -201,9 +253,10 @@ export class Monitor {
       this.interval = cp.interval;
       if (!cp.source) return;
       if (
-        typeof cp.source.path !== "string" ||
-        (cp.source.section !== undefined &&
-          typeof cp.source.section !== "string") ||
+        (cp.source.kind !== "conversation" &&
+          (typeof cp.source.path !== "string" ||
+            (cp.source.section !== undefined &&
+              typeof cp.source.section !== "string"))) ||
         !Array.isArray(cp.mappings) ||
         cp.mappings.length > 200 ||
         !Number.isSafeInteger(cp.nextTaskId) ||
@@ -227,7 +280,10 @@ export class Monitor {
         ids.add(map.id);
         hashes.add(map.hash);
       }
-      const snapshot = await this.read(cwd, cp.source.path, cp.source.section);
+      const snapshot =
+        cp.source.kind === "conversation"
+          ? this.conversation.rehydrate(cp.source)
+          : await this.read(cwd, cp.source.path, cp.source.section);
       if (epoch !== this.epoch) return;
       const ledger = reconcileLedger(undefined, snapshot);
       const maps = new Map(cp.mappings.map((map) => [map.hash, map]));
@@ -251,7 +307,9 @@ export class Monitor {
         )
       )
         ledger.currentTaskId = cp.currentTaskId;
-      this.source = { path: cp.source.path, section: cp.source.section };
+      if (cp.source.kind === "conversation")
+        this.conversation.restore(ledger, cp.conversation);
+      this.source = cp.source;
       this.ledger = ledger;
     } catch {
       if (epoch === this.epoch)

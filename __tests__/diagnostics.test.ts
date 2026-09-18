@@ -38,6 +38,9 @@ describe("bounded progress diagnostics", () => {
   it("shows freshness and rejection diagnostics in existing help without new commands", async () => {
     const monitor = new Monitor(vi.fn(), vi.fn());
     monitor.conversation.note("candidate-rejected");
+    monitor.gateway.status =
+      "Offline / invalid response / timeout; retry backed off";
+    monitor.error = "Service unavailable";
     const notify = vi.fn();
     await command(
       "",
@@ -48,6 +51,8 @@ describe("bounded progress diagnostics", () => {
     expect(help).toContain("Progress: Monitoring off");
     expect(help).toMatch(/Last Jev call[^\n]*never/i);
     expect(help).toContain("Diagnostics: candidate-rejected:1");
+    expect(help).toContain("Service unavailable");
+    expect(help).toContain("retry backed off");
     expect(help).toContain("/progress interval <seconds>");
     expect(help).not.toContain("/progress reset");
     monitor.stop();

@@ -204,6 +204,34 @@ describe("ordered conversation reports", () => {
     },
   );
 
+  it("keeps the full response lifecycle and current-task questions", () => {
+    const f = fixture(1);
+    const task = f.ledger().tasks[0];
+    if (!task) throw new Error("Missing response task");
+    task.workKind = "response";
+    const entries = [f.plan];
+    for (const status of [
+      "in-progress",
+      "done",
+      "reopened",
+      "cancelled",
+    ] as const) {
+      entries.push(message(`response-${status}`, `Response work is ${status}`));
+      f.conversation.update([...entries]);
+      const job = f.schedule();
+      if (!job) throw new Error("Missing response job");
+      expect(job.request.questions[task.id]?.criteria).toHaveProperty(status);
+      expect(job.request.questions.__current?.criteria).toHaveProperty(task.id);
+      const current =
+        status === "in-progress" || status === "reopened" ? task.id : "unknown";
+      job.admit(answer(job.request, status, current));
+      expect(f.ledger().tasks[0]?.status).toBe(status);
+      expect(f.ledger().currentTaskId).toBe(
+        current === "unknown" ? undefined : task.id,
+      );
+    }
+  });
+
   it("resumes a checkpointed partial report without rebilling accepted chunks", () => {
     const f = fixture(23);
     const done = message("done", "All 23 tasks are finished");

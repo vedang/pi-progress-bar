@@ -181,7 +181,7 @@ function runtime(initial: Entry[] = replayEntries(4), respond = verdict) {
       if (monitor.conversation.cursor?.id === id) return;
     }
     throw new Error(
-      `Replay stuck: target=${id}, cursor=${monitor.conversation.cursor?.id}; ${monitor.conversation.discoveryStatus}; ${monitor.conversation.reportStatus}; ${monitor.gateway.status}`,
+      `Replay stuck: target=${id}, cursor=${monitor.conversation.cursor?.id}; ${monitor.conversation.discoveryStatus}; ${monitor.conversation.reportStatus}; ${monitor.gateway.status}; ${JSON.stringify(monitor.diagnostics())}`,
     );
   };
   const append = (id: string, text: string, role = "user") => {

@@ -52,6 +52,9 @@ describe("Jev-derived response work", () => {
     const invalid = structuredClone(source);
     Object.assign(invalid.spans[1] ?? {}, { workKind: "invented" });
     expect(() => f.conversation.canonicalSource(invalid)).toThrow();
+    const missing = structuredClone(source);
+    Reflect.deleteProperty(missing.spans[1] ?? {}, "workKind");
+    expect(() => f.conversation.canonicalSource(missing)).toThrow();
   });
 
   it("isolates response state while retaining ordinary action batching", () => {
@@ -88,11 +91,40 @@ describe("Jev-derived response work", () => {
     ).toHaveProperty(ledger.tasks[0]?.id ?? "missing");
   });
 
+  it.each(["version", "task-kind", "source-kind"])(
+    "rejects obsolete persisted shape: %s",
+    async (mutation) => {
+      vi.stubEnv("TYPESAFE_API_KEY", "");
+      const f = fixture();
+      const monitor = new Monitor(vi.fn(), vi.fn());
+      const entries = [f.entry];
+      monitor.observe(() => entries);
+      monitor.conversation.update(entries);
+      monitor.source = f.conversation.source(f.proposed);
+      monitor.ledger = reconcileLedger(undefined, f.proposed.snapshot);
+      const checkpoint = monitor.checkpoint();
+      if (mutation === "version") Object.assign(checkpoint, { version: 2 });
+      if (mutation === "task-kind")
+        Reflect.deleteProperty(checkpoint.tasks[0] ?? {}, "workKind");
+      if (mutation === "source-kind")
+        Reflect.deleteProperty(checkpoint.source?.spans[0] ?? {}, "workKind");
+      try {
+        await monitor.restore("/nonexistent-offline-fixture", checkpoint);
+        expect(monitor.ledger).toBeUndefined();
+      } finally {
+        monitor.stop();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it("preserves response kind through a monitor checkpoint and reload", async () => {
     vi.stubEnv("TYPESAFE_API_KEY", "");
     const f = fixture();
     const monitor = new Monitor(vi.fn(), vi.fn());
-    monitor.observe(() => [f.entry]);
+    const entries = [f.entry];
+    monitor.observe(() => entries);
+    monitor.conversation.update(entries);
     monitor.source = f.conversation.source(f.proposed);
     monitor.ledger = reconcileLedger(undefined, f.proposed.snapshot);
     const checkpoint = monitor.checkpoint();

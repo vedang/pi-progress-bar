@@ -36,7 +36,7 @@ describe("automatic monitor lifecycle", () => {
     monitor.turnOn("/workspace");
     const checkpoint = monitor.checkpoint();
     expect(checkpoint).toMatchObject({
-      version: 2,
+      version: 3,
       enabled: true,
       interval: 15,
     });
@@ -65,14 +65,22 @@ describe("automatic monitor lifecycle", () => {
     const monitor = new Monitor(vi.fn(), vi.fn());
     monitor.observe(() => branch);
     await monitor.restore("/workspace", {
-      version: 2,
+      version: 3,
       enabled: false,
       interval: 60,
       source: {
         kind: "conversation",
         entryId: goal.id,
         hash: goal.hash,
-        spans: [{ id: `${goal.id}:9:14`, start: 9, end: 14, criteria: [] }],
+        spans: [
+          {
+            id: `${goal.id}:9:14`,
+            start: 9,
+            end: 14,
+            workKind: "action",
+            criteria: [],
+          },
+        ],
         context: [[0, 5]],
       },
       sourceRevision: goal.hash,
@@ -87,6 +95,7 @@ describe("automatic monitor lifecycle", () => {
       tasks: [
         {
           id: alphaId,
+          workKind: "action",
           status: "not-started",
           included: false,
           revision: goal.hash,
@@ -100,6 +109,7 @@ describe("automatic monitor lifecycle", () => {
         },
         {
           id: betaId,
+          workKind: "action",
           status: "in-progress",
           included: true,
           revision: evolved.hash,

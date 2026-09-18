@@ -5,6 +5,7 @@ import {
   applyScopeRelations,
   scopeAnswers,
   scopeChunks,
+  scopeTransactionIsAdmissible,
 } from "../src/sources/scope";
 
 const task = (
@@ -53,6 +54,83 @@ const candidate = (text: string): SourceTask => ({
 });
 
 describe("automatic evolving scope", () => {
+  it.each(["done", "cancelled", "not-started"] as const)(
+    "limits same-response identity transfer for %s work",
+    (status) => {
+      const before = ledger();
+      const previous = before.tasks[0];
+      if (!previous) throw new Error("Missing existing task");
+      previous.workKind = "response";
+      previous.status = status;
+      const nextRequest = {
+        ...candidate("Explain current status again"),
+        workKind: "response" as const,
+      };
+      const request = scopeChunks(before, [nextRequest])[0]?.request;
+      const sameAllowed = status === "not-started";
+      expect(
+        Object.hasOwn(request?.questions["0"]?.criteria ?? {}, "same:t1"),
+      ).toBe(sameAllowed);
+      expect(
+        scopeTransactionIsAdmissible(before, [nextRequest], {
+          0: "same:t1",
+          scope: "continue",
+          current: "candidate:0",
+        }),
+      ).toBe(sameAllowed);
+      expect(
+        scopeTransactionIsAdmissible(before, [nextRequest], {
+          0: "revised:t1",
+          scope: "continue",
+          current: "candidate:0",
+        }),
+      ).toBe(true);
+      expect(
+        scopeTransactionIsAdmissible(before, [nextRequest], {
+          0: "new",
+          scope: "continue",
+          current: "candidate:0",
+        }),
+      ).toBe(true);
+    },
+  );
+  it("does not collapse a response into a related action task", () => {
+    const before = ledger();
+    const response = {
+      ...candidate("Explain the parser work"),
+      workKind: "response" as const,
+    };
+    const action = {
+      ...candidate("Implement parser"),
+      workKind: "action" as const,
+    };
+    const first = before.tasks[0];
+    if (!first) throw new Error("Missing task");
+    first.workKind = "action";
+    const request = scopeChunks(before, [response, action])[0]?.request;
+    expect(
+      Object.hasOwn(request?.questions["0"]?.criteria ?? {}, "same:t1"),
+    ).toBe(false);
+    expect(
+      Object.hasOwn(request?.questions["1"]?.criteria ?? {}, "same:t1"),
+    ).toBe(true);
+    expect(
+      scopeTransactionIsAdmissible(before, [response], {
+        0: "same:t1",
+        scope: "continue",
+        current: "candidate:0",
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps same identity available for completed action work", () => {
+    const before = ledger();
+    const request = scopeChunks(before, [candidate("Implement parser")])[0]
+      ?.request;
+    expect(
+      Object.hasOwn(request?.questions["0"]?.criteria ?? {}, "same:t1"),
+    ).toBe(true);
+  });
   it.each(["done", "reopened", "cancelled", "not-a-report"])(
     "abstains from weak same-observation %s rather than replacing done with conflict",
     (status) => {

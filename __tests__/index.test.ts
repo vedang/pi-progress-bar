@@ -29,6 +29,7 @@ interface JevBody {
   state?: {
     report?: { text?: string };
     tasks?: { id: string; text: string }[];
+    spans?: { id: string; text: string }[];
   };
   questions: Record<
     string,
@@ -46,6 +47,9 @@ function jevResponse(body: JevBody): Response {
       task.id,
       task.text,
     ]),
+  );
+  const spans = new Map(
+    (body.state?.spans ?? []).map((span) => [span.id, span.text]),
   );
   const answers = Object.fromEntries(
     Object.entries(body.questions).map(([id, question]) => {
@@ -73,6 +77,10 @@ function jevResponse(body: JevBody): Response {
       let choice = keys[0] ?? "unknown";
       if (id === "source")
         choice = keys.find((key) => key.startsWith("candidate:")) ?? choice;
+      else if (keys.includes("task"))
+        choice = /^plan:?$/i.test(spans.get(id)?.trim() ?? "")
+          ? "context"
+          : "task";
       else if (keys.includes("not-a-report"))
         choice =
           report.includes("finished") && /parser/i.test(tasks.get(id) ?? "")

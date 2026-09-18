@@ -199,29 +199,6 @@ export class Conversation {
           : "Unknown: no actionable plan suggested";
         return;
       }
-      // Only unambiguous direct numbered/checklist structures may skip semantic subspan classification.
-      const direct =
-        candidate.structured &&
-        candidate.spans.every(
-          (span) =>
-            span.kind === "heading" ||
-            (span.kind === "list" &&
-              /^(?:\d+[.)]\s+|[-*+]\s+\[[ xX]\]\s+)/.test(
-                candidate.text.slice(
-                  candidate.text.lastIndexOf("\n", span.start - 1) + 1,
-                  span.start,
-                ),
-              )),
-        );
-      if (direct) {
-        this.classified.add(candidate.id);
-        try {
-          this.proposals.push(proposal(candidate));
-        } catch (error) {
-          this.discoveryStatus = String(error);
-        }
-        return;
-      }
       const chunks: Span[][] = [];
       let spans: Span[] = [];
       for (const span of candidate.spans) {

@@ -72,18 +72,44 @@ describe("actual-lineage trajectory normalization", () => {
     expect(JSON.stringify(trajectory.messages)).not.toContain("secret");
     expect(JSON.stringify(trajectory.messages)).not.toContain("All tasks done");
   });
-  it("prefers a recent plan after introductory chatter and retains exact offsets", () => {
-    const entries = Array.from({ length: 25 }, (_, i) =>
-      message(`intro${i}`, "user", "Thanks, hello again"),
+  it("rolls bounded windows to the latest evidence without a permanent shortlist", () => {
+    const entries = Array.from({ length: 620 }, (_, i) =>
+      message(`entry-${i}`, "user", `Plan:\n1. Task ${i}`),
     );
-    const plan = "Plan:\n1. Build the widget\n2. Verify its output";
+    const trajectory = collectTrajectory(entries);
+    expect(trajectory.messages.length).toBeLessThanOrEqual(512);
+    expect(trajectory.messages.at(-1)?.id).toBe("entry-619");
+    expect(trajectory.messages.some((item) => item.id === "entry-0")).toBe(
+      false,
+    );
+    const candidates = findCandidates(trajectory);
+    expect(candidates.length).toBeGreaterThan(12);
+    expect(candidates.at(-1)?.entryId).toBe("entry-619");
+    for (const candidate of candidates)
+      for (const span of candidate.spans) {
+        const original = trajectory.messages.find(
+          (item) => item.id === candidate.entryId,
+        );
+        expect(original?.text.slice(span.start, span.end)).toBe(span.text);
+      }
+  });
+
+  it("subchunks oversized messages with exact original offsets", () => {
+    const text = Array.from(
+      { length: 1200 },
+      (_, i) => `${i + 1}. Implement bounded item ${i} with verification`,
+    ).join("\n");
     const candidates = findCandidates(
-      collectTrajectory([...entries, message("latest", "assistant", plan)]),
+      collectTrajectory([message("oversized", "user", text)]),
     );
-    expect(candidates).toHaveLength(12);
-    expect(candidates[0]?.entryId).toBe("latest");
-    for (const span of candidates[0]?.spans ?? [])
-      expect(plan.slice(span.start, span.end)).toBe(span.text);
+    expect(candidates.length).toBeGreaterThan(1);
+    expect(
+      candidates.every((item) => Buffer.byteLength(item.text) < 20 * 1024),
+    ).toBe(true);
+    const spans = candidates.flatMap((item) => item.spans);
+    expect(new Set(spans.map((span) => span.id)).size).toBe(spans.length);
+    for (const span of spans)
+      expect(text.slice(span.start, span.end)).toBe(span.text);
   });
   it("excludes summaries without poisoning intact retained original ancestry", () => {
     const entries = [
@@ -126,19 +152,19 @@ describe("actual-lineage trajectory normalization", () => {
         .map((span) => span.text),
     ).toEqual(["Research the API", "Build the widget", "Verify its output"]);
   });
-  it("marks bounded retrieval gaps rather than claiming a complete scan", () => {
+  it("distinguishes rolling window absence from malformed ancestry", () => {
     const trajectory = collectTrajectory(
       Array.from({ length: 513 }, (_, i) =>
         message(String(i), "user", `Plan ${i}`),
       ),
     );
-    expect(trajectory.complete).toBe(false);
+    expect(trajectory.complete).toBe(true);
     expect(trajectory.messages.length).toBeLessThanOrEqual(512);
-    expect(trajectory.omissions.length).toBeGreaterThan(0);
-    const oversized = collectTrajectory([
-      message("big", "assistant", "x".repeat(256 * 1024 + 1)),
+    expect(trajectory.omissions.join(" ")).toMatch(/window/i);
+    const broken = collectTrajectory([
+      { ...message("tail", "assistant", "Plan: build"), parentId: "missing" },
     ]);
-    expect(oversized.complete).toBe(false);
+    expect(broken.complete).toBe(false);
   });
 });
 

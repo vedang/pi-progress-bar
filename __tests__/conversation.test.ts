@@ -184,7 +184,7 @@ describe("ordered conversation reports", () => {
     });
     expect(f.conversation.cursor?.id).toBe("plan");
   });
-  it("can explicitly narrow discovery to a known entry beyond the shortlist", () => {
+  it("keeps every candidate in the bounded window reachable automatically", () => {
     const f = fixture();
     f.conversation.update([
       f.plan,
@@ -194,13 +194,7 @@ describe("ordered conversation reports", () => {
     ]);
     expect(
       f.conversation.candidates.some((item) => item.entryId === "plan"),
-    ).toBe(false);
-    f.conversation.narrow("plan");
-    expect(f.conversation.candidates.map((item) => item.entryId)).toEqual([
-      "plan",
-    ]);
-    expect(() => f.conversation.narrow("sibling-entry")).toThrow(
-      /unavailable/i,
-    );
+    ).toBe(true);
+    expect(f.conversation.candidates.length).toBeGreaterThan(12);
   });
 });

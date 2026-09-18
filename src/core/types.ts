@@ -6,7 +6,7 @@ export type ReportState =
   | "cancelled"
   | "unknown"
   | "conflict";
-export interface SourceRef {
+interface SourceRef {
   sourceId: string;
   entryId?: string;
   start: number;

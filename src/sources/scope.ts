@@ -206,15 +206,28 @@ export function scopeAnswers(
     ]),
   );
   for (const index of indexes) {
-    const answer = sufficientChoice(result, `status:${index}`, "ambiguous");
+    // Low-confidence status is no status: only an explicit, sufficiently
+    // concentrated ambiguous answer may transfer conflict to an existing task.
+    const answer = result.answers[`status:${index}`];
+    const probability =
+      answer?.type === "choice"
+        ? (answer.probabilities[answer.choice] ?? 0)
+        : 0;
+    if (
+      answer?.type !== "choice" ||
+      answer.confidence < 0.5 ||
+      probability < 0.8 ||
+      answer.choice === "not-a-report"
+    ) {
+      states[index] = undefined;
+      continue;
+    }
     states[index] =
-      answer === "not-a-report"
-        ? undefined
-        : answer === "ambiguous"
-          ? "conflict"
-          : reportStates.has(answer as ReportState)
-            ? (answer as ReportState)
-            : "conflict";
+      answer.choice === "ambiguous"
+        ? "conflict"
+        : reportStates.has(answer.choice as ReportState)
+          ? (answer.choice as ReportState)
+          : undefined;
   }
   const current = sufficientChoice(result, "current", "unknown");
   const scope = sufficientChoice(result, "scope", "ambiguous");
@@ -229,16 +242,46 @@ export function scopeAnswers(
   } as ScopeAnswers;
 }
 
+/** True only when every candidate relation can commit as one scope transaction. */
+export function scopeTransactionIsAdmissible(
+  ledger: Ledger,
+  candidates: SourceTask[],
+  answers: ScopeAnswers,
+): boolean {
+  if (answers.scope === "ambiguous") return false;
+  let newTasks = 0;
+  for (const [index] of candidates.entries()) {
+    const relation = answers[index];
+    if (!relation || relation === "ambiguous") return false;
+    if (relation === "new") {
+      newTasks++;
+      continue;
+    }
+    if (relation === "context") continue;
+    const separator = relation.indexOf(":");
+    const kind = relation.slice(0, separator);
+    const id = relation.slice(separator + 1);
+    if (
+      (kind !== "same" && kind !== "revised") ||
+      !id ||
+      !ledger.tasks.some((task) => task.id === id && task.included)
+    )
+      return false;
+    if (answers.scope === "new-goal") return false;
+  }
+  return answers.scope !== "new-goal" || newTasks > 0;
+}
+
 /**
- * Applies a fully validated scope transaction. Ambiguous/global-inconsistent
- * answers cannot add work, remove work, transfer completion, or pick current.
+ * Applies one complete validated scope transaction. Unresolved relations never
+ * add work, archive work, transfer completion, or pick current work.
  */
 export function applyScopeRelations(
   ledger: Ledger,
   candidates: SourceTask[],
   answers: ScopeAnswers,
 ): Ledger {
-  if (answers.scope === "ambiguous")
+  if (!scopeTransactionIsAdmissible(ledger, candidates, answers))
     return { ...ledger, currentTaskId: undefined };
 
   const tasks = ledger.tasks.map((task) => ({
@@ -250,17 +293,6 @@ export function applyScopeRelations(
     ref: { ...task.ref },
   }));
   const existing = new Map(tasks.map((task) => [task.id, task]));
-  // A clear new goal may not also silently retain a relation to the archived
-  // goal. Treat that contradictory answer as uncertainty before mutation.
-  if (
-    answers.scope === "new-goal" &&
-    candidates.some((_, index) => {
-      const relation = answers[index];
-      return relation?.startsWith("same:") || relation?.startsWith("revised:");
-    })
-  )
-    return { ...ledger, currentTaskId: undefined };
-
   let nextTaskId = ledger.nextTaskId;
   let changed = answers.scope === "new-goal";
   if (answers.scope === "new-goal")
@@ -269,8 +301,7 @@ export function applyScopeRelations(
   const candidateIds = new Map<number, string>();
   for (const [index, candidate] of candidates.entries()) {
     const relation = answers[index];
-    if (!relation || relation === "context" || relation === "ambiguous")
-      continue;
+    if (relation === "context") continue;
     let target: Task | undefined;
     if (relation === "new") {
       const id = `${ledger.sourceId}:task:${nextTaskId++}`;

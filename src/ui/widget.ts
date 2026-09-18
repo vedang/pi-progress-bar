@@ -73,12 +73,15 @@ export function paint(ctx: ExtensionContext, monitor: Monitor) {
     render(width) {
       if (width < 2) return [""];
       const count = countReported(monitor.ledger);
+      const unresolvedScope = monitor.scopeIsUnresolved();
       const label = monitor.ledger
-        ? `Reported ${count.done}/${count.total}${count.percent === null ? " • unknown percentage" : ` • ${count.percent}%`}${monitor.ledger.stale ? " • stale" : ""}`
-        : `Progress: ${monitor.conversation.discoveryStatus}`;
+        ? unresolvedScope
+          ? `Reported ${count.done}/${count.total} • historical; scope unresolved`
+          : `Reported ${count.done}/${count.total}${count.percent === null ? " • unknown percentage" : ` • ${count.percent}%`}${monitor.ledger.stale ? " • stale" : ""}`
+        : `Progress: ${monitor.progressState()}`;
       const filled = Math.floor((count.percent ?? 0) / 10);
       const bar =
-        count.percent === null
+        unresolvedScope || count.percent === null
           ? ""
           : `[${"#".repeat(filled)}${"-".repeat(10 - filled)}] `;
       const task = monitor.ledger?.tasks.find(
@@ -96,6 +99,10 @@ export function paint(ctx: ExtensionContext, monitor: Monitor) {
         theme.fg(
           "muted",
           `${monitor.activity} • analysis every ${monitor.interval}s • ${plain(monitor.error ?? monitor.gateway.status)}`,
+        ),
+        theme.fg(
+          "muted",
+          `Progress state: ${monitor.progressState()} • diagnostics: ${monitor.diagnosticSummary()}`,
         ),
         ...signals(monitor).map((line) => theme.fg("muted", plain(line))),
       ];

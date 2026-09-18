@@ -13,6 +13,7 @@ import { AnalysisScheduler } from "../analysis/scheduler";
 import {
   type BeadsExport,
   enrichBeadsTasks,
+  hasGroundedBeadsRecords,
   readBeadsExport,
 } from "../sources/beads";
 import {
@@ -26,7 +27,9 @@ import {
   type ScopeChunk,
   scopeAnswers,
   scopeChunks,
+  scopeTransactionIsAdmissible,
 } from "../sources/scope";
+import type { Candidate } from "../sources/trajectory";
 import { reconcileLedger } from "./ledger";
 import type { Ledger, ReportState, SourceRef, SourceTask, Task } from "./types";
 
@@ -35,6 +38,28 @@ const taskKey = (task: Task) =>
     .update(task.anchor ? `anchor:${task.anchor}` : `text:${task.text}`)
     .digest("hex");
 
+interface PartialScopeCheckpoint {
+  proposalId: string;
+  candidate: { id: string; entryId: string; hash: string };
+  source: ConversationSource;
+  supersedesUnresolved: boolean;
+  /** SHA-256 digest of semantic ledger basis; never serialize scope text. */
+  identity: string;
+  index: number;
+  requestHashes: string[];
+  relations: { index: number; relation: string }[];
+  states: { index: number; status: ReportState }[];
+  scopes: string[];
+  currents: { index: number; choice: string }[];
+  /** Detects accidental/unrecomputed local checkpoint corruption; not authentication. */
+  digest: string;
+}
+interface UnresolvedScopeCheckpoint {
+  candidates: { id: string; entryId: string; hash: string }[];
+  /** More refs existed than durable cap; retain unknown UI state conservatively. */
+  overflow?: boolean;
+}
+const MAX_UNRESOLVED_SCOPE_REFS = 200;
 export interface Checkpoint {
   version: 2;
   enabled: boolean;
@@ -43,6 +68,8 @@ export interface Checkpoint {
   conversation?: ConversationCheckpoint;
   sourceRevision?: string;
   scopeRevision?: string;
+  partialScope?: PartialScopeCheckpoint;
+  unresolvedScope?: UnresolvedScopeCheckpoint;
   mappings: { hash: string; id: string }[];
   tasks: {
     id: string;
@@ -64,6 +91,11 @@ const validInterval = (seconds: number) =>
 
 interface ScopeWork {
   proposalId: string;
+  entryId: string;
+  entryHash: string;
+  candidate: Pick<Candidate, "id" | "hash">;
+  source: ConversationSource;
+  supersedesUnresolved: boolean;
   /** Scope request basis; result applies only if its semantic identity survives. */
   starting: Ledger;
   identity: string;
@@ -74,7 +106,7 @@ interface ScopeWork {
   relations: Record<number, ReturnType<typeof scopeAnswers>[number]>;
   states: Record<number, ReportState | undefined>;
   scopes: Set<"continue" | "new-goal" | "ambiguous">;
-  currents: Set<string>;
+  currents: Map<number, string>;
 }
 interface HealthWork {
   snapshot: HealthSnapshot;
@@ -83,26 +115,78 @@ interface HealthWork {
 }
 
 /** Excludes display-only Beads enrichment; includes every scope authority field. */
+const sameBeadsEnrichment = (left: Task[], right: Task[]) =>
+  left.length === right.length &&
+  left.every(
+    (task, index) =>
+      task.id === right[index]?.id &&
+      task.included === right[index]?.included &&
+      JSON.stringify(task.beads) === JSON.stringify(right[index]?.beads),
+  );
+
 const scopeIdentity = (ledger: Ledger) =>
-  JSON.stringify({
-    sourceId: ledger.sourceId,
-    sourceRevision: ledger.sourceRevision,
-    scopeRevision: ledger.scopeRevision,
-    currentTaskId: ledger.currentTaskId,
-    nextTaskId: ledger.nextTaskId,
-    stale: ledger.stale,
-    tasks: ledger.tasks.map((task) => ({
-      id: task.id,
-      text: task.text,
-      status: task.status,
-      criteria: task.criteria,
-      included: task.included,
-      anchor: task.anchor,
-      revision: task.revision,
-      ref: task.ref,
-      criterionRefs: task.criterionRefs,
-    })),
-  });
+  createHash("sha256")
+    .update(
+      JSON.stringify({
+        sourceId: ledger.sourceId,
+        sourceRevision: ledger.sourceRevision,
+        scopeRevision: ledger.scopeRevision,
+        currentTaskId: ledger.currentTaskId,
+        nextTaskId: ledger.nextTaskId,
+        stale: ledger.stale,
+        tasks: ledger.tasks.map((task) => ({
+          id: task.id,
+          text: task.text,
+          status: task.status,
+          criteria: task.criteria,
+          included: task.included,
+          anchor: task.anchor,
+          revision: task.revision,
+          ref: task.ref,
+          criterionRefs: task.criterionRefs,
+        })),
+      }),
+    )
+    .digest("hex");
+const requestHash = (request: EvaluationRequest) =>
+  createHash("sha256").update(JSON.stringify(request)).digest("hex");
+const scopeJournalDigest = (partial: Omit<PartialScopeCheckpoint, "digest">) =>
+  createHash("sha256")
+    .update(
+      JSON.stringify({
+        proposalId: partial.proposalId,
+        candidate: {
+          id: partial.candidate.id,
+          entryId: partial.candidate.entryId,
+          hash: partial.candidate.hash,
+        },
+        source: partial.source,
+        supersedesUnresolved: partial.supersedesUnresolved,
+        identity: partial.identity,
+        index: partial.index,
+        requestHashes: [...partial.requestHashes],
+        relations: [...partial.relations].sort(
+          (left, right) => left.index - right.index,
+        ),
+        states: [...partial.states].sort(
+          (left, right) => left.index - right.index,
+        ),
+        scopes: [...partial.scopes].sort(),
+        currents: [...partial.currents].sort(
+          (left, right) => left.index - right.index,
+        ),
+      }),
+    )
+    .digest("hex");
+const statusValues = new Set<ReportState>([
+  "done",
+  "reopened",
+  "not-started",
+  "in-progress",
+  "cancelled",
+  "unknown",
+  "conflict",
+]);
 
 /** Automatic, passive current-branch controller. */
 export class Monitor {
@@ -125,9 +209,20 @@ export class Monitor {
   private evidenceIdentity?: string;
   private scheduling = false;
   private scopedCandidates = new Set<string>();
+  private blockedScopeCandidates = new Set<string>();
+  /** Original-only refs let unresolved UI truth survive reload without text. */
+  private blockedScopeSources = new Map<
+    string,
+    { id: string; entryId: string; hash: string }
+  >();
   private scopeWork?: ScopeWork;
   private healthWork?: HealthWork;
   private beadsExport?: BeadsExport;
+  private diagnosticCounts = new Map<string, number>();
+  private scopeUnresolved = false;
+  private scopeUnresolvedOverflow = false;
+  /** Reloaded unchanged evidence stays unknown; never rebill history for health. */
+  private healthDeferred = false;
 
   constructor(
     private readonly changed: () => void,
@@ -142,6 +237,67 @@ export class Monitor {
       this.changed();
       if (this.enabled) queueMicrotask(() => this.scheduleAnalysis(false));
     });
+  }
+
+  /** Bounded aggregate diagnostics only; raw branch text never reaches UI/checkpoints. */
+  private note(code: string) {
+    if (!/^[a-z][a-z-]{0,63}$/.test(code)) return;
+    this.diagnosticCounts.set(
+      code,
+      Math.min(999, (this.diagnosticCounts.get(code) ?? 0) + 1),
+    );
+    while (this.diagnosticCounts.size > 12) {
+      const first = this.diagnosticCounts.keys().next().value;
+      if (!first) return;
+      this.diagnosticCounts.delete(first);
+    }
+  }
+
+  diagnostics() {
+    const counts = new Map(
+      this.conversation.diagnostics().map(({ code, count }) => [code, count]),
+    );
+    for (const [code, count] of this.diagnosticCounts)
+      counts.set(code, Math.min(999, (counts.get(code) ?? 0) + count));
+    return [...counts.entries()].map(([code, count]) => ({ code, count }));
+  }
+
+  progressState() {
+    if (!this.enabled) return "Monitoring off";
+    if (
+      this.error ||
+      /(?:error|retry|cooldown|unavailable)/i.test(this.gateway.status)
+    )
+      return "Analysis unavailable";
+    if (this.conversation.isCatchingUp()) return "Catching up history";
+    if (
+      this.scopeUnresolved ||
+      this.scopeUnresolvedOverflow ||
+      this.blockedScopeCandidates.size
+    )
+      return "Scope unresolved";
+    if (this.scopeWork || this.conversation.hasPendingDiscovery())
+      return "Updating scope";
+    if (this.conversation.hasPendingReports()) return "Updating reports";
+    if (!this.ledger) return "No actionable tasks yet";
+    if (this.ledger.stale) return "History stale";
+    if (!this.ledger.currentTaskId) return "Current task unknown";
+    return "No new evidence";
+  }
+
+  scopeIsUnresolved() {
+    return (
+      this.scopeUnresolved ||
+      this.scopeUnresolvedOverflow ||
+      this.blockedScopeCandidates.size > 0
+    );
+  }
+
+  diagnosticSummary() {
+    const diagnostics = this.diagnostics();
+    return diagnostics.length
+      ? diagnostics.map(({ code, count }) => `${code}:${count}`).join(" • ")
+      : "none";
   }
 
   observe(branch: () => readonly unknown[]) {
@@ -205,6 +361,7 @@ export class Monitor {
     isError: boolean,
   ) {
     if (!this.enabled) return;
+    this.healthDeferred = false;
     const value =
       result && typeof result === "object"
         ? { ...(result as object), isError }
@@ -232,10 +389,33 @@ export class Monitor {
 
   private adoptProposal() {
     if (this.ledger || !this.conversation.proposals.length) return;
-    const proposal = this.conversation.proposals.find(
-      (item) => !item.ambiguous,
-    );
+    let supersedesUnresolved = false;
+    let proposal: (typeof this.conversation.proposals)[number] | undefined;
+    for (const candidate of this.conversation.proposals) {
+      const id = this.proposalId(candidate);
+      if (this.scopedCandidates.has(id)) continue;
+      if (candidate.ambiguous) {
+        this.blockScope(id, "ambiguous-discovery", candidate.candidate);
+        supersedesUnresolved = true;
+        continue;
+      }
+      proposal = candidate;
+      break;
+    }
     if (!proposal) return;
+    if (supersedesUnresolved) {
+      // Earlier ambiguity remains rejected evidence. A later clear source is
+      // a fresh denominator, not an inferred resolution of that ambiguity.
+      for (const candidate of this.conversation.proposals) {
+        const id = this.proposalId(candidate);
+        if (candidate === proposal) break;
+        if (this.blockedScopeCandidates.delete(id)) {
+          this.blockedScopeSources.delete(id);
+          this.scopedCandidates.add(id);
+          this.conversation.note("superseded-unresolved-source");
+        }
+      }
+    }
     const source = this.conversation.source(proposal);
     const ledger = reconcileLedger(
       undefined,
@@ -245,7 +425,9 @@ export class Monitor {
       ledger.tasks = enrichBeadsTasks(ledger.tasks, this.beadsExport);
     this.source = source;
     this.ledger = ledger;
-    this.conversation.select(source);
+    this.scopeUnresolved = false;
+    this.conversation.commitScope(proposal.candidate);
+    this.conversation.select(source, true, true);
     this.scopedCandidates.add(
       `${proposal.candidate.id}:${proposal.candidate.hash}`,
     );
@@ -261,39 +443,157 @@ export class Monitor {
     );
   }
 
-  private scheduleScope() {
-    if (this.scopeWork && !this.scopeWorkIsCurrent(this.scopeWork))
-      this.scopeWork = undefined;
-    if (!this.scopeWork && this.ledger) {
-      const proposal = this.conversation.proposals.find(
-        (item) =>
-          !item.ambiguous &&
-          !this.scopedCandidates.has(
-            `${item.candidate.id}:${item.candidate.hash}`,
+  private proposalId(item: { candidate: { id: string; hash: string } }) {
+    return `${item.candidate.id}:${item.candidate.hash}`;
+  }
+
+  /** Earliest uncommitted proposal owns the next scope transaction. */
+  private nextScopeProposal() {
+    return this.conversation.proposals.find(
+      (item) => !this.scopedCandidates.has(this.proposalId(item)),
+    );
+  }
+
+  /** A later clear scope may supersede rejected ambiguity, never past reports. */
+  private nextRunnableScopeProposal() {
+    let supersedesUnresolved = false;
+    for (const proposal of this.conversation.proposals) {
+      const id = this.proposalId(proposal);
+      if (this.scopedCandidates.has(id)) continue;
+      if (this.blockedScopeCandidates.has(id)) {
+        supersedesUnresolved = true;
+        continue;
+      }
+      const observation = this.conversation.observation({
+        id: proposal.candidate.entryId,
+        hash: proposal.candidate.hash,
+      });
+      const supersedesRestoredScope =
+        !!observation &&
+        [...this.blockedScopeSources.values()].some((blocked) =>
+          this.conversation.entryIsAtOrBefore(
+            blocked.entryId,
+            blocked.hash,
+            observation,
           ),
-      );
-      if (proposal) {
-        try {
-          this.scopeWork = {
-            proposalId: `${proposal.candidate.id}:${proposal.candidate.hash}`,
-            starting: this.ledger,
-            identity: scopeIdentity(this.ledger),
-            epoch: this.epoch,
-            candidates: proposal.snapshot.tasks,
-            chunks: scopeChunks(this.ledger, proposal.snapshot.tasks),
-            index: 0,
-            relations: {},
-            states: {},
-            scopes: new Set(),
-            currents: new Set(),
-          };
-        } catch {
-          // Essential scope context cannot be clipped into a transaction.
-          this.scopedCandidates.add(
-            `${proposal.candidate.id}:${proposal.candidate.hash}`,
-          );
-          return;
-        }
+        );
+      return {
+        proposal,
+        supersedesUnresolved: supersedesUnresolved || supersedesRestoredScope,
+      };
+    }
+  }
+
+  /** A later scope transaction never changes the denominator for an earlier report. */
+  private scopeBlocksReport(
+    report: Parameters<Conversation["blocksReportsThrough"]>[0],
+  ) {
+    const work = this.scopeWork;
+    if (
+      work &&
+      this.conversation.entryIsAtOrBefore(work.entryId, work.entryHash, report)
+    )
+      return true;
+    if (
+      this.scopeUnresolvedOverflow ||
+      [...this.blockedScopeSources.values()].some((blocked) =>
+        this.conversation.entryIsAtOrBefore(
+          blocked.entryId,
+          blocked.hash,
+          report,
+        ),
+      )
+    )
+      return true;
+    const proposal = this.nextScopeProposal();
+    return (
+      !!proposal &&
+      this.conversation.entryIsAtOrBefore(
+        proposal.candidate.entryId,
+        proposal.candidate.hash,
+        report,
+      )
+    );
+  }
+
+  private blockScope(
+    id: string,
+    code: string,
+    source?: { id: string; entryId: string; hash: string },
+  ) {
+    const firstBlocked = !this.blockedScopeCandidates.has(id);
+    if (firstBlocked) this.note(code);
+    this.blockedScopeCandidates.add(id);
+    if (source) {
+      if (
+        !this.blockedScopeSources.has(id) &&
+        this.blockedScopeSources.size >= MAX_UNRESOLVED_SCOPE_REFS
+      ) {
+        this.scopeUnresolvedOverflow = true;
+        this.note("unresolved-scope-cap");
+      } else this.blockedScopeSources.set(id, { ...source });
+    }
+    this.scopeUnresolved = true;
+    const clearedCurrent = !!this.ledger?.currentTaskId;
+    if (clearedCurrent && this.ledger)
+      this.ledger = { ...this.ledger, currentTaskId: undefined };
+    // First blocked transition is durable even when current task was unknown.
+    if (firstBlocked || clearedCurrent) this.save();
+  }
+
+  private scheduleScope() {
+    if (this.scopeWork && !this.scopeWorkIsCurrent(this.scopeWork)) {
+      this.note("stale-scope-result");
+      this.scopeWork = undefined;
+    }
+    if (!this.scopeWork && this.ledger) {
+      const runnable = this.nextRunnableScopeProposal();
+      if (!runnable) return;
+      const { proposal, supersedesUnresolved } = runnable;
+      const id = this.proposalId(proposal);
+      // Initial adoption is already a scope commit. Later observations wait
+      // until every preceding report cursor transaction has settled. A clear
+      // later proposal can supersede a previously rejected ambiguous source.
+      if (
+        this.source &&
+        !this.conversation.scopeMayAdmit(
+          proposal.candidate.entryId,
+          proposal.candidate.hash,
+        ) &&
+        !supersedesUnresolved
+      )
+        return;
+      if (proposal.ambiguous) {
+        this.blockScope(id, "ambiguous-discovery", proposal.candidate);
+        return;
+      }
+      try {
+        this.scopeWork = {
+          proposalId: id,
+          entryId: proposal.candidate.entryId,
+          entryHash: proposal.candidate.hash,
+          candidate: {
+            id: proposal.candidate.id,
+            hash: proposal.candidate.hash,
+          },
+          source: this.conversation.source(proposal),
+          supersedesUnresolved,
+          starting: this.ledger,
+          identity: scopeIdentity(this.ledger),
+          epoch: this.epoch,
+          candidates: proposal.snapshot.tasks,
+          chunks: scopeChunks(this.ledger, proposal.snapshot.tasks),
+          index: 0,
+          relations: {},
+          states: {},
+          scopes: new Set(),
+          currents: new Map(),
+        };
+      } catch {
+        // Essential scope context cannot be clipped into a transaction. Keep
+        // its cursor blocked rather than interpreting it against old scope.
+        this.blockScope(id, "scope-overflow", proposal.candidate);
+        return;
       }
     }
     const work = this.scopeWork;
@@ -306,8 +606,10 @@ export class Monitor {
         this.scopeWork !== work ||
         !this.scopeWorkIsCurrent(work) ||
         work.index !== index
-      )
+      ) {
+        this.note("stale-scope-result");
         return;
+      }
       const partial = scopeAnswers(
         work.candidates.filter((_candidate, candidateIndex) =>
           chunk.indexes.includes(candidateIndex),
@@ -320,9 +622,13 @@ export class Monitor {
         work.states[candidateIndex] = partial.states?.[candidateIndex];
       }
       work.scopes.add(partial.scope);
-      if (partial.current !== "unknown") work.currents.add(partial.current);
+      if (partial.current !== "unknown")
+        work.currents.set(index, partial.current);
       work.index++;
       if (work.index < work.chunks.length) {
+        // Persist only derived choices plus request digests; ledger remains
+        // untouched until every chunk makes one admissible transaction.
+        this.save();
         this.scheduleScope();
         return;
       }
@@ -330,23 +636,80 @@ export class Monitor {
         work.scopes.size === 1
           ? ([...work.scopes][0] ?? "ambiguous")
           : "ambiguous";
+      const currentChoices = new Set(work.currents.values());
       const current =
-        work.currents.size === 1
-          ? ([...work.currents][0] ?? "unknown")
+        currentChoices.size === 1
+          ? ([...currentChoices][0] ?? "unknown")
           : "unknown";
       const live = this.ledger;
-      if (!live || !this.scopeWorkIsCurrent(work)) return;
-      const next = applyScopeRelations(live, work.candidates, {
+      if (!live || !this.scopeWorkIsCurrent(work)) {
+        this.note("stale-scope-result");
+        return;
+      }
+      this.scopeWork = undefined;
+      const answers = {
         ...work.relations,
         current,
         scope,
         states: work.states,
+      };
+      if (!scopeTransactionIsAdmissible(live, work.candidates, answers)) {
+        this.blockScope(
+          work.proposalId,
+          scope === "ambiguous"
+            ? "ambiguous-scope"
+            : "ambiguous-scope-relation",
+          {
+            id: work.candidate.id,
+            entryId: work.entryId,
+            hash: work.entryHash,
+          },
+        );
+        return;
+      }
+      const next = applyScopeRelations(live, work.candidates, answers);
+      const invalidated = next.tasks.flatMap((task) => {
+        const prior = live.tasks.find((item) => item.id === task.id);
+        return prior &&
+          (prior.revision !== task.revision || prior.included !== task.included)
+          ? [task.id]
+          : [];
       });
       this.ledger = this.beadsExport
         ? { ...next, tasks: enrichBeadsTasks(next.tasks, this.beadsExport) }
         : next;
+      this.conversation.retainProofs(this.ledger, invalidated);
+      if (work.supersedesUnresolved) {
+        this.conversation.skipUnresolvedReportsBefore(
+          work.entryId,
+          work.entryHash,
+        );
+        const target = this.conversation.observation({
+          id: work.entryId,
+          hash: work.entryHash,
+        });
+        if (target)
+          for (const [id, blocked] of this.blockedScopeSources) {
+            if (
+              this.conversation.entryIsAtOrBefore(
+                blocked.entryId,
+                blocked.hash,
+                target,
+              )
+            ) {
+              this.blockedScopeCandidates.delete(id);
+              this.blockedScopeSources.delete(id);
+              this.scopedCandidates.add(id);
+              this.conversation.commitScope(blocked);
+            }
+          }
+      }
+      if (!this.blockedScopeCandidates.size)
+        this.scopeUnresolvedOverflow = false;
+      this.scopeUnresolved =
+        this.blockedScopeCandidates.size > 0 || this.scopeUnresolvedOverflow;
       this.scopedCandidates.add(work.proposalId);
-      this.scopeWork = undefined;
+      this.conversation.commitScope(work.candidate);
       this.save();
     });
   }
@@ -401,6 +764,13 @@ export class Monitor {
     this.scheduling = true;
     try {
       if (this.branch) this.conversation.update(this.branch());
+      const epoch = this.epoch;
+      // Discovery stays chronological. Scope/report work only observes a
+      // proposal after its selection/classification transaction has committed.
+      this.conversation.scheduleDiscovery(
+        this.enqueueAnalysis.bind(this),
+        () => this.enabled && epoch === this.epoch,
+      );
       this.adoptProposal();
       this.scheduleScope();
       const snapshot = this.snapshot();
@@ -416,12 +786,9 @@ export class Monitor {
         }
         this.evidenceIdentity = snapshot?.identity;
       }
-      this.scheduleHealth(snapshot);
-      const epoch = this.epoch;
-      this.conversation.scheduleDiscovery(
-        this.enqueueAnalysis.bind(this),
-        () => this.enabled && epoch === this.epoch,
-      );
+      if (this.healthDeferred && this.conversation.hasPendingDiscovery())
+        this.healthDeferred = false;
+      if (!this.healthDeferred) this.scheduleHealth(snapshot);
       if (this.ledger && this.source)
         this.conversation.scheduleReports(
           this.ledger,
@@ -434,6 +801,10 @@ export class Monitor {
             this.ledger = ledger;
             this.save();
           },
+          (report) =>
+            this.conversation.blocksReportsThrough(report) ||
+            this.scopeBlocksReport(report),
+          () => this.save(),
         );
       if (startCycle) this.analysis.startCycle(3);
       else this.analysis.tick();
@@ -489,6 +860,8 @@ export class Monitor {
     this.enabled = true;
     this.error = undefined;
     this.epoch++;
+    // Restored partial scope is source-validated; bind it to new lifecycle.
+    if (this.scopeWork) this.scopeWork.epoch = this.epoch;
     this.runtimeIdentity = `runtime:${this.epoch}`;
     this.gateway.enable(this.runtimeIdentity);
     if (this.branch) this.conversation.update(this.branch());
@@ -508,16 +881,18 @@ export class Monitor {
   private async refreshBeads(cwd: string) {
     const epoch = this.epoch;
     const source = await readBeadsExport(cwd);
-    if (!this.enabled || epoch !== this.epoch) return;
-    this.beadsExport = source;
-    if (this.ledger) {
-      this.ledger = {
-        ...this.ledger,
-        tasks: enrichBeadsTasks(this.ledger.tasks, source),
-      };
-      this.save();
-      this.changed();
+    if (!this.enabled || epoch !== this.epoch || !source.complete) return;
+    if (this.ledger && !hasGroundedBeadsRecords(this.ledger.tasks, source)) {
+      this.note("incomplete-beads-export");
+      return;
     }
+    this.beadsExport = source;
+    if (!this.ledger) return;
+    const tasks = enrichBeadsTasks(this.ledger.tasks, source);
+    if (sameBeadsEnrichment(this.ledger.tasks, tasks)) return;
+    this.ledger = { ...this.ledger, tasks };
+    this.save();
+    this.changed();
   }
 
   private start(cwd: string) {
@@ -540,14 +915,307 @@ export class Monitor {
     this.changed();
   }
 
+  private partialScopeCheckpoint(): PartialScopeCheckpoint | undefined {
+    const work = this.scopeWork;
+    if (!work || work.index < 1) return;
+    const journal = {
+      proposalId: work.proposalId,
+      candidate: {
+        id: work.candidate.id,
+        entryId: work.entryId,
+        hash: work.entryHash,
+      },
+      source: this.conversation.canonicalSource(work.source, {
+        id: work.candidate.id,
+        entryId: work.entryId,
+        hash: work.entryHash,
+      }),
+      supersedesUnresolved: work.supersedesUnresolved,
+      identity: work.identity,
+      index: work.index,
+      requestHashes: work.chunks
+        .slice(0, work.index)
+        .map((chunk) => requestHash(chunk.request)),
+      relations: Object.entries(work.relations)
+        .map(([index, relation]) => ({
+          index: Number(index),
+          relation: String(relation),
+        }))
+        .sort((left, right) => left.index - right.index),
+      states: Object.entries(work.states)
+        .flatMap(([index, status]) =>
+          status ? [{ index: Number(index), status }] : [],
+        )
+        .sort((left, right) => left.index - right.index),
+      scopes: [...work.scopes].sort(),
+      currents: [...work.currents.entries()]
+        .map(([index, choice]) => ({ index, choice }))
+        .sort((left, right) => left.index - right.index),
+    };
+    return { ...journal, digest: scopeJournalDigest(journal) };
+  }
+
+  /** Rebuild source spans and requests before replaying text-free scope choices. */
+  private restorePartialScope(
+    ledger: Ledger,
+    partial: PartialScopeCheckpoint | undefined,
+  ) {
+    if (!partial) return;
+    if (
+      typeof partial.proposalId !== "string" ||
+      partial.proposalId.length > 512 ||
+      !partial.candidate ||
+      typeof partial.candidate.id !== "string" ||
+      !partial.candidate.id ||
+      partial.candidate.id.length > 256 ||
+      typeof partial.candidate.entryId !== "string" ||
+      !partial.candidate.entryId ||
+      partial.candidate.entryId.length > 200 ||
+      typeof partial.candidate.hash !== "string" ||
+      !/^[a-f0-9]{64}$/.test(partial.candidate.hash) ||
+      partial.proposalId !==
+        `${partial.candidate.id}:${partial.candidate.hash}` ||
+      !this.conversation.hasCandidate(partial.candidate) ||
+      typeof partial.supersedesUnresolved !== "boolean" ||
+      typeof partial.identity !== "string" ||
+      !/^[a-f0-9]{64}$/.test(partial.identity) ||
+      partial.identity !== scopeIdentity(ledger) ||
+      !Number.isSafeInteger(partial.index) ||
+      partial.index < 1 ||
+      partial.index > 200 ||
+      !Array.isArray(partial.requestHashes) ||
+      partial.requestHashes.length !== partial.index ||
+      !Array.isArray(partial.relations) ||
+      partial.relations.length > 200 ||
+      !Array.isArray(partial.states) ||
+      partial.states.length > 200 ||
+      !Array.isArray(partial.scopes) ||
+      !partial.scopes.length ||
+      partial.scopes.length > partial.index ||
+      !Array.isArray(partial.currents) ||
+      partial.currents.length > partial.index ||
+      typeof partial.digest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(partial.digest)
+    )
+      throw new Error("Invalid partial scope checkpoint");
+    const source = this.conversation.canonicalSource(
+      partial.source,
+      partial.candidate,
+    );
+    const snapshot = this.conversation.rehydrate(source);
+    if (
+      source.entryId !== partial.candidate.entryId ||
+      source.hash !== partial.candidate.hash ||
+      snapshot.revision !== partial.candidate.hash ||
+      snapshot.tasks.length > 200
+    )
+      throw new Error("Partial scope source changed");
+    const chunks = scopeChunks(ledger, snapshot.tasks);
+    if (
+      partial.index >= chunks.length ||
+      partial.requestHashes.some(
+        (hash, index) =>
+          !/^[a-f0-9]{64}$/.test(hash) ||
+          hash !== requestHash(chunks[index]?.request as EvaluationRequest),
+      )
+    )
+      throw new Error("Partial scope request changed");
+    const relations: ScopeWork["relations"] = {};
+    for (const decision of partial.relations) {
+      const chunk = chunks
+        .slice(0, partial.index)
+        .find((item) => item.indexes.includes(decision.index));
+      const question = chunk?.request.questions[String(decision.index)];
+      if (
+        !decision ||
+        !Number.isSafeInteger(decision.index) ||
+        decision.index < 0 ||
+        typeof decision.relation !== "string" ||
+        !decision.relation ||
+        Object.hasOwn(relations, decision.index) ||
+        !question ||
+        !Object.hasOwn(question.criteria, decision.relation)
+      )
+        throw new Error("Invalid partial scope relation");
+      relations[decision.index] =
+        decision.relation as ScopeWork["relations"][number];
+    }
+    const acceptedRelationIndexes = chunks
+      .slice(0, partial.index)
+      .flatMap((chunk) => chunk.indexes);
+    if (
+      Object.keys(relations).length !== acceptedRelationIndexes.length ||
+      acceptedRelationIndexes.some((index) => !Object.hasOwn(relations, index))
+    )
+      throw new Error("Incomplete partial scope relations");
+    const states: ScopeWork["states"] = {};
+    for (const decision of partial.states) {
+      const chunk = chunks
+        .slice(0, partial.index)
+        .find((item) => item.indexes.includes(decision.index));
+      const question = chunk?.request.questions[`status:${decision.index}`];
+      const choice =
+        decision.status === "conflict" ? "ambiguous" : decision.status;
+      if (
+        !decision ||
+        !Number.isSafeInteger(decision.index) ||
+        decision.index < 0 ||
+        Object.hasOwn(states, decision.index) ||
+        !statusValues.has(decision.status) ||
+        !question ||
+        !Object.hasOwn(question.criteria, choice)
+      )
+        throw new Error("Invalid partial scope status");
+      states[decision.index] = decision.status;
+    }
+    const scopes = new Set<"continue" | "new-goal" | "ambiguous">();
+    for (const scope of partial.scopes) {
+      if (scope !== "continue" && scope !== "new-goal" && scope !== "ambiguous")
+        throw new Error("Invalid partial scope boundary");
+      scopes.add(scope);
+    }
+    const currents = new Map<number, string>();
+    for (const decision of partial.currents) {
+      const question = chunks[decision.index]?.request.questions.current;
+      if (
+        !decision ||
+        !Number.isSafeInteger(decision.index) ||
+        decision.index < 0 ||
+        decision.index >= partial.index ||
+        typeof decision.choice !== "string" ||
+        !decision.choice ||
+        currents.has(decision.index) ||
+        !question ||
+        !Object.hasOwn(question.criteria, decision.choice)
+      )
+        throw new Error("Invalid partial scope current choice");
+      currents.set(decision.index, decision.choice);
+    }
+    const journal = {
+      proposalId: partial.proposalId,
+      candidate: {
+        id: partial.candidate.id,
+        entryId: partial.candidate.entryId,
+        hash: partial.candidate.hash,
+      },
+      source,
+      supersedesUnresolved: partial.supersedesUnresolved,
+      identity: partial.identity,
+      index: partial.index,
+      requestHashes: [...partial.requestHashes],
+      relations: Object.entries(relations)
+        .map(([index, relation]) => ({
+          index: Number(index),
+          relation: String(relation),
+        }))
+        .sort((left, right) => left.index - right.index),
+      states: Object.entries(states)
+        .flatMap(([index, status]) =>
+          status ? [{ index: Number(index), status }] : [],
+        )
+        .sort((left, right) => left.index - right.index),
+      scopes: [...scopes].sort(),
+      currents: [...currents.entries()]
+        .map(([index, choice]) => ({ index, choice }))
+        .sort((left, right) => left.index - right.index),
+    };
+    if (partial.digest !== scopeJournalDigest(journal))
+      throw new Error("Partial scope journal digest changed");
+    this.scopeWork = {
+      proposalId: partial.proposalId,
+      entryId: partial.candidate.entryId,
+      entryHash: partial.candidate.hash,
+      candidate: { id: partial.candidate.id, hash: partial.candidate.hash },
+      source,
+      supersedesUnresolved: partial.supersedesUnresolved,
+      starting: ledger,
+      identity: partial.identity,
+      epoch: this.epoch,
+      candidates: snapshot.tasks,
+      chunks,
+      index: partial.index,
+      relations,
+      states,
+      scopes,
+      currents,
+    };
+    this.conversation.resumeScopeCandidate(partial.candidate);
+  }
+
+  private restoreUnresolvedScope(
+    unresolved: UnresolvedScopeCheckpoint | undefined,
+  ) {
+    if (!unresolved) return;
+    if (
+      !Array.isArray(unresolved.candidates) ||
+      (!unresolved.candidates.length && unresolved.overflow !== true) ||
+      unresolved.candidates.length > MAX_UNRESOLVED_SCOPE_REFS ||
+      (unresolved.overflow !== undefined &&
+        typeof unresolved.overflow !== "boolean")
+    )
+      throw new Error("Invalid unresolved scope checkpoint");
+    const restored = new Map<
+      string,
+      { id: string; entryId: string; hash: string }
+    >();
+    for (const candidate of unresolved.candidates) {
+      if (
+        !candidate ||
+        typeof candidate.id !== "string" ||
+        !candidate.id ||
+        candidate.id.length > 256 ||
+        typeof candidate.entryId !== "string" ||
+        !candidate.entryId ||
+        candidate.entryId.length > 200 ||
+        typeof candidate.hash !== "string" ||
+        !/^[a-f0-9]{64}$/.test(candidate.hash) ||
+        !this.conversation.hasCandidate(candidate) ||
+        !this.conversation.observation({
+          id: candidate.entryId,
+          hash: candidate.hash,
+        })
+      )
+        throw new Error("Unresolved scope original unavailable");
+      const key = `${candidate.id}:${candidate.hash}`;
+      if (restored.has(key)) throw new Error("Duplicate unresolved scope");
+      restored.set(key, {
+        id: candidate.id,
+        entryId: candidate.entryId,
+        hash: candidate.hash,
+      });
+    }
+    this.blockedScopeCandidates = new Set(restored.keys());
+    this.blockedScopeSources = restored;
+    this.scopeUnresolvedOverflow = unresolved.overflow === true;
+    this.scopeUnresolved = restored.size > 0 || this.scopeUnresolvedOverflow;
+  }
+
   checkpoint(): Checkpoint {
+    const partialScope = this.partialScopeCheckpoint();
     return {
       version: 2,
       enabled: this.enabled,
       interval: this.interval,
-      source: this.source,
+      source: this.source
+        ? this.conversation.canonicalSource(this.source)
+        : undefined,
       sourceRevision: this.ledger?.sourceRevision,
       scopeRevision: this.ledger?.scopeRevision,
+      ...(partialScope ? { partialScope } : {}),
+      ...(this.blockedScopeSources.size || this.scopeUnresolvedOverflow
+        ? {
+            unresolvedScope: {
+              candidates: [...this.blockedScopeSources.values()].map(
+                (item) => ({
+                  id: item.id,
+                  entryId: item.entryId,
+                  hash: item.hash,
+                }),
+              ),
+              ...(this.scopeUnresolvedOverflow ? { overflow: true } : {}),
+            },
+          }
+        : {}),
       conversation:
         this.source && this.ledger
           ? this.conversation.checkpoint(this.ledger)
@@ -588,6 +1256,12 @@ export class Monitor {
     this.epoch++;
     this.conversation = new Conversation();
     this.scopedCandidates.clear();
+    this.blockedScopeCandidates.clear();
+    this.blockedScopeSources.clear();
+    this.scopeUnresolved = false;
+    this.scopeUnresolvedOverflow = false;
+    this.healthDeferred = false;
+    this.diagnosticCounts.clear();
     this.evidence.reset();
     this.beadsExport = undefined;
     this.ledger = undefined;
@@ -623,7 +1297,8 @@ export class Monitor {
           this.interval = cp.interval as number;
           this.usage = { ...cp.usage };
           if (cp.source) {
-            const snapshot = this.conversation.rehydrate(cp.source);
+            const source = this.conversation.canonicalSource(cp.source);
+            const snapshot = this.conversation.rehydrate(source);
             const ledger = reconcileLedger(undefined, snapshot);
             if (
               cp.sourceRevision !== snapshot.revision ||
@@ -747,9 +1422,21 @@ export class Monitor {
               )
             )
               ledger.currentTaskId = cp.currentTaskId;
-            this.conversation.restore(ledger, cp.conversation);
-            this.source = cp.source;
+            this.conversation.restore(ledger, cp.conversation, source);
+            this.source = source;
             this.ledger = ledger;
+            try {
+              this.restoreUnresolvedScope(cp.unresolvedScope);
+            } catch {
+              this.note("discarded-unresolved-scope");
+            }
+            try {
+              this.restorePartialScope(ledger, cp.partialScope);
+            } catch {
+              this.scopeWork = undefined;
+              this.note("discarded-partial-scope");
+            }
+            this.healthDeferred = true;
           }
         }
       }

@@ -56,6 +56,18 @@ const unit = (value: unknown): value is number =>
 const keysEqual = (value: Record<string, unknown>, keys: string[]) =>
   Object.keys(value).length === keys.length &&
   keys.every((key) => Object.hasOwn(value, key));
+
+/**
+ * Jev may serialize a distribution to cents. Permit only error explainable by
+ * that quantization, capped well below a materially unnormalized response.
+ */
+const distributionTolerance = (probabilities: number[]) => {
+  const cents = probabilities.every(
+    (probability) =>
+      Math.abs(probability * 100 - Math.round(probability * 100)) < 1e-8,
+  );
+  return cents ? Math.min(0.02, probabilities.length * 0.005 + 1e-9) : 0.001;
+};
 function validate(value: unknown, request: EvaluationRequest): ValidatedResult {
   if (
     !record(value) ||
@@ -81,23 +93,19 @@ function validate(value: unknown, request: EvaluationRequest): ValidatedResult {
       throw new Error("Invalid answer");
     const keys = Object.keys(question.criteria);
     const probabilities = answer.probabilities;
+    const values = Object.values(probabilities) as number[];
     if (
       !keysEqual(probabilities, keys) ||
-      !Object.values(probabilities).every(unit) ||
-      Math.abs(
-        Object.values(probabilities).reduce<number>(
-          (sum, p) => sum + (p as number),
-          0,
-        ) - 1,
-      ) > 0.001
+      !values.every(unit) ||
+      Math.abs(values.reduce((sum, probability) => sum + probability, 0) - 1) >
+        distributionTolerance(values)
     )
       throw new Error("Invalid distribution");
     if (question.type === "choice") {
       if (
         typeof answer.choice !== "string" ||
         !keys.includes(answer.choice) ||
-        (probabilities[answer.choice] as number) <
-          Math.max(...(Object.values(probabilities) as number[]))
+        (probabilities[answer.choice] as number) < Math.max(...values)
       )
         throw new Error("Invalid choice");
     } else {

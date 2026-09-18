@@ -48,7 +48,10 @@ enable/pause/resume aliases, or compatibility commands exist.
   completion or imports the backlog.
 
 Unknown current task, ambiguous scope, missing originals, stale evidence, unsupported formats, or
-overflow remain unknown/stale rather than guessed.
+overflow remain unknown/stale rather than guessed. `/progress` and the widget show a local
+progress state (`Catching up history`, `Scope unresolved`, `Current task unknown`, `No new
+evidence`, or transport/controller failure) plus capped aggregate reason-code counts. These
+diagnostics contain neither conversation text nor credentials.
 
 ## Runtime bounds and privacy
 
@@ -56,17 +59,28 @@ The extension reads only finalized visible user/assistant entries from
 `ctx.sessionManager.getBranch()`. It excludes siblings/children, system/thinking/private content,
 summaries as authority, generic tool bodies, and its own checkpoints. Discovery catches up through
 chronological windows of at most 512 entries / 256 KiB, committing a hash/offset cursor; retained
-source references are rehydrated only from the live active branch. Exact original offsets are
-preserved. Requests are at most 24 KiB and 20 questions; responses at most 128 KiB. Uncertain
-source, identity, scope, or current-task Choices abstain instead of mutating state. One request is in
-flight, at most three serial requests start per analysis cycle, default every 15 seconds, with
-a 10-second deadline. Successful unchanged evidence is not resent. Transient failures use bounded
+source references are rehydrated only from the live active branch, including after a reload beyond
+one discovery window. Exact original offsets are preserved. Partial scope/report journals retain
+only canonical source ranges, IDs, enum decisions, and request identities; an unkeyed digest detects
+accidental or unrecomputed corruption before replay. Requests are at most 24 KiB and 20 questions; responses at most 128 KiB. Discovery carries
+exact source spans, role, and bounded preceding visible user direction. A new user request can
+establish current scope; preceding direction grounds assistant plans without vetoing that request.
+It processes one chronological observation through selection/classification, scope/current reconciliation, and then
+that observation's report cursor; a later goal cannot affect an earlier report. Uncertain source,
+identity, scope, or current-task Choices abstain instead of mutating state. One request is in flight,
+at most three serial requests start per analysis cycle, default every 15 seconds, with a 10-second
+deadline. Successful unchanged evidence is not resent. Transient failures use bounded
 exponential backoff, Retry-After, three-attempt bursts, and five-minute cooldown/probe behavior.
 There is no lifetime request wall.
 
 Installing with a key automatically sends bounded relevant conversation/task/evidence excerpts to
-`https://api.typesafe.ai/v1/systemone`; this may incur TypeSafe charges. Credentials and raw remote
-responses are never checkpointed. Runtime has no simulated model or provider fallback.
+`https://api.typesafe.ai/v1/systemone`; this may incur TypeSafe charges. Original-delivery live
+validation used 16 requests. Separate completed repair-validation snapshot used 134 attempts
+(162,554 input and 29,207 output tokens, including two failed runs). User has authorized broader
+paid evaluation, but live runs remain explicitly finite and manual. Credentials and raw remote
+responses are never checkpointed. Checkpoints are trusted writable local session state: journal
+digests detect accidental or unrecomputed corruption, not deliberate edits that recompute them.
+Runtime has no simulated model or provider fallback.
 
 ## Supported passive evidence
 

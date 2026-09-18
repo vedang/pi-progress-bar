@@ -12,6 +12,8 @@ const help = (monitor: Monitor) => `Automatic progress monitor
 State: ${monitor.enabled ? "ON" : "OFF"}
 Analysis interval: ${monitor.interval}s
 Jev usage: ${monitor.usage.calls} calls • ${monitor.usage.inputTokens} input tokens • ${monitor.usage.outputTokens} output tokens
+Progress: ${monitor.progressState()}
+Diagnostics: ${monitor.diagnosticSummary()}
 
 ${COMMANDS}
 

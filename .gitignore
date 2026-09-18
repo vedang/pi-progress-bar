@@ -1,2 +1,5 @@
 .pi/subagents/
 .agents/plans/
+
+# bv (beads viewer) local config and caches
+.bv/

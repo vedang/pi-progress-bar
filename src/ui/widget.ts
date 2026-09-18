@@ -52,7 +52,7 @@ export function paint(ctx: ExtensionContext, monitor: Monitor) {
         theme.fg("accent", bar + label),
         theme.fg(
           "muted",
-          `Task: ${plain(task?.text ?? "unknown").slice(0, 160)}`,
+          `Task: ${plain(task?.text ?? "unknown").slice(0, 160)}${task?.beads ? ` • Beads ${plain(task.beads.id)}${task.beads.conflict ? " (export disagreement)" : ""}` : ""}`,
         ),
         theme.fg(
           "muted",

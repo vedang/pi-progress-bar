@@ -30,6 +30,13 @@ export interface SourceSnapshot {
 export interface Task extends SourceTask {
   id: string;
   included: boolean;
+  beads?: {
+    id: string;
+    title: string;
+    exportStatus?: string;
+    issueType?: string;
+    conflict: boolean;
+  };
 }
 export interface Ledger {
   sourceId: string;

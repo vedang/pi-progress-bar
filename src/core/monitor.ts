@@ -7,6 +7,11 @@ import {
 import { type HealthResult, healthSnapshot } from "../analysis/health";
 import { AnalysisScheduler } from "../analysis/scheduler";
 import {
+  type BeadsExport,
+  enrichBeadsTasks,
+  readBeadsExport,
+} from "../sources/beads";
+import {
   Conversation,
   type ConversationCheckpoint,
   type ConversationSource,
@@ -57,6 +62,7 @@ export class Monitor {
   private evidenceIdentity?: string;
   private scheduling = false;
   private scopedCandidates = new Set<string>();
+  private beadsExport?: BeadsExport;
 
   constructor(
     private readonly changed: () => void,
@@ -110,6 +116,8 @@ export class Monitor {
       undefined,
       this.conversation.rehydrate(source),
     );
+    if (this.beadsExport)
+      ledger.tasks = enrichBeadsTasks(ledger.tasks, this.beadsExport);
     this.source = source;
     this.ledger = ledger;
     this.conversation.select(source);
@@ -140,6 +148,11 @@ export class Monitor {
             candidates,
             scopeAnswers(candidates, result),
           );
+          if (this.beadsExport)
+            this.ledger.tasks = enrichBeadsTasks(
+              this.ledger.tasks,
+              this.beadsExport,
+            );
           this.scopedCandidates.add(scopeProposal.candidate.id);
           this.save();
         });
@@ -227,6 +240,7 @@ export class Monitor {
     this.runtimeIdentity = `runtime:${this.epoch}`;
     this.gateway.enable(this.runtimeIdentity);
     if (this.branch) this.conversation.update(this.branch());
+    void this.refreshBeads(cwd);
     this.start(cwd);
     this.save();
     this.scheduleAnalysis();
@@ -239,11 +253,27 @@ export class Monitor {
     this.clearRuntime();
   }
 
+  private async refreshBeads(cwd: string) {
+    const epoch = this.epoch;
+    const source = await readBeadsExport(cwd);
+    if (!this.enabled || epoch !== this.epoch) return;
+    this.beadsExport = source;
+    if (this.ledger) {
+      this.ledger = {
+        ...this.ledger,
+        tasks: enrichBeadsTasks(this.ledger.tasks, source),
+      };
+      this.save();
+      this.changed();
+    }
+  }
+
   private start(cwd: string) {
     if (!this.enabled) return;
     if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => {
       if (this.branch) this.conversation.update(this.branch());
+      void this.refreshBeads(cwd);
       this.scheduleAnalysis();
     }, this.interval * 1000);
     void cwd;

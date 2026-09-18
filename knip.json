@@ -3,6 +3,7 @@
   "entry": [
     "vitest.config.unit.ts",
     "vitest.config.integration.ts",
+    "vitest.config.live.ts",
     "__tests__/fixtures/pi-registration-probe.ts"
   ],
   "project": ["src/**/*.ts", "__tests__/**/*.ts", "vitest.config.*.ts"],

@@ -40,6 +40,10 @@ test-unit:
 test-integration:
 	./node_modules/.bin/vitest run --config vitest.config.integration.ts
 
+.PHONY: test-live
+test-live: ## Paid Jev production replay (requires PROGRESS_LIVE=1 and TYPESAFE_API_KEY)
+	./node_modules/.bin/vitest run --config vitest.config.live.ts
+
 .PHONY: test
 test: test-unit ## Run deterministic unit then integration suites
 	@$(MAKE) test-integration

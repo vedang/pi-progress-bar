@@ -3,3 +3,11 @@
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# Dependencies, local secrets, and generated output
+.env
+node_modules/
+dist/
+coverage/
+.pi-subagents/
+.pi/extensions/simplify-code.json

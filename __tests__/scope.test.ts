@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countReported } from "../src/core/ledger";
+import { countReported, reconcileLedger } from "../src/core/ledger";
 import type { Ledger, SourceTask } from "../src/core/types";
 import {
   applyScopeRelations,
@@ -53,6 +53,36 @@ const candidate = (text: string): SourceTask => ({
 });
 
 describe("automatic evolving scope", () => {
+  it.each(["same", "revised"] as const)(
+    "preserves the full production ID in %s relations",
+    (kind) => {
+      const initial = reconcileLedger(undefined, {
+        sourceId: "conversation:later",
+        kind: "conversation",
+        revision: "source-1",
+        complete: true,
+        tasks: [{ ...candidate("Implement parser"), status: "done" }],
+      });
+      const id = initial.tasks[0]?.id;
+      if (!id) throw new Error("Missing generated task ID");
+      expect(id).toContain(":task:1");
+      const next = applyScopeRelations(
+        initial,
+        [candidate("Implement parser with recovery")],
+        { 0: `${kind}:${id}`, current: "candidate:0", scope: "continue" },
+      );
+      expect(next.currentTaskId).toBe(id);
+      expect(next.tasks).toHaveLength(1);
+      expect(next.tasks[0]).toMatchObject({
+        id,
+        text:
+          kind === "same"
+            ? "Implement parser"
+            : "Implement parser with recovery",
+        status: kind === "same" ? "done" : "not-started",
+      });
+    },
+  );
   it("reuses semantic identity for paraphrases and adds genuine work", () => {
     const next = applyScopeRelations(
       ledger(),

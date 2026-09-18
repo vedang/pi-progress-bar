@@ -291,7 +291,9 @@ export function applyScopeRelations(
       candidateIds.set(index, id);
       changed = true;
     } else {
-      const [kind, id] = relation.split(":", 2);
+      const separator = relation.indexOf(":");
+      const kind = relation.slice(0, separator);
+      const id = relation.slice(separator + 1);
       const prior = id ? existing.get(id) : undefined;
       if (!prior?.included) return { ...ledger, currentTaskId: undefined };
       target = prior;

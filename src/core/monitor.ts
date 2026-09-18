@@ -64,7 +64,10 @@ const validInterval = (seconds: number) =>
 
 interface ScopeWork {
   proposalId: string;
+  /** Scope request basis; result applies only if its semantic identity survives. */
   starting: Ledger;
+  identity: string;
+  epoch: number;
   candidates: SourceTask[];
   chunks: ScopeChunk[];
   index: number;
@@ -78,6 +81,28 @@ interface HealthWork {
   index: number;
   result?: ValidatedResult;
 }
+
+/** Excludes display-only Beads enrichment; includes every scope authority field. */
+const scopeIdentity = (ledger: Ledger) =>
+  JSON.stringify({
+    sourceId: ledger.sourceId,
+    sourceRevision: ledger.sourceRevision,
+    scopeRevision: ledger.scopeRevision,
+    currentTaskId: ledger.currentTaskId,
+    nextTaskId: ledger.nextTaskId,
+    stale: ledger.stale,
+    tasks: ledger.tasks.map((task) => ({
+      id: task.id,
+      text: task.text,
+      status: task.status,
+      criteria: task.criteria,
+      included: task.included,
+      anchor: task.anchor,
+      revision: task.revision,
+      ref: task.ref,
+      criterionRefs: task.criterionRefs,
+    })),
+  });
 
 /** Automatic, passive current-branch controller. */
 export class Monitor {
@@ -228,8 +253,16 @@ export class Monitor {
     this.save();
   }
 
+  private scopeWorkIsCurrent(work: ScopeWork) {
+    return (
+      this.epoch === work.epoch &&
+      !!this.ledger &&
+      scopeIdentity(this.ledger) === work.identity
+    );
+  }
+
   private scheduleScope() {
-    if (this.scopeWork && this.ledger !== this.scopeWork.starting)
+    if (this.scopeWork && !this.scopeWorkIsCurrent(this.scopeWork))
       this.scopeWork = undefined;
     if (!this.scopeWork && this.ledger) {
       const proposal = this.conversation.proposals.find(
@@ -244,6 +277,8 @@ export class Monitor {
           this.scopeWork = {
             proposalId: `${proposal.candidate.id}:${proposal.candidate.hash}`,
             starting: this.ledger,
+            identity: scopeIdentity(this.ledger),
+            epoch: this.epoch,
             candidates: proposal.snapshot.tasks,
             chunks: scopeChunks(this.ledger, proposal.snapshot.tasks),
             index: 0,
@@ -269,7 +304,7 @@ export class Monitor {
       if (
         !this.enabled ||
         this.scopeWork !== work ||
-        this.ledger !== work.starting ||
+        !this.scopeWorkIsCurrent(work) ||
         work.index !== index
       )
         return;
@@ -299,17 +334,17 @@ export class Monitor {
         work.currents.size === 1
           ? ([...work.currents][0] ?? "unknown")
           : "unknown";
-      this.ledger = applyScopeRelations(work.starting, work.candidates, {
+      const live = this.ledger;
+      if (!live || !this.scopeWorkIsCurrent(work)) return;
+      const next = applyScopeRelations(live, work.candidates, {
         ...work.relations,
         current,
         scope,
         states: work.states,
       });
-      if (this.beadsExport)
-        this.ledger.tasks = enrichBeadsTasks(
-          this.ledger.tasks,
-          this.beadsExport,
-        );
+      this.ledger = this.beadsExport
+        ? { ...next, tasks: enrichBeadsTasks(next.tasks, this.beadsExport) }
+        : next;
       this.scopedCandidates.add(work.proposalId);
       this.scopeWork = undefined;
       this.save();

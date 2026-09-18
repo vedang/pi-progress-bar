@@ -203,7 +203,7 @@ describe("ordered conversation reports", () => {
     expect(countReported(ledger).done).toBe(23);
   });
 
-  it.each(["hash", "index", "task", "current"])(
+  it.each(["hash", "index", "task", "current", "valid-status"])(
     "discards corrupted partial report %s without trusting its states",
     (mutation) => {
       const f = fixture(23);
@@ -219,6 +219,11 @@ describe("ordered conversation reports", () => {
       if (mutation === "index") partial.index = 201;
       if (mutation === "task")
         partial.states.push({ taskId: "invented", status: "done" });
+      if (mutation === "valid-status") {
+        const state = partial.states[0];
+        if (!state) throw new Error("Missing accepted status");
+        state.status = "in-progress";
+      }
       if (mutation === "current")
         partial.currents.push({
           index: 201,

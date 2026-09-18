@@ -138,6 +138,23 @@ type Entry = {
   message: { role: "user" | "assistant"; content: string };
 };
 
+function beyondWindow(entries: Entry[], enabled: boolean): Entry[] {
+  if (!enabled) return entries;
+  const first = entries[0];
+  if (!first) throw new Error("Missing initial entry");
+  const result = [first];
+  for (let i = 0; i < 520; i++)
+    result.push({
+      type: "message",
+      id: `padding-${i}`,
+      parentId: result.at(-1)?.id ?? null,
+      message: { role: "assistant", content: "An unrelated explanatory note." },
+    });
+  for (const entry of entries.slice(1))
+    result.push({ ...entry, parentId: result.at(-1)?.id ?? null });
+  return result;
+}
+
 function runtime(initial: Entry[] = replayEntries(4), respond = verdict) {
   vi.useFakeTimers();
   vi.stubEnv("TYPESAFE_API_KEY", "offline-fixture-key");
@@ -385,38 +402,56 @@ describe("fresh-session ordered production controller", () => {
     }
   });
 
-  it("keeps an unresolved denominator historical after reload and provider backoff", async () => {
-    const r = runtime(replayEntries(4), (request) => {
-      const result = verdict(request);
-      if (request.questions.scope)
-        result.answers.scope = {
-          type: "choice",
-          choice: "ambiguous",
-          confidence: 1,
-          probabilities: { continue: 0, "new-goal": 0, ambiguous: 1 },
-        };
-      return result;
-    });
-    try {
-      for (let i = 0; i < 50; i++) {
-        r.monitor.scheduleAnalysis();
-        await vi.advanceTimersByTimeAsync(1);
+  it.each([false, true])(
+    "keeps unresolved history across reload/backoff beyond window=%s",
+    async (long) => {
+      const r = runtime(beyondWindow(replayEntries(4), long), (request) => {
+        const result = verdict(request);
+        if (request.questions.scope)
+          result.answers.scope = {
+            type: "choice",
+            choice: "ambiguous",
+            confidence: 1,
+            probabilities: { continue: 0, "new-goal": 0, ambiguous: 1 },
+          };
+        return result;
+      });
+      try {
+        for (let i = 0; i < 1500; i++) {
+          r.monitor.scheduleAnalysis();
+          await vi.advanceTimersByTimeAsync(1);
+          if (/historical|unresolved/.test(renderWidget(r.monitor)[0] ?? ""))
+            break;
+        }
+        expect(renderWidget(r.monitor)[0]).toMatch(/historical|unresolved/);
+        const checkpoint = structuredClone(r.checkpoints.at(-1));
+        const ref = checkpoint?.unresolvedScope?.candidates[0];
+        if (!ref) throw new Error("Missing unresolved reference");
+        Object.assign(ref, {
+          text: "PRIVATE-UNRESOLVED-TEXT",
+          probabilities: { done: 1 },
+        });
+        expect(checkpoint).toBeDefined();
+        r.fetch.mockResolvedValueOnce(new Response(null, { status: 503 }));
+        await r.monitor.restore("/nonexistent-offline-fixture", checkpoint);
+        expect(JSON.stringify(r.monitor.checkpoint())).not.toContain(
+          "PRIVATE-UNRESOLVED-TEXT",
+        );
+        expect(renderWidget(r.monitor)[0]).toMatch(/historical|unresolved/);
+        await vi.advanceTimersByTimeAsync(20);
+        expect(renderWidget(r.monitor)[0]).toMatch(/historical|unresolved/);
+      } finally {
+        r.monitor.stop();
       }
-      expect(renderWidget(r.monitor)[0]).toMatch(/historical|unresolved/);
-      const checkpoint = r.checkpoints.at(-1);
-      expect(checkpoint).toBeDefined();
-      r.fetch.mockResolvedValueOnce(new Response(null, { status: 503 }));
-      await r.monitor.restore("/nonexistent-offline-fixture", checkpoint);
-      expect(renderWidget(r.monitor)[0]).toMatch(/historical|unresolved/);
-      await vi.advanceTimersByTimeAsync(20);
-      expect(renderWidget(r.monitor)[0]).toMatch(/historical|unresolved/);
-    } finally {
-      r.monitor.stop();
-    }
-  });
+    },
+  );
 
   it.each([
     "valid",
+    "valid-long",
+    "extra-fields",
+    "forged-anchor",
+    "valid-relation",
     "hash",
     "index",
     "relation",
@@ -429,21 +464,24 @@ describe("fresh-session ordered production controller", () => {
       if (!original) throw new Error("Missing initial goal");
       let rejectLater = false;
       const r = runtime(
-        [
-          original,
-          {
-            type: "message",
-            id: "29acae97",
-            parentId: original.id,
-            message: {
-              role: "user",
-              content: Array.from(
-                { length: 27 },
-                (_, i) => `${i + 1}. New task ${i + 1}`,
-              ).join("\n"),
+        beyondWindow(
+          [
+            original,
+            {
+              type: "message",
+              id: "29acae97",
+              parentId: original.id,
+              message: {
+                role: "user",
+                content: Array.from(
+                  { length: 27 },
+                  (_, i) => `${i + 1}. New task ${i + 1}`,
+                ).join("\n"),
+              },
             },
-          },
-        ],
+          ],
+          mutation === "valid-long",
+        ),
         (request) => {
           const result = verdict(request);
           if (rejectLater && request.questions.scope)
@@ -473,10 +511,30 @@ describe("fresh-session ordered production controller", () => {
         if (mutation === "relation")
           partial.relations[0] = { index: 0, relation: "same:invented" };
         if (mutation === "missing-relation") partial.relations.pop();
+        if (mutation === "valid-relation") {
+          const relation = partial.relations[0];
+          if (!relation) throw new Error("Missing relation");
+          relation.relation = `same:${checkpoint?.tasks[0]?.id}`;
+        }
+        if (mutation === "forged-anchor") {
+          const span = partial.source.spans[0];
+          if (!span) throw new Error("Missing span");
+          span.id = "forged";
+        }
+        if (mutation === "extra-fields") {
+          Object.assign(partial.source, { text: "PRIVATE-SOURCE-TEXT" });
+          Object.assign(partial.source.spans[0] ?? {}, {
+            text: "PRIVATE-SPAN-TEXT",
+            probabilities: { done: 1 },
+          });
+        }
         expect(JSON.stringify(checkpoint)).not.toContain("New task");
         const before = r.requests.length;
         rejectLater = mutation === "later-ambiguous";
         await r.monitor.restore("/nonexistent-offline-fixture", checkpoint);
+        expect(JSON.stringify(r.monitor.checkpoint())).not.toMatch(
+          /PRIVATE-(SOURCE|SPAN)-TEXT/,
+        );
         if (rejectLater) {
           for (let i = 0; i < 50; i++) {
             r.monitor.scheduleAnalysis();
@@ -500,8 +558,8 @@ describe("fresh-session ordered production controller", () => {
         expect(resumed.length).toBeGreaterThan(0);
         expect(
           resumed.every((request) => !Object.hasOwn(request.questions, "0")),
-        ).toBe(mutation === "valid");
-        if (mutation !== "valid")
+        ).toBe(["valid", "valid-long", "extra-fields"].includes(mutation));
+        if (!["valid", "valid-long", "extra-fields"].includes(mutation))
           expect(
             r.monitor
               .diagnostics()

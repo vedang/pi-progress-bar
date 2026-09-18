@@ -37,21 +37,49 @@ enable/pause/resume aliases, or compatibility commands exist.
 - **Reported progress:** completed / active automatically discovered tasks. Explicit conversation
   reports own done/reopen/cancel state; cancelled work leaves the active denominator and can re-enter
   when explicitly reopened. Percentage is never effort, ETA, or correctness.
-- **Requirements / acceptance:** task-local Jev Score/Choice judgments rendered with local labels.
-  A score of 2.7 displays `mostly clear`; no model writes labels or summaries.
-- **Red test:** independent applicability and evidence. Labels include `Not needed`, `Reported red`,
-  `Observed red`, contradiction, and unknown.
+- **Task card:** Jev-selected current work is authoritative for analysis. When that selection is
+  unknown, the widget can show a deterministic **Selected task (current unknown)** reference. When
+  an assessed task completes or replacement assessment is pending, it keeps a clearly labelled
+  **Last task • retained last assessed as-of ...** card. This is display continuity only: it never
+  sets `currentTaskId`, changes reported completion, or supplies an evidence link. At assessment
+  time its five display labels are copied as immutable presentation values, so later evidence or
+  health objects cannot relabel a retained card. Cards are memory-only and disappear when their
+  original task span is unavailable on the active branch.
+- **Requirements:** task-local Jev clarity score rendered with local labels (`unknown`, `unclear`,
+  `partly clear`, `mostly clear`, or `clear`). It measures whether supplied requirements are usable,
+  not implementation quality.
+- **Acceptance:** task-local Jev judgment of observable success conditions (`explicit`, `partial`,
+  `not-found-in-context`, or `unknown`). It does not claim tests exist or pass.
+- **New red test:** whether a new failing regression would be useful for this task (`Needed`,
+  `Not needed`, or `Unknown`), distinct from whether any test was observed.
+- **Red evidence:** task-linked provenance: `Reported red` is an explicit agent assertion;
+  `Observed red` is bounded runner evidence; contradiction and unknown remain distinct.
 - **Implementation:** per-criterion Jev Choices aggregate locally to `appears complete`, `partial`,
   `contradicted`, or `unverified`. This is evidence assessment, not proof of arbitrary correctness.
+  `unknown` and `unverified` mean supplied evidence was insufficient, not failure; a reported-done
+  task can therefore remain unverified.
 - **Beads:** exact issue IDs already present in admitted tasks may be enriched from the conventional
   workspace `.beads/issues.jsonl`. Export status can show disagreement but never changes reported
   completion or imports the backlog.
 
+- **Last Jev call:** widget and bare `/progress` show the last actual HTTP dispatch for this
+  monitoring runtime, as local date/time and age, or `Never`. It updates before every dispatched
+  fetch, including failure/timeout, but not on redraws, scheduled ticks, cached unchanged input,
+  missing credentials, or retry-backoff. It is memory-only and resets for a fresh runtime.
+
+Substantive user directives, questions, explanation/status/plan requests and corrections are all
+supplied to Jev as possible work using exact source spans. Jev classifies a task as an **action**
+deliverable or a **response** deliverable; code never guesses that kind from wording. Jev also
+decides whether each is new, revised, same, context, or ambiguous. Approvals/clarifications can
+remain linked context; quoted examples, reports, hypotheticals and empty turns do not fabricate
+work. Assistant plans remain eligible only with applicable user grounding.
+
 Unknown current task, ambiguous scope, missing originals, stale evidence, unsupported formats, or
 overflow remain unknown/stale rather than guessed. `/progress` and the widget show a local
 progress state (`Catching up history`, `Scope unresolved`, `Current task unknown`, `No new
-evidence`, or transport/controller failure) plus capped aggregate reason-code counts. These
-diagnostics contain neither conversation text nor credentials.
+evidence`, or transport/controller failure) plus capped aggregate reason-code counts. Bare
+`/progress` also shows current service error/backoff wording when present. These diagnostics contain
+neither conversation text nor credentials.
 
 ## Runtime bounds and privacy
 
@@ -63,10 +91,16 @@ source references are rehydrated only from the live active branch, including aft
 one discovery window. Exact original offsets are preserved. Partial scope/report journals retain
 only canonical source ranges, IDs, enum decisions, and request identities; an unkeyed digest detects
 accidental or unrecomputed corruption before replay. Requests are at most 24 KiB and 20 questions; responses at most 128 KiB. Discovery carries
-exact source spans, role, and bounded preceding visible user direction. A new user request can
+exact source spans, role, and bounded preceding visible user direction. New checkpoints use schema
+v3 and require explicit `action` or `response` work kinds for every source span and saved task;
+legacy shapes are rejected rather than migrated. A new user request can
 establish current scope; preceding direction grounds assistant plans without vetoing that request.
 It processes one chronological observation through selection/classification, scope/current reconciliation, and then
-that observation's report cursor; a later goal cannot affect an earlier report. Uncertain source,
+that observation's report cursor; a later goal cannot affect an earlier report. Action-task reports
+remain bounded multi-task batches. Each Jev-classified response task uses one small target-local
+report request with full lifecycle and current-task choices, so an answer about unfinished
+implementation is not confused with completing that implementation; this can add one paid request
+per response task. Uncertain source,
 identity, scope, or current-task Choices abstain instead of mutating state. One request is in flight,
 at most three serial requests start per analysis cycle, default every 15 seconds, with a 10-second
 deadline. Successful unchanged evidence is not resent. Transient failures use bounded
@@ -76,9 +110,13 @@ There is no lifetime request wall.
 Installing with a key automatically sends bounded relevant conversation/task/evidence excerpts to
 `https://api.typesafe.ai/v1/systemone`; this may incur TypeSafe charges. Original-delivery live
 validation used 16 requests. Separate completed repair-validation snapshot used 134 attempts
-(162,554 input and 29,207 output tokens, including two failed runs). User has authorized broader
-paid evaluation, but live runs remain explicitly finite and manual. Credentials and raw remote
-responses are never checkpointed. Checkpoints are trusted writable local session state: journal
+(162,554 input and 29,207 output tokens, including two failed runs).
+Retained-task/conversational-work validation used 395 attempts (415,360 input and
+70,355 output tokens), including failed/interrupted runs and diagnostic probes.
+The final full suite passed 15/15 with 53 requests (56,701 input / 9,580 output tokens);
+No probabilistic accuracy guarantee is implied. User has authorized broader
+paid evaluation, but live runs remain explicitly finite and manual. Credentials, raw remote responses, retained card text and last-dispatch timestamps are never
+checkpointed. Checkpoints are trusted writable local session state: journal
 digests detect accidental or unrecomputed corruption, not deliberate edits that recompute them.
 Runtime has no simulated model or provider fallback.
 

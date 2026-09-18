@@ -161,7 +161,9 @@ export function findCandidates(trajectory: Trajectory): Candidate[] {
     const structured = lines.some((m) =>
       /^\s*(?:\d+[.)]\s+|[-*+]\s+\[[ xX]\]\s+)/.test(m[0]),
     );
-    if (structured) {
+    // Ordinary bullets still need separate exact spans, but retain semantic
+    // classification rather than the numbered/checklist direct-scope shortcut.
+    if (structured || lines.some((m) => /^\s*[-*+]\s+/.test(m[0]))) {
       let fenced = false;
       for (const line of lines) {
         if (/^\s*(```|~~~)/.test(line[0])) {

@@ -1,6 +1,10 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "entry": ["vitest.config.unit.ts", "vitest.config.integration.ts"],
+  "entry": [
+    "vitest.config.unit.ts",
+    "vitest.config.integration.ts",
+    "__tests__/fixtures/pi-registration-probe.ts"
+  ],
   "project": ["src/**/*.ts", "__tests__/**/*.ts", "vitest.config.*.ts"],
   "ignoreDependencies": ["@biomejs/biome"],
   "ignoreBinaries": ["make"]

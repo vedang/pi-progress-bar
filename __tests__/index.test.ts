@@ -253,6 +253,123 @@ describe("Pi host integration", () => {
     await h.event("session_shutdown");
   });
 
+  it("discovers conversation tasks and applies ordered reports without counting intentions", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
+    const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      const report = String(body.state?.report?.text ?? "");
+      const answers = Object.fromEntries(
+        Object.entries(body.questions).map(([id, raw], i) => {
+          const q = raw as {
+            type: string;
+            criteria: string[] | Record<string, string>;
+          };
+          if (q.type === "score") {
+            const levels = q.criteria as string[];
+            return [
+              id,
+              {
+                type: "score",
+                score: 0,
+                legend: Object.fromEntries(
+                  levels.map((s, j) => [String(j), s]),
+                ),
+                probabilities: Object.fromEntries(
+                  levels.map((_, j) => [String(j), j === 0 ? 1 : 0]),
+                ),
+                confidence: 1,
+              },
+            ];
+          }
+          const keys = Object.keys(q.criteria);
+          let choice =
+            keys.find(
+              (key) => !["none", "ambiguous", "unknown"].includes(key),
+            ) ?? keys[0];
+          if (keys.includes("task")) choice = "task";
+          if (keys.includes("not-a-report"))
+            choice = report.includes("Reopen")
+              ? i === 0
+                ? "reopened"
+                : "not-a-report"
+              : report.startsWith("Finished") && i < 2
+                ? "done"
+                : "not-a-report";
+          return [
+            id,
+            {
+              type: "choice",
+              choice,
+              probabilities: Object.fromEntries(
+                keys.map((key) => [key, key === choice ? 1 : 0]),
+              ),
+              confidence: 1,
+            },
+          ];
+        }),
+      );
+      return Response.json({
+        model: body.model,
+        answers,
+        usage: { input_tokens: 100, output_tokens: 0 },
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const h = await harness();
+    const entry = (id: string, text: string) => ({
+      type: "message",
+      id,
+      parentId: null,
+      timestamp: "2026-09-18T00:00:00Z",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text }],
+        timestamp: 1,
+      },
+    });
+    const plan = entry(
+      "plan",
+      "Plan:\n1. Research docs\n2. Build widget\n3. Write tests",
+    );
+    h.setBranch([plan]);
+    await h.event("session_start");
+    await h.command("enable");
+    await vi.advanceTimersByTimeAsync(60_000);
+    await h.command("source conversation");
+    expect(h.render().join(" ")).toMatch(/0\s*\/\s*3/);
+    await h.command("enable");
+    const done = entry(
+      "r-done",
+      "Finished research and build. Tests remain pending.",
+    );
+    h.setBranch([plan, done]);
+    await h.event("message_end");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.render().join(" ")).toMatch(/2\s*\/\s*3/);
+    const intent = entry(
+      "r-intent",
+      "I will finish Write tests next; example: all tasks done.",
+    );
+    h.setBranch([plan, done, intent]);
+    await h.event("message_end");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.render().join(" ")).toMatch(/2\s*\/\s*3/);
+    const reopen = entry(
+      "r-reopen",
+      "Reopen Research docs; discovery incomplete.",
+    );
+    h.setBranch([plan, done, intent, reopen]);
+    await h.event("message_end");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.render().join(" ")).toMatch(/1\s*\/\s*3/);
+    expect(JSON.stringify(h.api.appendEntry.mock.calls)).not.toContain(
+      "Finished research",
+    );
+    await h.event("session_shutdown");
+    expect(h.api.sendMessage).not.toHaveBeenCalled();
+    expect(h.api.exec).not.toHaveBeenCalled();
+  });
+
   it("does not use terminal-only widgets in RPC and never starts remote inference", async () => {
     const h = await harness("rpc");
     await h.event("session_start");

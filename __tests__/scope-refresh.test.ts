@@ -48,7 +48,8 @@ function fixture() {
   const first = candidates[0];
   const second = candidates[1];
   if (!first || !second) throw new Error("Missing fixture candidates");
-  const monitor = new Monitor(vi.fn(), vi.fn());
+  const persist = vi.fn();
+  const monitor = new Monitor(vi.fn(), persist);
   monitor.ledger = reconcileLedger(undefined, proposal(first).snapshot);
   monitor.conversation.proposals = [proposal(second)];
   // No turnOn: only exercise controller scheduling. No gateway or network.
@@ -62,7 +63,7 @@ function fixture() {
       if (purpose === "scope") jobs.push({ request, admit });
     },
   );
-  return { monitor, jobs };
+  return { monitor, jobs, persist };
 }
 
 function respond(job: {
@@ -103,6 +104,32 @@ function respond(job: {
 }
 
 describe("scope transactions across background refresh", () => {
+  it("preserves last valid Beads enrichment when export is unavailable", async () => {
+    const { monitor } = fixture();
+    if (!monitor.ledger) throw new Error("Missing ledger");
+    const beads = {
+      id: "proj-123",
+      title: "Previously read export",
+      conflict: false,
+    };
+    const task = monitor.ledger.tasks[0];
+    if (!task) throw new Error("Missing task");
+    task.beads = beads;
+    monitor.setInterval(15, "/offline-fixture");
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(monitor.ledger.tasks[0]?.beads).toEqual(beads);
+    monitor.stop();
+  });
+
+  it("does not append checkpoint on unchanged or unavailable enrichment refresh", async () => {
+    const { monitor, persist } = fixture();
+    monitor.conversation.proposals = [];
+    monitor.setInterval(15, "/offline-fixture");
+    persist.mockClear();
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(persist).not.toHaveBeenCalled();
+    monitor.stop();
+  });
   it("admits a valid scope result after timer-driven unavailable Beads refresh", async () => {
     const { monitor, jobs } = fixture();
     const readsBefore = vi.mocked(readBeadsExport).mock.calls.length;

@@ -238,6 +238,40 @@ describe("explicit report questions and atomic interpretation", () => {
       );
     }
   });
+  it.each(["done", "reopened", "cancelled"])(
+    "does not transfer weak-confidence %s status",
+    (choice) => {
+      if (!report) throw new Error("missing fixture");
+      const request = reportRequest(ledger, report);
+      const answers = Object.fromEntries(
+        Object.entries(request.questions).map(([id, question]) => {
+          const keys = Object.keys(question.criteria);
+          const selected = id === "__current" ? "unknown" : choice;
+          return [
+            id,
+            {
+              type: "choice" as const,
+              choice: selected,
+              confidence: 0.1,
+              probabilities: Object.fromEntries(
+                keys.map((key) => [
+                  key,
+                  key === selected ? 0.3 : 0.7 / (keys.length - 1),
+                ]),
+              ),
+            },
+          ];
+        }),
+      );
+      const states = reportStates(ledger, request, {
+        model: request.model,
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+      expect(Object.values(states)).not.toContain(choice);
+    },
+  );
+
   it("maps no-report to no update and ambiguous to conflict without invented task IDs", () => {
     if (!report) throw new Error("missing fixture");
     const request = reportRequest(ledger, report);

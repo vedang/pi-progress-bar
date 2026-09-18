@@ -53,6 +53,30 @@ const candidate = (text: string): SourceTask => ({
 });
 
 describe("automatic evolving scope", () => {
+  it.each(["continue", "new-goal"] as const)(
+    "rejects entire %s transaction with mixed ambiguous task relations",
+    (scope) => {
+      const before = ledger();
+      const next = applyScopeRelations(
+        before,
+        [candidate("New one"), candidate("Unclear two")],
+        { 0: "new", 1: "ambiguous", current: "candidate:0", scope },
+      );
+      expect(next.tasks).toEqual(before.tasks);
+      expect(next.scopeRevision).toBe(before.scopeRevision);
+      expect(next.currentTaskId).toBeUndefined();
+    },
+  );
+  it("does not archive known scope when a new goal admits no tasks", () => {
+    const before = ledger();
+    const next = applyScopeRelations(before, [candidate("Only context")], {
+      0: "context",
+      current: "unknown",
+      scope: "new-goal",
+    });
+    expect(next.tasks).toEqual(before.tasks);
+    expect(next.scopeRevision).toBe(before.scopeRevision);
+  });
   it.each(["same", "revised"] as const)(
     "preserves the full production ID in %s relations",
     (kind) => {

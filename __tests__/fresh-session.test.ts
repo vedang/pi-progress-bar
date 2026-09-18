@@ -4,8 +4,9 @@ import type {
   ValidatedResult,
 } from "../src/analysis/gateway";
 import { countReported } from "../src/core/ledger";
-import { Monitor } from "../src/core/monitor";
+import { type Checkpoint, Monitor } from "../src/core/monitor";
 import { replayEntries } from "./fixtures/live-session";
+import { renderWidget } from "./fixtures/render-widget";
 
 interface TestState {
   candidates?: {
@@ -137,22 +138,25 @@ type Entry = {
   message: { role: "user" | "assistant"; content: string };
 };
 
-function runtime(initial: Entry[] = replayEntries(4)) {
+function runtime(initial: Entry[] = replayEntries(4), respond = verdict) {
   vi.useFakeTimers();
   vi.stubEnv("TYPESAFE_API_KEY", "offline-fixture-key");
   const requests: EvaluationRequest[] = [];
   const fetch = vi.fn(async (_url: string, init?: RequestInit) => {
     const request = JSON.parse(String(init?.body)) as EvaluationRequest;
     requests.push(request);
-    return new Response(JSON.stringify(verdict(request)), { status: 200 });
+    return new Response(JSON.stringify(respond(request)), { status: 200 });
   });
   vi.stubGlobal("fetch", fetch);
   let entries = initial;
-  const monitor = new Monitor(vi.fn(), vi.fn());
+  const checkpoints: Checkpoint[] = [];
+  const monitor = new Monitor(vi.fn(), (checkpoint) =>
+    checkpoints.push(structuredClone(checkpoint)),
+  );
   monitor.observe(() => entries);
   monitor.turnOn("/nonexistent-offline-fixture");
   const settle = async (id: string) => {
-    for (let i = 0; i < 300; i++) {
+    for (let i = 0; i < 1500; i++) {
       monitor.scheduleAnalysis();
       await vi.advanceTimersByTimeAsync(1);
       if (monitor.conversation.cursor?.id === id) return;
@@ -174,6 +178,7 @@ function runtime(initial: Entry[] = replayEntries(4)) {
   };
   return {
     monitor,
+    checkpoints,
     requests,
     fetch,
     settle,
@@ -263,6 +268,215 @@ describe("fresh-session ordered production controller", () => {
     }
   });
 
+  it("does not let an ambiguous first source permanently block a later clear user plan", async () => {
+    const r = runtime(replayEntries(4), (request) => {
+      const result = verdict(request);
+      const state = request.state as TestState;
+      if (
+        request.questions.source &&
+        state.candidates?.[0]?.entryId === "old-goal"
+      ) {
+        const question = request.questions.source;
+        result.answers.source = {
+          type: "choice",
+          choice: "none",
+          confidence: 1,
+          probabilities: Object.fromEntries(
+            Object.keys(question.criteria).map((key) => [
+              key,
+              key === "none" ? 1 : 0,
+            ]),
+          ),
+        };
+      }
+      if (
+        request.questions.source &&
+        state.candidates?.[0]?.entryId === "55f2ddf0"
+      ) {
+        const id = state.candidates[0].id ?? "missing";
+        result.answers.source = {
+          type: "choice",
+          choice: id,
+          confidence: 1,
+          probabilities: Object.fromEntries(
+            Object.keys(request.questions.source.criteria).map((key) => [
+              key,
+              key === id ? 1 : 0,
+            ]),
+          ),
+        };
+      }
+      if (state.candidate?.entryId === "55f2ddf0") {
+        for (const [id, question] of Object.entries(request.questions))
+          result.answers[id] = {
+            type: "choice",
+            choice: "ambiguous",
+            confidence: 1,
+            probabilities: Object.fromEntries(
+              Object.keys(question.criteria).map((key) => [
+                key,
+                key === "ambiguous" ? 1 : 0,
+              ]),
+            ),
+          };
+      }
+      return result;
+    });
+    try {
+      await r.settle("29acae97");
+      expect(countReported(r.monitor.ledger)).toMatchObject({
+        done: 0,
+        total: 2,
+      });
+      expect(
+        r.monitor.ledger?.tasks.map((task) => task.text).join("\n"),
+      ).not.toContain("First lock scope");
+    } finally {
+      r.monitor.stop();
+    }
+  });
+
+  it("discloses ambiguous scope but can follow a later clear replacement goal", async () => {
+    const r = runtime(replayEntries(4), (request) => {
+      const result = verdict(request);
+      const state = request.state as TestState;
+      if (
+        request.questions.scope &&
+        state.candidates?.[0]?.ref?.entryId === "29acae97"
+      ) {
+        result.answers.scope = {
+          type: "choice",
+          choice: "ambiguous",
+          confidence: 1,
+          probabilities: { continue: 0, "new-goal": 0, ambiguous: 1 },
+        };
+      }
+      return result;
+    });
+    try {
+      for (let i = 0; i < 50; i++) {
+        r.monitor.scheduleAnalysis();
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      expect(r.monitor.progressState()).toMatch(
+        /uncertain|unknown|unresolved/i,
+      );
+      expect(renderWidget(r.monitor)[0]).toMatch(
+        /unresolved|historical|last settled|unknown/i,
+      );
+      expect(r.monitor.ledger?.currentTaskId).toBeUndefined();
+      r.append(
+        "replacement",
+        "1. Implement an unrelated CSV export feature instead of all previous goals.",
+      );
+      await r.settle("replacement");
+      expect(countReported(r.monitor.ledger)).toMatchObject({
+        done: 0,
+        total: 1,
+      });
+      expect(
+        r.monitor.ledger?.tasks.filter((task) => task.included)[0]?.text,
+      ).toContain("CSV export");
+    } finally {
+      r.monitor.stop();
+    }
+  });
+
+  it("restores between scope commit and report commit without repeating paid scope work", async () => {
+    const r = runtime(replayEntries(4));
+    try {
+      await r.settle("29acae97");
+      const checkpoint = r.checkpoints.find(
+        (cp) =>
+          cp.conversation?.cursor?.id === "old-done" &&
+          cp.tasks.some(
+            (task) => task.included && task.ref.entryId === "29acae97",
+          ),
+      );
+      expect(checkpoint).toBeDefined();
+      const before = r.requests.length;
+      await r.monitor.restore("/nonexistent-offline-fixture", checkpoint);
+      await r.settle("29acae97");
+      expect(countReported(r.monitor.ledger)).toMatchObject({
+        done: 0,
+        total: 2,
+      });
+      expect(
+        r.requests
+          .slice(before)
+          .filter(
+            (request) => request.questions.source || request.questions.scope,
+          ),
+      ).toHaveLength(0);
+    } finally {
+      r.monitor.stop();
+    }
+  });
+
+  it("does not lose queued goal changes when restoring across a 512-entry discovery window", async () => {
+    const entries: Entry[] = [
+      {
+        type: "message",
+        id: "old-goal",
+        parentId: null,
+        message: {
+          role: "user",
+          content: Array.from(
+            { length: 24 },
+            (_, i) => `${i + 1}. Initial task ${i + 1}`,
+          ).join("\n"),
+        },
+      },
+    ];
+    for (let i = 1; i <= 520; i++) {
+      const goal = replayEntries(4)[3];
+      const item: Entry =
+        i === 490 && goal
+          ? { ...goal, parentId: entries.at(-1)?.id ?? null }
+          : {
+              type: "message",
+              id: `noise-${i}`,
+              parentId: entries.at(-1)?.id ?? null,
+              message: {
+                role: "assistant",
+                content: "An unrelated explanatory note.",
+              },
+            };
+      entries.push(item);
+    }
+    const final = replayEntries().at(-1);
+    if (!final) throw new Error("Missing final report");
+    entries.push({ ...final, parentId: entries.at(-1)?.id ?? null });
+    const r = runtime(entries);
+    try {
+      await r.settle("2fd7cc52");
+      expect(countReported(r.monitor.ledger)).toMatchObject({
+        done: 2,
+        total: 2,
+      });
+      const checkpoint = r.checkpoints.find(
+        (cp) =>
+          cp.conversation?.discoveryCursor &&
+          cp.conversation.cursor?.id.startsWith("noise-") &&
+          cp.tasks.filter((task) => task.included).length === 24,
+      );
+      expect(checkpoint).toBeDefined();
+      await r.monitor.restore("/nonexistent-offline-fixture", checkpoint);
+      await r.settle("2fd7cc52");
+      expect(countReported(r.monitor.ledger)).toMatchObject({
+        done: 2,
+        total: 2,
+      });
+      expect(
+        r.monitor.ledger?.tasks
+          .filter((task) => task.included)
+          .every((task) => task.ref.entryId === "29acae97"),
+      ).toBe(true);
+    } finally {
+      r.monitor.stop();
+    }
+  }, 20_000);
+
   it("restores an evolved checkpoint without rediscovering paid history or duplicating tasks", async () => {
     const r = runtime(replayEntries());
     try {
@@ -338,6 +552,52 @@ describe("fresh-session ordered production controller", () => {
         done: 1,
         total: 1,
       });
+    } finally {
+      r.monitor.stop();
+    }
+  });
+
+  it("interprets completion in the initial selected observation, not just later messages", async () => {
+    const r = runtime(
+      [
+        {
+          type: "message",
+          id: "old-goal",
+          parentId: null,
+          message: {
+            role: "user",
+            content: "1. Implement parser (this task is already complete).",
+          },
+        },
+      ],
+      (request) => {
+        const result = verdict(request);
+        if ((request.state as TestState).observation?.id === "old-goal") {
+          for (const [id, question] of Object.entries(request.questions)) {
+            if (id !== "__current")
+              result.answers[id] = {
+                type: "choice",
+                choice: "done",
+                confidence: 1,
+                probabilities: Object.fromEntries(
+                  Object.keys(question.criteria).map((key) => [
+                    key,
+                    key === "done" ? 1 : 0,
+                  ]),
+                ),
+              };
+          }
+        }
+        return result;
+      },
+    );
+    try {
+      await r.settle("old-goal");
+      expect(countReported(r.monitor.ledger)).toMatchObject({
+        done: 1,
+        total: 1,
+      });
+      expect(r.monitor.ledger?.reportOrder).toBe(1);
     } finally {
       r.monitor.stop();
     }

@@ -2,17 +2,25 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import {
+  JevGateway,
   MAX_REQUEST_BYTES,
   MODEL,
   type ValidatedResult,
 } from "../../src/analysis/gateway";
-import { countReported } from "../../src/core/ledger";
+import { countReported, reconcileLedger } from "../../src/core/ledger";
 import { Monitor } from "../../src/core/monitor";
+import { proposal } from "../../src/sources/candidates";
+import { reportRequest, reportStates } from "../../src/sources/reports";
+import {
+  collectTrajectory,
+  findCandidates,
+  hashText,
+} from "../../src/sources/trajectory";
 import { replayEntries } from "../fixtures/live-session";
 
 // [tag:live_budget] All paid calls, including failed/aborted ones, pass this
 // process-wide cap. No retries/reruns or hidden direct semantic substitutes.
-const MAX_ATTEMPTS = 24;
+const MAX_ATTEMPTS = Number(process.env.PROGRESS_LIVE_MAX_ATTEMPTS ?? 24);
 const directory = resolve(
   ".agents/plans/20260918T165248--repair-session-progress-correctness__active",
 );
@@ -27,6 +35,12 @@ const record = (value: unknown) =>
   appendFileSync(artifact, `${JSON.stringify(value)}\n`);
 
 beforeAll(() => {
+  if (
+    !Number.isSafeInteger(MAX_ATTEMPTS) ||
+    MAX_ATTEMPTS < 1 ||
+    MAX_ATTEMPTS > 24
+  )
+    throw new Error("Live attempt budget must be an integer from 1 through 24");
   if (process.env.PROGRESS_LIVE !== "1")
     throw new Error("Paid suite requires explicit PROGRESS_LIVE=1");
   if (!process.env.TYPESAFE_API_KEY?.trim())
@@ -183,5 +197,71 @@ it("fresh-session production pipeline follows a changed goal and consumes comple
     expect(attempts).toBeLessThanOrEqual(MAX_ATTEMPTS);
   } finally {
     monitor.stop();
+  }
+});
+
+it.each([
+  [
+    "intention",
+    "Tomorrow I plan to implement the 15-second default interval and improve /progress help.",
+    false,
+  ],
+  [
+    "quoted example",
+    "Here is an example final message, not a claim about this session: 'Implemented the 15-second default interval and improved /progress help.' Neither change has been implemented yet.",
+    false,
+  ],
+  [
+    "test activity",
+    "I ran unit tests and inspected files. I have not yet implemented the default interval or /progress help changes.",
+    false,
+  ],
+  [
+    "delivery paraphrase",
+    "Shipped both requested updates: the default analysis interval is now fifteen seconds. /progress now prints clear help explaining all supported commands and how to use them.",
+    true,
+  ],
+])("report semantics: %s", async (name, text, completed) => {
+  const candidate = findCandidates(collectTrajectory(replayEntries(4))).find(
+    (candidate) => candidate.entryId === "29acae97",
+  );
+  if (!candidate) throw new Error("Missing original task request");
+  // Known fixture task boundaries isolate report semantics, while the test above
+  // also exercises real discovery/classification in the complete controller.
+  const scope = proposal(
+    candidate,
+    Object.fromEntries(
+      candidate.spans.map((span) => [
+        span.id,
+        span.kind === "list" ? "task" : "context",
+      ]),
+    ),
+  );
+  const ledger = reconcileLedger(undefined, scope.snapshot);
+  const request = reportRequest(ledger, {
+    id: `live-${name}`,
+    role: "assistant",
+    text,
+    hash: hashText(text),
+  });
+  const gateway = new JevGateway({
+    fetch: (url, init) => globalThis.fetch(url, init),
+    getApiKey: () => process.env.TYPESAFE_API_KEY,
+  });
+  const identity = `report-semantics:${name}`;
+  gateway.enable(identity);
+  try {
+    const result = await gateway.evaluate(request, identity);
+    expect(
+      result,
+      `No validated Jev response: ${gateway.status}`,
+    ).toBeDefined();
+    if (!result) return;
+    const states = reportStates(ledger, request, result);
+    record({ type: "report-case", name, completed, states });
+    if (completed) expect(Object.values(states)).toEqual(["done", "done"]);
+    else expect(Object.values(states)).not.toContain("done");
+  } finally {
+    gateway.pause();
   }
 });

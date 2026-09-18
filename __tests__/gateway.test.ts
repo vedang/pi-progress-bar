@@ -61,6 +61,35 @@ describe("shared Jev gateway", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    [{ explicit: 0.66, unknown: 0.33 }, true],
+    [{ explicit: 0.67, unknown: 0.34 }, true],
+    [{ explicit: 0.7, unknown: 0.1 }, false],
+    [{ explicit: 0.999, unknown: 0.02 }, false],
+  ])(
+    "accepts only bounded rounded probability totals: %j",
+    async (probabilities, accepted) => {
+      const rounded = {
+        ...result,
+        answers: {
+          acceptance: { ...result.answers.acceptance, probabilities },
+        },
+      };
+      const fetcher = vi.fn(async () => Response.json(rounded));
+      const gateway = new JevGateway({
+        fetch: fetcher,
+        getApiKey: () => "fixture",
+      });
+      gateway.enable("scope");
+      const value = await gateway.evaluate(request, "scope");
+      if (accepted) {
+        expect(value).toMatchObject(rounded);
+        await gateway.evaluate(request, "scope");
+        expect(fetcher).toHaveBeenCalledTimes(1);
+      } else expect(value).toBeUndefined();
+    },
+  );
+
   it("allows only one in flight and discards a late result after pause or identity change", async () => {
     let finish!: (response: Response) => void;
     const fetcher = vi.fn(

@@ -27,7 +27,7 @@ const entry = (id: string, role: "user" | "assistant", text: string) => ({
 interface JevBody {
   model: string;
   state?: {
-    report?: { text?: string };
+    observation?: { text?: string };
     tasks?: { id: string; text: string }[];
     spans?: { id: string; text: string }[];
   };
@@ -41,7 +41,7 @@ interface JevBody {
 }
 
 function jevResponse(body: JevBody): Response {
-  const report = String(body.state?.report?.text ?? "");
+  const report = String(body.state?.observation?.text ?? "");
   const tasks = new Map(
     (body.state?.tasks ?? []).map((task: { id: string; text: string }) => [
       task.id,

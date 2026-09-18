@@ -4,7 +4,8 @@
     "vitest.config.unit.ts",
     "vitest.config.integration.ts",
     "vitest.config.live.ts",
-    "__tests__/fixtures/pi-registration-probe.ts"
+    "__tests__/fixtures/pi-registration-probe.ts",
+    "__tests__/offline-setup.ts"
   ],
   "project": ["src/**/*.ts", "__tests__/**/*.ts", "vitest.config.*.ts"],
   "ignoreDependencies": ["@biomejs/biome"],

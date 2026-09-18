@@ -1,5 +1,6 @@
 /** Sanitized reconstruction of observed QA failure, not raw model verdicts.
- * Original IDs/text retained only for relevant visible messages. Chronology
+ * Request 29acae97 and final summary 2fd7cc52 are verbatim visible text.
+ * Insight is an excerpt; old-goal/old-done/working are synthetic connectors. Chronology
  * compressed: tool traffic, credentials, paths and unrelated conversation omitted.
  * Historical facts: old Insight selected; two later tasks missed; final report
  * cursor advanced while 0/1 persisted. Unknown: original Jev answers/build hash.
@@ -23,7 +24,7 @@ const sessionReplay = [
   {
     id: "29acae97",
     role: "user",
-    text: "1. Change the default progress analysis interval to 15 seconds.\n2. Improve /progress help to show state, interval, Jev usage, and available commands.",
+    text: "okay. Make the following changes to the code:\n1. The default analysis times should be 15s, 60s is too slow. \n2. /progress should show a better help message that clearly shows how to use it",
   },
   {
     id: "working",
@@ -33,7 +34,7 @@ const sessionReplay = [
   {
     id: "2fd7cc52",
     role: "assistant",
-    text: "Both requested changes are complete: the default interval is now 15 seconds, and /progress help shows state, interval, Jev usage, and available commands. Tests pass.",
+    text: "Implemented and committed: `e58ee7fa9d7c558031d3201a40817332cac78338`\n\nChanges:\n- New-session/default analysis interval: **15 seconds**\n- `/progress` now shows:\n  - ON/OFF state\n  - Current interval\n  - Jev usage\n  - Every supported command with descriptions and bounds\n- README and PRODUCT updated\n- Existing explicitly saved intervals remain unchanged; use `/progress interval 15` to update an existing session.\n\nValidation:\n- 74 unit tests passed\n- 10 integration tests passed\n- Biome, TypeScript, Knip, package dry-run passed\n- Bead closed/exported\n- Working copy clean\n\n`★ Insight ─────────────────────────────────────`\n- One shared constant now controls constructor and restore fallback defaults.\n- Help and invalid-command output share command definitions, avoiding documentation drift.\n`─────────────────────────────────────────────────`",
   },
 ] as const;
 

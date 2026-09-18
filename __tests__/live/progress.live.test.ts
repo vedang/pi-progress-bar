@@ -141,13 +141,23 @@ it("fresh-session production pipeline follows a changed goal and consumes comple
       cursor: monitor.conversation.cursor,
     });
     expect(tasks).toHaveLength(2);
-    expect(tasks.map((task) => task.text).join("\n")).toContain("15 seconds");
-    expect(tasks.map((task) => task.text).join("\n")).toContain(
-      "/progress help",
-    );
+    expect(tasks.map((task) => task.text).join("\n")).toContain("15s");
+    expect(tasks.map((task) => task.text).join("\n")).toContain("/progress");
     expect(tasks.map((task) => task.text).join("\n")).not.toContain(
       "First lock scope",
     );
+
+    entries = replayEntries(5);
+    await settleThrough("working");
+    const current = monitor.ledger?.tasks.find(
+      (task) => task.id === monitor.ledger?.currentTaskId,
+    );
+    record({
+      type: "current-checkpoint",
+      current,
+      cursor: monitor.conversation.cursor,
+    });
+    expect(current?.text).toContain("15s");
 
     entries = replayEntries();
     await settleThrough("2fd7cc52");

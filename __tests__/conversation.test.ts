@@ -13,7 +13,11 @@ const message = (id: string, text: string) => ({
   parentId: null,
   message: { role: "assistant", content: text },
 });
-function answer(request: EvaluationRequest, choice: string): ValidatedResult {
+function answer(
+  request: EvaluationRequest,
+  choice: string,
+  current = "unknown",
+): ValidatedResult {
   return {
     model: request.model,
     usage: { input_tokens: 10, output_tokens: 0 },
@@ -22,10 +26,13 @@ function answer(request: EvaluationRequest, choice: string): ValidatedResult {
         id,
         {
           type: "choice",
-          choice,
+          choice: id === "__current" ? current : choice,
           confidence: 1,
           probabilities: Object.fromEntries(
-            Object.keys(q.criteria).map((key) => [key, key === choice ? 1 : 0]),
+            Object.keys(q.criteria).map((key) => [
+              key,
+              key === (id === "__current" ? current : choice) ? 1 : 0,
+            ]),
           ),
         },
       ]),
@@ -57,6 +64,14 @@ function fixture(tasks = 3) {
       }
     | undefined => {
     job = undefined;
+    // These fixtures isolate report semantics: explicitly classify every later
+    // observation as no new plan before interpreting its status/current work.
+    for (let i = 0; i < 100 && conversation.hasPendingDiscovery(); i++) {
+      conversation.scheduleDiscovery(
+        (_purpose, request, admit) => admit(answer(request, "none")),
+        () => live,
+      );
+    }
     conversation.scheduleReports(
       ledger,
       source,
@@ -76,6 +91,10 @@ function fixture(tasks = 3) {
     if (!pending) throw new Error("Missing report job");
     pending.admit(answer(pending.request, choice));
   };
+  // Selection now interprets same-observation reports too. Fixture plan itself
+  // makes no status/current assertion, so settle that transaction first.
+  for (let i = 0; i < 20 && ledger.reportOrder === 0; i++)
+    reply("not-a-report");
   return {
     conversation,
     source,
@@ -123,6 +142,28 @@ describe("ordered conversation reports", () => {
     expect(f.ledger().reportOrder).toBe(before + 1);
     expect(f.conversation.cursor?.id).toBe("tail");
   });
+  it("selects current task across chunks when unrelated chunks abstain", () => {
+    const f = fixture(23);
+    const currentId = f.ledger().tasks[22]?.id;
+    if (!currentId) throw new Error("Missing last task");
+    f.conversation.update([
+      f.plan,
+      message("working", "I am working on Task 23 now."),
+    ]);
+    for (let i = 0; i < 5 && f.conversation.cursor?.id !== "working"; i++) {
+      const job = f.schedule();
+      if (!job) throw new Error("Missing report chunk");
+      const question = job.request.questions.__current;
+      const current =
+        question && Object.hasOwn(question.criteria, currentId)
+          ? currentId
+          : "unknown";
+      job.admit(answer(job.request, "not-a-report", current));
+    }
+    expect(f.ledger().currentTaskId).toBe(currentId);
+    expect(f.conversation.cursor?.id).toBe("working");
+  });
+
   it("does not admit a late answer after branch invalidation", () => {
     const f = fixture();
     f.conversation.update([f.plan, message("done", "Everything finished")]);
@@ -154,7 +195,7 @@ describe("ordered conversation reports", () => {
     expect(ledger.tasks.every((task) => task.status === "cancelled")).toBe(
       true,
     );
-    expect(ledger.reportOrder).toBe(36);
+    expect(ledger.reportOrder).toBe(37);
     expect(restored.cursor?.id).toBe("report-35");
     const invalid = new Conversation();
     invalid.update([

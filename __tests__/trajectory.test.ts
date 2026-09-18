@@ -220,9 +220,11 @@ describe("explicit report questions and atomic interpretation", () => {
   it("asks independently for every known task and carries explicit original report evidence", () => {
     if (!report) throw new Error("missing fixture");
     const request = reportRequest(ledger, report);
-    expect(Object.keys(request.questions)).toHaveLength(3);
+    expect(Object.keys(request.questions)).toHaveLength(4);
+    expect(request.questions.__current?.criteria).toHaveProperty("unknown");
     expect(JSON.stringify(request.state)).toContain(report.text);
-    for (const question of Object.values(request.questions)) {
+    for (const [id, question] of Object.entries(request.questions)) {
+      if (id === "__current") continue;
       expect(question.type).toBe("choice");
       expect(question.instructions).toMatch(/explicit|report/i);
       expect(Object.keys(question.criteria)).toEqual(
@@ -245,11 +247,12 @@ describe("explicit report questions and atomic interpretation", () => {
         id,
         {
           type: "choice" as const,
-          choice: choices[i] ?? "not-a-report",
+          choice:
+            id === "__current" ? "unknown" : (choices[i] ?? "not-a-report"),
           probabilities: Object.fromEntries(
             Object.keys(q.criteria).map((key) => [
               key,
-              key === choices[i] ? 1 : 0,
+              key === (id === "__current" ? "unknown" : choices[i]) ? 1 : 0,
             ]),
           ),
           confidence: 1,

@@ -1,6 +1,6 @@
 # Evaluation and review gates
 
-Status: proposed checks for implementation, not results from a built monitor. A four-call authorized exercise on selected real-session excerpts is reported in [spikes.md](spikes.md). It establishes narrow observations, not general model accuracy or calibrated thresholds; no monitor tests have been implemented or run.
+Status: evaluation strategy for the full target monitor. V1–V3 now have deterministic unit/host integration tests and an isolated offline Pi package-load/shutdown test; remaining slice checks below are proposed, not claimed results. A four-call authorized exercise on selected real-session excerpts is reported in [spikes.md](spikes.md). It establishes narrow observations, not general model accuracy or calibrated thresholds. No additional live Jev calls were made during implementation.
 
 ## Separate three kinds of correctness
 
@@ -77,4 +77,4 @@ Cover happy paths, insufficient evidence, contradictions, hostile embedded text,
 - Breadboard with all UI/code/store wiring and proposed commands.
 - Vertical slices, each with visible demo, dependencies and acceptance checks.
 - Open assumptions and bounded spikes, rather than guessed APIs or calibrated thresholds.
-- Explicit statement that implementation has not started.
+- Explicit implementation status: V1–V3 implemented; V4–V7 proposed. Distinguish deterministic verification from pending live semantic-quality validation.

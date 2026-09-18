@@ -3,7 +3,7 @@ shaping: true
 ---
 # Vertical slices — passive progress monitor
 
-**Proposed implementation sequence; none implemented.** Product v1 comprises V1–V7 below. Each slice extends a working Pi UI and includes its own tests, failure behavior and demo. These are not seven product releases. No coding begins until user review/next-step instruction.
+**V1–V3 implemented after user authorization; V4–V7 remain proposed.** Product v1 targets V1–V7 below. These are not seven product releases. The slice descriptions retain design acceptance goals; see [runtime README](../../README.md) for actual capabilities, conservative source confirmation, evidence omissions and limits. Semantic accuracy remains unvalidated.
 
 Canonical affordance IDs and wiring are in [breadboard.md](breadboard.md); requirements/mechanisms in [shape.md](shape.md). The tables here project those affordances into slices without redefining their wiring. Existing affordances listed under extensions are changed, not reassigned to a new first-delivery slice.
 
@@ -260,4 +260,4 @@ Recommended delivery is sequential V1 → V2 → V3 → V4 → V5 → V6 → V7.
 - Review unknown/conflict handling and identity rules, especially ambiguous task rewrites.
 - Set initial semantic evaluation goals and acceptable error/abstention tradeoffs after baseline examples, not fabricated accuracy targets.
 
-Do not create implementation tickets with implicit approval, install dependencies, or begin building merely because these slices now exist.
+V1–V3 received separate implementation approval. Do not treat these remaining slice descriptions as authorization to implement V4–V7, install dependencies, or run additional paid inference.

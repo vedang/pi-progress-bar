@@ -3,7 +3,7 @@ shaping: true
 ---
 # Breadboard — evidence-aware passive monitor
 
-**Proposed, not implemented.** Tables define intended affordances and wiring; function names are proposed seams, not existing repository symbols. Read [shape](shape.md), [spike findings](spikes.md) and [slices](slices.md) together. V1–V7 below mean implementation slices within product v1.
+**Target design; V1–V3 implemented, V4–V7 proposed.** Tables define conceptual affordances and wiring, not an exact runtime symbol map. See [runtime README](../../README.md) for implemented behavior and limitations, including explicit source confirmation and excluded unverified interactive tool answers. Read [shape](shape.md), [spike findings](spikes.md) and [slices](slices.md) together. V1–V7 below mean implementation slices within product v1.
 
 ## Operator journey
 
@@ -175,7 +175,7 @@ Arrows in this journey table abbreviate the numbered table relationships; they d
 
 - **R2 mechanism gap:** now has U4–U10, N10–N12/N28/N22, source/coverage stores and explicit display reductions, including Reported red and Not needed. Semantic quality and temporal thresholds remain validation gates; no claim of verified accuracy.
 - **R4 mechanism gap:** now has a concrete N5/N6/N7/N8/N17 path, one selected source, stable identity separate from revision, per-task report mapping and user correction in P3. Automatic candidate recall, ambiguous prose segmentation and robust file reconciliation require fixtures/live evaluation.
-- The breadboard makes these mechanisms reviewable; it does not remove the empirical risks found by the spikes. User approval is still needed before implementing the slices.
+- The breadboard makes these mechanisms reviewable; it does not remove the empirical risks found by the spikes. User authorization covered V1–V3; further slices and paid validation still need approval.
 
 ## Wiring checks
 

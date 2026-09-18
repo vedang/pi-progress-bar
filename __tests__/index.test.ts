@@ -167,6 +167,49 @@ describe("Pi host integration", () => {
     await h.event("session_shutdown");
   });
 
+  it("refreshes 2/5 to 3/5 and bounds narrow Unicode rendering across reload", async () => {
+    const h = await harness();
+    const body = (checked: boolean) =>
+      `# Tasks\n- [x] ${"界🙂".repeat(200)}\n- [x] Second\n- [${checked ? "x" : " "}] Third\n- [ ] Fourth\n- [ ] Fifth`;
+    await writeFile(join(h.cwd, "plan.md"), body(false));
+    h.ui.select.mockImplementation(async (title, options) =>
+      /current task/i.test(title) ? options[1] : options[0],
+    );
+    await h.event("session_start");
+    await h.command("source plan.md#Tasks");
+    expect(h.render().join(" ")).toContain("40%");
+    await writeFile(join(h.cwd, "plan.md"), body(true));
+    await vi.advanceTimersByTimeAsync(15000);
+    await vi.waitFor(() => expect(h.render().join(" ")).toContain("60%"));
+    for (const width of [1, 2, 8, 30]) {
+      const rows = h.render(width);
+      expect(rows.length).toBeLessThanOrEqual(12);
+      for (const row of rows)
+        expect(
+          Array.from(row).reduce(
+            (n, character) =>
+              n + (character === "界" || character === "🙂" ? 2 : 1),
+            0,
+          ),
+        ).toBeLessThanOrEqual(width);
+    }
+    const checkpoint = h.api.appendEntry.mock.calls.at(-1)?.[1];
+    h.setBranch([
+      {
+        type: "custom",
+        id: "checkpoint",
+        customType: "pi-progress-bar",
+        data: checkpoint,
+      },
+    ]);
+    await h.event("session_start");
+    expect(h.render().join(" ")).toContain("60%");
+    expect(vi.getTimerCount()).toBe(1);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    await h.event("session_shutdown");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("requires consent then displays separate Jev signals without changing reported counts", async () => {
     vi.stubEnv("TYPESAFE_API_KEY", "unit-key-never-in-state");
     const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {

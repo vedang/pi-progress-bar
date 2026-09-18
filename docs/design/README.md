@@ -1,6 +1,6 @@
 # Progress monitor — review packet
 
-**Status: V1–V3 selected as the next combined implementation batch; no extension implementation has started.** Detailed execution planning lives in ignored task artifacts; implementation steps are tracked in Beads. No source code, test execution, SDK installation, or live Jev call is implied by the acceptance checks below.
+**Status: V1–V3 implemented; V4–V7 remain proposed.** See the [runtime README](../../README.md) for shipped commands and limitations. Detailed execution planning remains in ignored task artifacts; steps are tracked in Beads. Design affordance names below are conceptual, not necessarily repository symbols. Deterministic mechanics and offline Pi loading are tested; semantic accuracy is not live-validated. Source suggestions require explicit Apply; interactive tool answers are excluded without verified provenance.
 
 ## Read in this order
 

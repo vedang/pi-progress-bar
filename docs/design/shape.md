@@ -3,7 +3,7 @@ shaping: true
 ---
 # pi-progress-bar — proposed shape
 
-Status: user endorsed overall design direction and requested explicit `Not needed` for red tests. Future nudging is desired if signals prove accurate; implementation details and calibration remain proposed. No extension integration code. A later authorized four-call real-trajectory spike is documented in [spikes.md](spikes.md).
+Status: user endorsed this design and subsequently authorized V1–V3, now implemented (see [runtime README](../../README.md)). Remaining signals and future nudging are not implemented. This document describes the full target shape, not a claim that every mechanism ships. Calibration remains pending; the earlier four-call real-trajectory spike is documented in [spikes.md](spikes.md).
 
 ## Requirements
 
@@ -51,7 +51,7 @@ This is a design-mechanism fit, not implementation or accuracy verification. ✅
 | A6 | Named Pi widget displays reported bar plus seven status/meter rows, with source/freshness and on-demand evidence details. | Final layout and command names need user confirmation. |
 | A7 | Session-scoped scheduler refreshes at the configured interval (default 15s), performs single-flight changed-state inference, cancels on shutdown, and rejects cross-session/task results. | End-to-end latency and cost require measurement. |
 
-These are understood architectural seams, not a claim that automatic plan inference or health judgments have been validated. The proposed mechanisms are detailed in [breadboard.md](breadboard.md) and sequenced in [slices.md](slices.md). This review packet does not authorize implementation.
+These are understood architectural seams, not a claim that automatic plan inference or health judgments have been validated. The proposed mechanisms are detailed in [breadboard.md](breadboard.md) and sequenced in [slices.md](slices.md). The packet itself does not authorize further scope; subsequent user authorization covered V1–V3 only.
 
 ## Overall progress semantics
 
@@ -199,7 +199,7 @@ Reference patterns: Ralph status clearing and lifecycle; Exa bounded, injected n
 
 The first experiment spans two runnable slices: first a small explicitly selected checklist and reported-completion bar, then two Jev signals (requirements clarity and acceptance criteria). This keeps every increment working while separating observed counting from the first model call. Compare a few labeled clear/vague/contradictory/missing-evidence examples and inspect raw answers. Establish Pi widget and configurable refresh (default 15s) in the first slice; add consent, state budget and nonblocking/unknown inference behavior with the first Jev slice.
 
-Then extend the same working product with automatic plan/report selection and optional Beads sourcing; add observed red-test history and per-criterion implementation judgments; finally evaluate temporal progress/stuck/drift. The detailed proposed sequence is in [slices.md](slices.md); all slices remain unimplemented.
+Then extend the same working product with automatic plan/report selection and optional Beads sourcing; add observed red-test history and per-criterion implementation judgments; finally evaluate temporal progress/stuck/drift. The detailed proposed sequence is in [slices.md](slices.md); V1–V3 are implemented and V4–V7 remain proposed.
 
 Acceptance probes before broad use:
 - `[x]` updates count; no plan yields no percentage; scope revision changes denominator honestly.

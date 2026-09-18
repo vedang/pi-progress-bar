@@ -38,7 +38,8 @@ For people supervising a coding agent who want to see reported plan completion a
 - Current Pi extension, TUI, package, and session-format documentation.
 - Live TypeSafe documentation for Jev primitives, state, confidence, model limits, and verification patterns.
 - Four authorized Jev calls on manually selected excerpts from this actual Pi session are recorded in [docs/design/spikes.md](docs/design/spikes.md): 11,269 input tokens, roughly 1.2–1.3 seconds each, estimated total input cost $0.000473298.
-- No monitor implementation, representative accuracy baseline, automatic retrieval validation, or calibrated thresholds yet.
+- V1–V3 are implemented: local checklist progress, consented clarity/acceptance, and current-branch plan/report interpretation with explicit source confirmation. See [README](README.md) for actual commands and limits. V4–V7 remain proposed.
+- Deterministic tests and an isolated offline Pi package-load check exercise mechanics; representative live accuracy, automatic retrieval quality and calibrated thresholds remain unvalidated.
 
 ## Future direction (not v1)
 

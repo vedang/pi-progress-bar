@@ -415,50 +415,103 @@ describe("fresh-session ordered production controller", () => {
     }
   });
 
-  it("resumes persisted partial scope without rebilling accepted relation chunks", async () => {
-    const original = replayEntries(1)[0];
-    if (!original) throw new Error("Missing initial goal");
-    const r = runtime([
-      original,
-      {
-        type: "message",
-        id: "29acae97",
-        parentId: original.id,
-        message: {
-          role: "user",
-          content: Array.from(
-            { length: 27 },
-            (_, i) => `${i + 1}. New task ${i + 1}`,
-          ).join("\n"),
+  it.each([
+    "valid",
+    "hash",
+    "index",
+    "relation",
+    "missing-relation",
+    "later-ambiguous",
+  ])(
+    "resumes or safely discards partial scope journal: %s",
+    async (mutation) => {
+      const original = replayEntries(1)[0];
+      if (!original) throw new Error("Missing initial goal");
+      let rejectLater = false;
+      const r = runtime(
+        [
+          original,
+          {
+            type: "message",
+            id: "29acae97",
+            parentId: original.id,
+            message: {
+              role: "user",
+              content: Array.from(
+                { length: 27 },
+                (_, i) => `${i + 1}. New task ${i + 1}`,
+              ).join("\n"),
+            },
+          },
+        ],
+        (request) => {
+          const result = verdict(request);
+          if (rejectLater && request.questions.scope)
+            result.answers.scope = {
+              type: "choice",
+              choice: "ambiguous",
+              confidence: 1,
+              probabilities: { continue: 0, "new-goal": 0, ambiguous: 1 },
+            };
+          return result;
         },
-      },
-    ]);
-    try {
-      await r.settle("29acae97");
-      const savedIndex = r.saveRequestCounts.findIndex(
-        (count) =>
-          r.requests
-            .slice(0, count)
-            .filter((request) => request.questions.scope).length === 1,
       );
-      expect(savedIndex).toBeGreaterThanOrEqual(0);
-      const checkpoint = r.checkpoints[savedIndex];
-      expect(JSON.stringify(checkpoint)).not.toContain("New task");
-      const before = r.requests.length;
-      await r.monitor.restore("/nonexistent-offline-fixture", checkpoint);
-      await r.settle("29acae97");
-      expect(countReported(r.monitor.ledger).total).toBe(27);
-      const resumed = r.requests
-        .slice(before)
-        .filter((request) => request.questions.scope);
-      expect(resumed.length).toBeGreaterThan(0);
-      expect(
-        resumed.every((request) => !Object.hasOwn(request.questions, "0")),
-      ).toBe(true);
-    } finally {
-      r.monitor.stop();
-    }
-  });
+      try {
+        await r.settle("29acae97");
+        const savedIndex = r.saveRequestCounts.findIndex(
+          (count) =>
+            r.requests
+              .slice(0, count)
+              .filter((request) => request.questions.scope).length === 1,
+        );
+        expect(savedIndex).toBeGreaterThanOrEqual(0);
+        const checkpoint = structuredClone(r.checkpoints[savedIndex]);
+        const partial = checkpoint?.partialScope;
+        if (!partial) throw new Error("Missing partial scope journal");
+        if (mutation === "hash") partial.requestHashes[0] = "0".repeat(64);
+        if (mutation === "index") partial.index = 201;
+        if (mutation === "relation")
+          partial.relations[0] = { index: 0, relation: "same:invented" };
+        if (mutation === "missing-relation") partial.relations.pop();
+        expect(JSON.stringify(checkpoint)).not.toContain("New task");
+        const before = r.requests.length;
+        rejectLater = mutation === "later-ambiguous";
+        await r.monitor.restore("/nonexistent-offline-fixture", checkpoint);
+        if (rejectLater) {
+          for (let i = 0; i < 50; i++) {
+            r.monitor.scheduleAnalysis();
+            await vi.advanceTimersByTimeAsync(1);
+          }
+          expect(r.monitor.conversation.cursor?.id).toBe(original.id);
+          expect(renderWidget(r.monitor)[0]).toMatch(/historical|unresolved/);
+          rejectLater = false;
+          r.append("replacement", "1. Implement a CSV export feature instead.");
+          await r.settle("replacement");
+          expect(
+            r.monitor.ledger?.tasks.filter((task) => task.included)[0]?.text,
+          ).toContain("CSV export");
+          return;
+        }
+        await r.settle("29acae97");
+        expect(countReported(r.monitor.ledger).total).toBe(27);
+        const resumed = r.requests
+          .slice(before)
+          .filter((request) => request.questions.scope);
+        expect(resumed.length).toBeGreaterThan(0);
+        expect(
+          resumed.every((request) => !Object.hasOwn(request.questions, "0")),
+        ).toBe(mutation === "valid");
+        if (mutation !== "valid")
+          expect(
+            r.monitor
+              .diagnostics()
+              .some((item) => item.code === "discarded-partial-scope"),
+          ).toBe(true);
+      } finally {
+        r.monitor.stop();
+      }
+    },
+  );
 
   it("restores between scope commit and report commit without repeating paid scope work", async () => {
     const r = runtime(replayEntries(4));

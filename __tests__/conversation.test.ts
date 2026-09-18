@@ -203,6 +203,52 @@ describe("ordered conversation reports", () => {
     expect(countReported(ledger).done).toBe(23);
   });
 
+  it.each(["hash", "index", "task", "current"])(
+    "discards corrupted partial report %s without trusting its states",
+    (mutation) => {
+      const f = fixture(23);
+      const done = message("done", "All 23 tasks are finished");
+      f.conversation.update([f.plan, done]);
+      const first = f.schedule();
+      if (!first) throw new Error("Missing first chunk");
+      first.admit(answer(first.request, "done"));
+      const checkpoint = structuredClone(f.conversation.checkpoint(f.ledger()));
+      const partial = checkpoint.partialReport;
+      if (!partial) throw new Error("Missing partial report journal");
+      if (mutation === "hash") partial.requestHashes[0] = "0".repeat(64);
+      if (mutation === "index") partial.index = 201;
+      if (mutation === "task")
+        partial.states.push({ taskId: "invented", status: "done" });
+      if (mutation === "current")
+        partial.currents.push({
+          index: 201,
+          taskId: f.ledger().tasks[0]?.id ?? "missing",
+        });
+      const restored = new Conversation();
+      restored.update([f.plan, done]);
+      const ledger = reconcileLedger(undefined, restored.rehydrate(f.source));
+      restored.restore(ledger, checkpoint, f.source);
+      expect(countReported(ledger).done).toBe(0);
+      expect(
+        restored
+          .diagnostics()
+          .some((item) => item.code === "discarded-partial-report"),
+      ).toBe(true);
+      let request: EvaluationRequest | undefined;
+      restored.scheduleReports(
+        ledger,
+        f.source,
+        2,
+        (_purpose, next) => {
+          request = next;
+        },
+        () => ledger,
+        () => {},
+      );
+      expect(request?.questions).toEqual(first.request.questions);
+    },
+  );
+
   it("does not admit a late answer after branch invalidation", () => {
     const f = fixture();
     f.conversation.update([f.plan, message("done", "Everything finished")]);

@@ -318,8 +318,10 @@ it("denies an entire paid health batch before dispatch when its metadata/card ca
   await vi.advanceTimersByTimeAsync(100);
   expect(h.fetch).not.toHaveBeenCalled();
   expect(h.monitor.presentationSnapshot().usage).toEqual(metadata.usage);
-  expect(h.monitor.checkpoint()).toHaveProperty("state.capacity", "limit");
-  expect(h.monitor.presentationSnapshot().card?.retained).toBe(true);
+  // [ref:ux_optional_isolation] Health denial cannot block semantic tracking.
+  expect(h.monitor.checkpoint()).toHaveProperty("state.capacity", "clear");
+  expect(h.monitor.state.tasks).toEqual(f.state.tasks);
+  expect(h.monitor.state.cursor).toEqual(f.state.cursor);
   expect(h.save.mock.calls.every(([saved]) => size(saved) <= 512 * 1024)).toBe(
     true,
   );

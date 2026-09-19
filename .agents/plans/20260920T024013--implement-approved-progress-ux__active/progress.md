@@ -47,3 +47,11 @@
 - Launch running; READY routing verification pending. Cleanup on orchestration completion or master-ID replacement: `/orchestration-watchdog-stop orchestration-watchdog-01a0ba83`.
 - Watchdog verification FAILED: fresh Pi blocked at interactive trust prompt (`Do not trust` / `Do not trust (this session only)`); no intercom registration or WATCHDOG READY received. Did not accept security trust on owner's behalf.
 - Dismissed exact background session `orchestration-watchdog-01a0ba83`; listBackground confirms no background sessions. Watchdog NOT active. Owner trust setup required before same-protocol relaunch. No repository/source implementation failure; U05 remains current work.
+
+## U05 frozen red contracts
+- Main authored `ux-board-projection.test.ts` (16 cases) and `ux-health-storage.test.ts` (5 cases), changed old optional-health byte-edge assertion from semantic capacity limit to clear, and updated main-owned current-schema pins to strict v7. Persisted per-task health/provenance changes warrant schema bump; v6 becomes unsupported, no migration/decoder.
+- Main rejects recon suggestions to expose source IDs/hashes, alias backward compatibility, or map reopened to INPROG. Safe board only role/time/provenance qualifiers; reopened without fresh exclusive focus remains OPEN. Frozen idle qualifier: `Last reported · idle`.
+- New board contract: all retained newest-first tasks, exact five health fields with explicit Unassessed, safe provenance, task-local transitions, currentTask identity/status/qualifier, global service separate; no live monitor capability in UI. Full 200-task/1000-event projection stays detached/passive.
+- Durable healthCards array keyed by unique taskId, one card per retained task; provenance requires exact taskSource, triggering observation, hashed snapshot/request/evidence identities and codeRevision; no raw request retention. Full map preflight before optional calls; optional denial/failure cannot block semantics.
+- Verified targeted initial 22 reds/9 passes; after schema pin updates full unit26reds/409pass, integration1red/14pass. Format/check PASS. Logs `u05-{format,check,red,unit-red,integration-red}.log`.
+- U05 acceptance is reproduced reds, not green feature delivery. U06 sole source writer may implement only this slice; main owns all further test/config edits.

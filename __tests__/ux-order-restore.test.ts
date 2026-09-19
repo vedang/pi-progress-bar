@@ -137,7 +137,7 @@ afterEach(() => {
 
 function checkpointAtBytes(bytes: number) {
   const value = {
-    version: 6,
+    version: encodeCheckpoint(emptyState("session:test")).version,
     state: { ...emptyState("session:test"), scopeError: "" },
   };
   value.state.scopeError = "x".repeat(
@@ -178,7 +178,7 @@ describe("rejected storage never resets or rebills history", () => {
     expect(h.extract).not.toHaveBeenCalled();
     expect(data).toEqual(before);
   });
-  it.each([0, 5, 7, 99])(
+  it.each([0, 5, 6, 8, 99])(
     "blocks unsupported version %s before save or dispatch",
     async (version) => {
       const h = fixture();
@@ -219,7 +219,7 @@ describe("rejected storage never resets or rebills history", () => {
       kind === "null"
         ? null
         : kind === "missing-state"
-          ? { version: 6 }
+          ? { version: valid.version }
           : kind === "extra-key"
             ? { ...valid, obsolete: true }
             : kind === "invalid-counter"

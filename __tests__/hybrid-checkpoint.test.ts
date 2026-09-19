@@ -41,7 +41,7 @@ describe("strict hybrid v6 checkpoint", () => {
   it("round-trips generated labels and evidence, without full source context", async () => {
     const state = await initial(true);
     const checkpoint = encodeCheckpoint(state);
-    expect(checkpoint).toMatchObject({ version: 6 });
+    expect(checkpoint).toMatchObject({ version: 7 });
     expect(JSON.stringify(checkpoint)).toContain("Implement parser");
     expect(JSON.stringify(checkpoint)).not.toContain(
       "PRIVATE_CONTEXT_SENTINEL",

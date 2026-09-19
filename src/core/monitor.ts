@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { ExtractionInput } from "../analysis/extractor";
 import {
   type EvaluationRequest,
@@ -13,6 +15,7 @@ import {
 } from "../sources/beads";
 import { EvidenceStore, redEvidenceLabel } from "../sources/evidence";
 import { type CanonicalFrontier, CanonicalPass } from "../sources/messages";
+import { type BoardSnapshot, projectBoard } from "./board-projection";
 import {
   type AdmissionPlan,
   DurabilityCapacityError,
@@ -23,6 +26,8 @@ import {
   checkpointBytes,
   checkpointStorageStatus,
   encodeCheckpoint,
+  type HealthCard,
+  type HealthFields,
   MAX_CHECKPOINT_BYTES,
   type MonitorCheckpointMetadata,
   monitorCheckpointMetadata,
@@ -34,6 +39,7 @@ import {
   type HybridState,
   type HybridTask,
   type Observation,
+  observationRef,
 } from "./hybrid-state";
 import type { Ledger } from "./types";
 
@@ -66,13 +72,7 @@ interface RetainedCard {
   retained: boolean;
   replacementPending: boolean;
   assessedAt: number;
-  health: {
-    requirements: string;
-    acceptance: string;
-    newRedTest: string;
-    redEvidence: string;
-    implementation: string;
-  };
+  health: HealthFields;
 }
 
 interface PresentationCard extends RetainedCard {
@@ -173,11 +173,14 @@ const diagnosticLabels: Record<string, string> = {
   "beads-unavailable": "Beads export unavailable",
   "unresolved-overflow": "Progress input exceeds safe limit",
   "capacity-exhausted": "Progress state capacity reached",
+  "health-capacity-skipped": "Optional task health skipped at capacity",
 };
 
 class RetryableJevError extends RetryableProviderError {}
 
 const copyUsage = (usage: ProviderUsage): ProviderUsage => ({ ...usage });
+const sha256 = (value: string) =>
+  createHash("sha256").update(value).digest("hex");
 const safeUsageValue = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const validUsage = (usage: ProviderUsage) => {
@@ -201,6 +204,23 @@ const copyCard = (card: RetainedCard): RetainedCard => ({
   ...card,
   health: { ...card.health },
 });
+const copyHealthCard = (card: HealthCard): HealthCard => ({
+  ...card,
+  health: { ...card.health },
+  provenance: {
+    ...card.provenance,
+    taskSource: { ...card.provenance.taskSource },
+    observation: { ...card.provenance.observation },
+    requestHashes: [...card.provenance.requestHashes],
+  },
+});
+const sameSource = (left: HybridTask["source"], right: HybridTask["source"]) =>
+  left.entryId === right.entryId &&
+  left.messageHash === right.messageHash &&
+  left.role === right.role &&
+  left.start === right.start &&
+  left.end === right.end &&
+  left.quoteHash === right.quoteHash;
 const presentationCard = (
   card: RetainedCard,
   beads?: BeadsPresentation,
@@ -251,6 +271,8 @@ export class Monitor {
   /** Safe local status only. Raw provider errors never enter display/persistence. */
   error?: string;
   readonly gateway: JevGateway;
+  /** Optional health has independent retry/permanent-failure state. */
+  private readonly healthGateway: JevGateway;
   readonly evidence = new EvidenceStore();
   readonly usage = {
     jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
@@ -286,6 +308,11 @@ export class Monitor {
   private healthFlight?: { epoch: number; token: number };
   private nextHealthToken = 0;
   private card?: RetainedCard;
+  /** Bounded durable map; legacy card remains presentation-only. */
+  private healthCards = new Map<string, HealthCard>();
+  private lastDisplayedTaskId?: string;
+  /** New unclassified work immediately disqualifies retained idle DONE display. */
+  private idleDoneInvalidated = false;
   private cardHealthIdentity?: string;
   private beads = new Map<string, BeadsPresentation>();
   private beadsGeneration = 0;
@@ -308,6 +335,13 @@ export class Monitor {
       getApiKey: () => process.env.TYPESAFE_API_KEY,
       onDispatch: (at) => this.recordJevDispatch(at),
       onPermanentError: () => this.forceOff(),
+    });
+    this.healthGateway = new JevGateway({
+      fetch: (url, init) => globalThis.fetch(url, init),
+      getApiKey: () => process.env.TYPESAFE_API_KEY,
+      onDispatch: (at) => this.recordJevDispatch(at),
+      // Health is optional: a permanent health transport error cannot turn OFF tracking.
+      onPermanentError: () => this.note("model-unavailable"),
     });
   }
 
@@ -418,7 +452,9 @@ export class Monitor {
       this.extractionController?.abort();
       this.cancelHealth();
       this.gateway.pause();
+      this.healthGateway.pause();
       this.gateway.enable(this.identity());
+      this.healthGateway.enable(this.identity());
       this.waitingForWake = false;
       this.requeue(pass);
       this.drain();
@@ -436,7 +472,10 @@ export class Monitor {
     else if (authority === "incomplete") this.scheduleCanonicalWake();
     else {
       this.requeue(pass);
-      if (this.queued.length) this.cancelHealth();
+      if (this.queued.length) {
+        this.idleDoneInvalidated = true;
+        this.cancelHealth();
+      }
       this.drain();
     }
   }
@@ -543,6 +582,7 @@ export class Monitor {
     this.cancelHealth();
     this.healthObservation = undefined;
     this.gateway.pause();
+    this.healthGateway.pause();
     this.evidence.clearPending();
   }
 
@@ -553,12 +593,13 @@ export class Monitor {
   private mergeTelemetry(
     metadata: MonitorCheckpointMetadata | undefined,
     work: ControlWork,
+    pass: CanonicalPass,
   ) {
     if (!(work.preserveControls && work.sourceId === work.telemetry.sourceId)) {
-      this.applyMetadata(metadata);
+      this.applyMetadata(metadata, pass);
       return;
     }
-    this.applyMetadata(metadata);
+    this.applyMetadata(metadata, pass);
     this.usage.jev.calls = Math.max(
       this.usage.jev.calls,
       work.telemetry.usage.jev.calls,
@@ -643,12 +684,12 @@ export class Monitor {
       );
       if (restored) {
         this.state = copyState(restored);
-        this.mergeTelemetry(work.metadata, work);
+        this.mergeTelemetry(work.metadata, work, pass);
         this.latchHistoricalCatchup = true;
         if (this.directCanonicalAmendment(pass) || this.pendingContextAmended())
           this.resetState(work.sourceId, false);
       } else if (this.restoreSourceMatches(work.data, work.sourceId)) {
-        this.mergeTelemetry(work.metadata, work);
+        this.mergeTelemetry(work.metadata, work, pass);
         this.resetState(work.sourceId, false);
         this.latchHistoricalCatchup = true;
       } else {
@@ -695,6 +736,7 @@ export class Monitor {
     this.waitingForWake = false;
     this.epoch++;
     this.gateway.enable(this.identity());
+    this.healthGateway.enable(this.identity());
     this.save();
     this.requeue(pass, true);
     this.refreshBeads();
@@ -786,6 +828,29 @@ export class Monitor {
     };
   }
 
+  /** Detached all-task board data; no history, persistence or provider capability. */
+  boardSnapshot(): BoardSnapshot {
+    return projectBoard({
+      state: copyState(this.state),
+      healthCards: new Map(
+        [...this.healthCards].map(([taskId, card]) => [
+          taskId,
+          copyHealthCard(card),
+        ]),
+      ),
+      service: this.service(),
+      unsettled:
+        this.processing ||
+        !!this.activeObservation ||
+        !!this.queued.length ||
+        !!this.state.pending ||
+        this.state.scopeUnresolved,
+      lastDisplayedTaskId: this.idleDoneInvalidated
+        ? undefined
+        : this.lastDisplayedTaskId,
+    });
+  }
+
   /** Detached allowlisted diagnostics; intentionally excludes task/source/provider text. */
   debugSnapshot(): DebugSnapshot {
     return {
@@ -830,6 +895,9 @@ export class Monitor {
   private resetState(sourceId: string, resetTelemetry = true) {
     this.state = emptyState(sourceId);
     this.card = undefined;
+    this.healthCards.clear();
+    this.lastDisplayedTaskId = undefined;
+    this.idleDoneInvalidated = false;
     this.cardHealthIdentity = undefined;
     this.clearRuntimeContext();
     this.queued = [];
@@ -877,7 +945,14 @@ export class Monitor {
       ...(this.lastExtractionCallAt
         ? { lastExtractionCallAt: this.lastExtractionCallAt }
         : {}),
-      ...(this.card ? { card: copyCard(this.card) } : {}),
+      // New task-local records replace legacy durable current-card storage.
+      // `card` remains only for historic fixture/current presentation recovery.
+      ...((!this.healthCards.size || this.card?.replacementPending) && this.card
+        ? { card: copyCard(this.card) }
+        : {}),
+      ...(this.healthCards.size
+        ? { healthCards: [...this.healthCards.values()].map(copyHealthCard) }
+        : {}),
     };
   }
 
@@ -936,8 +1011,34 @@ export class Monitor {
     }, 0);
   }
 
-  private applyMetadata(metadata: MonitorCheckpointMetadata | undefined) {
+  private applyMetadata(
+    metadata: MonitorCheckpointMetadata | undefined,
+    pass?: CanonicalPass,
+  ) {
+    const cards = metadata?.healthCards ?? [];
+    this.healthCards = new Map(
+      cards
+        .filter((card) => this.healthCardMatchesCanonical(card, pass))
+        .map((card) => [card.taskId, copyHealthCard(card)]),
+    );
     this.card = metadata?.card ? copyCard(metadata.card) : undefined;
+    if (!this.card) {
+      const focused = this.state.focusTaskId
+        ? this.healthCards.get(this.state.focusTaskId)
+        : undefined;
+      const latest = [...this.healthCards.values()].sort(
+        (left, right) => right.assessedAt - left.assessedAt,
+      )[0];
+      const card = focused ?? latest;
+      if (card)
+        this.card = this.presentationCardFor(
+          card,
+          !focused ||
+            this.state.tasks.find((task) => task.id === card.taskId)?.status ===
+              "done",
+        );
+    }
+    this.lastDisplayedTaskId = this.card?.taskId;
     this.cardHealthIdentity = undefined;
     this.lastJevCallAt = metadata?.lastJevCallAt;
     this.lastExtractionCallAt = metadata?.lastExtractionCallAt;
@@ -948,6 +1049,39 @@ export class Monitor {
     this.usage.extraction.calls = usage?.extraction.calls ?? 0;
     this.usage.extraction.inputTokens = usage?.extraction.inputTokens ?? 0;
     this.usage.extraction.outputTokens = usage?.extraction.outputTokens ?? 0;
+  }
+
+  private healthCardMatchesCanonical(card: HealthCard, pass?: CanonicalPass) {
+    const task = this.state.tasks.find(
+      (item) =>
+        item.id === card.taskId &&
+        item.revision === card.revision &&
+        item.label === card.label &&
+        sameSource(item.source, card.provenance.taskSource),
+    );
+    if (!task) return false;
+    const observation = pass?.observation(card.provenance.observation.entryId);
+    return (
+      !pass ||
+      (!!observation &&
+        observation.hash === card.provenance.observation.messageHash &&
+        observation.role === card.provenance.observation.role)
+    );
+  }
+
+  private presentationCardFor(
+    card: HealthCard,
+    retained: boolean,
+  ): RetainedCard {
+    return {
+      taskId: card.taskId,
+      revision: card.revision,
+      label: card.label,
+      retained,
+      replacementPending: false,
+      assessedAt: card.assessedAt,
+      health: { ...card.health },
+    };
   }
 
   private save() {
@@ -1040,7 +1174,7 @@ export class Monitor {
   private cancelHealth() {
     if (!this.healthFlight) return;
     this.healthFlight = undefined;
-    this.gateway.invalidate();
+    this.healthGateway.invalidate();
   }
 
   private clearRetry() {
@@ -1351,6 +1485,7 @@ export class Monitor {
     if (wasEnabled) {
       this.enabled = true;
       this.gateway.enable(this.identity());
+      this.healthGateway.enable(this.identity());
       // Rebuild from current canonical branch after discarding stale semantics.
       this.requeue(this.beginCanonicalPass(), true);
       this.drain();
@@ -1691,7 +1826,7 @@ export class Monitor {
       if (this.healthFlight !== flight) return;
       if (error instanceof RetryableJevError) this.note("jev-unavailable");
       else if (error instanceof RetryableProviderError) {
-        this.waitingForWake = true;
+        // Optional health is never allowed to hold semantic queue progress.
         this.note("model-unavailable");
       } else this.note("invalid-scope-result");
     } finally {
@@ -1705,7 +1840,10 @@ export class Monitor {
   }
 
   /** Saturating metadata bounds every dispatch and usage persistence boundary. */
-  private capacityMetadata(card = this.card): MonitorCheckpointMetadata {
+  private capacityMetadata(
+    card = this.card,
+    healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
+  ): MonitorCheckpointMetadata {
     const maximum = Number.MAX_SAFE_INTEGER;
     const maximumCard = card
       ? {
@@ -1715,6 +1853,9 @@ export class Monitor {
           assessedAt: maximum,
         }
       : undefined;
+    // Existing cards are durable facts, not counters. Only the prospective
+    // replacement/new card supplied by admitHealth is worst-case expanded.
+    const maximumHealthCards = [...healthCards.values()].map(copyHealthCard);
     return {
       enabled: false,
       usage: {
@@ -1732,6 +1873,7 @@ export class Monitor {
       lastJevCallAt: maximum,
       lastExtractionCallAt: maximum,
       ...(maximumCard ? { card: maximumCard } : {}),
+      ...(maximumHealthCards.length ? { healthCards: maximumHealthCards } : {}),
     };
   }
 
@@ -1770,12 +1912,14 @@ export class Monitor {
     card = this.retainedCardFor(candidate),
     schemaBytes = 0,
     requests = 1,
+    healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
   ): CapacityEnvelope {
     const current = this.metadata();
     const oldCard = this.retainedCardFor(this.state);
-    const dispatch = this.capacityMetadata(oldCard);
+    const dispatch = this.capacityMetadata(oldCard, healthCards);
     const accepted = this.capacityMetadata(
       card ?? this.retainedCardFor(candidate),
+      healthCards,
     );
     const currentLimit = { ...this.state, capacity: "limit" as const };
     const candidateLimit = { ...candidate, capacity: "limit" as const };
@@ -1824,14 +1968,13 @@ export class Monitor {
     return false;
   }
 
-  private maximumHealthCard(task: HybridTask): RetainedCard {
+  private maximumHealthCard(task: HybridTask): HealthCard {
+    const maximum = Number.MAX_SAFE_INTEGER;
     return {
       taskId: task.id,
       revision: task.revision,
       label: task.label,
-      retained: false,
-      replacementPending: false,
-      assessedAt: Number.MAX_SAFE_INTEGER,
+      assessedAt: maximum,
       health: {
         requirements: "mostly clear",
         acceptance: "not-found-in-context",
@@ -1839,28 +1982,44 @@ export class Monitor {
         redEvidence: "Contradictory",
         implementation: "appears complete",
       },
+      provenance: {
+        taskSource: { ...task.source },
+        observation: {
+          entryId: task.source.entryId,
+          messageHash: task.source.messageHash,
+          role: task.source.role,
+        },
+        snapshotHash: "f".repeat(64),
+        requestHashes: Array.from({ length: 20 }, () => "f".repeat(64)),
+        evidenceHash: "f".repeat(64),
+        codeRevision: maximum,
+      },
     };
   }
 
-  /** Whole health batch admission precedes its first Jev request. */
+  /** Whole optional batch admission precedes its first Jev request. */
   private admitHealth(task: HybridTask, requests: number) {
-    if (this.state.capacity === "limit") return false;
+    if (this.state.capacity === "limit" || requests <= 0) return false;
+    const candidateCards = new Map(this.healthCards);
+    candidateCards.set(task.id, this.maximumHealthCard(task));
     try {
       if (
         this.capacityEnvelope(
           "health",
           this.state,
-          this.maximumHealthCard(task),
+          this.presentationCardFor(this.maximumHealthCard(task), false),
           0,
           requests,
-        ).maximum <= MAX_CHECKPOINT_BYTES &&
-        requests > 0
+          candidateCards,
+        ).maximum <= MAX_CHECKPOINT_BYTES
       )
         return true;
     } catch {
-      // Invalid or unencodable health projection has no admission proof.
+      // Invalid or unencodable optional projection has no admission proof.
     }
-    this.rejectCapacity();
+    // Optional health never changes semantic capacity or persists a marker.
+    this.note("health-capacity-skipped");
+    this.publish();
     return false;
   }
 
@@ -1885,6 +2044,9 @@ export class Monitor {
 
   private commit(state: HybridState) {
     const previousCard = this.card ? copyCard(this.card) : undefined;
+    const admittedCompletion = state.events
+      .slice(this.state.events.length)
+      .some((event) => event.kind === "complete");
     this.retainCardBeforeReplacement(state);
     let checkpoint: unknown;
     try {
@@ -1897,6 +2059,18 @@ export class Monitor {
       throw new DurabilityCapacityError();
     }
     this.state = copyState(state);
+    const focused = this.openFocus(this.state);
+    if (focused && !this.state.scopeUnresolved && !this.state.pending) {
+      this.lastDisplayedTaskId = focused.id;
+      this.idleDoneInvalidated = false;
+    } else if (
+      admittedCompletion &&
+      this.lastDisplayedTaskId &&
+      this.state.tasks
+        .filter((task) => task.included)
+        .every((task) => task.status === "done")
+    )
+      this.idleDoneInvalidated = false;
     try {
       this.persist(checkpoint);
     } catch {
@@ -1951,17 +2125,18 @@ export class Monitor {
     request: EvaluationRequest,
     epoch: number,
     owner?: ActiveWork,
+    gateway: JevGateway = this.gateway,
   ) {
     this.assertActiveAuthority(epoch, owner);
     this.activity = "Assessing progress";
     this.publish();
-    const result = await this.gateway.evaluate(request, this.identity(), true);
+    const result = await gateway.evaluate(request, this.identity(), true);
     while (true) {
       await this.awaitActiveAuthority(epoch, owner);
       if (!this.activeAuthorityBarrier(epoch, owner)) break;
     }
     if (!result) {
-      if (this.gateway.retryPending) throw new RetryableJevError();
+      if (gateway.retryPending) throw new RetryableJevError();
       throw new RetryableProviderError();
     }
     // Recheck immediately before synchronous usage/result admission. The loop
@@ -2134,7 +2309,12 @@ export class Monitor {
     if (!this.admitHealth(task, snapshot.requests.length)) return;
     let combined: ValidatedResult | undefined;
     for (const request of snapshot.requests) {
-      const result = await this.evaluateJev(request, epoch);
+      const result = await this.evaluateJev(
+        request,
+        epoch,
+        undefined,
+        this.healthGateway,
+      );
       if (this.healthFlight !== flight) throw new RetryableProviderError();
       combined = {
         model: result.model,
@@ -2178,51 +2358,62 @@ export class Monitor {
     const acceptance = combined.answers.acceptance;
     const applicability = combined.answers.redApplicability;
     const reported = combined.answers.redReport;
-    this.card = {
+    const health: HealthFields = {
+      requirements: healthRequirements(combined.answers.clarity),
+      acceptance: acceptance?.type === "choice" ? acceptance.choice : "unknown",
+      newRedTest:
+        applicability?.type === "choice" && applicability.choice === "needed"
+          ? "Needed"
+          : applicability?.type === "choice" &&
+              applicability.choice === "not-needed"
+            ? "Not needed"
+            : "Unknown",
+      redEvidence: redEvidenceLabel({
+        applicability:
+          applicability?.type === "choice" &&
+          (applicability.choice === "needed" ||
+            applicability.choice === "not-needed" ||
+            applicability.choice === "unknown")
+            ? applicability.choice
+            : undefined,
+        reported:
+          reported?.type === "choice" && reported.choice === "reported-red",
+        contradiction:
+          reported?.type === "choice" && reported.choice === "contradicted",
+      }),
+      implementation: (() => {
+        const implementation = implementationFromResult(
+          [task.label],
+          combined,
+          this.evidence.snapshot(),
+          this.evidence.codeRevision(),
+          snapshot.implementationEvidenceComplete,
+        );
+        return implementation === "not-needed" ? "Not needed" : implementation;
+      })(),
+    };
+    const assessedAt = Date.now();
+    const card: HealthCard = {
       taskId: task.id,
       revision: task.revision,
       label: task.label,
-      retained: task.status === "done",
-      replacementPending: false,
-      assessedAt: Date.now(),
-      health: {
-        requirements: healthRequirements(combined.answers.clarity),
-        acceptance:
-          acceptance?.type === "choice" ? acceptance.choice : "unknown",
-        newRedTest:
-          applicability?.type === "choice" && applicability.choice === "needed"
-            ? "Needed"
-            : applicability?.type === "choice" &&
-                applicability.choice === "not-needed"
-              ? "Not needed"
-              : "Unknown",
-        redEvidence: redEvidenceLabel({
-          applicability:
-            applicability?.type === "choice" &&
-            (applicability.choice === "needed" ||
-              applicability.choice === "not-needed" ||
-              applicability.choice === "unknown")
-              ? applicability.choice
-              : undefined,
-          reported:
-            reported?.type === "choice" && reported.choice === "reported-red",
-          contradiction:
-            reported?.type === "choice" && reported.choice === "contradicted",
-        }),
-        implementation: (() => {
-          const implementation = implementationFromResult(
-            [task.label],
-            combined,
-            this.evidence.snapshot(),
-            this.evidence.codeRevision(),
-            snapshot.implementationEvidenceComplete,
-          );
-          return implementation === "not-needed"
-            ? "Not needed"
-            : implementation;
-        })(),
+      assessedAt,
+      health,
+      provenance: {
+        taskSource: { ...task.source },
+        observation: observationRef(work.observation),
+        // snapshot.identity contains task/context JSON. Persist only its digest.
+        snapshotHash: sha256(snapshot.identity),
+        requestHashes: snapshot.requests.map((request) =>
+          sha256(JSON.stringify(request)),
+        ),
+        evidenceHash: sha256(JSON.stringify(this.evidence.snapshot())),
+        codeRevision: this.evidence.codeRevision(),
       },
     };
+    this.healthCards.set(task.id, card);
+    this.card = this.presentationCardFor(card, task.status === "done");
+    this.lastDisplayedTaskId = task.id;
     this.cardHealthIdentity = snapshot.identity;
     this.save();
     this.publish();

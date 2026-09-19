@@ -42,13 +42,38 @@ import {
   taskLabelIsValid,
 } from "./hybrid-state";
 
-const VERSION = 6;
+const VERSION = 7;
 const MAX_TASKS = 200;
 const MAX_ACTIVE_TASKS = 20;
 const MAX_EVENTS = 1000;
 export const MAX_CHECKPOINT_BYTES = 512 * 1024;
 const MAX_COMPLETIONS = 20;
 const focusSpecialChoices = new Set(["none", "concurrent", "uncertain"]);
+
+export interface HealthFields {
+  requirements: string;
+  acceptance: string;
+  newRedTest: string;
+  redEvidence: string;
+  implementation: string;
+}
+
+/** Durable task-local assessment fact. Raw prompts, answers and evidence stay out. */
+export interface HealthCard {
+  taskId: string;
+  revision: number;
+  label: string;
+  assessedAt: number;
+  health: HealthFields;
+  provenance: {
+    taskSource: SourceRef;
+    observation: ObservationRef;
+    snapshotHash: string;
+    requestHashes: string[];
+    evidenceHash: string;
+    codeRevision: number;
+  };
+}
 
 export interface MonitorCheckpointMetadata {
   enabled: boolean;
@@ -58,6 +83,7 @@ export interface MonitorCheckpointMetadata {
   };
   lastJevCallAt?: number;
   lastExtractionCallAt?: number;
+  /** Legacy widget projection; retained for its current display contract. */
   card?: {
     taskId: string;
     revision: number;
@@ -65,14 +91,10 @@ export interface MonitorCheckpointMetadata {
     retained: boolean;
     replacementPending: boolean;
     assessedAt: number;
-    health: {
-      requirements: string;
-      acceptance: string;
-      newRedTest: string;
-      redEvidence: string;
-      implementation: string;
-    };
+    health: HealthFields;
   };
+  /** At most one exact accepted health fact for every retained task. */
+  healthCards?: HealthCard[];
 }
 
 interface Checkpoint {
@@ -683,7 +705,7 @@ function validMonitorMetadata(
     !exactKeys(
       value,
       ["enabled", "usage"],
-      ["lastJevCallAt", "lastExtractionCallAt", "card"],
+      ["lastJevCallAt", "lastExtractionCallAt", "card", "healthCards"],
     ) ||
     typeof value.enabled !== "boolean" ||
     !record(value.usage) ||
@@ -702,6 +724,19 @@ function validMonitorMetadata(
       !nonNegativeInteger(value.lastExtractionCallAt))
   )
     return false;
+  if (Object.hasOwn(value, "healthCards")) {
+    if (
+      !Array.isArray(value.healthCards) ||
+      value.healthCards.length > MAX_TASKS ||
+      !value.healthCards.every(validHealthCard) ||
+      new Set(value.healthCards.map((card) => card.taskId)).size !==
+        value.healthCards.length ||
+      !value.healthCards.every((card) =>
+        state.tasks.some((task) => task.id === card.taskId),
+      )
+    )
+      return false;
+  }
   if (!Object.hasOwn(value, "card")) return true;
   const card = value.card;
   if (
@@ -733,6 +768,52 @@ function validMonitorMetadata(
   )
     return false;
   return state.tasks.some((task) => task.id === card.taskId);
+}
+
+function validHealthCard(value: unknown): value is HealthCard {
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      "taskId",
+      "revision",
+      "label",
+      "assessedAt",
+      "health",
+      "provenance",
+    ]) ||
+    !taskIdIsValid(value.taskId) ||
+    !positiveInteger(value.revision) ||
+    !safeLabel(value.label) ||
+    !nonNegativeInteger(value.assessedAt) ||
+    !record(value.health) ||
+    !exactKeys(value.health, [
+      "requirements",
+      "acceptance",
+      "newRedTest",
+      "redEvidence",
+      "implementation",
+    ]) ||
+    !Object.values(value.health).every(safeHealthLabel) ||
+    !record(value.provenance) ||
+    !exactKeys(value.provenance, [
+      "taskSource",
+      "observation",
+      "snapshotHash",
+      "requestHashes",
+      "evidenceHash",
+      "codeRevision",
+    ]) ||
+    !validSourceRef(value.provenance.taskSource) ||
+    !validObservationRef(value.provenance.observation) ||
+    !hashIsValid(value.provenance.snapshotHash) ||
+    !Array.isArray(value.provenance.requestHashes) ||
+    value.provenance.requestHashes.length > 20 ||
+    !value.provenance.requestHashes.every(hashIsValid) ||
+    !hashIsValid(value.provenance.evidenceHash) ||
+    !nonNegativeInteger(value.provenance.codeRevision)
+  )
+    return false;
+  return true;
 }
 
 function validCheckpoint(value: unknown): value is Checkpoint {
@@ -902,7 +983,7 @@ function checkpointState(state: HybridState): HybridState {
   return snapshot;
 }
 
-/** Exact encoded bytes after strict v6 shape validation, before capacity denial. */
+/** Exact encoded bytes after strict v7 shape validation, before capacity denial. */
 export function checkpointBytes(
   state: HybridState,
   monitor?: MonitorCheckpointMetadata,
@@ -924,7 +1005,7 @@ export function encodeCheckpoint(
   monitor?: MonitorCheckpointMetadata,
 ): Checkpoint {
   if (checkpointBytes(state, monitor) > MAX_CHECKPOINT_BYTES)
-    throw new Error("Hybrid checkpoint exceeds v6 bounds");
+    throw new Error("Hybrid checkpoint exceeds v7 bounds");
   return JSON.parse(
     JSON.stringify({
       version: VERSION,

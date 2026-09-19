@@ -107,6 +107,51 @@ it("preserves all-done retained card while clearing current focus", async () => 
     replacementPending: false,
   });
 });
+it("retains replacement-pending after A completes until held B health is admitted", async () => {
+  const h = fixture("task:2", ["complete:task:1"]);
+  h.start();
+  await h.settle("goal");
+  const original = h.fetch.getMockImplementation();
+  if (!original) throw new Error("Missing fake");
+  let release: (() => void) | undefined;
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body));
+    const response = await original(url, init);
+    if (request.questions.clarity)
+      return new Promise<Response>((resolve) => {
+        release = () => resolve(response);
+      });
+    return response;
+  });
+  h.append("switch", "Parser complete. I am now writing the regression.");
+  await h.settle("switch");
+  expect(release).toBeDefined();
+  expect(h.monitor.state.focusTaskId).toBe("task:2");
+  expect(h.monitor.presentationSnapshot().card).toMatchObject({
+    taskId: "task:1",
+    retained: true,
+    replacementPending: true,
+  });
+  const saved = h.monitor.checkpoint();
+  expect(saved).toMatchObject({
+    monitor: { card: { taskId: "task:1", replacementPending: true } },
+  });
+  release?.();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.presentationSnapshot().card).toMatchObject({
+    taskId: "task:2",
+    retained: false,
+    replacementPending: false,
+  });
+  h.monitor.stop();
+  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  expect(h.monitor.presentationSnapshot().card).toMatchObject({
+    taskId: "task:1",
+    retained: true,
+    replacementPending: true,
+  });
+});
+
 it("late health for A cannot replace selected B and tool callbacks never own focus", async () => {
   const h = fixture();
   h.start();

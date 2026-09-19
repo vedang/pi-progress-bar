@@ -70,11 +70,18 @@ const requestFits = (request: EvaluationRequest) =>
   Buffer.byteLength(JSON.stringify(request)) <= MAX_REQUEST_BYTES;
 const criterionQuestion = (criterion: string) => ({
   type: "choice" as const,
-  instructions: `Assess whether bounded passive implementation evidence supports exact criterion ${JSON.stringify(criterion)}. Agent self-report alone is insufficient. Missing, stale, truncated or unlinked evidence is insufficient; explicit contrary current evidence contradicts.`,
+  instructions: `Assess exact criterion ${JSON.stringify(criterion)} for this exact task revision. Passive facts are CANDIDATES, not task ownership: establish concrete support and relevance from canonical requirements, latest report, and candidate facts. Bare agent self-report alone is insufficient. Missing, stale, truncated, unrelated, or unlinked facts are insufficient; explicit contrary current evidence contradicts. Choose partial for explicit incomplete support. Choose not-needed only when this criterion has no implementation deliverable from supplied context.`,
   criteria: {
-    supports: "Current linked passive evidence supports this criterion",
-    contradicts: "Current linked passive evidence contradicts this criterion",
-    insufficient: "Evidence is missing, stale, unlinked, or incomplete",
+    supports:
+      "Current concrete candidate evidence supports this complete criterion",
+    partial:
+      "Current concrete candidate evidence supports only part of this criterion",
+    contradicts:
+      "Current concrete candidate evidence contradicts this criterion",
+    insufficient:
+      "Evidence is missing, stale, incomplete, unrelated, or unlinked",
+    "not-needed":
+      "This criterion has no implementation deliverable in supplied context",
   },
 });
 
@@ -122,6 +129,12 @@ export function healthSnapshot(
     passive: bounded.evidence,
     codeRevision,
   };
+  const candidateEvidence = {
+    ...evidence,
+    candidateFacts:
+      "Passive facts are candidates only; no local focus/path/keyword ownership is inferred",
+    evidenceComplete: bounded.complete,
+  };
   const commonState = {
     goal: context?.length ? context.join("\n") : task.text,
     goalScope: context?.length
@@ -129,9 +142,9 @@ export function healthSnapshot(
       : "Selected task only",
     task: task.text,
     criteria: task.criteria,
-    evidence,
+    evidence: candidateEvidence,
     coverage:
-      "Complete selected task and owned criteria; only explicitly supplied source context supports goal claims",
+      "Complete selected task and owned criteria; only explicitly supplied canonical source context supports goal claims",
   };
   const coreQuestions: EvaluationRequest["questions"] = { ...questions };
   const core: EvaluationRequest = {
@@ -167,10 +180,11 @@ export function healthSnapshot(
       const request: EvaluationRequest = {
         model: MODEL,
         state: {
+          goal: commonState.goal,
           task: task.text,
           criteria: nextIndexes.map((i) => task.criteria[i]),
           criterionIndexes: nextIndexes,
-          evidence,
+          evidence: candidateEvidence,
           coverage: {
             totalCriteria: task.criteria.length,
             suppliedIndexes: nextIndexes,
@@ -207,7 +221,8 @@ export function healthSnapshot(
     task.text,
     task.criteria,
     task.ref,
-    passiveEvidence,
+    bounded.evidence,
+    bounded.complete,
     codeRevision,
   ]);
   return {

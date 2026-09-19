@@ -5,9 +5,35 @@ export type ImplementationLabel =
   | "appears complete"
   | "partial"
   | "contradicted"
+  | "not-needed"
   | "unverified";
 
-type CriterionAnswer = "supports" | "contradicts" | "insufficient";
+type CriterionAnswer =
+  | "supports"
+  | "partial"
+  | "contradicts"
+  | "insufficient"
+  | "not-needed";
+
+const recognizedAnswer = (answer: string): answer is CriterionAnswer =>
+  ["supports", "partial", "contradicts", "insufficient", "not-needed"].includes(
+    answer,
+  );
+
+const currentPassiveEvidence = (
+  evidence: PassiveEvidence[],
+  codeRevision: number,
+) =>
+  evidence.some(
+    (item) =>
+      item.revision === codeRevision &&
+      (item.kind === "code-change" || item.kind === "test-pass"),
+  );
+
+/**
+ * Local aggregation never assigns evidence to a task. It only prevents a
+ * positive Jev judgment from escaping without current passive candidates.
+ */
 export function aggregateImplementation(
   criteria: string[],
   answers: string[],
@@ -16,21 +42,35 @@ export function aggregateImplementation(
   evidenceComplete = true,
 ): ImplementationLabel {
   if (!criteria.length) return "unverified";
-  const bounded = answers.slice(0, criteria.length);
-  if (bounded.includes("contradicts")) return "contradicted";
-  const currentEvidence = evidence.some(
-    (item) => item.revision === codeRevision && item.kind !== "observed-red",
+  const bounded = criteria.map((_, index) =>
+    answers[index] && recognizedAnswer(answers[index])
+      ? answers[index]
+      : "insufficient",
   );
-  if (!currentEvidence) return "unverified";
-  if (
-    evidenceComplete &&
-    bounded.length === criteria.length &&
-    bounded.every((answer) => answer === "supports")
-  )
+  if (bounded.includes("contradicts")) return "contradicted";
+  const applicable = bounded.filter((answer) => answer !== "not-needed");
+  if (!applicable.length) return "not-needed";
+  if (!currentPassiveEvidence(evidence, codeRevision)) return "unverified";
+  if (evidenceComplete && applicable.every((answer) => answer === "supports"))
     return "appears complete";
-  if (bounded.some((answer) => answer === "supports")) return "partial";
+  if (
+    applicable.some((answer) => answer === "supports" || answer === "partial")
+  )
+    return "partial";
   return "unverified";
 }
+
+const acceptedChoice = (result: ValidatedResult | undefined, index: number) => {
+  const answer = result?.answers[`criterion:${index}`];
+  if (
+    answer?.type !== "choice" ||
+    !recognizedAnswer(answer.choice) ||
+    answer.confidence < 0.5 ||
+    (answer.probabilities[answer.choice] ?? 0) < 0.8
+  )
+    return "insufficient" as const;
+  return answer.choice;
+};
 
 export function implementationFromResult(
   criteria: string[],
@@ -39,16 +79,9 @@ export function implementationFromResult(
   codeRevision: number,
   evidenceComplete = true,
 ): ImplementationLabel {
-  const answers: CriterionAnswer[] = criteria.flatMap((_, index) => {
-    const answer = result?.answers[`criterion:${index}`];
-    return answer?.type === "choice" &&
-      ["supports", "contradicts", "insufficient"].includes(answer.choice)
-      ? [answer.choice as CriterionAnswer]
-      : [];
-  });
   return aggregateImplementation(
     criteria,
-    answers,
+    criteria.map((_, index) => acceptedChoice(result, index)),
     evidence,
     codeRevision,
     evidenceComplete,

@@ -82,6 +82,12 @@ interface PresentationCard extends RetainedCard {
   beads?: BeadsPresentation;
 }
 
+interface HealthWork {
+  observation: Observation;
+  taskId: string;
+  revision: number;
+}
+
 export interface PresentationSnapshot {
   enabled: boolean;
   progress: {
@@ -137,6 +143,20 @@ const presentationCard = (
   ...copyCard(card),
   ...(beads ? { beads: { ...beads } } : {}),
 });
+const MAX_HEALTH_REQUIREMENTS_BYTES = 4 * 1024;
+const MAX_HEALTH_REPORT_BYTES = 4 * 1024;
+
+const boundedHealthText = (text: string, maxBytes: number) => {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  let bounded = "";
+  for (const character of text) {
+    if (Buffer.byteLength(bounded) + Buffer.byteLength(character) > maxBytes)
+      break;
+    bounded += character;
+  }
+  return `${bounded}\n[bounded canonical text omitted]`;
+};
+
 const payloadHash = (value: unknown) =>
   createHash("sha256")
     .update(JSON.stringify(value) ?? "undefined")
@@ -226,7 +246,7 @@ export class Monitor {
   private authoritySampleCursor = 0;
   private epoch = 0;
   private extractionController?: AbortController;
-  private healthObservation?: Observation;
+  private healthObservation?: HealthWork;
   private healthFlight?: { epoch: number; token: number };
   private nextHealthToken = 0;
   private card?: RetainedCard;
@@ -495,6 +515,7 @@ export class Monitor {
     this.catchupTarget = undefined;
     this.authorityIndex.clear();
     this.authoritySampleCursor = 0;
+    this.evidence.reset();
     this.beads.clear();
     this.beadsGeneration++;
     this.lastJevCallAt = undefined;
@@ -975,12 +996,12 @@ export class Monitor {
       void this.processOne(observation, epoch);
       return;
     }
-    const healthObservation = this.healthObservation;
-    if (!healthObservation || this.healthFlight) return;
+    const healthWork = this.healthObservation;
+    if (!healthWork || this.healthFlight) return;
     this.healthObservation = undefined;
     const flight = { epoch: this.epoch, token: ++this.nextHealthToken };
     this.healthFlight = flight;
-    void this.processHealth(healthObservation, flight);
+    void this.processHealth(healthWork, flight);
   }
 
   private preceding(_observation: Observation) {
@@ -1009,6 +1030,12 @@ export class Monitor {
         this.blockedPending = { id: observation.id, hash: observation.hash };
         return;
       }
+      const healthTarget = this.state.tasks.find(
+        (task) =>
+          task.id === this.state.focusTaskId &&
+          task.included &&
+          task.status !== "done",
+      );
       const next = await processObservation(
         this.state,
         observation,
@@ -1020,6 +1047,15 @@ export class Monitor {
         this.preceding(observation),
       );
       if (!this.enabled || epoch !== this.epoch) return;
+      const completedHealthTarget =
+        healthTarget &&
+        next.tasks.find(
+          (task) =>
+            task.id === healthTarget.id &&
+            task.revision === healthTarget.revision &&
+            task.included &&
+            task.status === "done",
+        );
       this.commit(next);
       if (
         next.cursor?.id === observation.id &&
@@ -1044,7 +1080,7 @@ export class Monitor {
         else {
           if (next.scopeFailure === "invalid")
             this.note("invalid-scope-result");
-          this.scheduleHealth(observation);
+          this.scheduleHealth(observation, completedHealthTarget);
         }
         return;
       }
@@ -1085,16 +1121,29 @@ export class Monitor {
   }
 
   /** New semantic observations replace stale optional health work. */
-  private scheduleHealth(observation: Observation) {
-    this.healthObservation = { ...observation };
+  private scheduleHealth(observation: Observation, task?: HybridTask) {
+    const target =
+      task ??
+      this.state.tasks.find(
+        (item) =>
+          item.id === this.state.focusTaskId &&
+          item.included &&
+          item.status !== "done",
+      );
+    if (!target) return;
+    this.healthObservation = {
+      observation: { ...observation },
+      taskId: target.id,
+      revision: target.revision,
+    };
   }
 
   private async processHealth(
-    observation: Observation,
+    work: HealthWork,
     flight: { epoch: number; token: number },
   ) {
     try {
-      await this.assessHealth(flight.epoch, observation, flight);
+      await this.assessHealth(flight.epoch, work, flight);
     } catch (error) {
       if (this.healthFlight !== flight) return;
       if (error instanceof RetryableJevError) this.note("jev-unavailable");
@@ -1258,10 +1307,16 @@ export class Monitor {
     task: HybridTask,
     observation: Observation,
   ): HealthSnapshot | undefined {
+    const source = this.resolveObservation(task.source.entryId);
+    if (!source || source.hash !== task.source.messageHash) return;
+    const requirements = source.text
+      .slice(task.source.start, task.source.end)
+      .trim();
+    if (!requirements) return;
     const ledger: Ledger = {
       sourceId: this.state.sourceId,
       kind: "conversation",
-      sourceRevision: task.source.messageHash,
+      sourceRevision: source.hash,
       scopeRevision: `hybrid:${task.revision}`,
       tasks: [
         {
@@ -1288,9 +1343,22 @@ export class Monitor {
       nextTaskId: 1,
       explicitSelection: true,
     };
-    return healthSnapshot(ledger, this.epoch, [
-      `Latest canonical ${observation.role} report:\n${observation.text}`,
-    ]);
+    return healthSnapshot(
+      ledger,
+      this.epoch,
+      [
+        `Canonical task requirements:\n${boundedHealthText(
+          requirements,
+          MAX_HEALTH_REQUIREMENTS_BYTES,
+        )}`,
+        `Latest canonical ${observation.role} report:\n${boundedHealthText(
+          observation.text,
+          MAX_HEALTH_REPORT_BYTES,
+        )}`,
+      ],
+      this.evidence.snapshot(),
+      this.evidence.codeRevision(),
+    );
   }
 
   private cardIsCurrent(task: HybridTask, healthIdentity: string) {
@@ -1306,17 +1374,17 @@ export class Monitor {
 
   private async assessHealth(
     epoch: number,
-    observation: Observation,
+    work: HealthWork,
     flight: { epoch: number; token: number },
   ) {
     const task = this.state.tasks.find(
       (item) =>
-        item.id === this.state.focusTaskId &&
-        item.included &&
-        item.status !== "done",
+        item.id === work.taskId &&
+        item.revision === work.revision &&
+        item.included,
     );
     if (!task) return;
-    const snapshot = this.projectedHealth(task, observation);
+    const snapshot = this.projectedHealth(task, work.observation);
     if (!snapshot || this.cardIsCurrent(task, snapshot.identity)) return;
     let combined: ValidatedResult | undefined;
     for (const request of snapshot.requests) {
@@ -1340,6 +1408,18 @@ export class Monitor {
       this.healthFlight !== flight
     )
       return;
+    // Evidence and code revision are part of the snapshot identity. Never admit
+    // a response that raced a passive-fact change.
+    const currentTask = this.state.tasks.find(
+      (item) =>
+        item.id === work.taskId &&
+        item.revision === work.revision &&
+        item.included,
+    );
+    const current = currentTask
+      ? this.projectedHealth(currentTask, work.observation)
+      : undefined;
+    if (!current || current.identity !== snapshot.identity) return;
     const acceptance = combined.answers.acceptance;
     const applicability = combined.answers.redApplicability;
     const reported = combined.answers.redReport;
@@ -1347,7 +1427,7 @@ export class Monitor {
       taskId: task.id,
       revision: task.revision,
       label: task.label,
-      retained: false,
+      retained: task.status === "done",
       replacementPending: false,
       assessedAt: Date.now(),
       health: {
@@ -1374,13 +1454,18 @@ export class Monitor {
           contradiction:
             reported?.type === "choice" && reported.choice === "contradicted",
         }),
-        implementation: implementationFromResult(
-          [task.label],
-          combined,
-          [],
-          0,
-          snapshot.implementationEvidenceComplete,
-        ),
+        implementation: (() => {
+          const implementation = implementationFromResult(
+            [task.label],
+            combined,
+            this.evidence.snapshot(),
+            this.evidence.codeRevision(),
+            snapshot.implementationEvidenceComplete,
+          );
+          return implementation === "not-needed"
+            ? "Not needed"
+            : implementation;
+        })(),
       },
     };
     this.cardHealthIdentity = snapshot.identity;

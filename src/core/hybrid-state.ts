@@ -235,3 +235,22 @@ export function observationRef(observation: Observation): ObservationRef {
 export function copyState(state: HybridState): HybridState {
   return structuredClone(state);
 }
+
+/**
+ * Detached board order from immutable accepted create events, never mutable task
+ * array order, revision time, completion, or render selection.
+ *
+ * Valid checkpoint state contains exactly one create event for each task.
+ */
+export function tasksNewestFirst(state: HybridState): HybridTask[] {
+  const createOrder = new Map<string, number>();
+  state.events.forEach((event, index) => {
+    if (event.kind === "create") createOrder.set(event.taskId, index);
+  });
+  return [...state.tasks].sort((left, right) => {
+    const leftOrder = createOrder.get(left.id) ?? -1;
+    const rightOrder = createOrder.get(right.id) ?? -1;
+    if (leftOrder !== rightOrder) return rightOrder - leftOrder;
+    return right.id.localeCompare(left.id);
+  });
+}

@@ -81,6 +81,13 @@ interface Checkpoint {
   monitor?: MonitorCheckpointMetadata;
 }
 
+/** Structural storage result only; canonical replay/amendment is checked separately. */
+export type CheckpointStorageStatus =
+  | "absent"
+  | "supported"
+  | "unsupported"
+  | "corrupt";
+
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
@@ -737,6 +744,21 @@ function validCheckpoint(value: unknown): value is Checkpoint {
     (!Object.hasOwn(value, "monitor") ||
       validMonitorMetadata(value.monitor, value.state))
   );
+}
+
+/**
+ * Classify persisted shape before source/reference replay. A current-shape
+ * checkpoint whose canonical conversation changed remains `supported`; restore
+ * reconciles that accepted amendment without being misreported as corruption.
+ */
+export function checkpointStorageStatus(
+  data: unknown,
+): CheckpointStorageStatus {
+  if (data === undefined) return "absent";
+  if (!record(data)) return "corrupt";
+  if (typeof data.version === "number" && data.version !== VERSION)
+    return "unsupported";
+  return validCheckpoint(data) ? "supported" : "corrupt";
 }
 
 function canonicalObservation(

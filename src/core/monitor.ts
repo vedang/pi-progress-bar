@@ -21,6 +21,7 @@ import {
 } from "./hybrid";
 import {
   checkpointBytes,
+  checkpointStorageStatus,
   encodeCheckpoint,
   MAX_CHECKPOINT_BYTES,
   type MonitorCheckpointMetadata,
@@ -159,6 +160,11 @@ export interface DebugSnapshot {
   diagnostics: { code: string; label: string; count: number }[];
 }
 
+const rejectedStorageMessage = (kind: "unsupported" | "corrupt") =>
+  kind === "unsupported"
+    ? "Saved progress state is unsupported; start a fresh session. Existing progress data was not changed."
+    : "Saved progress state is corrupt; start a fresh session. Existing progress data was not changed.";
+
 const diagnosticLabels: Record<string, string> = {
   "invalid-scope-result": "Scope result rejected",
   "jev-unavailable": "Jev service unavailable",
@@ -288,6 +294,8 @@ export class Monitor {
   private lastJevCallAt?: number;
   private lastExtractionCallAt?: number;
   private diagnostics = new Map<string, number>();
+  /** A rejected persisted shape remains OFF until a new restore boundary. */
+  private restoreRejection?: "unsupported" | "corrupt";
 
   constructor(
     private readonly changed: () => void,
@@ -340,6 +348,10 @@ export class Monitor {
 
   turnOn(cwd: string): string | undefined {
     this.cwd = cwd;
+    if (this.restoreRejection) {
+      this.publish();
+      return this.error ?? rejectedStorageMessage(this.restoreRejection);
+    }
     if (this.enabled) return;
     if (this.controlWork) {
       this.controlWork.wantEnabled = true;
@@ -365,6 +377,11 @@ export class Monitor {
 
   /** Effective OFF is immediate; desired ON belongs only to ControlWork. */
   turnOff() {
+    if (this.restoreRejection) {
+      this.disableRuntime();
+      this.publish();
+      return;
+    }
     const control = this.controlWork;
     if (control) {
       control.wantEnabled = false;
@@ -692,10 +709,13 @@ export class Monitor {
     preserveControls = false,
     reader?: () => readonly unknown[],
   ) {
+    const storage = checkpointStorageStatus(data);
     const prior = this.controlWork;
     const desired = preserveControls
       ? (prior?.wantEnabled ?? this.enabled)
-      : (monitorCheckpointMetadata(data)?.enabled ?? true);
+      : storage === "supported"
+        ? (monitorCheckpointMetadata(data)?.enabled ?? true)
+        : true;
     this.finishControl(prior);
     this.controlWork = undefined;
     this.cwd = cwd;
@@ -709,15 +729,22 @@ export class Monitor {
     this.evidence.reset();
     this.diagnostics.clear();
     const sourceId = this.options.sourceId();
+    if (storage === "unsupported" || storage === "corrupt") {
+      this.rejectStoredCheckpoint(sourceId, storage);
+      return;
+    }
+    this.restoreRejection = undefined;
+    this.error = undefined;
     const promise = this.beginControl({
       kind: "restore",
       wantEnabled: desired,
       sourceId,
-      metadata: monitorCheckpointMetadata(data),
+      metadata:
+        storage === "supported" ? monitorCheckpointMetadata(data) : undefined,
       data,
       preserveControls,
       telemetry: this.captureTelemetry(this.state.sourceId),
-      target: this.restoreTarget(data),
+      target: storage === "supported" ? this.restoreTarget(data) : undefined,
     });
     await promise;
   }
@@ -824,6 +851,19 @@ export class Monitor {
     this.usage.extraction.calls = 0;
     this.usage.extraction.inputTokens = 0;
     this.usage.extraction.outputTokens = 0;
+  }
+
+  /** Reject only persisted shape; canonical amendments remain normal restore reconciliation. */
+  private rejectStoredCheckpoint(
+    sourceId: string,
+    kind: "unsupported" | "corrupt",
+  ) {
+    this.disableRuntime();
+    this.resetState(sourceId);
+    this.restoreRejection = kind;
+    this.error = rejectedStorageMessage(kind);
+    this.waitingForWake = false;
+    this.publish();
   }
 
   private metadata(enabled = this.enabled): MonitorCheckpointMetadata {
@@ -1034,6 +1074,11 @@ export class Monitor {
   }
 
   private service() {
+    if (this.restoreRejection)
+      return {
+        code: `saved-state-${this.restoreRejection}`,
+        label: "Saved progress state needs a fresh session",
+      };
     if (!this.enabled) return { code: "monitor-off", label: "Monitoring off" };
     if (this.waitingForWake)
       return { code: "model-unavailable", label: "Selected model unavailable" };

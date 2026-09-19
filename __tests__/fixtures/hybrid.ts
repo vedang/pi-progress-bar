@@ -45,6 +45,9 @@ export function backend(
   patch = noPatch(),
   options: {
     gate?: string;
+    focus?: string;
+    focusConfidence?: number;
+    focusProbability?: number;
     complete?: string | Record<string, string>;
     withdraw?: Record<string, string>;
     save?: (state: HybridState) => void;
@@ -64,24 +67,38 @@ export function backend(
             if (question.type !== "choice") throw new Error("Expected choice");
             const id = key.slice(key.indexOf(":") + 1);
             const choice =
-              key === "gate"
-                ? (options.gate ?? "changed")
-                : key.startsWith("withdraw:")
-                  ? (options.withdraw?.[id] ?? "no")
-                  : typeof options.complete === "string"
-                    ? options.complete
-                    : (options.complete?.[id] ?? "no");
+              key === "focus"
+                ? (options.focus ??
+                  Object.keys(question.criteria).find((id) =>
+                    id.startsWith("task:"),
+                  ) ??
+                  "none")
+                : key === "gate"
+                  ? (options.gate ?? "changed")
+                  : key.startsWith("withdraw:")
+                    ? (options.withdraw?.[id] ?? "no")
+                    : typeof options.complete === "string"
+                      ? options.complete
+                      : (options.complete?.[id] ?? "no");
             expect(Object.keys(question.criteria)).toContain(choice);
             return [
               key,
               {
                 type: "choice",
                 choice,
-                confidence: 1,
+                confidence:
+                  key === "focus" ? (options.focusConfidence ?? 1) : 1,
                 probabilities: Object.fromEntries(
                   Object.keys(question.criteria).map((candidate) => [
                     candidate,
-                    candidate === choice ? 1 : 0,
+                    candidate === choice
+                      ? key === "focus"
+                        ? (options.focusProbability ?? 1)
+                        : 1
+                      : key === "focus"
+                        ? (1 - (options.focusProbability ?? 1)) /
+                          (Object.keys(question.criteria).length - 1)
+                        : 0,
                   ]),
                 ),
               },

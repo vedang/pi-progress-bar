@@ -69,6 +69,9 @@ export function jevReply(request: EvaluationRequest) {
           key !== "complete:task:1"
         )
           choice = "yes";
+        if (key === "focus")
+          choice =
+            keys.find((candidate) => candidate.startsWith("task:")) ?? "none";
         if (key === "acceptance") choice = "explicit";
         if (key === "redApplicability") choice = "not-needed";
         if (key === "redReport") choice = "not-found";

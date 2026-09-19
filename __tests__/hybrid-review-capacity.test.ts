@@ -148,13 +148,15 @@ it.each([false, true])(
       "Report current work.",
       "assistant",
     );
-    let target = pending ? 508 * 1024 : 512 * 1024;
-    let f = await settledAtBytes(target, false, 3, true);
+    const f = await settledAtBytes(
+      pending ? 500 * 1024 : 512 * 1024,
+      false,
+      3,
+      true,
+    );
     let state = f.state;
-    for (let attempt = 0; attempt < 8; attempt++) {
-      f = await settledAtBytes(target, false, 3, true);
-      state = f.state;
-      if (pending) {
+    if (pending) {
+      const acceptGate = async () => {
         const saved: HybridState[] = [];
         const p = Object.assign(
           backend(noPatch(), {
@@ -163,14 +165,23 @@ it.each([false, true])(
           }),
           { admit: (plan: { phase: string }) => plan.phase !== "completion" },
         );
-        await processObservation(state, latest, p, f.messages.slice(-2));
+        await processObservation(f.state, latest, p, f.messages.slice(-2));
         const accepted = saved.find((value) => value.pending?.journal.gate);
         if (!accepted) throw new Error("Missing accepted gate");
-        state = accepted;
-      }
-      const bytes = checkpointBytes(state, f.meta);
-      if (bytes === 512 * 1024) break;
-      target += 512 * 1024 - bytes;
+        return accepted;
+      };
+      const unpadded = await acceptGate();
+      const extra = 512 * 1024 - checkpointBytes(unpadded, f.meta);
+      expect(extra).toBeGreaterThan(0);
+      // Change exactly one historical event ref, not cursor/context refs whose
+      // repeated byte growth makes iterative target padding oscillate.
+      const event = f.state.events[3];
+      if (!event) throw new Error("Missing filler event");
+      event.source.entryId += "x".repeat(extra);
+      f.messages.unshift(
+        observation(event.source.entryId, f.source.text, f.source.role),
+      );
+      state = await acceptGate();
     }
     const checkpoint = encodeCheckpoint(state, f.meta);
     expect(size(checkpoint)).toBe(512 * 1024);

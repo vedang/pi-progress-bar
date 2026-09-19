@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToVisualLines } from "@earendil-works/pi-coding-agent";
 import { expect, it, vi } from "vitest";
@@ -32,7 +33,11 @@ function fixture(kind = "current", total = 3) {
     lastExtractionCallAt: 900,
   };
 }
-function render(view: ReturnType<typeof fixture>, width: number) {
+function render(
+  view: ReturnType<typeof fixture>,
+  width: number,
+  colored = false,
+) {
   let component:
     | { render(width: number): string[]; invalidate(): void }
     | undefined;
@@ -46,7 +51,8 @@ function render(view: ReturnType<typeof fixture>, width: number) {
         component = factory(
           {},
           {
-            fg: (_color: string, text: string) => text,
+            fg: (_color: string, text: string) =>
+              colored ? `\u001b[38;2;90;128;128m${text}\u001b[39m` : text,
             bold: (text: string) => text,
           },
         );
@@ -99,6 +105,21 @@ it("shows actual Jev dispatch freshness rather than an opaque Ready label", () =
   expect(freshness).toBeDefined();
   expect(freshness).toMatch(/00:00:01|1\/1\/1970|1970-01-01/);
 });
+it.each([40, 80])(
+  "preserves trusted ANSI color sequences without exposing their marker text at width %i",
+  (width) => {
+    const lines = render(fixture(), width, true);
+    expect(lines.some((line) => line.includes("\u001b["))).toBe(true);
+    const visible = stripVTControlCharacters(lines.join("\n"));
+    expect(visible).not.toMatch(/\[(?:38;2;|39m)/);
+    expect(visible).toContain("Requirements:");
+    expect(visible).toContain("retained");
+    for (const line of lines)
+      expect(truncateToVisualLines(line, 1, width, 0).visualLines).toEqual([
+        line,
+      ]);
+  },
+);
 it.each(["previous", "empty"])(
   "does not render current percentages for %s progress",
   (kind) => {

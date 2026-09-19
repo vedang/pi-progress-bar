@@ -45,3 +45,5 @@
 - No background sessions before launch. Spawned fresh Pi outside repository at `/Users/vedang/.pi/agent`, background dispatch session `orchestration-watchdog-01a0ba83`, autoExitOnQuiet=false, quiet/update/grace=600000ms.
 - Timer read-only: sends READY then sleeps600 and sends TICK; no repository inspection/writes/delegation. Master retains all decisions and checks intercom, jj state, sole-writer ownership, exact immediate-parent gates and validation on ticks.
 - Launch running; READY routing verification pending. Cleanup on orchestration completion or master-ID replacement: `/orchestration-watchdog-stop orchestration-watchdog-01a0ba83`.
+- Watchdog verification FAILED: fresh Pi blocked at interactive trust prompt (`Do not trust` / `Do not trust (this session only)`); no intercom registration or WATCHDOG READY received. Did not accept security trust on owner's behalf.
+- Dismissed exact background session `orchestration-watchdog-01a0ba83`; listBackground confirms no background sessions. Watchdog NOT active. Owner trust setup required before same-protocol relaunch. No repository/source implementation failure; U05 remains current work.

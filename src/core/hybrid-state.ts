@@ -142,10 +142,18 @@ export interface PatchRecord {
   undo: PatchUndo;
 }
 
+interface FocusRecord {
+  assessment: Assessment;
+  /** Exact focus presence before first combined completion/focus reduction. */
+  priorFocusTaskId: Presence<string>;
+}
+
 export interface CompletionRecord {
   requestHash: string;
   chunkIds: string[];
   assessments: Assessment[];
+  /** Mandatory only on first chunk when pre-completion open candidates exist. */
+  focus?: FocusRecord;
   undo: {
     tasks: Array<{
       status: TaskStatus;

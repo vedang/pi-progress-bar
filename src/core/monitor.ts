@@ -1037,6 +1037,15 @@ export class Monitor {
             task.included &&
             task.status === "done",
         );
+      const focusedHealthTarget = next.tasks.find(
+        (task) =>
+          task.id === next.focusTaskId &&
+          task.included &&
+          task.status !== "done",
+      );
+      const hasOpenTasks = next.tasks.some(
+        (task) => task.included && task.status !== "done",
+      );
       this.commit(next);
       if (next.capacity === "limit") {
         this.blockedPending = { id: observation.id, hash: observation.hash };
@@ -1066,7 +1075,13 @@ export class Monitor {
         else {
           if (next.scopeFailure === "invalid")
             this.note("invalid-scope-result");
-          this.scheduleHealth(observation, completedHealthTarget);
+          // A newly selected open focus is current. A completed prior focus is
+          // health-eligible only for the all-done retained-card path.
+          this.scheduleHealth(
+            observation,
+            focusedHealthTarget ??
+              (!hasOpenTasks ? completedHealthTarget : undefined),
+          );
         }
         return;
       }
@@ -1342,12 +1357,19 @@ export class Monitor {
       next.focusTaskId !== card.taskId ||
       task.revision !== card.revision ||
       task.label !== card.label
-    )
+    ) {
+      const replacement = next.tasks.find(
+        (candidate) =>
+          candidate.id === next.focusTaskId &&
+          candidate.included &&
+          candidate.status !== "done",
+      );
       this.card = {
         ...copyCard(card),
         retained: true,
-        replacementPending: !completed,
+        replacementPending: !!replacement,
       };
+    }
   }
 
   private recordJevDispatch(at: number) {
@@ -1484,18 +1506,29 @@ export class Monitor {
     );
   }
 
-  private async assessHealth(
-    epoch: number,
-    work: HealthWork,
-    flight: { epoch: number; token: number },
-    pass: CanonicalPass,
-  ) {
+  /** Health follows exact open focus, except all-done retained assessment. */
+  private healthTaskForCurrentFocus(work: HealthWork) {
     const task = this.state.tasks.find(
       (item) =>
         item.id === work.taskId &&
         item.revision === work.revision &&
         item.included,
     );
+    if (!task) return;
+    const hasOpenTasks = this.state.tasks.some(
+      (item) => item.included && item.status !== "done",
+    );
+    if (task.status === "done") return hasOpenTasks ? undefined : task;
+    return this.state.focusTaskId === task.id ? task : undefined;
+  }
+
+  private async assessHealth(
+    epoch: number,
+    work: HealthWork,
+    flight: { epoch: number; token: number },
+    pass: CanonicalPass,
+  ) {
+    const task = this.healthTaskForCurrentFocus(work);
     if (!task) return;
     const snapshot = this.projectedHealth(task, work.observation, pass);
     if (!snapshot || this.cardIsCurrent(task, snapshot.identity)) return;
@@ -1524,12 +1557,7 @@ export class Monitor {
       return;
     // Evidence and code revision are part of the snapshot identity. Never admit
     // a response that raced a passive-fact change.
-    const currentTask = this.state.tasks.find(
-      (item) =>
-        item.id === work.taskId &&
-        item.revision === work.revision &&
-        item.included,
-    );
+    const currentTask = this.healthTaskForCurrentFocus(work);
     const currentPass = this.beginCanonicalPass();
     if (this.hasCanonicalAmendment(currentPass)) {
       this.resetForCanonicalAmendment();

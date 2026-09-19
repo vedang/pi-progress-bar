@@ -1,4 +1,9 @@
-import { completionDecisions, completionRequest } from "../analysis/completion";
+import {
+  completionDecisions,
+  completionRequest,
+  focusAssessment,
+  focusSpecialChoices,
+} from "../analysis/completion";
 import {
   type ExtractionInput,
   ExtractionInputOverflowError,
@@ -93,10 +98,16 @@ const validObservation = (observation: Observation) =>
   typeof observation.text === "string" &&
   /^[a-f0-9]{64}$/.test(observation.hash);
 
-const focusTaskId = (state: HybridState) =>
-  Object.hasOwn(state, "focusTaskId")
-    ? state.focusTaskId
-    : state.tasks.find((task) => task.included && task.status !== "done")?.id;
+const openTasks = (state: HybridState) =>
+  state.tasks.filter((task) => task.included && task.status !== "done");
+
+/** Focus is a Jev judgment, never a first-open display heuristic. */
+const retainedFocusTaskId = (state: HybridState) => {
+  const task = state.tasks.find(
+    (candidate) => candidate.id === state.focusTaskId,
+  );
+  return task?.included && task.status !== "done" ? task.id : undefined;
+};
 
 const sameObservation = (reference: ObservationRef, observation: Observation) =>
   reference.entryId === observation.id &&
@@ -143,7 +154,7 @@ function completeTransaction(state: HybridState, observation: Observation) {
       hash: observation.hash,
       role: observation.role,
     },
-    focusTaskId: focusTaskId(committed),
+    focusTaskId: retainedFocusTaskId(committed),
   };
 }
 
@@ -387,18 +398,9 @@ export function applyPatch(
       })),
     ],
   };
-  const archivedFocus = outcome.archive.some(
-    (operation) => operation.id === state.focusTaskId,
-  );
-  const nextFocus = additions[0]?.id ?? outcome.restore[0]?.id;
-  return {
-    ...next,
-    ...(nextFocus
-      ? { focusTaskId: nextFocus }
-      : archivedFocus
-        ? { focusTaskId: undefined }
-        : {}),
-  };
+  // Scope patches never claim current activity. Preserve only an existing
+  // open semantic focus; additions/restores must await the combined Jev answer.
+  return { ...next, focusTaskId: retainedFocusTaskId(next) };
 }
 
 /** Shared pure gate reducer; journal records outcome separately. */
@@ -414,12 +416,18 @@ export function completionChunks(
   observation: Observation,
   tasks: readonly HybridTask[],
   preceding: readonly Observation[],
+  focusCandidates: readonly HybridTask[] = [],
 ): HybridTask[][] {
   const chunks: HybridTask[][] = [];
   let current: HybridTask[] = [];
   for (const task of tasks) {
     try {
-      completionRequest(observation, [...current, task], preceding);
+      completionRequest(
+        observation,
+        [...current, task],
+        preceding,
+        chunks.length === 0 ? focusCandidates : [],
+      );
       current.push(task);
     } catch (error) {
       if (!current.length) throw error;
@@ -478,7 +486,7 @@ export function applyCompletionRecord(
       "capacity",
       "Task mutation event capacity exceeds 1000",
     );
-  return {
+  const next = {
     ...state,
     tasks,
     events: [
@@ -489,6 +497,29 @@ export function applyCompletionRecord(
       })),
     ],
   };
+  // A later completion chunk may settle the task selected in first chunk.
+  return { ...next, focusTaskId: retainedFocusTaskId(next) };
+}
+
+/** Apply one first-chunk current-activity assessment after completion. */
+export function applyFocusRecord(
+  state: HybridState,
+  candidates: readonly HybridTask[],
+  assessment: Assessment,
+): HybridState {
+  const candidateIds = new Set(candidates.map((candidate) => candidate.id));
+  const selected =
+    assessment.reason === "accepted" &&
+    !focusSpecialChoices.has(assessment.rawChoice) &&
+    candidateIds.has(assessment.rawChoice)
+      ? state.tasks.find(
+          (task) =>
+            task.id === assessment.rawChoice &&
+            task.included &&
+            task.status !== "done",
+        )?.id
+      : undefined;
+  return { ...state, focusTaskId: selected };
 }
 
 export const acceptedCompletionIds = (
@@ -657,21 +688,35 @@ function completionAdmissionPlan(
   state: HybridState,
   observation: Observation,
   chunk: readonly HybridTask[],
+  focusCandidates: readonly HybridTask[],
   request: EvaluationRequest,
 ): AdmissionPlan {
   const assessments = chunk.map(() => maximumAssessment(observation));
   const undo = completionUndo(state, chunk);
-  const committed = applyCompletionRecord(
+  const completed = applyCompletionRecord(
     state,
     chunk.map((task) => task.id),
     assessments,
   );
   const journal = state.pending?.journal;
   if (!journal) throw new Error("Accepted gate journal is required");
+  const focus = focusCandidates.length
+    ? {
+        assessment: {
+          ...maximumAssessment(observation),
+          rawChoice: focusCandidates.at(-1)?.id ?? "invalid",
+        },
+        priorFocusTaskId: optionalPresence(state.focusTaskId),
+      }
+    : undefined;
+  const committed = focus
+    ? applyFocusRecord(completed, focusCandidates, focus.assessment)
+    : completed;
   const record: CompletionRecord = {
     requestHash: requestHash(request),
     chunkIds: chunk.map((task) => task.id),
     assessments,
+    ...(focus ? { focus } : {}),
     undo,
   };
   return {
@@ -740,7 +785,7 @@ export async function processObservation(
           hash: observation.hash,
           role: observation.role,
         },
-        focusTaskId: focusTaskId(next),
+        focusTaskId: retainedFocusTaskId(next),
         scopeUnresolved: true,
         scopeFailure: "overflow",
         scopeError: "Latest message exceeds 12KiB unresolved overflow",
@@ -865,34 +910,65 @@ export async function processObservation(
         (task) => task.included && !accepted.has(task.id),
       );
       if (!remaining.length) break;
-      const chunk = completionChunks(observation, remaining, context)[0];
+      // Only the first completion request has all pre-completion open tasks
+      // available for an independent current-activity judgment.
+      const completionJournal = next.pending?.journal;
+      if (!completionJournal)
+        throw new Error("Accepted gate journal is required");
+      const focusCandidates = completionJournal.completions.length
+        ? []
+        : openTasks(next);
+      const chunk = completionChunks(
+        observation,
+        remaining,
+        context,
+        focusCandidates,
+      )[0];
       if (!chunk) break;
       if (next.events.length + chunk.length > MAX_EVENTS)
         return blockPending(next, "event-capacity", "capacity");
-      const request = completionRequest(observation, chunk, context);
+      const request = completionRequest(
+        observation,
+        chunk,
+        context,
+        focusCandidates,
+      );
       if (
         !admissionAllowed(
           providers,
-          completionAdmissionPlan(next, observation, chunk, request),
+          completionAdmissionPlan(
+            next,
+            observation,
+            chunk,
+            focusCandidates,
+            request,
+          ),
         )
       )
         return blockPending(next, "completion-build", "capacity", true);
-      const decisions = completionDecisions(
-        await providers.evaluate(request),
-        observation,
-        chunk,
-      );
+      const result = await providers.evaluate(request);
+      const decisions = completionDecisions(result, observation, chunk);
       const assessments = decisions.map((decision) => decision.assessment);
+      const focus = focusCandidates.length
+        ? {
+            assessment: focusAssessment(result, observation, focusCandidates),
+            priorFocusTaskId: optionalPresence(next.focusTaskId),
+          }
+        : undefined;
       const undo = completionUndo(next, chunk);
-      const committed = applyCompletionRecord(
+      const completed = applyCompletionRecord(
         next,
         chunk.map((task) => task.id),
         assessments,
       );
+      const committed = focus
+        ? applyFocusRecord(completed, focusCandidates, focus.assessment)
+        : completed;
       const record: CompletionRecord = {
         requestHash: requestHash(request),
         chunkIds: chunk.map((task) => task.id),
         assessments: structuredClone(assessments),
+        ...(focus ? { focus: structuredClone(focus) } : {}),
         undo,
       };
       const journal = next.pending?.journal;

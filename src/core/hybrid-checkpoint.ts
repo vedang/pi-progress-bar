@@ -5,6 +5,7 @@ import { gateRequest } from "../analysis/gate";
 import {
   acceptedCompletionIds,
   applyCompletionRecord,
+  applyFocusRecord,
   applyGate,
   applyPatch,
   completionChunks,
@@ -13,6 +14,7 @@ import {
 } from "./hybrid";
 import {
   gateDecision,
+  optionalPresence,
   originHash,
   replayCore,
   requestHash,
@@ -38,13 +40,14 @@ import {
   type TaskStatus,
 } from "./hybrid-state";
 
-const VERSION = 5;
+const VERSION = 6;
 const MAX_TASKS = 200;
 const MAX_ACTIVE_TASKS = 20;
 const MAX_EVENTS = 1000;
 const MAX_LABEL_CHARACTERS = 240;
 export const MAX_CHECKPOINT_BYTES = 512 * 1024;
 const MAX_COMPLETIONS = 20;
+const focusSpecialChoices = new Set(["none", "concurrent", "uncertain"]);
 
 export interface MonitorCheckpointMetadata {
   enabled: boolean;
@@ -169,9 +172,12 @@ function validAssessment(value: unknown): value is Assessment {
     (value.rawChoice === "changed" ||
       value.rawChoice === "unchanged" ||
       value.rawChoice === "uncertain" ||
+      value.rawChoice === "none" ||
+      value.rawChoice === "concurrent" ||
       value.rawChoice === "yes" ||
       value.rawChoice === "no" ||
-      value.rawChoice === "invalid") &&
+      value.rawChoice === "invalid" ||
+      taskIdIsValid(value.rawChoice)) &&
     unit(value.confidence) &&
     unit(value.probability) &&
     (value.reason === "accepted" ||
@@ -417,6 +423,15 @@ function validPatchUndo(
   );
 }
 
+function validFocusRecord(value: unknown) {
+  return (
+    record(value) &&
+    exactKeys(value, ["assessment", "priorFocusTaskId"]) &&
+    validAssessment(value.assessment) &&
+    validPresence(value.priorFocusTaskId, taskIdIsValid)
+  );
+}
+
 function validGate(value: unknown): value is GateRecord {
   return (
     record(value) &&
@@ -481,15 +496,17 @@ function validPending(value: unknown): value is PendingObservation {
   }
   const ids = new Set<string>();
   let count = 0;
-  for (const completion of value.journal.completions) {
+  for (const [
+    completionIndex,
+    completion,
+  ] of value.journal.completions.entries()) {
     if (
       !record(completion) ||
-      !exactKeys(completion, [
-        "requestHash",
-        "chunkIds",
-        "assessments",
-        "undo",
-      ]) ||
+      !exactKeys(
+        completion,
+        ["requestHash", "chunkIds", "assessments", "undo"],
+        ["focus"],
+      ) ||
       !hashIsValid(completion.requestHash) ||
       !Array.isArray(completion.chunkIds) ||
       completion.chunkIds.length < 1 ||
@@ -509,8 +526,12 @@ function validPending(value: unknown): value is PendingObservation {
           validTaskStatus(undo.status) &&
           validPresence(undo.latestAssessment, validAssessment),
       ) ||
-      !nonNegativeInteger(completion.undo.eventLength)
+      !nonNegativeInteger(completion.undo.eventLength) ||
+      (Object.hasOwn(completion, "focus") &&
+        !validFocusRecord(completion.focus))
     )
+      return false;
+    if (Object.hasOwn(completion, "focus") && completionIndex !== 0)
       return false;
     for (const id of completion.chunkIds) {
       count++;
@@ -612,8 +633,10 @@ function validState(value: unknown): value is HybridState {
     )
   )
     return false;
-  if (typeof state.focusTaskId === "string" && !taskIds.has(state.focusTaskId))
-    return false;
+  if (typeof state.focusTaskId === "string") {
+    const focused = state.tasks.find((task) => task.id === state.focusTaskId);
+    if (!focused?.included || focused.status === "done") return false;
+  }
   if (
     state.events.some(
       (event) =>
@@ -759,6 +782,7 @@ function journalReferencesResolve(
       : []),
     ...pending.journal.completions.flatMap((completion) => [
       ...completion.assessments.map((assessment) => assessment.source),
+      ...(completion.focus ? [completion.focus.assessment.source] : []),
       ...completion.undo.tasks.flatMap((undo) =>
         undo.latestAssessment.present
           ? [undo.latestAssessment.value.source]
@@ -834,7 +858,7 @@ function checkpointState(state: HybridState): HybridState {
   return snapshot;
 }
 
-/** Exact encoded bytes after strict v5 shape validation, before capacity denial. */
+/** Exact encoded bytes after strict v6 shape validation, before capacity denial. */
 export function checkpointBytes(
   state: HybridState,
   monitor?: MonitorCheckpointMetadata,
@@ -856,7 +880,7 @@ export function encodeCheckpoint(
   monitor?: MonitorCheckpointMetadata,
 ): Checkpoint {
   if (checkpointBytes(state, monitor) > MAX_CHECKPOINT_BYTES)
-    throw new Error("Hybrid checkpoint exceeds v5 bounds");
+    throw new Error("Hybrid checkpoint exceeds v6 bounds");
   return JSON.parse(
     JSON.stringify({
       version: VERSION,
@@ -976,6 +1000,8 @@ function reversePending(finalState: HybridState): HybridState {
   delete state.scopeFailure;
   delete state.completionError;
   for (const completion of [...pending.journal.completions].reverse()) {
+    if (completion.focus)
+      restorePresence(state, "focusTaskId", completion.focus.priorFocusTaskId);
     if (state.events.length < completion.undo.eventLength)
       throw new Error("Completion event length invalid");
     completion.chunkIds.forEach((id, index) => {
@@ -1092,24 +1118,35 @@ function replayPending(
   }
   if (pending.phase === "extract" && pending.journal.completions.length)
     return false;
-  for (const completion of pending.journal.completions) {
+  for (const [
+    completionIndex,
+    completion,
+  ] of pending.journal.completions.entries()) {
     if (pending.phase !== "complete") return false;
     const accepted = new Set(
       acceptedCompletionIds({
         ...pending,
         journal: {
           ...pending.journal,
-          completions: pending.journal.completions.slice(
-            0,
-            pending.journal.completions.indexOf(completion),
-          ),
+          completions: pending.journal.completions.slice(0, completionIndex),
         },
       }),
     );
     const remaining = replayed.tasks.filter(
       (task) => task.included && !accepted.has(task.id),
     );
-    const chunk = completionChunks(latest, remaining, context)[0];
+    const focusCandidates =
+      completionIndex === 0
+        ? replayed.tasks.filter(
+            (task) => task.included && task.status !== "done",
+          )
+        : [];
+    const chunk = completionChunks(
+      latest,
+      remaining,
+      context,
+      focusCandidates,
+    )[0];
     if (
       !chunk ||
       !sameJson(
@@ -1118,7 +1155,7 @@ function replayPending(
       )
     )
       return false;
-    const request = completionRequest(latest, chunk, context);
+    const request = completionRequest(latest, chunk, context, focusCandidates);
     if (
       requestHash(request) !== completion.requestHash ||
       !sameJson(completionUndo(replayed, chunk), completion.undo)
@@ -1130,11 +1167,35 @@ function replayPending(
       )
     )
       return false;
+    const requiresFocus = focusCandidates.length > 0;
+    if (requiresFocus !== !!completion.focus) return false;
+    if (completion.focus) {
+      const focus = completion.focus;
+      const allowed = new Set([
+        ...focusCandidates.map((candidate) => candidate.id),
+        ...focusSpecialChoices,
+      ]);
+      if (
+        !allowed.has(focus.assessment.rawChoice) ||
+        !sameRef(focus.assessment.source, pending.observation) ||
+        !sameJson(
+          optionalPresence(replayed.focusTaskId),
+          focus.priorFocusTaskId,
+        )
+      )
+        return false;
+    }
     replayed = applyCompletionRecord(
       replayed,
       completion.chunkIds,
       completion.assessments,
     );
+    if (completion.focus)
+      replayed = applyFocusRecord(
+        replayed,
+        focusCandidates,
+        completion.focus.assessment,
+      );
   }
   return sameJson(replayCore(replayed), replayCore(finalState));
 }

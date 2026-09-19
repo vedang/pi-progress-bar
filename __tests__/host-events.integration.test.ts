@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,7 +14,9 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as pinnedPi from "@earendil-works/pi-coding-agent";
 import { expect, it, vi } from "vitest";
 import progressBar from "../src/index";
-import { hashText } from "../src/sources/trajectory";
+
+const hashText = (text: string) =>
+  createHash("sha256").update(text).digest("hex");
 
 function latch() {
   let release = () => {};
@@ -74,8 +77,8 @@ it.each([false, true])(
         vi.fn(async (url: string, init?: RequestInit) => {
           expect(url).toBe("https://api.typesafe.ai/v1/systemone");
           const request = JSON.parse(String(init?.body));
-          expect(Object.keys(request.questions)).toEqual(["source"]);
-          const id = request.state.candidates[0].entryId as string;
+          expect(Object.keys(request.questions)).toEqual(["gate"]);
+          const id = request.state.latest.id as string;
           expect(
             manager
               .getBranch()
@@ -86,14 +89,14 @@ it.each([false, true])(
           return Response.json({
             model: "jev-1.13.0",
             answers: {
-              source: {
+              gate: {
                 type: "choice",
-                choice: "none",
+                choice: "unchanged",
                 confidence: 1,
                 probabilities: Object.fromEntries(
-                  Object.keys(request.questions.source.criteria).map((key) => [
+                  Object.keys(request.questions.gate.criteria).map((key) => [
                     key,
-                    key === "none" ? 1 : 0,
+                    key === "unchanged" ? 1 : 0,
                   ]),
                 ),
               },

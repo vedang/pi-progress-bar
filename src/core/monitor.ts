@@ -99,7 +99,6 @@ interface ContextScan {
 interface Deferred {
   promise: Promise<void>;
   resolve: () => void;
-  reject: () => void;
 }
 
 interface ActiveWork {
@@ -397,6 +396,7 @@ export class Monitor {
     else if (authority === "incomplete") this.scheduleCanonicalWake();
     else {
       this.clearRetry();
+      this.settleActiveAuthority(this.activeObservation);
       this.epoch++;
       this.extractionController?.abort();
       this.cancelHealth();
@@ -469,14 +469,21 @@ export class Monitor {
     return cursor ? { id: cursor.id, includeTarget: true } : undefined;
   }
 
+  /** Accepted pending work is valid only against its exact complete gate context. */
+  private pendingContextAmended() {
+    const pending = this.state.pending;
+    return (
+      !!pending &&
+      !this.sameContext(pending.journal.gate.context, this.settledContext)
+    );
+  }
+
   private deferred(): Deferred {
     let resolve = () => {};
-    let reject = () => {};
-    const promise = new Promise<void>((ok, fail) => {
+    const promise = new Promise<void>((ok) => {
       resolve = ok;
-      reject = fail;
     });
-    return { promise, resolve, reject };
+    return { promise, resolve };
   }
 
   private captureTelemetry(sourceId: string): Telemetry {
@@ -510,6 +517,7 @@ export class Monitor {
     this.enabled = false;
     this.waitingForWake = false;
     this.clearRetry();
+    this.settleActiveAuthority(this.activeObservation);
     this.epoch++;
     this.extractionController?.abort();
     this.cancelHealth();
@@ -617,7 +625,7 @@ export class Monitor {
         this.state = copyState(restored);
         this.mergeTelemetry(work.metadata, work);
         this.latchHistoricalCatchup = true;
-        if (this.directCanonicalAmendment(pass))
+        if (this.directCanonicalAmendment(pass) || this.pendingContextAmended())
           this.resetState(work.sourceId, false);
       } else if (this.restoreSourceMatches(work.data, work.sourceId)) {
         this.mergeTelemetry(work.metadata, work);
@@ -630,7 +638,10 @@ export class Monitor {
           work.sourceId !== work.telemetry.sourceId,
         );
       }
-    } else if (this.directCanonicalAmendment(pass)) {
+    } else if (
+      this.directCanonicalAmendment(pass) ||
+      this.pendingContextAmended()
+    ) {
       // Enable is already effectively OFF. Rebuild semantics without
       // canceling desired control or writing old branch state.
       this.resetState(work.sourceId, false);
@@ -688,7 +699,6 @@ export class Monitor {
     if (reader) this.reader = reader;
     this.queued = [];
     this.blockedPending = undefined;
-    this.activeObservation = undefined;
     this.catchingUp = false;
     this.catchupTarget = undefined;
     this.beads.clear();
@@ -783,8 +793,7 @@ export class Monitor {
     this.pageFrontier = undefined;
     this.settledContext = [];
     this.pendingScan = undefined;
-    this.activeObservation?.barrier?.reject();
-    if (this.activeObservation) this.activeObservation.scan = undefined;
+    this.settleActiveAuthority(this.activeObservation);
   }
 
   /** Semantic authority resets on amendment; billing lifetime resets only by source. */
@@ -1036,14 +1045,9 @@ export class Monitor {
   }
 
   private forceOff() {
-    this.enabled = false;
+    this.disableRuntime();
+    this.clearRuntimeContext();
     this.error = "Progress service unavailable";
-    this.clearRetry();
-    this.epoch++;
-    this.extractionController?.abort();
-    this.cancelHealth();
-    this.healthObservation = undefined;
-    this.evidence.clearPending();
     this.save();
     this.publish();
   }
@@ -1224,11 +1228,13 @@ export class Monitor {
     return active.barrier;
   }
 
-  private settleBarrier(active: ActiveWork, amended = false) {
+  /** Resolve owner work before its epoch or ownership can disappear. */
+  private settleActiveAuthority(active: ActiveWork | undefined) {
+    if (!active) return;
+    active.scan = undefined;
     const barrier = active.barrier;
     active.barrier = undefined;
-    if (amended) barrier?.reject();
-    else barrier?.resolve();
+    barrier?.resolve();
   }
 
   /** Current/amended/incomplete keeps partial scan out of transaction state. */
@@ -1248,7 +1254,6 @@ export class Monitor {
         this.createBarrier(active);
         return "incomplete";
       }
-      active.scan = undefined;
       const changed = !this.sameContext(
         active.requestContext.map((observation) => ({
           entryId: observation.id,
@@ -1257,7 +1262,7 @@ export class Monitor {
         })),
         scanned.context,
       );
-      this.settleBarrier(active, changed);
+      this.settleActiveAuthority(active);
       return changed ? "amended" : "current";
     }
     const pending = this.state.pending;
@@ -1433,14 +1438,14 @@ export class Monitor {
     if (observation) {
       const epoch = this.epoch;
       this.processing = true;
-      const requestContext = this.settledContext.map((item) => ({ ...item }));
-      this.activeObservation = {
+      const active: ActiveWork = {
         observation: { ...observation },
         epoch,
-        requestContext,
+        requestContext: this.settledContext.map((item) => ({ ...item })),
       };
+      this.activeObservation = active;
       this.setActivity("Analyzing progress");
-      void this.processOne(observation, epoch, requestContext);
+      void this.processOne(active);
       return;
     }
     const healthWork = this.healthObservation;
@@ -1468,11 +1473,8 @@ export class Monitor {
     this.settledContext = context;
   }
 
-  private async processOne(
-    observation: Observation,
-    epoch: number,
-    requestContext: readonly Observation[],
-  ) {
+  private async processOne(active: ActiveWork) {
+    const { observation, epoch, requestContext } = active;
     try {
       const healthTarget = this.state.tasks.find(
         (task) =>
@@ -1485,8 +1487,8 @@ export class Monitor {
         observation,
         {
           admit: (plan) => this.admit(plan),
-          evaluate: (request) => this.evaluateJev(request, epoch),
-          extract: (input) => this.extract(input, epoch),
+          evaluate: (request) => this.evaluateJev(request, epoch, active),
+          extract: (input) => this.extract(input, epoch, active),
           save: (state) => this.commit(state),
         },
         requestContext,
@@ -1585,8 +1587,10 @@ export class Monitor {
       } else this.note("invalid-scope-result");
     } finally {
       this.processing = false;
-      if (this.activeObservation?.epoch === epoch)
+      if (this.activeObservation === active) {
+        this.settleActiveAuthority(active);
         this.activeObservation = undefined;
+      }
       if (epoch === this.epoch && !this.controlWork) {
         this.activity = "Idle";
         const pass = this.beginCanonicalPass();
@@ -1873,28 +1877,39 @@ export class Monitor {
     this.publish();
   }
 
-  private async awaitActiveAuthority(epoch: number) {
-    const active = this.activeObservation;
-    if (!active || active.epoch !== epoch) return;
-    const barrier = active.barrier;
-    if (!barrier) return;
-    try {
-      await barrier.promise;
-    } catch {
+  private async awaitActiveAuthority(epoch: number, owner?: ActiveWork) {
+    if (owner && (this.activeObservation !== owner || owner.epoch !== epoch))
       throw new RetryableProviderError();
-    }
-    if (!this.enabled || epoch !== this.epoch)
+    const barrier = owner?.barrier;
+    if (barrier) await barrier.promise;
+    if (
+      !this.enabled ||
+      epoch !== this.epoch ||
+      (owner && (this.activeObservation !== owner || owner.epoch !== epoch))
+    )
       throw new RetryableProviderError();
   }
 
-  private async evaluateJev(request: EvaluationRequest, epoch: number) {
-    if (!this.enabled || epoch !== this.epoch)
+  private async evaluateJev(
+    request: EvaluationRequest,
+    epoch: number,
+    owner?: ActiveWork,
+  ) {
+    if (
+      !this.enabled ||
+      epoch !== this.epoch ||
+      (owner && (this.activeObservation !== owner || owner.epoch !== epoch))
+    )
       throw new RetryableProviderError();
     this.activity = "Assessing progress";
     this.publish();
     const result = await this.gateway.evaluate(request, this.identity(), true);
-    await this.awaitActiveAuthority(epoch);
-    if (!this.enabled || epoch !== this.epoch)
+    await this.awaitActiveAuthority(epoch, owner);
+    if (
+      !this.enabled ||
+      epoch !== this.epoch ||
+      (owner && (this.activeObservation !== owner || owner.epoch !== epoch))
+    )
       throw new RetryableProviderError();
     if (!result) {
       if (this.gateway.retryPending) throw new RetryableJevError();
@@ -1914,8 +1929,16 @@ export class Monitor {
     return result;
   }
 
-  private async extract(input: ExtractionInput, epoch: number) {
-    if (!this.enabled || epoch !== this.epoch)
+  private async extract(
+    input: ExtractionInput,
+    epoch: number,
+    owner?: ActiveWork,
+  ) {
+    if (
+      !this.enabled ||
+      epoch !== this.epoch ||
+      (owner && (this.activeObservation !== owner || owner.epoch !== epoch))
+    )
       throw new RetryableProviderError();
     const controller = new AbortController();
     this.extractionController = controller;
@@ -1927,8 +1950,13 @@ export class Monitor {
         controller.signal,
         (at) => this.recordExtractionDispatch(at, epoch),
       );
-      await this.awaitActiveAuthority(epoch);
-      if (!this.enabled || epoch !== this.epoch || controller.signal.aborted)
+      await this.awaitActiveAuthority(epoch, owner);
+      if (
+        !this.enabled ||
+        epoch !== this.epoch ||
+        controller.signal.aborted ||
+        (owner && (this.activeObservation !== owner || owner.epoch !== epoch))
+      )
         throw new RetryableProviderError();
       if (
         !safeUsageValue(result.usage.inputTokens) ||

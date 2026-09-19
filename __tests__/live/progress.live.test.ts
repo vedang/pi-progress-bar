@@ -288,6 +288,60 @@ it("QA fresh reading updates actual scope before a historical backlog drains", a
   }
 });
 
+it.each([userMessageQa.investigation, userMessageQa.regression])(
+  "QA follow-up $id becomes grounded work after reading",
+  async (message) => {
+    const entries = [
+      qaEntry(userMessageQa.reading, null),
+      qaEntry(
+        {
+          id: "qa-reading-delivered",
+          text: "I have read and understood the advisory plan and supporting documents. That reading task is complete; I have not implemented the future advisory feature.",
+        },
+        userMessageQa.reading.id,
+        "assistant",
+      ),
+    ];
+    const monitor = new Monitor(
+      () => {},
+      () => {},
+    );
+    monitor.observe(() => entries);
+    const settle = async (id: string) => {
+      monitor.observe(() => entries);
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        if (blocked || !monitor.enabled)
+          throw new Error(`Live QA blocked: ${monitor.error ?? artifact}`);
+        if (monitor.conversation.cursor?.id === id && active === 0) return;
+        await pause(25);
+      }
+      throw new Error(`QA follow-up stalled at ${id}; ${artifact}`);
+    };
+    try {
+      expect(monitor.turnOn("/nonexistent-live-fixture")).toBeUndefined();
+      await settle("qa-reading-delivered");
+      entries.push(qaEntry(message, "qa-reading-delivered"));
+      await settle(message.id);
+      const tasks =
+        monitor.ledger?.tasks.filter(
+          (task) => task.included && task.ref.entryId === message.id,
+        ) ?? [];
+      record({
+        type: "qa-follow-up",
+        id: message.id,
+        tasks,
+        diagnostics: monitor.diagnostics(),
+      });
+      expect(tasks.length).toBeGreaterThan(0);
+      expect(tasks.every((task) => task.status !== "done")).toBe(true);
+      expect(monitor.scopeIsUnresolved()).toBe(false);
+    } finally {
+      monitor.stop();
+    }
+  },
+);
+
 it("fresh-session production pipeline follows a changed goal and consumes completion only after scope", async () => {
   let entries: {
     type: string;

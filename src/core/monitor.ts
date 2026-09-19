@@ -502,6 +502,9 @@ export class Monitor {
 
   private beginControl(input: Omit<ControlWork, "epoch" | "done">) {
     this.disableRuntime();
+    // Old work retains its local owner until its own finally block unwinds, but
+    // target restore validation must not include old-branch references.
+    this.activeObservation = undefined;
     this.clearRuntimeContext();
     const work: ControlWork = {
       ...input,
@@ -1877,11 +1880,7 @@ export class Monitor {
     this.publish();
   }
 
-  private async awaitActiveAuthority(epoch: number, owner?: ActiveWork) {
-    if (owner && (this.activeObservation !== owner || owner.epoch !== epoch))
-      throw new RetryableProviderError();
-    const barrier = owner?.barrier;
-    if (barrier) await barrier.promise;
+  private assertActiveAuthority(epoch: number, owner?: ActiveWork) {
     if (
       !this.enabled ||
       epoch !== this.epoch ||
@@ -1890,31 +1889,40 @@ export class Monitor {
       throw new RetryableProviderError();
   }
 
+  private activeAuthorityBarrier(epoch: number, owner?: ActiveWork) {
+    this.assertActiveAuthority(epoch, owner);
+    return owner?.barrier;
+  }
+
+  private async awaitActiveAuthority(epoch: number, owner?: ActiveWork) {
+    let barrier = this.activeAuthorityBarrier(epoch, owner);
+    while (barrier) {
+      await barrier.promise;
+      barrier = this.activeAuthorityBarrier(epoch, owner);
+    }
+  }
+
   private async evaluateJev(
     request: EvaluationRequest,
     epoch: number,
     owner?: ActiveWork,
   ) {
-    if (
-      !this.enabled ||
-      epoch !== this.epoch ||
-      (owner && (this.activeObservation !== owner || owner.epoch !== epoch))
-    )
-      throw new RetryableProviderError();
+    this.assertActiveAuthority(epoch, owner);
     this.activity = "Assessing progress";
     this.publish();
     const result = await this.gateway.evaluate(request, this.identity(), true);
-    await this.awaitActiveAuthority(epoch, owner);
-    if (
-      !this.enabled ||
-      epoch !== this.epoch ||
-      (owner && (this.activeObservation !== owner || owner.epoch !== epoch))
-    )
-      throw new RetryableProviderError();
+    while (true) {
+      await this.awaitActiveAuthority(epoch, owner);
+      if (!this.activeAuthorityBarrier(epoch, owner)) break;
+    }
     if (!result) {
       if (this.gateway.retryPending) throw new RetryableJevError();
       throw new RetryableProviderError();
     }
+    // Recheck immediately before synchronous usage/result admission. The loop
+    // above covers barriers installed while its awaits yielded.
+    if (this.activeAuthorityBarrier(epoch, owner))
+      throw new RetryableProviderError();
     this.usage.jev.calls = saturatingAdd(this.usage.jev.calls, 1);
     this.usage.jev.inputTokens = saturatingAdd(
       this.usage.jev.inputTokens,
@@ -1934,12 +1942,7 @@ export class Monitor {
     epoch: number,
     owner?: ActiveWork,
   ) {
-    if (
-      !this.enabled ||
-      epoch !== this.epoch ||
-      (owner && (this.activeObservation !== owner || owner.epoch !== epoch))
-    )
-      throw new RetryableProviderError();
+    this.assertActiveAuthority(epoch, owner);
     const controller = new AbortController();
     this.extractionController = controller;
     this.activity = "Extracting tasks";
@@ -1950,13 +1953,13 @@ export class Monitor {
         controller.signal,
         (at) => this.recordExtractionDispatch(at, epoch),
       );
-      await this.awaitActiveAuthority(epoch, owner);
-      if (
-        !this.enabled ||
-        epoch !== this.epoch ||
-        controller.signal.aborted ||
-        (owner && (this.activeObservation !== owner || owner.epoch !== epoch))
-      )
+      while (true) {
+        await this.awaitActiveAuthority(epoch, owner);
+        if (!this.activeAuthorityBarrier(epoch, owner)) break;
+      }
+      if (controller.signal.aborted) throw new RetryableProviderError();
+      // Keep barrier/owner validation adjacent to synchronous extraction usage.
+      if (this.activeAuthorityBarrier(epoch, owner))
         throw new RetryableProviderError();
       if (
         !safeUsageValue(result.usage.inputTokens) ||

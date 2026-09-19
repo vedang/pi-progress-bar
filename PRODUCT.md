@@ -21,6 +21,7 @@ Hybrid epic `pi-progress-barroot-xkg` supersedes the span-only extraction and Je
 ### Health and presentation
 
 - Preserve five fields: requirements clarity, acceptance criteria, usefulness of a new red test, red evidence, implementation assessment.
+- Red evidence derives Not needed from test applicability without hiding actual reported/observed or contradictory evidence. Implementation Choices are supports, partial, contradicts, insufficient and not-needed. Judge applicability before evidence sufficiency; informational-only work needs no implementation evidence. Positive implementation labels require current passive candidates and accepted task-specific relevance/support judgments, never display-focus attribution or bare self-report. A final completion observation may refresh a coherent retained health card; health still cannot change completion.
 - Completion, health, tool evidence and Beads status remain separate. Focus is display/health only, not tool ownership or an execution lock. Unlinked tools cannot establish Observed red.
 - Retained cards copy the task label and all five fields coherently at assessment admission, with task/revision/as-of provenance. Actual dispatch timestamps are not assessment times.
 - Presentation/debug snapshots are copied, read-only and network-free. No redraw-driven analysis, mutable evidence borrowing or raw provider diagnostics. Trusted colors survive clipping; untrusted controls are sanitized before styling.

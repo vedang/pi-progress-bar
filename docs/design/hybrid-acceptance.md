@@ -63,3 +63,15 @@ Old fresh-message next-cycle latency, span-only/Jev-only labels and memory-only 
 ## Limits of the evidence
 
 Finite single-run semantics are not a reliability guarantee. Jev may confidently miss work or abstain; generated task grouping is probabilistic. No further gate-ablation study is required for this pragmatic delivery. Whole-message/page/state limits can prevent admission; history catch-up is chronological. Provider availability, long histories, broader model families and unsupported tool/Beads formats are not universally proven. Full debugger/redesign/advisory work is excluded.
+
+## Implementation-health correction — `0417a04b`
+
+User-approved scoped health change, not acceptance of outstanding H5/82j durability/authority repairs. Source `00a141cc` wires actual bounded passive candidates and canonical requirements into health, adds partial/not-needed choices, handles final-completion assessment and rejects stale in-flight evidence. `0417a04b` clarifies that applicability is decided before missing evidence. Red-evidence precedence is unchanged. Both user and assistant roles may still affect scope and task state.
+
+Main independently passed format/check, **224 unit +8 integration tests**. The preceding wiring revision also passed8 global-host integration tests and package dry-run. Fifteen dedicated regression tests cover applicability, aggregation, evidence wiring, lack of automatic tool ownership/completion, unsupported claims, canonical reset and in-flight evidence changes.
+
+Bounded semantic check uses production `healthSnapshot`, Jev gateway and implementation aggregation—not a full live Monitor session. First run (`00a141cc`) failed on the informational fixture: insufficient evidence won over not-needed;1 Jev call,1,288 input/217 output tokens. Failure is retained, not counted as a pass.
+
+The corrected frozen run (`0417a04b`) passed all4 cases: informational→not-needed, partial support→partial, full support→appears complete, bare self-report→unverified. **4 Jev calls,0 extraction-LLM calls;5,733 input/859 output tokens.** Confidence/probability thresholds were not lowered. No hidden retry. Total scoped health validation including failure:5 Jev calls,7,021 input/1,076 output tokens.
+
+Artifacts in `.agents/plans/20260919T191131--enable-useful-implementation-health__active/`: `health-live-1789826237763.jsonl` (failed), `health-live-1789826417885.jsonl` (passed), `main-gates.log`, `applicability-main-gates.log`. These finite fixtures demonstrate the new choices, not universal semantic accuracy. Earlier full-batch review blockers remain open and must be resolved separately.

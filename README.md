@@ -43,9 +43,11 @@ The task card has five separate signals, in order:
 | Acceptance | Whether observable success conditions are supplied |
 | New red test | Whether a new failing regression test would be useful |
 | Red evidence | Reported failing-test evidence, not automatically verified execution |
-| Implementation | Supplied criterion evidence: appears complete, partial, contradicted or unverified |
+| Implementation | Not needed, appears complete, partial, contradicted or unverified, based on the task's implementation requirements and evidence |
 
 `Unknown` and `unverified` mean insufficient evidence, not failure. These health fields never establish reported completion.
+
+Red evidence derives **Not needed** from new-red-test applicability when no actual red evidence takes precedence; a reported failing test is not hidden merely because it was unnecessary. For implementation, informational-only tasks can be **Not needed** without code evidence. Implementation work instead requires bounded current code/test facts plus Jev's assessment of their relevance to the exact task and revision. Facts are candidates, not automatically owned by the focused task. Accepted implementation choices require confidence >=0.5 and selected probability >=0.8; bare self-reports, missing/stale facts or red-only evidence cannot produce a positive implementation label. Explicit partial support can represent incomplete implementation of a single deliverable. A completion report can receive a final health assessment, retained coherently afterward; implementation health never marks a task done.
 
 **Focus is display/health selection only.** It does not assign tools or execution to a task. Unlinked tool output cannot establish Observed red or completion. Exact admitted Beads IDs may receive read-only export metadata; Beads status never imports backlog or changes task completion.
 

@@ -30,6 +30,11 @@ const clipVisualLine = (line: string, width: number) => {
   ).visualLines;
   return visualLines.length ? [visualLines[0] ?? ""] : [""];
 };
+const timestamp = (value: number | undefined) => {
+  if (value === undefined) return "never";
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : "unknown";
+};
 
 /** Render copied presentation data only; no monitor or branch capability enters UI. */
 export function paint(ctx: ExtensionContext, view: PresentationSnapshot) {
@@ -52,7 +57,7 @@ export function paint(ctx: ExtensionContext, view: PresentationSnapshot) {
       const provenance = card
         ? [
             `Task assessment: ${card.retained ? "retained" : "current"}`,
-            `As-of: ${new Date(card.assessedAt).toISOString()}`,
+            `As-of: ${timestamp(card.assessedAt)}`,
             ...(card.replacementPending
               ? ["Replacement assessment pending"]
               : []),
@@ -78,6 +83,10 @@ export function paint(ctx: ExtensionContext, view: PresentationSnapshot) {
         ...provenance.map((line) => theme.fg("muted", line)),
         ...(card ? [theme.fg("muted", `Task: ${card.label}`)] : []),
         theme.fg("muted", `${view.activity} • ${view.service.label}`),
+        theme.fg(
+          "muted",
+          `Last Jev dispatch: ${timestamp(view.lastJevCallAt)} • Last extraction dispatch: ${timestamp(view.lastExtractionCallAt)}`,
+        ),
         theme.fg(
           "muted",
           `Jev ${view.usage.jev.inputTokens}/${view.usage.jev.outputTokens} tokens • extraction ${view.usage.extraction.inputTokens}/${view.usage.extraction.outputTokens} tokens`,

@@ -6,6 +6,11 @@ import {
 } from "../analysis/gateway";
 import { type HealthSnapshot, healthSnapshot } from "../analysis/health";
 import { implementationFromResult } from "../analysis/implementation";
+import {
+  type BeadsPresentation,
+  beadsPresentation,
+  readBeadsExport,
+} from "../sources/beads";
 import { EvidenceStore, redEvidenceLabel } from "../sources/evidence";
 import { canonicalMessages } from "../sources/messages";
 import { processObservation, RetryableProviderError } from "./hybrid";
@@ -61,6 +66,10 @@ interface RetainedCard {
   };
 }
 
+interface PresentationCard extends RetainedCard {
+  beads?: BeadsPresentation;
+}
+
 export interface PresentationSnapshot {
   enabled: boolean;
   progress: {
@@ -68,7 +77,7 @@ export interface PresentationSnapshot {
     total: number;
     kind: "current" | "previous" | "empty";
   };
-  card?: RetainedCard;
+  card?: PresentationCard;
   activity: string;
   service: { code: string; label: string };
   usage: { jev: ProviderUsage; extraction: ProviderUsage };
@@ -88,6 +97,7 @@ const diagnosticLabels: Record<string, string> = {
   "jev-unavailable": "Jev service unavailable",
   "model-unavailable": "Selected model unavailable",
   "saved-state-rejected": "Saved state rejected",
+  "beads-unavailable": "Beads export unavailable",
 };
 
 const copyUsage = (usage: ProviderUsage): ProviderUsage => ({ ...usage });
@@ -100,6 +110,22 @@ const copyCard = (card: RetainedCard): RetainedCard => ({
   ...card,
   health: { ...card.health },
 });
+const presentationCard = (
+  card: RetainedCard,
+  beads?: BeadsPresentation,
+): PresentationCard => ({
+  ...copyCard(card),
+  ...(beads ? { beads: { ...beads } } : {}),
+});
+const sameBeads = (
+  left: ReadonlyMap<string, BeadsPresentation>,
+  right: ReadonlyMap<string, BeadsPresentation>,
+) =>
+  left.size === right.size &&
+  [...left].every(([taskId, value]) => {
+    const candidate = right.get(taskId);
+    return !!candidate && JSON.stringify(candidate) === JSON.stringify(value);
+  });
 
 const healthRequirements = (answer: ValidatedResult["answers"][string]) => {
   if (answer?.type !== "score") return "unknown";
@@ -127,13 +153,22 @@ export class Monitor {
   };
 
   private reader?: () => readonly unknown[];
+  private cwd?: string;
   private observations: Observation[] = [];
   private queued: Observation[] = [];
   private processing = false;
   private waitingForWake = false;
   private epoch = 0;
   private extractionController?: AbortController;
+  private healthObservation?: Observation;
+  private healthFlight?: { epoch: number; token: number };
+  private nextHealthToken = 0;
   private card?: RetainedCard;
+  private cardHealthIdentity?: string;
+  private beads = new Map<string, BeadsPresentation>();
+  private beadsGeneration = 0;
+  private beadsInFlight = false;
+  private beadsRefreshQueued = false;
   private lastJevCallAt?: number;
   private lastExtractionCallAt?: number;
   private diagnostics = new Map<string, number>();
@@ -186,8 +221,9 @@ export class Monitor {
     this.publish();
   }
 
-  turnOn(_cwd: string): string | undefined {
+  turnOn(cwd: string): string | undefined {
     if (this.enabled) return;
+    this.cwd = cwd;
     if (!process.env.TYPESAFE_API_KEY?.trim()) {
       this.error = "TYPESAFE_API_KEY is required; progress monitor is OFF";
       this.enabled = false;
@@ -203,6 +239,7 @@ export class Monitor {
     this.gateway.enable(this.identity());
     this.save();
     this.requeue();
+    this.refreshBeads();
     this.publish();
     this.drain();
   }
@@ -214,6 +251,8 @@ export class Monitor {
     this.waitingForWake = false;
     this.epoch++;
     this.extractionController?.abort();
+    this.cancelHealth();
+    this.healthObservation = undefined;
     this.gateway.pause();
     this.evidence.clearPending();
     this.save();
@@ -225,6 +264,8 @@ export class Monitor {
     this.waitingForWake = false;
     this.epoch++;
     this.extractionController?.abort();
+    this.cancelHealth();
+    this.healthObservation = undefined;
     this.gateway.pause();
     this.evidence.clearPending();
     this.publish();
@@ -235,6 +276,7 @@ export class Monitor {
     if (!this.enabled) return;
     this.epoch++;
     this.extractionController?.abort();
+    this.cancelHealth();
     this.gateway.pause();
     this.gateway.enable(this.identity());
     this.waitingForWake = false;
@@ -249,6 +291,7 @@ export class Monitor {
     this.observations = canonicalMessages(reader());
     if (!this.enabled) return;
     this.requeue();
+    if (this.queued.length) this.cancelHealth();
     this.drain();
   }
 
@@ -263,11 +306,16 @@ export class Monitor {
     reader?: () => readonly unknown[],
   ) {
     const wasEnabled = this.enabled;
+    this.cwd = cwd;
     this.epoch++;
     this.extractionController?.abort();
+    this.cancelHealth();
     this.gateway.pause();
     this.waitingForWake = false;
     this.queued = [];
+    this.healthObservation = undefined;
+    this.beads.clear();
+    this.beadsGeneration++;
     this.evidence.reset();
     this.diagnostics.clear();
     if (reader) this.reader = reader;
@@ -302,7 +350,11 @@ export class Monitor {
     return {
       enabled: this.enabled,
       progress: { done, total: active.length, kind },
-      ...(this.card ? { card: copyCard(this.card) } : {}),
+      ...(this.card
+        ? {
+            card: presentationCard(this.card, this.beads.get(this.card.taskId)),
+          }
+        : {}),
       activity: this.activity,
       service: this.service(),
       usage: {
@@ -320,11 +372,12 @@ export class Monitor {
   debugSnapshot(): DebugSnapshot {
     return {
       enabled: this.enabled,
-      processing: this.processing
-        ? "processing"
-        : this.waitingForWake
-          ? "waiting"
-          : "idle",
+      processing:
+        this.processing || this.healthFlight
+          ? "processing"
+          : this.waitingForWake
+            ? "waiting"
+            : "idle",
       service: this.service(),
       diagnostics: [...this.diagnostics].map(([code, count]) => ({
         code,
@@ -341,7 +394,11 @@ export class Monitor {
   private resetState(sourceId: string) {
     this.state = emptyState(sourceId);
     this.card = undefined;
+    this.cardHealthIdentity = undefined;
     this.queued = [];
+    this.healthObservation = undefined;
+    this.beads.clear();
+    this.beadsGeneration++;
     this.lastJevCallAt = undefined;
     this.lastExtractionCallAt = undefined;
     this.usage.jev.calls = 0;
@@ -369,6 +426,7 @@ export class Monitor {
 
   private applyMetadata(metadata: MonitorCheckpointMetadata | undefined) {
     this.card = metadata?.card ? copyCard(metadata.card) : undefined;
+    this.cardHealthIdentity = undefined;
     this.lastJevCallAt = metadata?.lastJevCallAt;
     this.lastExtractionCallAt = metadata?.lastExtractionCallAt;
     const usage = metadata?.usage;
@@ -404,6 +462,69 @@ export class Monitor {
     );
   }
 
+  /** Async Beads reads enrich copied display data only, never hybrid state. */
+  private refreshBeads() {
+    const cwd = this.cwd;
+    if (!cwd || !this.enabled) return;
+    const generation = ++this.beadsGeneration;
+    if (this.beadsInFlight) {
+      this.beadsRefreshQueued = true;
+      return;
+    }
+    const epoch = this.epoch;
+    const sourceId = this.state.sourceId;
+    this.beadsInFlight = true;
+    void readBeadsExport(cwd)
+      .then((source) => {
+        if (
+          generation !== this.beadsGeneration ||
+          !this.enabled ||
+          epoch !== this.epoch ||
+          sourceId !== this.state.sourceId
+        )
+          return;
+        const next = new Map<string, BeadsPresentation>();
+        if (source.complete) {
+          for (const task of this.state.tasks) {
+            const beads = beadsPresentation(
+              task.label,
+              task.status === "done",
+              source,
+            );
+            if (beads) next.set(task.id, beads);
+          }
+        } else this.note("beads-unavailable");
+        const changed = !sameBeads(this.beads, next);
+        if (changed) this.beads = next;
+        if (!source.complete || changed) this.publish();
+      })
+      .catch(() => {
+        if (
+          generation !== this.beadsGeneration ||
+          !this.enabled ||
+          epoch !== this.epoch ||
+          sourceId !== this.state.sourceId
+        )
+          return;
+        this.beads.clear();
+        this.note("beads-unavailable");
+        this.publish();
+      })
+      .finally(() => {
+        this.beadsInFlight = false;
+        if (this.beadsRefreshQueued) {
+          this.beadsRefreshQueued = false;
+          this.refreshBeads();
+        }
+      });
+  }
+
+  private cancelHealth() {
+    if (!this.healthFlight) return;
+    this.healthFlight = undefined;
+    this.gateway.invalidate();
+  }
+
   private service() {
     if (!this.enabled) return { code: "monitor-off", label: "Monitoring off" };
     if (this.waitingForWake)
@@ -423,6 +544,8 @@ export class Monitor {
     this.error = "Progress service unavailable";
     this.epoch++;
     this.extractionController?.abort();
+    this.cancelHealth();
+    this.healthObservation = undefined;
     this.evidence.clearPending();
     this.save();
     this.publish();
@@ -452,19 +575,21 @@ export class Monitor {
   }
 
   private drain() {
-    if (
-      !this.enabled ||
-      this.processing ||
-      this.waitingForWake ||
-      !this.queued.length
-    )
-      return;
+    if (!this.enabled || this.processing || this.waitingForWake) return;
     const observation = this.queued[0];
-    if (!observation) return;
-    const epoch = this.epoch;
-    this.processing = true;
-    this.setActivity("Analyzing progress");
-    void this.processOne(observation, epoch);
+    if (observation) {
+      const epoch = this.epoch;
+      this.processing = true;
+      this.setActivity("Analyzing progress");
+      void this.processOne(observation, epoch);
+      return;
+    }
+    const healthObservation = this.healthObservation;
+    if (!healthObservation || this.healthFlight) return;
+    this.healthObservation = undefined;
+    const flight = { epoch: this.epoch, token: ++this.nextHealthToken };
+    this.healthFlight = flight;
+    void this.processHealth(healthObservation, flight);
   }
 
   private preceding(observation: Observation) {
@@ -490,7 +615,7 @@ export class Monitor {
       );
       if (!this.enabled || epoch !== this.epoch) return;
       this.commit(next);
-      await this.assessHealth(epoch);
+      this.scheduleHealth(observation);
     } catch (error) {
       if (error instanceof RetryableProviderError) {
         this.waitingForWake = true;
@@ -507,10 +632,38 @@ export class Monitor {
     }
   }
 
+  /** New semantic observations replace stale optional health work. */
+  private scheduleHealth(observation: Observation) {
+    this.healthObservation = { ...observation };
+  }
+
+  private async processHealth(
+    observation: Observation,
+    flight: { epoch: number; token: number },
+  ) {
+    try {
+      await this.assessHealth(flight.epoch, observation, flight);
+    } catch (error) {
+      if (this.healthFlight !== flight) return;
+      if (error instanceof RetryableProviderError) {
+        this.waitingForWake = true;
+        this.note("model-unavailable");
+      } else this.note("invalid-scope-result");
+    } finally {
+      if (this.healthFlight === flight) {
+        this.healthFlight = undefined;
+        this.activity = "Idle";
+        this.publish();
+      }
+      this.drain();
+    }
+  }
+
   private commit(state: HybridState) {
     this.retainCardBeforeReplacement(state);
     this.state = copyState(state);
     this.save();
+    this.refreshBeads();
     this.publish();
   }
 
@@ -518,8 +671,10 @@ export class Monitor {
     const card = this.card;
     if (!card || card.retained) return;
     const task = next.tasks.find((item) => item.id === card.taskId);
+    const completed = task?.status === "done";
     if (
       !task ||
+      completed ||
       next.focusTaskId !== card.taskId ||
       task.revision !== card.revision ||
       task.label !== card.label
@@ -527,7 +682,7 @@ export class Monitor {
       this.card = {
         ...copyCard(card),
         retained: true,
-        replacementPending: true,
+        replacementPending: !completed,
       };
   }
 
@@ -537,12 +692,17 @@ export class Monitor {
     this.activity = "Assessing progress";
     this.publish();
     const result = await this.gateway.evaluate(request, this.identity(), true);
+    const dispatchedAt = this.gateway.lastCallAt;
+    if (dispatchedAt !== this.lastJevCallAt) {
+      this.lastJevCallAt = dispatchedAt;
+      this.save();
+      this.publish();
+    }
     if (!this.enabled || epoch !== this.epoch || !result)
       throw new RetryableProviderError();
     this.usage.jev.calls++;
     this.usage.jev.inputTokens += result.usage.input_tokens;
     this.usage.jev.outputTokens += result.usage.output_tokens;
-    this.lastJevCallAt = this.gateway.lastCallAt;
     this.save();
     this.publish();
     return result;
@@ -575,7 +735,10 @@ export class Monitor {
     }
   }
 
-  private projectedHealth(task: HybridTask): HealthSnapshot | undefined {
+  private projectedHealth(
+    task: HybridTask,
+    observation: Observation,
+  ): HealthSnapshot | undefined {
     const ledger: Ledger = {
       sourceId: this.state.sourceId,
       kind: "conversation",
@@ -606,29 +769,40 @@ export class Monitor {
       nextTaskId: 1,
       explicitSelection: true,
     };
-    return healthSnapshot(ledger, this.epoch, []);
+    return healthSnapshot(ledger, this.epoch, [
+      `Latest canonical ${observation.role} report:\n${observation.text}`,
+    ]);
   }
 
-  private cardIsCurrent(task: HybridTask) {
+  private cardIsCurrent(task: HybridTask, healthIdentity: string) {
     return (
       !!this.card &&
       !this.card.retained &&
       this.card.taskId === task.id &&
       this.card.revision === task.revision &&
-      this.card.label === task.label
+      this.card.label === task.label &&
+      this.cardHealthIdentity === healthIdentity
     );
   }
 
-  private async assessHealth(epoch: number) {
+  private async assessHealth(
+    epoch: number,
+    observation: Observation,
+    flight: { epoch: number; token: number },
+  ) {
     const task = this.state.tasks.find(
-      (item) => item.id === this.state.focusTaskId && item.included,
+      (item) =>
+        item.id === this.state.focusTaskId &&
+        item.included &&
+        item.status !== "done",
     );
-    if (!task || this.cardIsCurrent(task)) return;
-    const snapshot = this.projectedHealth(task);
-    if (!snapshot) return;
+    if (!task) return;
+    const snapshot = this.projectedHealth(task, observation);
+    if (!snapshot || this.cardIsCurrent(task, snapshot.identity)) return;
     let combined: ValidatedResult | undefined;
     for (const request of snapshot.requests) {
       const result = await this.evaluateJev(request, epoch);
+      if (this.healthFlight !== flight) throw new RetryableProviderError();
       combined = {
         model: result.model,
         answers: { ...(combined?.answers ?? {}), ...result.answers },
@@ -640,7 +814,13 @@ export class Monitor {
         },
       };
     }
-    if (!combined || !this.enabled || epoch !== this.epoch) return;
+    if (
+      !combined ||
+      !this.enabled ||
+      epoch !== this.epoch ||
+      this.healthFlight !== flight
+    )
+      return;
     const acceptance = combined.answers.acceptance;
     const applicability = combined.answers.redApplicability;
     const reported = combined.answers.redReport;
@@ -684,6 +864,7 @@ export class Monitor {
         ),
       },
     };
+    this.cardHealthIdentity = snapshot.identity;
     this.save();
     this.publish();
   }

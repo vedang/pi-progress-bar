@@ -17,6 +17,15 @@ export interface BeadsExport {
   records: Map<string, BeadsRecord>;
   note: string;
 }
+
+/** Display-only Beads data for one already-admitted hybrid task. */
+export interface BeadsPresentation {
+  id: string;
+  title: string;
+  exportStatus?: BeadsRecord["status"];
+  issueType?: string;
+  conflict: boolean;
+}
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
 
@@ -122,6 +131,34 @@ export async function readBeadsExport(cwd: string): Promise<BeadsExport> {
   } catch {
     return unavailable("Beads export unavailable or unsupported");
   }
+}
+
+/**
+ * Match exactly one exported ID already named by an admitted task label.
+ * This never imports backlog records or changes task lifecycle authority.
+ */
+export function beadsPresentation(
+  label: string,
+  completed: boolean,
+  source: BeadsExport,
+): BeadsPresentation | undefined {
+  const ids = label.match(/[A-Za-z0-9][A-Za-z0-9._-]{2,127}/g) ?? [];
+  const matches = [...new Set(ids)].flatMap((id) => {
+    const item = source.records.get(id);
+    return item ? [item] : [];
+  });
+  const issue = matches.length === 1 ? matches[0] : undefined;
+  if (!issue) return;
+  return {
+    id: issue.id,
+    title: issue.title,
+    ...(issue.status ? { exportStatus: issue.status } : {}),
+    ...(issue.issueType ? { issueType: issue.issueType } : {}),
+    conflict:
+      issue.status === undefined
+        ? false
+        : (issue.status === "closed") !== completed,
+  };
 }
 
 export function enrichBeadsTasks(tasks: Task[], source: BeadsExport): Task[] {

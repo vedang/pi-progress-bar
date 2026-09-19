@@ -1119,6 +1119,12 @@ export class Monitor {
       this.pageBytes,
     );
     if (!result.afterValid) return false;
+    // A same-anchor frontier can still be structurally stale. Never append to
+    // observations/bytes that were admitted under the old header prefix.
+    if (result.invalidated) {
+      this.page = [];
+      this.pageBytes = 0;
+    }
     this.page.push(...result.page);
     this.pageBytes += result.page.reduce(
       (total, observation) => total + Buffer.byteLength(observation.text),
@@ -1166,7 +1172,11 @@ export class Monitor {
     entryId: string | undefined,
     includeTarget = false,
   ) {
-    return entryId ? pass.preceding(entryId, includeTarget) : [];
+    if (!entryId) return [];
+    const result = pass.precedingResult(entryId, includeTarget);
+    if (!result.complete)
+      throw new Error("Canonical preceding context requires continuation");
+    return result.context;
   }
 
   /** Resolve one current canonical ref from the current pass only. */

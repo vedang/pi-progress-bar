@@ -75,9 +75,12 @@ function canonicalObservation(
 export interface CanonicalFrontier {
   kind: "page" | "preceding" | "latest";
   anchorId?: string;
+  anchorIndex: number;
   includeTarget?: boolean;
   index: number;
-  signature: string;
+  /** Unambiguous header-tuple digest through this exclusive prefix. */
+  prefix: string;
+  prefixLength: number;
   terminal?: true;
 }
 
@@ -85,12 +88,16 @@ export interface CanonicalPage {
   page: Observation[];
   hasMore: boolean;
   afterValid: boolean;
+  /** Prior page accumulation was structurally stale and must be dropped. */
+  invalidated?: true;
   frontier?: CanonicalFrontier;
 }
 
 export interface CanonicalPreceding {
   context: Observation[];
   complete: boolean;
+  /** Caller-supplied partial context was structurally stale and was dropped. */
+  invalidated?: true;
   frontier?: CanonicalFrontier;
 }
 
@@ -112,16 +119,10 @@ export class CanonicalPass {
   private readonly duplicateIds = new Set<string>();
   private readonly materialized = new Map<string, Observation | undefined>();
   private exploratoryReads = 0;
-  private readonly signature: string;
 
   constructor(entries: readonly unknown[]) {
     this.entries = [...entries];
     this.headers = canonicalHeaders(this.entries);
-    this.signature = hash(
-      this.headers
-        .map((header) => `${header.id}\u0000${header.role}`)
-        .join("\u0001"),
-    );
     for (const header of this.headers) {
       if (this.byId.has(header.id)) this.duplicateIds.add(header.id);
       else this.byId.set(header.id, header);
@@ -145,6 +146,15 @@ export class CanonicalPass {
     return this.headers.findIndex((header) => header.id === id);
   }
 
+  /** JSON array tuples avoid delimiter ambiguity in arbitrary host IDs. */
+  private prefix(index: number) {
+    return hash(
+      JSON.stringify(
+        this.headers.slice(0, index).map((header) => [header.id, header.role]),
+      ),
+    );
+  }
+
   private accepts(
     frontier: CanonicalFrontier | undefined,
     kind: CanonicalFrontier["kind"],
@@ -157,25 +167,45 @@ export class CanonicalPass {
       frontier.anchorId === anchorId &&
       frontier.includeTarget ===
         (kind === "preceding" ? includeTarget : undefined) &&
-      frontier.signature === this.signature &&
+      frontier.anchorIndex >= -1 &&
+      frontier.anchorIndex < this.headers.length &&
+      this.headers[frontier.anchorIndex]?.id === anchorId &&
       frontier.index >= -1 &&
-      frontier.index <= this.headers.length
+      frontier.index <= this.headers.length &&
+      frontier.prefixLength >= 0 &&
+      frontier.prefixLength <= this.headers.length &&
+      frontier.prefix === this.prefix(frontier.prefixLength) &&
+      // A reverse scan cannot skip newly appended headers while unfinished.
+      (frontier.kind !== "latest" ||
+        frontier.terminal ||
+        frontier.prefixLength === this.headers.length)
     );
   }
 
   private frontier(
     kind: CanonicalFrontier["kind"],
     anchorId: string | undefined,
+    anchorIndex: number,
     index: number,
     terminal = false,
     includeTarget = false,
   ): CanonicalFrontier {
+    // Page continuation pays only inspected prefix; preceding must bind every
+    // header through target so an insertion near target invalidates its cache.
+    const prefixLength =
+      kind === "preceding"
+        ? anchorIndex + 1
+        : kind === "latest"
+          ? this.headers.length
+          : index;
     return {
       kind,
       ...(anchorId ? { anchorId } : {}),
+      anchorIndex,
       ...(kind === "preceding" ? { includeTarget } : {}),
       index,
-      signature: this.signature,
+      prefix: this.prefix(prefixLength),
+      prefixLength,
       ...(terminal ? { terminal: true as const } : {}),
     };
   }
@@ -183,14 +213,6 @@ export class CanonicalPass {
   private exploratory(header: CanonicalHeader) {
     this.exploratoryReads++;
     return this.observation(header.id);
-  }
-
-  /**
-   * Direct callers get a bounded best effort. Monitor uses precedingResult so
-   * incomplete scans never become an authoritative empty context.
-   */
-  preceding(entryId: string, includeTarget = false): Observation[] {
-    return this.precedingResult(entryId, includeTarget).context;
   }
 
   precedingResult(
@@ -207,12 +229,15 @@ export class CanonicalPass {
       entryId,
       includeTarget,
     );
+    const invalidated = !!frontier && !accepted;
     let index = accepted
       ? (frontier?.index ?? -1)
       : includeTarget
         ? target
         : target - 1;
-    const context = prior.map((observation) => ({ ...observation }));
+    const context = (invalidated ? [] : prior).map((observation) => ({
+      ...observation,
+    }));
     let bytes = context.reduce(
       (total, observation) =>
         total + Buffer.byteLength(JSON.stringify(observation)),
@@ -225,9 +250,11 @@ export class CanonicalPass {
         return {
           context,
           complete: false,
+          ...(invalidated ? { invalidated: true as const } : {}),
           frontier: this.frontier(
             "preceding",
             entryId,
+            target,
             index,
             false,
             includeTarget,
@@ -246,12 +273,16 @@ export class CanonicalPass {
     return {
       context,
       complete: true,
-      frontier: this.frontier("preceding", entryId, index, true, includeTarget),
+      ...(invalidated ? { invalidated: true as const } : {}),
+      frontier: this.frontier(
+        "preceding",
+        entryId,
+        target,
+        index,
+        true,
+        includeTarget,
+      ),
     };
-  }
-
-  latestAfter(after?: { id: string; hash: string }) {
-    return this.latestAfterResult(after).latest;
   }
 
   latestAfterResult(
@@ -269,12 +300,16 @@ export class CanonicalPass {
     let index = accepted
       ? (frontier?.index ?? afterIndex)
       : this.headers.length - 1;
-    if (accepted && frontier?.terminal) return { complete: true, frontier };
+    if (accepted && frontier?.terminal) {
+      if (this.headers.length === frontier.prefixLength)
+        return { complete: true, frontier };
+      index = this.headers.length - 1;
+    }
     while (index > afterIndex) {
       if (this.exploratoryReads >= MAX_EXPLORATORY_HEADERS)
         return {
           complete: false,
-          frontier: this.frontier("latest", anchor, index),
+          frontier: this.frontier("latest", anchor, afterIndex, index),
         };
       const header = this.headers[index];
       index--;
@@ -284,12 +319,12 @@ export class CanonicalPass {
         return {
           latest: observation,
           complete: true,
-          frontier: this.frontier("latest", anchor, index, true),
+          frontier: this.frontier("latest", anchor, afterIndex, index, true),
         };
     }
     return {
       complete: true,
-      frontier: this.frontier("latest", anchor, index, true),
+      frontier: this.frontier("latest", anchor, afterIndex, index, true),
     };
   }
 
@@ -308,23 +343,34 @@ export class CanonicalPass {
         return { page: [], hasMore: false, afterValid: false };
     }
     const accepted = this.accepts(frontier, "page", anchor);
+    const invalidated = !!frontier && !accepted;
     let index = accepted ? (frontier?.index ?? afterIndex + 1) : afterIndex + 1;
-    if (accepted && frontier?.terminal)
-      return { page: [], hasMore: false, afterValid: true, frontier };
+    if (accepted && frontier?.terminal) {
+      if (this.headers.length === frontier.prefixLength)
+        return { page: [], hasMore: false, afterValid: true, frontier };
+      index = frontier.index;
+    }
+    const retained = invalidated ? [] : admitted;
     const page: Observation[] = [];
-    let bytes = admittedBytes;
+    let bytes = invalidated ? 0 : admittedBytes;
     while (index < this.headers.length) {
       if (
-        admitted.length + page.length >= MAX_CANONICAL_PAGE_MESSAGES ||
+        retained.length + page.length >= MAX_CANONICAL_PAGE_MESSAGES ||
         bytes >= MAX_CANONICAL_PAGE_BYTES
       )
-        return { page, hasMore: true, afterValid: true };
+        return {
+          page,
+          hasMore: true,
+          afterValid: true,
+          ...(invalidated ? { invalidated: true as const } : {}),
+        };
       if (this.exploratoryReads >= MAX_EXPLORATORY_HEADERS)
         return {
           page,
           hasMore: true,
           afterValid: true,
-          frontier: this.frontier("page", anchor, index),
+          ...(invalidated ? { invalidated: true as const } : {}),
+          frontier: this.frontier("page", anchor, afterIndex, index),
         };
       const header = this.headers[index];
       index++;
@@ -333,11 +379,16 @@ export class CanonicalPass {
       if (!observation) continue;
       const size = Buffer.byteLength(observation.text);
       if (
-        admitted.length + page.length &&
-        (admitted.length + page.length >= MAX_CANONICAL_PAGE_MESSAGES ||
+        retained.length + page.length &&
+        (retained.length + page.length >= MAX_CANONICAL_PAGE_MESSAGES ||
           bytes + size > MAX_CANONICAL_PAGE_BYTES)
       )
-        return { page, hasMore: true, afterValid: true };
+        return {
+          page,
+          hasMore: true,
+          afterValid: true,
+          ...(invalidated ? { invalidated: true as const } : {}),
+        };
       page.push(observation);
       bytes += size;
     }
@@ -345,7 +396,8 @@ export class CanonicalPass {
       page,
       hasMore: false,
       afterValid: true,
-      frontier: this.frontier("page", anchor, index, true),
+      ...(invalidated ? { invalidated: true as const } : {}),
+      frontier: this.frontier("page", anchor, afterIndex, index, true),
     };
   }
 }

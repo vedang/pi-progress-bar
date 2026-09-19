@@ -181,6 +181,37 @@ it("preflights the actual long triggering observation ID before any optional dis
   ).toBe(true);
 });
 
+it.each([
+  "snapshotHash",
+  "requestHashes",
+  "evidenceHash",
+  "codeRevision",
+] as const)(
+  "restored health never claims current from unverified %s",
+  async (field) => {
+    const h = fixture();
+    h.start();
+    await h.settle("goal");
+    const saved = h.monitor.checkpoint() as {
+      monitor: { healthCards: HealthRecord[] };
+    };
+    const card = saved.monitor.healthCards[0];
+    if (!card) throw new Error("Missing card");
+    if (field === "requestHashes")
+      card.provenance.requestHashes = ["0".repeat(64)];
+    else if (field === "codeRevision") card.provenance.codeRevision += 1;
+    else card.provenance[field] = "0".repeat(64);
+    const calls = h.fetch.mock.calls.length;
+    await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+    await vi.advanceTimersByTimeAsync(100);
+    const restored = h.monitor
+      .boardSnapshot()
+      .tasks.find((task) => task.taskId === "task:1");
+    expect(restored?.provenance.state).not.toBe("current");
+    expect(h.fetch).toHaveBeenCalledTimes(calls);
+  },
+);
+
 it("rejects strict-v7 provenance-free legacy current-card storage without replay", async () => {
   const h = fixture();
   h.start();

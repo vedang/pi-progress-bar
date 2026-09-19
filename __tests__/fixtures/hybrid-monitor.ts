@@ -94,7 +94,7 @@ export function jevReply(request: EvaluationRequest) {
   });
 }
 export function monitorHarness(
-  initial = [
+  initial: unknown[] = [
     branchEntry("goal", "Implement parser, add regression, and validate it."),
   ],
 ) {

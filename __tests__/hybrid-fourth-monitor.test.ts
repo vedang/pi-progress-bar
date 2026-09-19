@@ -7,6 +7,7 @@ import {
   type MonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
 import { selectedModelExtractor } from "../src/core/selected-model";
+import { fixtureHealthCard } from "./fixtures/health-card";
 import { initial, initialMessage, noPatch } from "./fixtures/hybrid";
 import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
 
@@ -93,25 +94,11 @@ it("health envelope covers retained old card with prospective dispatch and usage
   first.status = "done";
   first.label = "\ud800".repeat(240);
   state.focusTaskId = second.id;
-  const oldCard = {
-    taskId: first.id,
-    revision: first.revision,
-    label: first.label,
-    retained: true,
-    replacementPending: true,
-    assessedAt: 1,
-    health: {
-      requirements: "Clear",
-      acceptance: "explicit",
-      newRedTest: "Not needed",
-      redEvidence: "Not needed",
-      implementation: "unverified",
-    },
-  };
+  const oldCard = fixtureHealthCard(first, initialMessage);
   const metadata: MonitorCheckpointMetadata = {
     enabled: false,
     usage: { jev: usage(), extraction: usage() },
-    card: oldCard,
+    healthCards: [oldCard],
   };
   const h = monitorHarness([
     branchEntry(initialMessage.id, initialMessage.text, initialMessage.role),
@@ -124,18 +111,10 @@ it("health envelope covers retained old card with prospective dispatch and usage
     h.reader,
   );
   expect(h.monitor.state.focusTaskId).toBe(second.id);
-  const projected = {
-    ...oldCard,
-    taskId: second.id,
-    label: second.label,
-    retained: false,
-    replacementPending: false,
-    assessedAt: Number.MAX_SAFE_INTEGER,
-  };
   const envelope = Reflect.apply(
     Reflect.get(h.monitor, "capacityEnvelope"),
     h.monitor,
-    ["health", h.monitor.state, projected],
+    ["health", h.monitor.state],
   ) as { maximum: number };
   const dispatched = {
     ...metadata,

@@ -134,8 +134,13 @@ it("retains replacement-pending after A completes until held B health is admitte
   });
   const saved = h.monitor.checkpoint();
   expect(saved).toMatchObject({
-    monitor: { card: { taskId: "task:1", replacementPending: true } },
+    monitor: {
+      healthCards: expect.arrayContaining([
+        expect.objectContaining({ taskId: "task:1" }),
+      ]),
+    },
   });
+  expect(saved).not.toHaveProperty("monitor.card");
   release?.();
   await vi.advanceTimersByTimeAsync(100);
   expect(h.monitor.presentationSnapshot().card).toMatchObject({

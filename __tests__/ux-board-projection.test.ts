@@ -446,6 +446,23 @@ describe("truthful display status", () => {
     expect(board(h.monitor).currentTask?.status).not.toBe("DONE");
   });
 
+  it("OFF/ON cannot resurrect idle DONE after work arrived while monitoring was off", async () => {
+    const h = fixture();
+    h.start();
+    await h.settle("goal");
+    h.focus("none");
+    h.complete(["task:1", "task:2", "task:3"]);
+    h.append("finished", "All three requested tasks are complete.");
+    await h.settle("finished");
+    expect(board(h.monitor).currentTask?.status).toBe("DONE");
+    h.monitor.turnOff();
+    h.append("off-work", "Investigate another parser boundary.", "user");
+    h.monitor.turnOn("/nonexistent-hybrid-test");
+    expect(board(h.monitor).currentTask).toBeUndefined();
+    await h.settle("off-work");
+    expect(board(h.monitor).currentTask).toBeUndefined();
+  });
+
   it("reload never resurrects an idle DONE invalidated by newer work", async () => {
     const h = fixture();
     h.start();

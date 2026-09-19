@@ -6,6 +6,7 @@ import {
   type MonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
 import { type HybridState, observationRef } from "../src/core/hybrid-state";
+import { fixtureHealthCard } from "./fixtures/health-card";
 import {
   backend,
   initial,
@@ -62,22 +63,11 @@ async function settledAtBytes(
   }
   const meta = structuredClone(metadata);
   meta.enabled = enabled;
-  if (withCard)
-    meta.card = {
-      taskId: "task:1",
-      revision: 1,
-      label: "Implement parser",
-      retained: false,
-      replacementPending: false,
-      assessedAt: 1,
-      health: {
-        requirements: "Clear",
-        acceptance: "explicit",
-        newRedTest: "Not needed",
-        redEvidence: "Not needed",
-        implementation: "unverified",
-      },
-    };
+  if (withCard) {
+    const task = seed.tasks[0];
+    if (!task) throw new Error("Missing seed task");
+    meta.healthCards = [fixtureHealthCard(task, initialMessage)];
+  }
   function candidate(padding: number, remainder = 0) {
     const state = structuredClone(seed);
     const source = observation(
@@ -288,7 +278,8 @@ it("finalizes a fully accepted journal above 496KiB without rebilling providers"
 it("persists a fixed-size capacity marker at the byte edge and retains the old card", async () => {
   const f = await settledAtBytes(512 * 1024 - 2, true);
   const h = await restored(f);
-  expect(h.monitor.presentationSnapshot().card?.retained).toBe(false);
+  // Restored assessments have no re-established live request/evidence identity.
+  expect(h.monitor.presentationSnapshot().card?.retained).toBe(true);
   h.monitor.turnOn("/nonexistent-hybrid-test");
   h.append("edge-message", "Acknowledged.", "user");
   await vi.advanceTimersByTimeAsync(100);

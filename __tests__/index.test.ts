@@ -182,3 +182,35 @@ it("stays OFF without a key and does not invoke the selected model", async () =>
   expect(fetch).not.toHaveBeenCalled();
   expect(JSON.stringify(h.notify.mock.calls)).toMatch(/TYPESAFE_API_KEY/);
 });
+
+it.each([{ version: 5, state: {} }, { version: 6 }])(
+  "preserves rejected stored checkpoint through host restore and progress on: %j",
+  async (data) => {
+    const h = fixture();
+    const saved = {
+      type: "custom",
+      id: "saved-progress",
+      customType: "pi-progress-bar",
+      data,
+    };
+    h.setEntries([
+      branchEntry("goal", "Implement parser, add regression, and validate it."),
+      saved,
+    ]);
+    await h.emit("session_start");
+    await vi.advanceTimersByTimeAsync(100);
+    await h.command("on");
+    await h.emit("context");
+    await h.emit("turn_end");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.checkpoints).toEqual([]);
+    expect(h.complete).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(
+      h.notify.mock.calls.some(([message]) =>
+        /fresh session/i.test(String(message)),
+      ),
+    ).toBe(true);
+    expect(saved.data).toEqual(data);
+  },
+);

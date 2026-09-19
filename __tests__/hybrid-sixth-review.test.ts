@@ -6,6 +6,7 @@ import {
   restoreCheckpoint,
 } from "../src/core/hybrid-checkpoint";
 import type { HybridState } from "../src/core/hybrid-state";
+import { canonicalMessages } from "../src/sources/messages";
 import { backend, noPatch, observation } from "./fixtures/hybrid";
 import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
 
@@ -420,11 +421,9 @@ it("ON invalidates an accepted pending gate when preceding context changed while
       (item) => item.id,
     ),
   ).toEqual(["goal", "inserted"]);
-  const canonical = [
-    observation(f.entry.id, f.entry.message.content),
-    observation(inserted.id, inserted.message.content),
-    f.latest,
-  ];
+  // Replay the actual canonical adapter output, including the serialized
+  // observation field order used by extraction's request hash.
+  const canonical = canonicalMessages(f.entries);
   for (const [saved] of f.h.save.mock.calls) {
     expect(
       restoreCheckpoint(

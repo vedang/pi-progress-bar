@@ -265,7 +265,7 @@ describe("automatic Pi host contract", () => {
     await h.event("session_shutdown");
   });
 
-  it("exposes only bare usage/state, on, off, and interval 5-86400", async () => {
+  it("exposes only bare usage/state, on and off", async () => {
     vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
     const h = await harness();
     await h.event("session_start");
@@ -273,14 +273,15 @@ describe("automatic Pi host contract", () => {
     const help = String(h.ui.notify.mock.calls.at(-1)?.[0]);
     expect(help).toContain("Automatic progress monitor");
     expect(help).toContain("State: ON");
-    expect(help).toContain("Analysis interval: 15s");
+    expect(help).not.toMatch(/interval/i);
     expect(help).toContain("/progress on");
     expect(help).toContain("/progress off");
-    expect(help).toContain("/progress interval <seconds>");
-    expect(help).toContain("5-86400");
+
     expect(help).toMatch(/Jev usage: \d+ calls/i);
     expect(h.ui.select).not.toHaveBeenCalled();
     for (const obsolete of [
+      "interval 5",
+      "interval 86400",
       "source conversation",
       "details",
       "enable",
@@ -290,13 +291,7 @@ describe("automatic Pi host contract", () => {
       await h.command(obsolete);
       expect(h.ui.notify.mock.calls.at(-1)?.join(" ")).toMatch(/usage|use/i);
     }
-    await h.command("interval 5");
-    expect(vi.getTimerCount()).toBe(1);
-    await h.command("interval 86400");
-    expect(vi.getTimerCount()).toBe(1);
-    for (const invalid of ["interval 4", "interval 86401", "interval 5.5"])
-      await h.command(invalid);
-    expect(h.ui.notify.mock.calls.at(-1)?.join(" ")).toMatch(/5.*86400/);
+    expect(vi.getTimerCount()).toBe(0);
     await h.event("session_shutdown");
   });
 
@@ -317,7 +312,7 @@ describe("automatic Pi host contract", () => {
     expect(signal?.aborted).toBe(true);
     expect(h.render()).toEqual([]);
     expect(vi.getTimerCount()).toBe(0);
-    await h.command("interval 7");
+    await h.command("");
     expect(vi.getTimerCount()).toBe(0);
     await h.command("on");
     await h.command("on");
@@ -339,7 +334,7 @@ describe("automatic Pi host contract", () => {
     );
     const h = await harness([plan]);
     await h.event("session_start");
-    await vi.advanceTimersByTimeAsync(120_000);
+    await vi.advanceTimersByTimeAsync(1000);
     await vi.waitFor(() => expect(h.render().join(" ")).toMatch(/0\s*\/\s*2/));
     h.setBranch([
       plan,
@@ -349,8 +344,8 @@ describe("automatic Pi host contract", () => {
         "Implement parser is finished. Add tests remains.",
       ),
     ]);
-    await h.event("message_end");
-    await vi.advanceTimersByTimeAsync(60_000);
+    await h.event("turn_end");
+    await vi.advanceTimersByTimeAsync(1000);
     await vi.waitFor(() => expect(h.render().join(" ")).toMatch(/1\s*\/\s*2/));
     expect(h.ui.confirm).not.toHaveBeenCalled();
     expect(h.ui.select).not.toHaveBeenCalled();
@@ -370,6 +365,150 @@ describe("automatic Pi host contract", () => {
       h.api.registerTool,
     ])
       expect(fn).not.toHaveBeenCalled();
+    await h.event("session_shutdown");
+  });
+});
+
+// Event-driven contract supersedes interval assertions; the real host ordering
+// proof lives in host-events.integration.test.ts, not this synthetic harness.
+describe("event-driven host contract", () => {
+  function noWorkTransport() {
+    const requests: { state?: { candidates?: { entryId: string }[] } }[] = [];
+    const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      requests.push(body);
+      return Response.json({
+        model: "jev-1.13.0",
+        answers: {
+          source: {
+            type: "choice",
+            choice: "none",
+            confidence: 1,
+            probabilities: Object.fromEntries(
+              Object.keys(body.questions.source.criteria).map((key) => [
+                key,
+                key === "none" ? 1 : 0,
+              ]),
+            ),
+          },
+        },
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    return { fetcher, requests };
+  }
+
+  it("observes accepted refs at context/turn_end, not raw message_end, without waiting for settled", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
+    const { fetcher, requests } = noWorkTransport();
+    const h = await harness();
+    await h.event("session_start");
+    expect(h.handlers.has("context")).toBe(true);
+    expect(h.handlers.has("turn_end")).toBe(true);
+    const user = entry("accepted-user", "user", "Explain the parser.");
+    await h.event("message_end", { message: user.message });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetcher).not.toHaveBeenCalled();
+    h.setBranch([user]);
+    await h.event("context");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(
+      requests.flatMap(
+        (request) =>
+          request.state?.candidates?.map((candidate) => candidate.entryId) ??
+          [],
+      ),
+    ).toEqual(["accepted-user"]);
+    h.setBranch([
+      user,
+      {
+        ...entry(
+          "accepted-answer",
+          "assistant",
+          "The parser preserves source spans.",
+        ),
+        parentId: user.id,
+      },
+    ]);
+    await h.event("turn_end");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(
+      requests.flatMap(
+        (request) =>
+          request.state?.candidates?.map((candidate) => candidate.entryId) ??
+          [],
+      ),
+    ).toContain("accepted-answer");
+    await h.event("session_shutdown");
+  });
+
+  it("drains finite work beyond the old three-call budget and coalesces duplicate notifications", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
+    const { fetcher, requests } = noWorkTransport();
+    const branch = Array.from({ length: 12 }, (_, index) => ({
+      ...entry(`context-${index}`, "user", `Context note number ${index}.`),
+      parentId: index ? `context-${index - 1}` : null,
+    }));
+    const h = await harness(branch);
+    await h.event("session_start");
+    // No periodic interval or synthetic per-cycle calls; allow yielded local work.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(
+      requests.flatMap(
+        (request) =>
+          request.state?.candidates?.map((candidate) => candidate.entryId) ??
+          [],
+      ),
+    ).toEqual(branch.map((value) => value.id));
+    expect(vi.getTimerCount()).toBe(0);
+    for (const hook of ["context", "turn_end", "agent_settled", "context"])
+      await h.event(hook);
+    await h.command("");
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(fetcher).toHaveBeenCalledTimes(12);
+    expect(vi.getTimerCount()).toBe(0);
+    await h.event("session_shutdown");
+  });
+
+  it("has no idle analysis timer or interval control", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
+    const h = await harness();
+    await h.event("session_start");
+    await h.command("");
+    const help = String(h.ui.notify.mock.calls.at(-1)?.[0]);
+    expect(help).toContain("/progress on");
+    expect(help).toContain("/progress off");
+    expect(help).not.toMatch(/interval/i);
+    expect(h.commands.get("progress")?.description).not.toMatch(/interval/i);
+    await h.command("interval 5");
+    expect(h.ui.notify.mock.calls.at(-1)?.join(" ")).toMatch(
+      /unknown|use|usage/i,
+    );
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(fetch).not.toHaveBeenCalled();
+    await h.event("session_shutdown");
+  });
+
+  it("retries pending 429 work at Retry-After without an interval or fresh event", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
+    const { fetcher } = noWorkTransport();
+    fetcher.mockImplementationOnce(
+      async () =>
+        new Response(null, { status: 429, headers: { "Retry-After": "2" } }),
+    );
+    const h = await harness([
+      entry("retry-user", "user", "Context for the work."),
+    ]);
+    await h.event("session_start");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(101);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
     await h.event("session_shutdown");
   });
 });

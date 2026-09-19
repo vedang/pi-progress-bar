@@ -73,7 +73,7 @@ function canonicalObservation(
 }
 
 export interface CanonicalFrontier {
-  kind: "page" | "preceding" | "latest";
+  kind: "page" | "preceding";
   anchorId?: string;
   anchorIndex: number;
   includeTarget?: boolean;
@@ -88,9 +88,11 @@ export interface CanonicalPage {
   page: Observation[];
   hasMore: boolean;
   afterValid: boolean;
+  /** Only this outcome may schedule one more exploratory wake. */
+  progress: "terminal" | "scan-needed" | "page-full";
   /** Prior page accumulation was structurally stale and must be dropped. */
   invalidated?: true;
-  frontier?: CanonicalFrontier;
+  frontier: CanonicalFrontier;
 }
 
 export interface CanonicalPreceding {
@@ -98,12 +100,6 @@ export interface CanonicalPreceding {
   complete: boolean;
   /** Caller-supplied partial context was structurally stale and was dropped. */
   invalidated?: true;
-  frontier?: CanonicalFrontier;
-}
-
-export interface CanonicalLatest {
-  latest?: Observation;
-  complete: boolean;
   frontier?: CanonicalFrontier;
 }
 
@@ -175,10 +171,7 @@ export class CanonicalPass {
       frontier.prefixLength >= 0 &&
       frontier.prefixLength <= this.headers.length &&
       frontier.prefix === this.prefix(frontier.prefixLength) &&
-      // A reverse scan cannot skip newly appended headers while unfinished.
-      (frontier.kind !== "latest" ||
-        frontier.terminal ||
-        frontier.prefixLength === this.headers.length)
+      true
     );
   }
 
@@ -192,12 +185,7 @@ export class CanonicalPass {
   ): CanonicalFrontier {
     // Page continuation pays only inspected prefix; preceding must bind every
     // header through target so an insertion near target invalidates its cache.
-    const prefixLength =
-      kind === "preceding"
-        ? anchorIndex + 1
-        : kind === "latest"
-          ? this.headers.length
-          : index;
+    const prefixLength = kind === "preceding" ? anchorIndex + 1 : index;
     return {
       kind,
       ...(anchorId ? { anchorId } : {}),
@@ -285,49 +273,6 @@ export class CanonicalPass {
     };
   }
 
-  latestAfterResult(
-    after?: { id: string; hash: string },
-    frontier?: CanonicalFrontier,
-  ): CanonicalLatest {
-    const afterIndex = after ? this.indexOf(after.id) : -1;
-    const anchor = after?.id;
-    if (after && afterIndex < 0) return { complete: true };
-    if (after) {
-      const current = this.observation(after.id);
-      if (!current || current.hash !== after.hash) return { complete: true };
-    }
-    const accepted = this.accepts(frontier, "latest", anchor);
-    let index = accepted
-      ? (frontier?.index ?? afterIndex)
-      : this.headers.length - 1;
-    if (accepted && frontier?.terminal) {
-      if (this.headers.length === frontier.prefixLength)
-        return { complete: true, frontier };
-      index = this.headers.length - 1;
-    }
-    while (index > afterIndex) {
-      if (this.exploratoryReads >= MAX_EXPLORATORY_HEADERS)
-        return {
-          complete: false,
-          frontier: this.frontier("latest", anchor, afterIndex, index),
-        };
-      const header = this.headers[index];
-      index--;
-      if (!header) continue;
-      const observation = this.exploratory(header);
-      if (observation)
-        return {
-          latest: observation,
-          complete: true,
-          frontier: this.frontier("latest", anchor, afterIndex, index, true),
-        };
-    }
-    return {
-      complete: true,
-      frontier: this.frontier("latest", anchor, afterIndex, index, true),
-    };
-  }
-
   page(
     after?: { id: string; hash: string },
     frontier?: CanonicalFrontier,
@@ -340,65 +285,75 @@ export class CanonicalPass {
       afterIndex = this.indexOf(after.id);
       const current = afterIndex < 0 ? undefined : this.observation(after.id);
       if (!current || current.hash !== after.hash)
-        return { page: [], hasMore: false, afterValid: false };
+        return {
+          page: [],
+          hasMore: false,
+          afterValid: false,
+          progress: "terminal",
+          frontier: this.frontier("page", anchor, afterIndex, afterIndex, true),
+        };
     }
     const accepted = this.accepts(frontier, "page", anchor);
     const invalidated = !!frontier && !accepted;
     let index = accepted ? (frontier?.index ?? afterIndex + 1) : afterIndex + 1;
     if (accepted && frontier?.terminal) {
       if (this.headers.length === frontier.prefixLength)
-        return { page: [], hasMore: false, afterValid: true, frontier };
+        return {
+          page: [],
+          hasMore: false,
+          afterValid: true,
+          progress: "terminal",
+          frontier,
+        };
       index = frontier.index;
     }
     const retained = invalidated ? [] : admitted;
     const page: Observation[] = [];
     let bytes = invalidated ? 0 : admittedBytes;
+    const result = (
+      progress: CanonicalPage["progress"],
+      hasMore: boolean,
+      at: number,
+      terminal = false,
+    ): CanonicalPage => ({
+      page,
+      hasMore,
+      afterValid: true,
+      progress,
+      ...(invalidated ? { invalidated: true as const } : {}),
+      frontier: this.frontier("page", anchor, afterIndex, at, terminal),
+    });
     while (index < this.headers.length) {
       if (
         retained.length + page.length >= MAX_CANONICAL_PAGE_MESSAGES ||
         bytes >= MAX_CANONICAL_PAGE_BYTES
       )
-        return {
-          page,
-          hasMore: true,
-          afterValid: true,
-          ...(invalidated ? { invalidated: true as const } : {}),
-        };
+        return result("page-full", true, index);
       if (this.exploratoryReads >= MAX_EXPLORATORY_HEADERS)
-        return {
-          page,
-          hasMore: true,
-          afterValid: true,
-          ...(invalidated ? { invalidated: true as const } : {}),
-          frontier: this.frontier("page", anchor, afterIndex, index),
-        };
+        return result("scan-needed", true, index);
       const header = this.headers[index];
-      index++;
-      if (!header) continue;
+      if (!header) {
+        index++;
+        continue;
+      }
       const observation = this.exploratory(header);
-      if (!observation) continue;
+      if (!observation) {
+        index++;
+        continue;
+      }
       const size = Buffer.byteLength(observation.text);
       if (
         retained.length + page.length &&
         (retained.length + page.length >= MAX_CANONICAL_PAGE_MESSAGES ||
           bytes + size > MAX_CANONICAL_PAGE_BYTES)
       )
-        return {
-          page,
-          hasMore: true,
-          afterValid: true,
-          ...(invalidated ? { invalidated: true as const } : {}),
-        };
+        // Candidate was read but cannot be admitted. Resume at its header.
+        return result("page-full", true, index);
+      index++;
       page.push(observation);
       bytes += size;
     }
-    return {
-      page,
-      hasMore: false,
-      afterValid: true,
-      ...(invalidated ? { invalidated: true as const } : {}),
-      frontier: this.frontier("page", anchor, afterIndex, index, true),
-    };
+    return result("terminal", false, index, true);
   }
 }
 

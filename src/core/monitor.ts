@@ -84,6 +84,54 @@ interface HealthWork {
   revision: number;
 }
 
+interface ContextTarget {
+  id: string;
+  includeTarget: boolean;
+}
+
+/** Partial reverse scan; never used as a transaction context. */
+interface ContextScan {
+  target: ContextTarget;
+  frontier?: CanonicalFrontier;
+  partial: Observation[];
+}
+
+interface Deferred {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: () => void;
+}
+
+interface ActiveWork {
+  observation: Observation;
+  epoch: number;
+  /** Immutable transaction input retained through provider result admission. */
+  requestContext: Observation[];
+  scan?: ContextScan;
+  barrier?: Deferred;
+}
+
+interface Telemetry {
+  sourceId: string;
+  usage: { jev: ProviderUsage; extraction: ProviderUsage };
+  lastJevCallAt?: number;
+  lastExtractionCallAt?: number;
+}
+
+interface ControlWork {
+  kind: "restore" | "enable";
+  wantEnabled: boolean;
+  epoch: number;
+  target?: ContextTarget;
+  scan?: ContextScan;
+  data?: unknown;
+  sourceId: string;
+  metadata?: MonitorCheckpointMetadata;
+  preserveControls: boolean;
+  telemetry: Telemetry;
+  done?: Deferred;
+}
+
 interface CapacityEnvelope {
   boundaries: Record<string, number>;
   maximum: number;
@@ -210,29 +258,18 @@ export class Monitor {
   private page: Observation[] = [];
   private pageBytes = 0;
   private pageFrontier?: CanonicalFrontier;
-  private latestFrontier?: CanonicalFrontier;
-  private precedingContext: Observation[] = [];
-  private precedingFrontier?: CanonicalFrontier;
-  private precedingTarget?: { id: string; includeTarget: boolean };
-  private canonicalContinuationTimer?: ReturnType<typeof setTimeout>;
-  private canonicalIncomplete = false;
-  private restoring?: {
-    data: unknown;
-    sourceId: string;
-    metadata: MonitorCheckpointMetadata | undefined;
-    resume: boolean;
-    target?: { id: string; includeTarget: boolean };
-    frontier?: CanonicalFrontier;
-    context: Observation[];
-    epoch: number;
-  };
+  /** Complete-only context used to form a future transaction. */
+  private settledContext: Observation[] = [];
+  private pendingScan?: ContextScan;
+  private canonicalWakeTimer?: ReturnType<typeof setTimeout>;
+  private controlWork?: ControlWork;
   private queued: Observation[] = [];
   private processing = false;
   private waitingForWake = false;
   private retryTimer?: ReturnType<typeof setTimeout>;
   private retryObservation?: Observation;
   private blockedPending?: { id: string; hash: string };
-  private activeObservation?: { observation: Observation; epoch: number };
+  private activeObservation?: ActiveWork;
   private catchingUp = false;
   /** Initial backlog target; remains set until its observation commits. */
   private catchupTarget?: { id: string; hash: string };
@@ -303,117 +340,88 @@ export class Monitor {
   }
 
   turnOn(cwd: string): string | undefined {
-    if (this.enabled) return;
-    return this.turnOnWithPass(cwd, this.beginCanonicalPass());
-  }
-
-  /** OFF→ON uses one canonical snapshot before gateway admission. */
-  private turnOnWithPass(cwd: string, pass: CanonicalPass): string | undefined {
     this.cwd = cwd;
+    if (this.enabled) return;
+    if (this.controlWork) {
+      this.controlWork.wantEnabled = true;
+      this.scheduleCanonicalWake();
+      return;
+    }
     if (!process.env.TYPESAFE_API_KEY?.trim()) {
       this.error = "TYPESAFE_API_KEY is required; progress monitor is OFF";
-      this.enabled = false;
       this.publish();
       return this.error;
     }
     const sourceId = this.options.sourceId();
     if (sourceId !== this.state.sourceId) this.resetState(sourceId);
-    // OFF history can change while no observer callback runs. Reset first.
-    if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
-    if (this.canonicalIncomplete) {
-      this.scheduleCanonicalContinuation();
+    this.beginControl({
+      kind: "enable",
+      wantEnabled: true,
+      sourceId,
+      preserveControls: false,
+      telemetry: this.captureTelemetry(sourceId),
+      target: this.contextTarget(this.state),
+    });
+  }
+
+  /** Effective OFF is immediate; desired ON belongs only to ControlWork. */
+  turnOff() {
+    const control = this.controlWork;
+    if (control) {
+      control.wantEnabled = false;
+      this.error = undefined;
       this.publish();
       return;
     }
-    // A legacy exact-edge ON checkpoint remains readable but cannot enable.
-    if (!this.falseProjectionFits()) {
-      this.enabled = false;
-      this.gateway.pause();
-      this.note("capacity-exhausted");
-      this.publish();
-      return "Progress state capacity reached; monitoring remains OFF";
-    }
-    this.latchHistoricalCatchup = true;
-    this.enabled = true;
-    this.error = undefined;
-    this.waitingForWake = false;
-    this.clearRetry();
-    this.epoch++;
-    this.gateway.enable(this.identity());
-    this.save();
-    this.requeue(pass, true);
-    this.refreshBeads();
-    this.publish();
-    this.drain();
-  }
-
-  turnOff() {
     if (!this.enabled) return;
-    this.enabled = false;
-    this.error = undefined;
-    this.waitingForWake = false;
-    this.clearRetry();
-    this.epoch++;
-    this.extractionController?.abort();
-    this.cancelHealth();
-    this.healthObservation = undefined;
-    this.gateway.pause();
-    this.evidence.clearPending();
-    this.clearCanonicalContinuations();
+    this.disableRuntime();
+    this.clearRuntimeContext();
     this.save();
     this.publish();
   }
 
   stop() {
-    this.enabled = false;
-    this.waitingForWake = false;
-    this.clearRetry();
-    this.epoch++;
-    this.extractionController?.abort();
-    this.cancelHealth();
-    this.healthObservation = undefined;
-    this.gateway.pause();
-    this.evidence.clearPending();
-    this.clearCanonicalContinuations();
+    this.disableRuntime();
+    this.clearRuntimeContext();
+    this.finishControl(this.controlWork);
+    this.controlWork = undefined;
     this.publish();
   }
 
-  /** Model select is an explicit eligible wake for a paused selected-model phase. */
+  /** Model selection cannot revive old semantic state during a control handoff. */
   modelSelected() {
-    if (!this.enabled) return;
+    if (this.controlWork || !this.enabled) return;
     const pass = this.beginCanonicalPass();
-    if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
-    if (this.canonicalIncomplete) {
-      this.scheduleCanonicalContinuation();
-      this.publish();
-      return;
+    const authority = this.reconcileAuthority(pass);
+    if (authority === "amended") this.resetForCanonicalAmendment();
+    else if (authority === "incomplete") this.scheduleCanonicalWake();
+    else {
+      this.clearRetry();
+      this.epoch++;
+      this.extractionController?.abort();
+      this.cancelHealth();
+      this.gateway.pause();
+      this.gateway.enable(this.identity());
+      this.waitingForWake = false;
+      this.requeue(pass);
+      this.drain();
     }
-    this.clearRetry();
-    this.epoch++;
-    this.extractionController?.abort();
-    this.cancelHealth();
-    this.gateway.pause();
-    this.gateway.enable(this.identity());
-    this.waitingForWake = false;
-    this.requeue(pass);
     this.publish();
-    this.drain();
   }
 
-  /** Canonical branch is read only on host observation, never from projections. */
+  /** Canonical branch is read only on host observation, never projections. */
   observe(reader: () => readonly unknown[]) {
     this.reader = reader;
-    if (!this.enabled) return;
+    if (this.controlWork || !this.enabled) return;
     const pass = this.beginCanonicalPass();
-    if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
-    if (this.canonicalIncomplete) {
-      this.scheduleCanonicalContinuation();
-      this.publish();
-      return;
+    const authority = this.reconcileAuthority(pass);
+    if (authority === "amended") this.resetForCanonicalAmendment();
+    else if (authority === "incomplete") this.scheduleCanonicalWake();
+    else {
+      this.requeue(pass);
+      if (this.queued.length) this.cancelHealth();
+      this.drain();
     }
-    this.requeue(pass);
-    if (this.queued.length) this.cancelHealth();
-    this.drain();
   }
 
   checkpoint(): unknown {
@@ -430,7 +438,7 @@ export class Monitor {
     );
   }
 
-  private restoreTarget(data: unknown) {
+  private restoreTarget(data: unknown): ContextTarget | undefined {
     if (!data || typeof data !== "object") return;
     const state = (data as { state?: unknown }).state;
     if (!state || typeof state !== "object") return;
@@ -454,69 +462,214 @@ export class Monitor {
       : undefined;
   }
 
-  private continueRestore(work: NonNullable<Monitor["restoring"]>) {
-    if (this.restoring !== work || work.epoch !== this.epoch) return;
-    const pass = this.beginCanonicalPass();
-    const context = work.target
-      ? pass.precedingResult(
-          work.target.id,
-          work.target.includeTarget,
-          work.frontier,
-          work.context,
-        )
-      : { context: [] as Observation[], complete: true };
-    if (!context.complete) {
-      work.context = context.context;
-      work.frontier = context.frontier;
-      this.scheduleCanonicalContinuation();
-      this.publish();
+  private contextTarget(state: HybridState): ContextTarget | undefined {
+    const pending = state.pending?.observation;
+    if (pending) return { id: pending.entryId, includeTarget: false };
+    const cursor = state.cursor;
+    return cursor ? { id: cursor.id, includeTarget: true } : undefined;
+  }
+
+  private deferred(): Deferred {
+    let resolve = () => {};
+    let reject = () => {};
+    const promise = new Promise<void>((ok, fail) => {
+      resolve = ok;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  }
+
+  private captureTelemetry(sourceId: string): Telemetry {
+    return {
+      sourceId,
+      usage: {
+        jev: copyUsage(this.usage.jev),
+        extraction: copyUsage(this.usage.extraction),
+      },
+      ...(this.lastJevCallAt ? { lastJevCallAt: this.lastJevCallAt } : {}),
+      ...(this.lastExtractionCallAt
+        ? { lastExtractionCallAt: this.lastExtractionCallAt }
+        : {}),
+    };
+  }
+
+  private beginControl(input: Omit<ControlWork, "epoch" | "done">) {
+    this.disableRuntime();
+    this.clearRuntimeContext();
+    const work: ControlWork = {
+      ...input,
+      epoch: this.epoch,
+      ...(input.kind === "restore" ? { done: this.deferred() } : {}),
+    };
+    this.controlWork = work;
+    this.advanceControl(work);
+    return work.done?.promise;
+  }
+
+  private disableRuntime() {
+    this.enabled = false;
+    this.waitingForWake = false;
+    this.clearRetry();
+    this.epoch++;
+    this.extractionController?.abort();
+    this.cancelHealth();
+    this.healthObservation = undefined;
+    this.gateway.pause();
+    this.evidence.clearPending();
+  }
+
+  private finishControl(work: ControlWork | undefined) {
+    work?.done?.resolve();
+  }
+
+  private mergeTelemetry(
+    metadata: MonitorCheckpointMetadata | undefined,
+    work: ControlWork,
+  ) {
+    if (!(work.preserveControls && work.sourceId === work.telemetry.sourceId)) {
+      this.applyMetadata(metadata);
       return;
     }
-    if (work.target) {
-      this.precedingContext = context.context;
-      this.precedingFrontier = context.frontier;
-      this.precedingTarget = { ...work.target };
-    }
-    this.restoring = undefined;
-    const restored = restoreCheckpoint(
-      work.data,
-      work.sourceId,
-      (entryId) => this.resolveObservation(pass, entryId),
-      (entryId) =>
-        work.target?.id === entryId
-          ? context.context
-          : this.rehydratePreceding(pass, entryId),
+    this.applyMetadata(metadata);
+    this.usage.jev.calls = Math.max(
+      this.usage.jev.calls,
+      work.telemetry.usage.jev.calls,
     );
-    if (restored) {
-      this.state = copyState(restored);
-      // Lifetime telemetry belongs to the saved source/session before semantic
-      // reconciliation may discard stale task/card authority.
-      this.applyMetadata(work.metadata);
-      this.latchHistoricalCatchup = true;
-      if (this.hasCanonicalAmendment(pass)) {
-        this.resetState(work.sourceId, false);
-        this.latchHistoricalCatchup = true;
-      } else if (this.canonicalIncomplete) {
-        // Replay cannot use an incomplete context as an empty authoritative one.
-        this.restoring = work;
-        this.scheduleCanonicalContinuation();
+    this.usage.jev.inputTokens = Math.max(
+      this.usage.jev.inputTokens,
+      work.telemetry.usage.jev.inputTokens,
+    );
+    this.usage.jev.outputTokens = Math.max(
+      this.usage.jev.outputTokens,
+      work.telemetry.usage.jev.outputTokens,
+    );
+    this.usage.extraction.calls = Math.max(
+      this.usage.extraction.calls,
+      work.telemetry.usage.extraction.calls,
+    );
+    this.usage.extraction.inputTokens = Math.max(
+      this.usage.extraction.inputTokens,
+      work.telemetry.usage.extraction.inputTokens,
+    );
+    this.usage.extraction.outputTokens = Math.max(
+      this.usage.extraction.outputTokens,
+      work.telemetry.usage.extraction.outputTokens,
+    );
+    this.lastJevCallAt =
+      Math.max(this.lastJevCallAt ?? 0, work.telemetry.lastJevCallAt ?? 0) ||
+      undefined;
+    this.lastExtractionCallAt =
+      Math.max(
+        this.lastExtractionCallAt ?? 0,
+        work.telemetry.lastExtractionCallAt ?? 0,
+      ) || undefined;
+  }
+
+  private scanContext(
+    pass: CanonicalPass,
+    scan: ContextScan | undefined,
+    target: ContextTarget,
+  ) {
+    const result = pass.precedingResult(
+      target.id,
+      target.includeTarget,
+      scan?.frontier,
+      scan?.partial,
+    );
+    if (result.complete)
+      return { complete: true as const, context: result.context };
+    return {
+      complete: false as const,
+      scan: {
+        target,
+        frontier: result.frontier,
+        partial: result.context,
+      } satisfies ContextScan,
+    };
+  }
+
+  private advanceControl(work: ControlWork) {
+    if (this.controlWork !== work || work.epoch !== this.epoch) return;
+    const pass = this.beginCanonicalPass();
+    if (work.target) {
+      const scanned = this.scanContext(pass, work.scan, work.target);
+      if (!scanned.complete) {
+        work.scan = scanned.scan;
+        this.scheduleCanonicalWake();
         this.publish();
         return;
       }
-    } else if (this.restoreSourceMatches(work.data, work.sourceId)) {
-      // A canonical amendment can make strict replay reject before it returns
-      // state. Saved lifetime telemetry remains true even as semantic state
-      // rebuilds from the amended branch.
-      this.applyMetadata(work.metadata);
+      this.settledContext = scanned.context;
+      work.scan = undefined;
+    } else this.settledContext = [];
+
+    if (work.kind === "restore") {
+      const restored = restoreCheckpoint(
+        work.data,
+        work.sourceId,
+        (entryId) => this.resolveObservation(pass, entryId),
+        (entryId) =>
+          work.target?.id === entryId
+            ? this.settledContext
+            : this.rehydratePreceding(pass, entryId),
+      );
+      if (restored) {
+        this.state = copyState(restored);
+        this.mergeTelemetry(work.metadata, work);
+        this.latchHistoricalCatchup = true;
+        if (this.directCanonicalAmendment(pass))
+          this.resetState(work.sourceId, false);
+      } else if (this.restoreSourceMatches(work.data, work.sourceId)) {
+        this.mergeTelemetry(work.metadata, work);
+        this.resetState(work.sourceId, false);
+        this.latchHistoricalCatchup = true;
+      } else {
+        if (work.data !== undefined) this.note("saved-state-rejected");
+        this.resetState(
+          work.sourceId,
+          work.sourceId !== work.telemetry.sourceId,
+        );
+      }
+    } else if (this.directCanonicalAmendment(pass)) {
+      // Enable is already effectively OFF. Rebuild semantics without
+      // canceling desired control or writing old branch state.
       this.resetState(work.sourceId, false);
       this.latchHistoricalCatchup = true;
-    } else {
-      if (work.data !== undefined) this.note("saved-state-rejected");
-      this.resetState(work.sourceId);
+      work.target = undefined;
+      work.scan = undefined;
     }
-    this.enabled = false;
-    if (work.resume) this.turnOnWithPass(this.cwd ?? "", pass);
-    else this.publish();
+
+    this.controlWork = undefined;
+    if (!work.wantEnabled) {
+      if (this.falseProjectionFits()) this.save();
+      else this.note("capacity-exhausted");
+      this.finishControl(work);
+      this.publish();
+      return;
+    }
+    if (!process.env.TYPESAFE_API_KEY?.trim()) {
+      this.error = "TYPESAFE_API_KEY is required; progress monitor is OFF";
+      this.finishControl(work);
+      this.publish();
+      return;
+    }
+    if (!this.falseProjectionFits()) {
+      this.note("capacity-exhausted");
+      this.finishControl(work);
+      this.publish();
+      return;
+    }
+    this.enabled = true;
+    this.error = undefined;
+    this.waitingForWake = false;
+    this.epoch++;
+    this.gateway.enable(this.identity());
+    this.save();
+    this.requeue(pass, true);
+    this.refreshBeads();
+    this.finishControl(work);
+    this.publish();
+    this.drain();
   }
 
   async restore(
@@ -525,39 +678,35 @@ export class Monitor {
     preserveControls = false,
     reader?: () => readonly unknown[],
   ) {
-    const wasEnabled = this.enabled;
+    const prior = this.controlWork;
+    const desired = preserveControls
+      ? (prior?.wantEnabled ?? this.enabled)
+      : (monitorCheckpointMetadata(data)?.enabled ?? true);
+    this.finishControl(prior);
+    this.controlWork = undefined;
     this.cwd = cwd;
-    this.epoch++;
-    this.extractionController?.abort();
-    this.cancelHealth();
-    this.gateway.pause();
-    this.waitingForWake = false;
-    this.clearRetry();
-    this.clearCanonicalContinuations();
+    if (reader) this.reader = reader;
     this.queued = [];
-    this.healthObservation = undefined;
     this.blockedPending = undefined;
     this.activeObservation = undefined;
     this.catchingUp = false;
     this.catchupTarget = undefined;
-    this.latchHistoricalCatchup = false;
     this.beads.clear();
     this.beadsGeneration++;
     this.evidence.reset();
     this.diagnostics.clear();
-    if (reader) this.reader = reader;
-    const metadata = monitorCheckpointMetadata(data);
-    const work = {
+    const sourceId = this.options.sourceId();
+    const promise = this.beginControl({
+      kind: "restore",
+      wantEnabled: desired,
+      sourceId,
+      metadata: monitorCheckpointMetadata(data),
       data,
-      sourceId: this.options.sourceId(),
-      metadata,
-      resume: preserveControls ? wasEnabled : (metadata?.enabled ?? true),
+      preserveControls,
+      telemetry: this.captureTelemetry(this.state.sourceId),
       target: this.restoreTarget(data),
-      context: [] as Observation[],
-      epoch: this.epoch,
-    };
-    this.restoring = work;
-    this.continueRestore(work);
+    });
+    await promise;
   }
 
   /** Detached plain projection; it does not read history, persist, or schedule. */
@@ -625,19 +774,17 @@ export class Monitor {
     return new CanonicalPass(this.reader ? this.reader() : []);
   }
 
-  private clearCanonicalContinuations() {
-    if (this.canonicalContinuationTimer)
-      clearTimeout(this.canonicalContinuationTimer);
-    this.canonicalContinuationTimer = undefined;
+  /** Clear runtime page/context state without canceling an in-progress control. */
+  private clearRuntimeContext() {
+    if (this.canonicalWakeTimer) clearTimeout(this.canonicalWakeTimer);
+    this.canonicalWakeTimer = undefined;
     this.page = [];
     this.pageBytes = 0;
     this.pageFrontier = undefined;
-    this.latestFrontier = undefined;
-    this.precedingContext = [];
-    this.precedingFrontier = undefined;
-    this.precedingTarget = undefined;
-    this.canonicalIncomplete = false;
-    this.restoring = undefined;
+    this.settledContext = [];
+    this.pendingScan = undefined;
+    this.activeObservation?.barrier?.reject();
+    if (this.activeObservation) this.activeObservation.scan = undefined;
   }
 
   /** Semantic authority resets on amendment; billing lifetime resets only by source. */
@@ -645,7 +792,7 @@ export class Monitor {
     this.state = emptyState(sourceId);
     this.card = undefined;
     this.cardHealthIdentity = undefined;
-    this.clearCanonicalContinuations();
+    this.clearRuntimeContext();
     this.queued = [];
     this.healthObservation = undefined;
     this.blockedPending = undefined;
@@ -694,32 +841,46 @@ export class Monitor {
     }
   }
 
-  /** A finite scan continuation, not an interval or idle polling loop. */
-  private scheduleCanonicalContinuation() {
-    if (
-      this.canonicalContinuationTimer ||
-      (this.restoring === undefined && !this.enabled)
-    )
-      return;
+  /** One bounded wake, rescheduled only by a named advancing frontier. */
+  private scheduleCanonicalWake() {
+    if (this.canonicalWakeTimer) return;
     const epoch = this.epoch;
-    this.canonicalContinuationTimer = setTimeout(() => {
-      this.canonicalContinuationTimer = undefined;
+    this.canonicalWakeTimer = setTimeout(() => {
+      this.canonicalWakeTimer = undefined;
       if (epoch !== this.epoch) return;
-      if (this.restoring) {
-        this.continueRestore(this.restoring);
+      const control = this.controlWork;
+      if (control) {
+        this.advanceControl(control);
+        return;
+      }
+      const active = this.activeObservation;
+      if (active?.scan) {
+        this.advanceActiveAuthority(active);
         return;
       }
       if (!this.enabled) return;
-      const pass = this.beginCanonicalPass();
-      if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
-      if (this.canonicalIncomplete) {
-        this.scheduleCanonicalContinuation();
-        this.publish();
+      if (this.pendingScan) {
+        const pass = this.beginCanonicalPass();
+        const authority = this.reconcileAuthority(pass);
+        if (authority === "amended") this.resetForCanonicalAmendment();
+        else if (authority === "incomplete") this.scheduleCanonicalWake();
+        else {
+          this.requeue(pass);
+          this.publish();
+          this.drain();
+        }
         return;
       }
-      this.requeue(pass);
-      this.publish();
-      this.drain();
+      if (this.processing || this.page.length) return;
+      if (!this.pageFrontier || this.pageFrontier.terminal) return;
+      const pass = this.beginCanonicalPass();
+      const authority = this.reconcileAuthority(pass);
+      if (authority === "amended") this.resetForCanonicalAmendment();
+      else if (authority === "current") {
+        this.requeue(pass);
+        this.publish();
+        this.drain();
+      }
     }, 0);
   }
 
@@ -848,8 +1009,9 @@ export class Monitor {
         this.retryTimer = undefined;
         if (!this.enabled || epoch !== this.epoch) return;
         const pass = this.beginCanonicalPass();
-        if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
-        if (this.canonicalIncomplete) this.scheduleCanonicalContinuation();
+        const authority = this.reconcileAuthority(pass);
+        if (authority === "amended") this.resetForCanonicalAmendment();
+        else if (authority === "incomplete") this.scheduleCanonicalWake();
         else this.requeue(pass);
         this.publish();
         this.drain();
@@ -911,7 +1073,7 @@ export class Monitor {
             },
           ]
         : []),
-      ...this.precedingContext.map((observation) => ({
+      ...this.settledContext.map((observation) => ({
         entryId: observation.id,
         messageHash: observation.hash,
         role: observation.role,
@@ -942,8 +1104,25 @@ export class Monitor {
               messageHash: this.activeObservation.observation.hash,
               role: this.activeObservation.observation.role,
             },
+            ...this.activeObservation.requestContext.map((observation) => ({
+              entryId: observation.id,
+              messageHash: observation.hash,
+              role: observation.role,
+            })),
+            ...(this.activeObservation.scan?.partial ?? []).map(
+              (observation) => ({
+                entryId: observation.id,
+                messageHash: observation.hash,
+                role: observation.role,
+              }),
+            ),
           ]
         : []),
+      ...(this.pendingScan?.partial ?? []).map((observation) => ({
+        entryId: observation.id,
+        messageHash: observation.hash,
+        role: observation.role,
+      })),
       ...(this.healthObservation
         ? [
             {
@@ -1016,17 +1195,15 @@ export class Monitor {
     );
   }
 
-  /** Full relevant-source validation on one ephemeral coherent pass. */
-  private hasCanonicalAmendment(pass: CanonicalPass) {
-    this.canonicalIncomplete = false;
-    let amended = false;
+  /** Exhaustive direct ref validation. Exploratory context is handled separately. */
+  private directCanonicalAmendment(pass: CanonicalPass) {
     const byId = new Map<string, ReturnType<typeof this.canonicalReferences>>();
     for (const reference of this.canonicalReferences()) {
       const expected = byId.get(reference.entryId) ?? [];
       expected.push(reference);
       byId.set(reference.entryId, expected);
     }
-    // Do not short circuit: all relevant payload getters run once per boundary.
+    let amended = false;
     for (const [entryId, expected] of byId) {
       const current = pass.observation(entryId);
       if (
@@ -1039,68 +1216,97 @@ export class Monitor {
       )
         amended = true;
     }
-    const exactPreceding = (target: { id: string; includeTarget: boolean }) => {
-      const sameTarget =
-        this.precedingTarget?.id === target.id &&
-        this.precedingTarget.includeTarget === target.includeTarget;
-      const result = pass.precedingResult(
-        target.id,
-        target.includeTarget,
-        sameTarget ? this.precedingFrontier : undefined,
-        sameTarget ? this.precedingContext : [],
-      );
-      this.precedingContext = result.context;
-      this.precedingFrontier = result.frontier;
-      this.precedingTarget = target;
-      if (!result.complete) {
-        this.canonicalIncomplete = true;
-        return;
-      }
-      return result.context;
-    };
-    const pending = this.state.pending;
-    if (pending) {
-      const context = exactPreceding({
-        id: pending.observation.entryId,
-        includeTarget: false,
-      });
-      if (context && !this.sameContext(pending.journal.gate.context, context))
-        amended = true;
-    }
-    if (this.activeObservation) {
-      const expected = this.precedingContext.map((observation) => ({
-        entryId: observation.id,
-        messageHash: observation.hash,
-        role: observation.role,
-      }));
-      const context = exactPreceding({
-        id: this.activeObservation.observation.id,
-        includeTarget: false,
-      });
-      if (context && !this.sameContext(expected, context)) amended = true;
-    }
     return amended;
+  }
+
+  private createBarrier(active: ActiveWork) {
+    if (!active.barrier) active.barrier = this.deferred();
+    return active.barrier;
+  }
+
+  private settleBarrier(active: ActiveWork, amended = false) {
+    const barrier = active.barrier;
+    active.barrier = undefined;
+    if (amended) barrier?.reject();
+    else barrier?.resolve();
+  }
+
+  /** Current/amended/incomplete keeps partial scan out of transaction state. */
+  private reconcileAuthority(
+    pass: CanonicalPass,
+  ): "current" | "amended" | "incomplete" {
+    if (this.directCanonicalAmendment(pass)) return "amended";
+    const active = this.activeObservation;
+    if (active) {
+      const target: ContextTarget = {
+        id: active.observation.id,
+        includeTarget: false,
+      };
+      const scanned = this.scanContext(pass, active.scan, target);
+      if (!scanned.complete) {
+        active.scan = scanned.scan;
+        this.createBarrier(active);
+        return "incomplete";
+      }
+      active.scan = undefined;
+      const changed = !this.sameContext(
+        active.requestContext.map((observation) => ({
+          entryId: observation.id,
+          messageHash: observation.hash,
+          role: observation.role,
+        })),
+        scanned.context,
+      );
+      this.settleBarrier(active, changed);
+      return changed ? "amended" : "current";
+    }
+    const pending = this.state.pending;
+    if (!pending) return "current";
+    const target: ContextTarget = {
+      id: pending.observation.entryId,
+      includeTarget: false,
+    };
+    const scanned = this.scanContext(pass, this.pendingScan, target);
+    if (!scanned.complete) {
+      this.pendingScan = scanned.scan;
+      return "incomplete";
+    }
+    this.pendingScan = undefined;
+    return this.sameContext(pending.journal.gate.context, scanned.context)
+      ? "current"
+      : "amended";
+  }
+
+  private advanceActiveAuthority(active: ActiveWork) {
+    if (this.activeObservation !== active || active.epoch !== this.epoch)
+      return;
+    const pass = this.beginCanonicalPass();
+    const authority = this.reconcileAuthority(pass);
+    if (authority === "amended") this.resetForCanonicalAmendment();
+    else if (authority === "incomplete") this.scheduleCanonicalWake();
+    this.publish();
   }
 
   /** Drop stale derived evidence before replaying a canonically amended branch. */
   private resetForCanonicalAmendment() {
     const sourceId = this.state.sourceId;
-    this.epoch++;
-    this.extractionController?.abort();
-    this.cancelHealth();
-    this.healthObservation = undefined;
-    this.waitingForWake = false;
-    this.clearRetry();
-    this.gateway.pause();
+    const wasEnabled = this.enabled;
+    this.disableRuntime();
     this.resetState(sourceId, false);
     this.latchHistoricalCatchup = true;
     this.activity = "Idle";
-    if (this.enabled) this.gateway.enable(this.identity());
+    if (wasEnabled) {
+      this.enabled = true;
+      this.gateway.enable(this.identity());
+      // Rebuild from current canonical branch after discarding stale semantics.
+      this.requeue(this.beginCanonicalPass(), true);
+      this.drain();
+    }
     this.save();
     this.publish();
   }
 
-  /** Read one bounded chronological page from this boundary's canonical pass. */
+  /** Read one bounded chronological page. Page-full waits for cursor progress. */
   private loadPage(
     pass: CanonicalPass,
     after?: { id: string; hash: string },
@@ -1119,8 +1325,6 @@ export class Monitor {
       this.pageBytes,
     );
     if (!result.afterValid) return false;
-    // A same-anchor frontier can still be structurally stale. Never append to
-    // observations/bytes that were admitted under the old header prefix.
     if (result.invalidated) {
       this.page = [];
       this.pageBytes = 0;
@@ -1131,42 +1335,28 @@ export class Monitor {
       0,
     );
     this.pageFrontier = result.frontier;
-    if (
-      (historical || this.latchHistoricalCatchup || this.catchingUp) &&
-      !this.catchupTarget &&
-      (this.page.length > 1 || result.hasMore)
-    ) {
-      // A final short page itself proves the target. Full pages spend the
-      // exploratory quantum, so keep the catch-up latch until that final page.
-      const finalVisible = !result.hasMore && this.page.at(-1);
-      if (finalVisible)
-        this.catchupTarget = {
-          id: finalVisible.id,
-          hash: finalVisible.hash,
-        };
-      else {
-        const latest = pass.latestAfterResult(after, this.latestFrontier);
-        this.latestFrontier = latest.frontier;
-        if (latest.latest)
-          this.catchupTarget = {
-            id: latest.latest.id,
-            hash: latest.latest.hash,
-          };
-        else if (!latest.complete) this.scheduleCanonicalContinuation();
-      }
+    const history =
+      historical || this.latchHistoricalCatchup || this.catchingUp;
+    if (history && result.progress === "terminal" && !this.catchupTarget) {
+      const target = this.page.at(-1);
+      if (target) this.catchupTarget = { id: target.id, hash: target.hash };
     }
     this.latchHistoricalCatchup = false;
     this.catchingUp =
-      this.catchingUp ||
       !!this.catchupTarget ||
-      result.hasMore ||
-      (!!result.frontier && !result.frontier.terminal);
-    if (result.frontier && !result.frontier.terminal)
-      this.scheduleCanonicalContinuation();
+      (history &&
+        (result.progress === "scan-needed" ||
+          (result.progress === "page-full" && this.page.length > 0)));
+    if (
+      result.progress === "scan-needed" &&
+      !this.page.length &&
+      !this.processing
+    )
+      this.scheduleCanonicalWake();
     return true;
   }
 
-  /** Restore at most two immediately preceding eligible observations. */
+  /** Restore callbacks require complete context; control work drains it first. */
   private rehydratePreceding(
     pass: CanonicalPass,
     entryId: string | undefined,
@@ -1179,17 +1369,12 @@ export class Monitor {
     return result.context;
   }
 
-  /** Resolve one current canonical ref from the current pass only. */
   private resolveObservation(pass: CanonicalPass, entryId: string) {
     return pass.observation(entryId);
   }
 
   private requeue(pass: CanonicalPass, historical = false) {
-    if (this.canonicalIncomplete) {
-      this.scheduleCanonicalContinuation();
-      return;
-    }
-    if (this.waitingForWake) return;
+    if (this.controlWork || this.waitingForWake) return;
     if (this.blockedPending && !this.state.pending) {
       this.queued = [];
       return;
@@ -1225,9 +1410,7 @@ export class Monitor {
         this.resetForCanonicalAmendment();
         this.loadPage(pass, undefined, true);
         this.queued = [...this.page];
-        return;
-      }
-      this.queued = [current];
+      } else this.queued = [current];
       return;
     }
     const cursor = this.state.cursor;
@@ -1250,9 +1433,14 @@ export class Monitor {
     if (observation) {
       const epoch = this.epoch;
       this.processing = true;
-      this.activeObservation = { observation: { ...observation }, epoch };
+      const requestContext = this.settledContext.map((item) => ({ ...item }));
+      this.activeObservation = {
+        observation: { ...observation },
+        epoch,
+        requestContext,
+      };
       this.setActivity("Analyzing progress");
-      void this.processOne(observation, epoch);
+      void this.processOne(observation, epoch, requestContext);
       return;
     }
     const healthWork = this.healthObservation;
@@ -1263,14 +1451,13 @@ export class Monitor {
     void this.processHealth(healthWork, flight);
   }
 
-  private preceding(_observation: Observation) {
-    return this.precedingContext;
-  }
-
-  private rememberPreceding(observation: Observation) {
+  private rememberPreceding(
+    requestContext: readonly Observation[],
+    observation: Observation,
+  ) {
     const context: Observation[] = [];
     let bytes = 0;
-    for (const candidate of [...this.precedingContext, observation]
+    for (const candidate of [...requestContext, observation]
       .slice(-2)
       .reverse()) {
       const size = Buffer.byteLength(JSON.stringify(candidate));
@@ -1278,10 +1465,14 @@ export class Monitor {
       context.unshift(candidate);
       bytes += size;
     }
-    this.precedingContext = context;
+    this.settledContext = context;
   }
 
-  private async processOne(observation: Observation, epoch: number) {
+  private async processOne(
+    observation: Observation,
+    epoch: number,
+    requestContext: readonly Observation[],
+  ) {
     try {
       const healthTarget = this.state.tasks.find(
         (task) =>
@@ -1298,7 +1489,7 @@ export class Monitor {
           extract: (input) => this.extract(input, epoch),
           save: (state) => this.commit(state),
         },
-        this.preceding(observation),
+        requestContext,
       );
       if (!this.enabled || epoch !== this.epoch) return;
       const completedHealthTarget =
@@ -1336,7 +1527,7 @@ export class Monitor {
         )
           this.retryObservation = undefined;
         // Cursor progression, including overflow, owns bounded context parity.
-        this.rememberPreceding(observation);
+        this.rememberPreceding(requestContext, observation);
         if (
           this.catchupTarget?.id === observation.id &&
           this.catchupTarget.hash === observation.hash
@@ -1396,11 +1587,12 @@ export class Monitor {
       this.processing = false;
       if (this.activeObservation?.epoch === epoch)
         this.activeObservation = undefined;
-      if (epoch === this.epoch) {
+      if (epoch === this.epoch && !this.controlWork) {
         this.activity = "Idle";
         const pass = this.beginCanonicalPass();
-        if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
-        if (this.canonicalIncomplete) this.scheduleCanonicalContinuation();
+        const authority = this.reconcileAuthority(pass);
+        if (authority === "amended") this.resetForCanonicalAmendment();
+        else if (authority === "incomplete") this.scheduleCanonicalWake();
         else this.requeue(pass);
         this.publish();
       }
@@ -1432,8 +1624,14 @@ export class Monitor {
   ) {
     try {
       const pass = this.beginCanonicalPass();
-      if (this.hasCanonicalAmendment(pass)) {
+      const authority = this.reconcileAuthority(pass);
+      if (authority === "amended") {
         this.resetForCanonicalAmendment();
+        return;
+      }
+      if (authority === "incomplete") {
+        this.healthObservation = work;
+        this.scheduleCanonicalWake();
         return;
       }
       await this.assessHealth(flight.epoch, work, flight, pass);
@@ -1675,12 +1873,27 @@ export class Monitor {
     this.publish();
   }
 
+  private async awaitActiveAuthority(epoch: number) {
+    const active = this.activeObservation;
+    if (!active || active.epoch !== epoch) return;
+    const barrier = active.barrier;
+    if (!barrier) return;
+    try {
+      await barrier.promise;
+    } catch {
+      throw new RetryableProviderError();
+    }
+    if (!this.enabled || epoch !== this.epoch)
+      throw new RetryableProviderError();
+  }
+
   private async evaluateJev(request: EvaluationRequest, epoch: number) {
     if (!this.enabled || epoch !== this.epoch)
       throw new RetryableProviderError();
     this.activity = "Assessing progress";
     this.publish();
     const result = await this.gateway.evaluate(request, this.identity(), true);
+    await this.awaitActiveAuthority(epoch);
     if (!this.enabled || epoch !== this.epoch)
       throw new RetryableProviderError();
     if (!result) {
@@ -1714,6 +1927,7 @@ export class Monitor {
         controller.signal,
         (at) => this.recordExtractionDispatch(at, epoch),
       );
+      await this.awaitActiveAuthority(epoch);
       if (!this.enabled || epoch !== this.epoch || controller.signal.aborted)
         throw new RetryableProviderError();
       if (
@@ -1872,8 +2086,13 @@ export class Monitor {
     // a response that raced a passive-fact change.
     const currentTask = this.healthTaskForCurrentFocus(work);
     const currentPass = this.beginCanonicalPass();
-    if (this.hasCanonicalAmendment(currentPass)) {
+    const authority = this.reconcileAuthority(currentPass);
+    if (authority === "amended") {
       this.resetForCanonicalAmendment();
+      return;
+    }
+    if (authority === "incomplete") {
+      this.scheduleCanonicalWake();
       return;
     }
     const current = currentTask

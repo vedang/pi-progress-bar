@@ -244,7 +244,12 @@ export function boundedEarlier(
 ): Observation[] {
   if (preceding.length > MAX_EARLIER_MESSAGES)
     throw new Error("Earlier extraction context exceeds two messages");
-  const earlier = preceding.map((message) => ({ ...message }));
+  const earlier = preceding.map(({ id, role, text, hash }) => ({
+    id,
+    role,
+    text,
+    hash,
+  }));
   const bytes = Buffer.byteLength(JSON.stringify(earlier));
   if (bytes > MAX_EARLIER_CONTEXT_BYTES)
     throw new Error("Earlier extraction context exceeds 4KiB");

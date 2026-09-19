@@ -22,9 +22,9 @@ import {
   requestHash,
 } from "./hybrid-proof";
 import {
-  copyState,
   type Assessment,
   type CompletionRecord,
+  copyState,
   type GateRecord,
   type HybridState,
   type HybridTask,
@@ -38,7 +38,6 @@ import {
   type PendingBlock,
   type PendingObservation,
   type ScopeFailure,
-  type SourceRef,
 } from "./hybrid-state";
 
 const MAX_ACTIVE_TASKS = 20;
@@ -510,7 +509,6 @@ function blockPending(
       ...current,
       block: present(block),
     },
-    scopeUnresolved: true,
     scopeFailure: failure,
   };
 }

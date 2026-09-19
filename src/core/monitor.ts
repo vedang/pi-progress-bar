@@ -424,7 +424,7 @@ export class Monitor {
     const done = active.filter((task) => task.status === "done").length;
     const kind = !active.length
       ? "empty"
-      : this.state.scopeUnresolved
+      : this.state.scopeUnresolved || this.state.pending?.block.present
         ? "previous"
         : "current";
     return {

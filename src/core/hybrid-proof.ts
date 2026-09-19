@@ -8,7 +8,7 @@ import type {
   ReplayCore,
 } from "./hybrid-state";
 
-export const proofHash = (value: unknown) =>
+const proofHash = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 export const absent = <T>(): Presence<T> => ({ present: false });

@@ -12,9 +12,7 @@ import {
   patchUndo,
 } from "./hybrid";
 import {
-  absent,
   gateDecision,
-  optionalPresence,
   originHash,
   replayCore,
   requestHash,
@@ -22,8 +20,8 @@ import {
 } from "./hybrid-proof";
 import {
   type Assessment,
-  copyState,
   type Cursor,
+  copyState,
   type GateRecord,
   type HybridState,
   type HybridTask,
@@ -1045,12 +1043,20 @@ function replayPending(
   )
     return false;
   if (pending.block.present) {
-    if (
-      pending.block.value === "completion-build"
-        ? pending.phase !== "complete"
-        : pending.phase !== "extract" ||
-          !!patch ||
-          pending.journal.completions.length > 0
+    if (pending.block.value === "completion-build") {
+      if (pending.phase !== "complete") return false;
+    } else if (pending.block.value === "event-capacity") {
+      if (pending.phase !== "extract" && pending.phase !== "complete")
+        return false;
+      if (
+        pending.phase === "extract" &&
+        (patch || pending.journal.completions.length > 0)
+      )
+        return false;
+    } else if (
+      pending.phase !== "extract" ||
+      patch ||
+      pending.journal.completions.length > 0
     )
       return false;
   }

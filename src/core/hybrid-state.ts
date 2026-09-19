@@ -1,4 +1,5 @@
-export type ObservationRole = "user" | "assistant";
+/** Canonical conversation provenance; intercom is not a typed human user. */
+export type ObservationRole = "user" | "assistant" | "intercom";
 export type TaskKind = "action" | "response";
 export type TaskBasis = "explicit" | "derived";
 export type TaskStatus = "not-started" | "reopened" | "done";

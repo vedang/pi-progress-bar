@@ -12,7 +12,12 @@ interface SourceRef {
   entryId?: string;
   start: number;
   end: number;
-  provenance: "file-marker" | "user" | "assistant" | "interactive-user";
+  provenance:
+    | "file-marker"
+    | "user"
+    | "assistant"
+    | "intercom"
+    | "interactive-user";
 }
 interface SourceTask {
   text: string;

@@ -27,20 +27,25 @@ function visibleText(content: unknown): string | undefined {
 export interface CanonicalHeader {
   id: string;
   role: ObservationRole;
-  message: Record<string, unknown>;
+  content: unknown;
 }
 
 function canonicalHeader(entry: unknown): CanonicalHeader | undefined {
-  if (!record(entry) || entry.type !== "message") return;
+  if (!record(entry)) return;
   const id = entry.id;
   if (typeof id !== "string" || !id) return;
+  if (entry.type === "custom_message") {
+    if (entry.customType !== "intercom_message") return;
+    return { id, role: "intercom", content: entry.content };
+  }
+  if (entry.type !== "message") return;
   const message = entry.message;
   if (!record(message)) return;
   const role = message.role;
   if (role !== "user" && role !== "assistant") return;
   const stopReason = message.stopReason;
   if (stopReason === "error" || stopReason === "aborted") return;
-  return { id, role, message };
+  return { id, role, content: message.content };
 }
 
 /** Scan IDs/roles without materializing every historical text payload. */
@@ -55,7 +60,7 @@ function canonicalHeaders(entries: readonly unknown[]): CanonicalHeader[] {
 function canonicalObservation(
   header: CanonicalHeader,
 ): Observation | undefined {
-  const text = visibleText(header.message.content);
+  const text = visibleText(header.content);
   if (text === undefined || !text.trim()) return;
   return {
     id: header.id,

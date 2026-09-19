@@ -87,7 +87,9 @@ export interface HybridProviders {
 
 const validObservation = (observation: Observation) =>
   !!observation.id &&
-  (observation.role === "user" || observation.role === "assistant") &&
+  (observation.role === "user" ||
+    observation.role === "assistant" ||
+    observation.role === "intercom") &&
   typeof observation.text === "string" &&
   /^[a-f0-9]{64}$/.test(observation.hash);
 

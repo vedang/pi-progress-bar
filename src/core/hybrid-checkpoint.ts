@@ -29,6 +29,7 @@ import {
   type NormalizedPatch,
   type Observation,
   type ObservationRef,
+  type ObservationRole,
   type PatchUndo,
   type PendingBlock,
   type PendingObservation,
@@ -96,8 +97,8 @@ const taskIdIsValid = (value: unknown): value is string =>
   typeof value === "string" && /^task:[1-9]\d*$/.test(value);
 const eventIdIsValid = (value: unknown): value is string =>
   typeof value === "string" && /^event:[1-9]\d*$/.test(value);
-const roleIsValid = (value: unknown): value is "user" | "assistant" =>
-  value === "user" || value === "assistant";
+const roleIsValid = (value: unknown): value is ObservationRole =>
+  value === "user" || value === "assistant" || value === "intercom";
 const byteLength = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
 const unit = (value: unknown): value is number =>
   typeof value === "number" &&

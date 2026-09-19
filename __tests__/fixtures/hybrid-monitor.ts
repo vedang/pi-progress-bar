@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 import type { EvaluationRequest } from "../../src/analysis/gateway";
-import { Monitor } from "../../src/core/monitor";
+import { Monitor, type MonitorOptions } from "../../src/core/monitor";
 import { addPatch, noPatch, observation } from "./hybrid";
 import { userMessageQa } from "./user-message-qa";
 
@@ -99,28 +99,27 @@ export function monitorHarness(
   vi.stubGlobal("fetch", fetch);
   const changed = vi.fn();
   const save = vi.fn();
-  const extract = vi.fn(
-    async (
-      input: {
-        latest: { id: string; text: string; role: "user" | "assistant" };
-      },
-      _signal: AbortSignal,
-    ) => ({
-      text: JSON.stringify(
-        input.latest.id === "goal" || input.latest.id === "secret"
-          ? addPatch(
-              observation(
-                input.latest.id,
-                input.latest.text,
-                input.latest.role,
-              ),
-            )
-          : noPatch(),
-      ),
-      provider: "offline",
-      model: "fixture",
-      usage: { inputTokens: 3, outputTokens: 2 },
-    }),
+  const extract = vi.fn<MonitorOptions["extract"]>(
+    async (input, _signal, onDispatch?: (at: number) => void) => {
+      // The fake transport emits its own dispatch, just like the real host adapter.
+      onDispatch?.(Date.now());
+      return {
+        text: JSON.stringify(
+          input.latest.id === "goal" || input.latest.id === "secret"
+            ? addPatch(
+                observation(
+                  input.latest.id,
+                  input.latest.text,
+                  input.latest.role,
+                ),
+              )
+            : noPatch(),
+        ),
+        provider: "offline",
+        model: "fixture",
+        usage: { inputTokens: 3, outputTokens: 2 },
+      };
+    },
   );
   const monitor = new Monitor(changed, save, {
     sourceId: () => "session:test",

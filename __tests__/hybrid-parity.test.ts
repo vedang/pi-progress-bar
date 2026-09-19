@@ -90,7 +90,7 @@ it("qualifies the last health card as retained when its focused task completes",
   );
   await h.settle("focused-done");
   expect(h.monitor.state.tasks[0]?.status).toBe("done");
-  expect(h.monitor.state.focusTaskId).toBe(before?.taskId);
+  expect(h.monitor.state.focusTaskId).toBeUndefined();
   expect(h.monitor.presentationSnapshot().card).toMatchObject({
     taskId: before?.taskId,
     label: before?.label,

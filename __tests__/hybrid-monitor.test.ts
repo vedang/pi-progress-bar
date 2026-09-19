@@ -64,7 +64,7 @@ describe("integrated hybrid monitor", () => {
       enabled: true,
       progress: { done: 2, total: 3 },
     });
-    expect(h.monitor.checkpoint()).toMatchObject({ version: 5 });
+    expect(h.monitor.checkpoint()).toMatchObject({ version: 6 });
     expect(
       h.requests.every(
         (request) =>
@@ -273,7 +273,7 @@ describe("pure safe display publication groundwork", () => {
       const original = h.fetch.getMockImplementation();
       if (!original) throw new Error("Missing fetch");
       let release: (() => void) | undefined;
-      h.fetch.mockImplementation((url, init) => {
+      h.fetch.mockImplementation(async (url, init) => {
         const request = JSON.parse(String(init?.body));
         if (request.questions.clarity)
           return new Promise<Response>((resolve) => {
@@ -281,7 +281,23 @@ describe("pure safe display publication groundwork", () => {
               void original(url, init).then(resolve);
             };
           });
-        return original(url, init);
+        const response = await original(url, init);
+        if (!request.questions.focus || kind !== "addition") return response;
+        const body = (await response.json()) as {
+          answers: Record<string, unknown>;
+        };
+        body.answers.focus = {
+          type: "choice",
+          choice: "task:4",
+          confidence: 1,
+          probabilities: Object.fromEntries(
+            Object.keys(request.questions.focus.criteria).map((key) => [
+              key,
+              key === "task:4" ? 1 : 0,
+            ]),
+          ),
+        };
+        return Response.json(body);
       });
       h.append("extra", text, "user");
       await vi.advanceTimersByTimeAsync(100);

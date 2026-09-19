@@ -37,11 +37,11 @@ function restore(state: HybridState, messages = [initialMessage]) {
   return restored;
 }
 
-describe("strict hybrid v5 checkpoint", () => {
+describe("strict hybrid v6 checkpoint", () => {
   it("round-trips generated labels and evidence, without full source context", async () => {
     const state = await initial(true);
     const checkpoint = encodeCheckpoint(state);
-    expect(checkpoint).toMatchObject({ version: 5 });
+    expect(checkpoint).toMatchObject({ version: 6 });
     expect(JSON.stringify(checkpoint)).toContain("Implement parser");
     expect(JSON.stringify(checkpoint)).not.toContain(
       "PRIVATE_CONTEXT_SENTINEL",
@@ -52,7 +52,7 @@ describe("strict hybrid v5 checkpoint", () => {
     expect(state.tasks[0]?.label).toBe("Implement parser");
     expect(JSON.stringify(checkpoint)).not.toContain("consumer mutation");
   });
-  it.each([1, 2, 3, 4, 6])(
+  it.each([1, 2, 3, 4, 5, 7])(
     "rejects obsolete or unknown checkpoint version %i",
     async (version) => {
       const checkpoint = { ...encodeCheckpoint(await initial()), version };

@@ -299,8 +299,16 @@ it("keeps unrelated evidence insufficient rather than assigning tools by display
   expect(h.monitor.evidenceLink()).toBeUndefined();
 });
 
-it("assesses final implementation evidence when the focused task completes in the same observation", async () => {
+it("assesses final implementation evidence when all work completes in the same observation", async () => {
   const h = fixture();
+  h.extract.mockResolvedValueOnce({
+    text: JSON.stringify(
+      addPatch(observation("goal", requestText), ["Implement parser"]),
+    ),
+    provider: "offline",
+    model: "fixture",
+    usage: { inputTokens: 1, outputTokens: 1 },
+  });
   h.start();
   await h.settle("goal");
   toolFacts(h);

@@ -84,7 +84,16 @@ function providers(
             id,
             choice(
               question,
-              id === "gate" ? gate : (statuses[id] ?? { choice: "no" }),
+              id === "gate"
+                ? gate
+                : (statuses[id] ?? {
+                    choice:
+                      id === "focus"
+                        ? (Object.keys(question.criteria).find((id) =>
+                            id.startsWith("task:"),
+                          ) ?? "none")
+                        : "no",
+                  }),
             ),
           ]),
         ),
@@ -142,6 +151,7 @@ describe("hybrid fresh-session core vertical", () => {
       "complete:task:1",
       "complete:task:2",
       "complete:task:3",
+      "focus",
     ]);
   });
   it("skips extraction on accepted unchanged but independently completes later tasks", async () => {
@@ -336,7 +346,7 @@ describe("hybrid fresh-session core vertical", () => {
 });
 
 describe("hybrid accepted contract regressions", () => {
-  it("retains display focus when the focused task completes instead of selecting first unfinished", async () => {
+  it("clears completed focus instead of guessing first unfinished", async () => {
     const initial = await seeded();
     const state = await processObservation(
       initial,
@@ -348,14 +358,18 @@ describe("hybrid accepted contract regressions", () => {
       ),
     );
     expect(state.tasks[0]?.status).toBe("done");
-    expect(state.focusTaskId).toBe(initial.focusTaskId);
+    expect(state.focusTaskId).toBeUndefined();
   });
-  it("focuses the first newly touched active task rather than an unrelated old unfinished task", async () => {
+  it("focuses a newly added task only when Jev selects it", async () => {
     const observation = message("added", "Also write the release notes.");
     const state = await processObservation(
       await seeded(),
       observation,
-      providers(additions(observation.text, ["Write release notes"])),
+      providers(
+        additions(observation.text, ["Write release notes"]),
+        { choice: "changed" },
+        { focus: { choice: "task:4" } },
+      ),
     );
     expect(state.focusTaskId).toBe("task:4");
   });

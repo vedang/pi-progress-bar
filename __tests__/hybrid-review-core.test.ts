@@ -33,6 +33,7 @@ async function ledger(total: number, active: number, long = false) {
     taskId: task.id,
   }));
   state.nextTaskId = total + 1;
+  state.focusTaskId = undefined;
   // This is a legal bounded checkpoint, not a malformed oversized input.
   expect(
     restoreCheckpoint(

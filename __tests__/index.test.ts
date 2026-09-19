@@ -129,7 +129,7 @@ it("uses canonical context rather than preappend message_end, through the host-s
   expect(args[2]).toMatchObject({ maxRetries: 0, maxTokens: 2048 });
   expect(args[2].signal).toBeInstanceOf(AbortSignal);
   expect(JSON.stringify(args[1])).not.toContain("offline-key");
-  expect(h.checkpoints.at(-1)).toMatchObject({ version: 5 });
+  expect(h.checkpoints.at(-1)).toMatchObject({ version: 6 });
   expect(JSON.stringify(h.checkpoints.at(-1))).toContain("Implement parser");
 });
 it("keeps commands passive and OFF idempotent without enabling debugger commands", async () => {

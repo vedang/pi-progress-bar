@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { completionRequest } from "../src/analysis/completion";
 import { processObservation } from "../src/core/hybrid";
 import {
   encodeCheckpoint,
@@ -52,6 +53,36 @@ function object(value: unknown): Record<string, unknown> {
 }
 
 describe("Jev-selected current task focus", () => {
+  it.each([false, true])(
+    "fits all twenty full-label focus candidates without needless duplication (unicode=%s)",
+    async (unicode) => {
+      const seed = (await initial()).tasks[0];
+      if (!seed) throw new Error("Missing seed");
+      const tasks = Array.from({ length: 20 }, (_, index) => ({
+        ...structuredClone(seed),
+        id: `task:${index + 1}`,
+        label: `${index} ${unicode ? "界".repeat(220) : "specific requirement ".repeat(10)}`,
+      }));
+      const report = observation(
+        "large",
+        unicode
+          ? "Working on the last task."
+          : `Working on the last task. ${"Detailed supporting report. ".repeat(350)}`,
+        "assistant",
+      );
+      const first = tasks[0];
+      if (!first) throw new Error("Missing candidate");
+      const request = completionRequest(report, [first], [], tasks);
+      expect(Buffer.byteLength(JSON.stringify(request))).toBeLessThanOrEqual(
+        24 * 1024,
+      );
+      const question = request.questions.focus;
+      expect(question?.type).toBe("choice");
+      expect(Object.keys(question?.criteria ?? {})).toHaveLength(23);
+      for (const task of tasks)
+        expect(JSON.stringify(request.state)).toContain(task.label);
+    },
+  );
   it("switches between existing open tasks without scope changes or completion", async () => {
     const { state, next, p } = await switched();
     expect(next.focusTaskId).toBe("task:2");

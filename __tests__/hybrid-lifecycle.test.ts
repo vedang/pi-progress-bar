@@ -90,10 +90,13 @@ describe("hybrid task lifecycle", () => {
   it("archives without claiming completion and clears an archived focus", async () => {
     const before = await initial();
     const message = observation("cancel", "Drop the parser task.");
-    const p = backend({
-      ...noPatch(),
-      archive: [{ id: "task:1", quote: message.text }],
-    });
+    const p = backend(
+      {
+        ...noPatch(),
+        archive: [{ id: "task:1", quote: message.text }],
+      },
+      { focus: "none" },
+    );
     const after = await processObservation(before, message, p);
     expect(after.tasks[0]).toMatchObject({
       included: false,
@@ -144,7 +147,9 @@ describe("hybrid task lifecycle", () => {
         revision: requirementsChanged ? 2 : 1,
       });
       expect(after.nextTaskId).toBe(4);
-      expect(after.focusTaskId).toBe("task:1");
+      expect(after.focusTaskId).toBe(
+        requirementsChanged ? "task:1" : undefined,
+      );
     },
   );
   it("can complete revised requirements in the same report", async () => {

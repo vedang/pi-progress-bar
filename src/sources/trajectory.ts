@@ -294,12 +294,20 @@ function spansFor(message: Observation): Span[] {
       /[^\n]+(?:\n(?!\n)[^\n]+)*/g,
     )) {
       const text = paragraph[0];
-      const sentences = [...text.matchAll(/[^.!?]+(?:[.!?]+(?=\s|$)|$)/g)];
+      const sentences: { start: number; text: string }[] = [];
+      let start = 0;
+      for (const boundary of text.matchAll(/[.!?]+(?=\s|$)/g)) {
+        const end = (boundary.index ?? start) + boundary[0].length;
+        sentences.push({ start, text: text.slice(start, end) });
+        start = end;
+      }
+      if (start < text.length)
+        sentences.push({ start, text: text.slice(start) });
       if (sentences.length > 1)
         for (const sentence of sentences)
           add(
-            (paragraph.index ?? 0) + (sentence.index ?? 0),
-            sentence[0],
+            (paragraph.index ?? 0) + sentence.start,
+            sentence.text,
             "sentence",
           );
       else add(paragraph.index ?? 0, text, "paragraph");

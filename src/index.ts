@@ -49,7 +49,8 @@ export default function progressBar(pi: ExtensionAPI): void {
     const saved = checkpoint(ctx);
     await monitor.restore(
       ctx.cwd,
-      saved?.type === "custom" ? saved.data : undefined,
+      // Entry presence matters: missing payload is corrupt, not a fresh session.
+      saved?.type === "custom" ? (saved.data ?? null) : undefined,
       preserveControls,
       () => ctx.sessionManager.getBranch(),
     );

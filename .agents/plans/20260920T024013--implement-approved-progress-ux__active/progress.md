@@ -27,3 +27,10 @@
 - Main corrected classifier to enforce existing UTF-8 checkpoint ceiling; no schema or canonical-amendment change.
 - `make format`, `make check`, `make test` PASS: 412 unit +14 integration. Logs `u04-{format,check,test}.log`.
 - U04 stays in_progress until cumulative U00–U04 reviewer acceptance. No later ticket released.
+
+## U04 review resolution
+- Cumulative reviewer `c340a32c` found one P1: host optional CustomEntry.data erased entry-presence distinction. Main reproduced missing-data saved entry overwriting/replaying (`u04-missing-data-red.log`: 1 failed/6 passed).
+- Host restore now reserves undefined for absent entry, passes null for present missing payload. No compatibility path added.
+- Added valid-supported restore clearing latch with settled tasks and no rebilling; renamed absent-boundary test accurately.
+- Main reran format/check/test PASS: 413 unit +15 integration (`u04-review-*` logs). Reviewer blocker resolved by exact requested fix and regression. Main accepts U04; review verdict was BLOCK before correction, not a post-fix reviewer PASS.
+- Remaining host-proof coverage limits explicitly retained: reverse listener ordering, configured custom editor, and actual pi-subagents co-load permutations are not yet real-host proven. Complete during controller/board integration before functional QA handoff; existing receipts prove only their recorded default-editor/transform-before-listener regular/fullscreen cases.

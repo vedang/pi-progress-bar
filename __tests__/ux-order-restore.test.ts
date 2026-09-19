@@ -266,7 +266,7 @@ describe("rejected storage never resets or rebills history", () => {
     expect(h.extract).not.toHaveBeenCalled();
   });
 
-  it("clears the rejected-format latch only on a new valid/absent restore boundary", async () => {
+  it("clears the rejected-format latch on a new absent restore boundary", async () => {
     const h = fixture();
     await h.monitor.restore(
       "/nonexistent-hybrid-test",
@@ -286,6 +286,35 @@ describe("rejected storage never resets or rebills history", () => {
     expect(h.monitor.enabled).toBe(true);
     expect(h.monitor.state.tasks).toHaveLength(3);
     expect(h.extract).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the rejection latch on valid restore without rebilling settled work", async () => {
+    const h = fixture();
+    h.start();
+    await h.settle("goal");
+    const checkpoint = h.monitor.checkpoint();
+    const tasks = structuredClone(h.monitor.state.tasks);
+    const calls = h.fetch.mock.calls.length;
+    const extractionCalls = h.extract.mock.calls.length;
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      { version: 5 },
+      false,
+      h.reader,
+    );
+    expect(h.monitor.enabled).toBe(false);
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      checkpoint,
+      false,
+      h.reader,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.monitor.enabled).toBe(true);
+    expect(h.monitor.error).toBeUndefined();
+    expect(h.monitor.state.tasks).toEqual(tasks);
+    expect(h.fetch).toHaveBeenCalledTimes(calls);
+    expect(h.extract).toHaveBeenCalledTimes(extractionCalls);
   });
 
   it("keeps existing settled current-version no-rebilling semantics", async () => {

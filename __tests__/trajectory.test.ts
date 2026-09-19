@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { reconcileLedger } from "../src/core/ledger";
 import { reportRequest, reportStates } from "../src/sources/reports";
 import { collectTrajectory, findCandidates } from "../src/sources/trajectory";
+import { userMessageQa } from "./fixtures/user-message-qa";
 
 // Verbatim visible message from this project's real Pi trajectory, entry1989bec4.
 // All other messages below are synthetic adversarial fixtures, not live Jev evidence.
@@ -16,6 +17,23 @@ const message = (id: string, role: string, text: string) => ({
 });
 
 describe("actual-lineage trajectory normalization", () => {
+  it.each([
+    userMessageQa.reading.text,
+    "Thanks. Read src/core/monitor.ts and explain its lifecycle. No implementation yet.",
+    "Please inspect https://example.test/docs?version=1.2 and explain the result. Keep scope narrow.",
+    "Check package version 1.13.0 against the manifest. Report compatibility.",
+    "Explain `value?.field` and `ready!` in this example. Do not change code.",
+  ])("preserves every character in prose candidate spans: %s", (text) => {
+    const trajectory = collectTrajectory([
+      message("punctuation", "user", text),
+    ]);
+    const spans = findCandidates(trajectory).flatMap(
+      (candidate) => candidate.spans,
+    );
+    expect(spans.map((span) => span.text).join("")).toBe(text);
+    for (const span of spans)
+      expect(text.slice(span.start, span.end)).toBe(span.text);
+  });
   it("retains real entry/span provenance and never invents candidate text", () => {
     const trajectory = collectTrajectory([
       message("1989bec4", "assistant", actualPlan),

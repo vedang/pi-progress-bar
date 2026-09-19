@@ -210,6 +210,49 @@ function runtime(initial: Entry[] = replayEntries(4), respond = verdict) {
 }
 
 describe("fresh-session ordered production controller", () => {
+  it.each([40, 520])(
+    "admits a Jev-confirmed fresh replacement without replaying %i older messages first",
+    async (padding) => {
+      const r = runtime(replayEntries(1));
+      try {
+        await r.settle("old-goal");
+        for (let i = 0; i < padding; i++)
+          r.append(
+            `qa-backlog-${i}`,
+            "An unrelated explanatory note.",
+            "assistant",
+          );
+        r.append(
+          "old-done",
+          "The planned progress monitor implementation is complete.",
+          "assistant",
+        );
+        r.append(
+          "replacement",
+          "Read the advisory plan and supporting documents instead.",
+        );
+        const before = r.requests.length;
+        // Three normal cycles allow selection, classification and scope, without
+        // increasing per-cycle request budget or treating selection as admission.
+        await vi.advanceTimersByTimeAsync(45_000);
+        expect(r.requests.length - before).toBeLessThanOrEqual(9);
+        const active =
+          r.monitor.ledger?.tasks.filter((task) => task.included) ?? [];
+        expect(active).toHaveLength(1);
+        expect(active[0]?.ref.entryId).toBe("replacement");
+        expect(active[0]?.status).not.toBe("done");
+        expect(r.monitor.scopeIsUnresolved()).toBe(false);
+        // Catch-up cannot let older scope or its completion overwrite newer work.
+        await r.settle("replacement");
+        const after =
+          r.monitor.ledger?.tasks.filter((task) => task.included) ?? [];
+        expect(after.map((task) => task.ref.entryId)).toEqual(["replacement"]);
+        expect(after[0]?.status).not.toBe("done");
+      } finally {
+        r.monitor.stop();
+      }
+    },
+  );
   it("replaces historical scope, tracks current work, completes, reopens and cancels without rebilling unchanged history", async () => {
     const r = runtime([]);
     try {

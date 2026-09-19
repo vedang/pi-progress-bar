@@ -26,12 +26,13 @@ import {
 } from "../../src/sources/trajectory";
 import { replayEntries } from "../fixtures/live-session";
 import { renderWidget } from "../fixtures/render-widget";
+import { qaEntry, userMessageQa } from "../fixtures/user-message-qa";
 
 // [tag:live_budget] All paid calls, including failed/aborted ones, pass this
 // process-wide cap. No retries/reruns or hidden direct semantic substitutes.
 const MAX_ATTEMPTS = Number(process.env.PROGRESS_LIVE_MAX_ATTEMPTS ?? 64);
 const directory = resolve(
-  ".agents/plans/20260918T230453--retain-tasks-show-freshness__active",
+  ".agents/plans/20260919T072656--diagnose-user-message-reassessment__active",
 );
 const artifact = resolve(directory, `live-${Date.now()}.jsonl`);
 const realFetch = globalThis.fetch;
@@ -129,6 +130,67 @@ afterAll(() => {
 });
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+it("QA user reading request becomes tracked work after an old delivery", async () => {
+  // User turns are verbatim QA; completion is a synthetic bridge, not a claim
+  // about original model verdicts or exact omitted session history.
+  const entries = [
+    qaEntry(userMessageQa.historical, null),
+    qaEntry(
+      {
+        id: "qa-delivered",
+        text: "The previously planned progress-bar changes are completed and delivered.",
+      },
+      userMessageQa.historical.id,
+      "assistant",
+    ),
+    qaEntry(userMessageQa.reading, "qa-delivered"),
+  ];
+  const monitor = new Monitor(
+    () => {},
+    () => {},
+  );
+  monitor.observe(() => entries);
+  const deadline = Date.now() + 60_000;
+  try {
+    expect(monitor.turnOn("/nonexistent-live-fixture")).toBeUndefined();
+    while (Date.now() < deadline) {
+      if (blocked) throw new Error(`Live attempt cap reached; see ${artifact}`);
+      if (!monitor.enabled) throw new Error(monitor.error ?? "Monitor stopped");
+      monitor.scheduleAnalysis();
+      const reading = monitor.ledger?.tasks.find(
+        (task) =>
+          task.included && task.ref.entryId === userMessageQa.reading.id,
+      );
+      if (reading && !monitor.scopeIsUnresolved() && active === 0) break;
+      if (
+        !monitor.conversation.hasPendingDiscovery() &&
+        monitor.scopeIsUnresolved() &&
+        active === 0
+      )
+        break;
+      await pause(25);
+    }
+    record({
+      type: "qa-reading-checkpoint",
+      tasks: monitor.ledger?.tasks,
+      diagnostics: monitor.diagnostics(),
+      discovery: monitor.conversation.discoveryStatus,
+      reports: monitor.conversation.reportStatus,
+    });
+    const reading =
+      monitor.ledger?.tasks.filter(
+        (task) =>
+          task.included && task.ref.entryId === userMessageQa.reading.id,
+      ) ?? [];
+    expect(reading, `QA request not admitted; see ${artifact}`).toHaveLength(1);
+    expect(reading[0]?.text).toContain("read through and understand");
+    expect(monitor.scopeIsUnresolved()).toBe(false);
+    expect(reading[0]?.status).not.toBe("done");
+  } finally {
+    monitor.stop();
+  }
+});
 
 it("fresh-session production pipeline follows a changed goal and consumes completion only after scope", async () => {
   let entries: {

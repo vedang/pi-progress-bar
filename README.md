@@ -28,6 +28,9 @@ New sessions default ON. Missing/rejected Jev credentials leave the monitor OFF.
 2. Ask pinned `jev-1.13.0` whether task scope changed. Only confidently **unchanged** skips extraction. Gate confidence must be >=0.5 and selected probability >=0.8; uncertainty remains distinct from a confident negative.
 3. When needed, ask the **currently selected Pi model** for a strict grounded task patch. New tasks can be action or response deliverables. A new question after completed work can create a new response task, even on the same topic. User approvals and other people's work are not assistant tasks.
 4. Independently ask Jev about each included task. Completion of an earlier task is **not** a prerequisite for completing later tasks. Newly extracted tasks can be assessed in the same observation. Done tasks receive a separate withdrawal judgment.
+5. The first completion batch also selects current activity from **all open tasks**. Present activity or an immediate explicit commitment may select one task; no-match, concurrency or uncertainty clears focus rather than guessing. Requests, quotes, distant intent and tool use alone do not select focus. Focus controls display/health, never task completion or tool ownership. All-done health can remain as an explicitly retained card.
+
+See the [Jev batching audit](docs/design/jev-batching.md) for call boundaries and durability constraints.
 
 Reported fraction = done / included tasks. It is not effort, ETA, code correctness or an execution lock. Semantic judgments can miss work or abstain; a finite test suite is not an accuracy guarantee.
 
@@ -81,9 +84,9 @@ Each visible observation may incur a Jev gate plus completion/health requests. E
 
 Bounded conversation/task excerpts go to **TypeSafe** (`https://api.typesafe.ai/v1/systemone`) and, when extraction is needed, to **your selected Pi model provider**. This is not local-only processing.
 
-Strict **v5** checkpoints persist bounded generated task labels, IDs/revisions, source hashes/ranges, assessment scalars, immutable mutation events, pending-phase journals, usage, dispatch timestamps and retained health-card metadata. They do **not** persist full source messages, prompts, provider envelopes, reasoning, tool bodies or credentials. Source references must resolve against the active branch. Checkpoints are trusted writable local state, not cryptographic protection against deliberate tampering.
+Strict **v6** checkpoints persist bounded generated task labels, IDs/revisions, source hashes/ranges, assessment scalars, immutable mutation events, pending-phase journals, usage, dispatch timestamps and retained health-card metadata. They do **not** persist full source messages, prompts, provider envelopes, reasoning, tool bodies or credentials. Source references must resolve against the active branch. Checkpoints are trusted writable local state, not cryptographic protection against deliberate tampering.
 
-Old v4 checkpoints are rejected and rebuilt from canonical history—**no migration**. Canonical source amendments invalidate stale derived references and trigger bounded reconciliation. v5 intentionally supersedes the old reference-only/no-generated-label privacy contract.
+Older checkpoints, including v5, are rejected and rebuilt from canonical history—**no migration**. Accepted same-version phases resume without rebilling. Canonical source amendments invalidate stale derived references and trigger bounded reconciliation. v6 includes focus assessments and replay/undo data; generated labels remain bounded derived data, not reference-only storage.
 
 The extension does not run commands/tests, mutate Beads, inject conversation messages, replace tools, follow child/sibling sessions, or send advisory nudges.
 

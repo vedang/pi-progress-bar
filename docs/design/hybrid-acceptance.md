@@ -2,7 +2,19 @@
 
 ## Status
 
-Runtime freeze: **`d7c703b2`**. Main independently passed format, TypeScript, Biome, Knip, **171 unit +8 integration tests**, plus **8 integration tests on global Pi0.85.1**. Local host is Pi0.84.2/pi-ai0.84.4. Package dry-run passed. **Independent full-batch review and publication remain pending**; these results do not close H5 or earlier82j acceptance.
+Runtime freeze: **`d780df28`**. Main independently passed format, TypeScript, Biome, Knip, **327 unit +12 integration tests** and package dry-run. **12 global-host integration tests** passed at `e6e03191`; the final change only increases the numeric serialization admission bound from23 to24 bytes. Local host is Pi0.84.2/pi-ai0.84.4; global host is Pi0.85.1. **Independent cumulative review and publication remain pending**; these results alone do not close H5 or earlier82j acceptance.
+
+### Latest repair evidence
+
+The strict v6 runtime adds canonical intercom intake and independent current-activity focus, with no first-open fallback or tool ownership. Accepted phases use reconstructed request replay and phase-specific capacity admission. The full review must independently dispose earlier blockers; test totals do not substitute for this.
+
+- `e6e03191` CI: **12 Jev /6 model calls**,27,503/1,372 Jev tokens,5,078/219 model tokens,$0.06173 reported model cost. Passed with **2/3 reported done**, meeting the specified2/3 floor, not perfect completion.
+- `e6e03191` remaining: **14 Jev /4 model calls**,21,570/1,219 Jev tokens,2,339/324 model tokens,$0.03959 reported model cost. Reading, question/answer, parallel completion, withdrawal and settled reload/no-rebilling passed.
+- Focus request semantics at `470dab83`: **6/6 real Jev probes**,18,427/1,160 tokens, no extraction-model calls. Explicit switch, immediate commitment, concurrent work, idle, quoted example and completed-task-to-new-focus all passed.
+- Intercom: two real Jev gate probes passed; actual-host trigger/steer/follow-up tests pass. Idle non-triggering delivery is intentionally assessed next real turn, not through polling.
+- The scalar-only `d780df28` change does not alter paid requests. Earlier failed request-size and numeric capacity tests were preserved, then passed after corrections; thresholds/limits were not relaxed.
+
+Latest local artifacts are under `.agents/plans/20260919T220021--finish-pending-progress-repairs__active/`: `final-*.log`, `hybrid-ci-1789838032255-38f93041-3c9a-4ce0-99f8-986c30e901ad.jsonl`, `hybrid-remaining-1789838075715-4a2dfc6f-ca38-4c49-bb9d-c5d6f7e85d5e.jsonl`, `focus-jev-1789837851181.jsonl`, and `intercom-jev-1789836084473.jsonl`. Earlier rows below remain historical evidence, not the latest freeze. See [batching audit](jev-batching.md).
 
 ## Production-path paid runs
 
@@ -53,12 +65,12 @@ The pre-hybrid tests were explicitly archived, not counted as passing. New suite
 | Unbounded settled caches / full historical payload reads | `hybrid-bounds`; metadata-only scans distinguished from payload reads |
 | Accepted partial work rebilled after OFF/reload | `hybrid-chunk-resume`, `hybrid-checkpoint`, `hybrid-retry` |
 | Abort/late provider result and canonical amendment races | `hybrid-retry`, `hybrid-bounds`, `hybrid-lifecycle` |
-| Malformed checkpoint / obsolete interval | Strict v5 `hybrid-checkpoint`; v4 rejected, no migration |
+| Malformed checkpoint / obsolete interval | Strict v6 `hybrid-checkpoint`; older versions rejected, no migration |
 | Health/Beads/card and publication parity | `hybrid-parity`, `hybrid-beads`, `hybrid-view` |
 | Real host authority and selected-model authentication | `host-events.integration`, `selected-model-host.integration` on both supported hosts |
 | Response admission, actor ownership and ANSI fragments | `hybrid-orgtok`, `hybrid-view`, first-two-turn paid replay |
 
-Old fresh-message next-cycle latency, span-only/Jev-only labels and memory-only card/timestamp persistence are intentionally superseded. Chronological backlog latency and bounded v5 derived persistence are the approved replacements. Full review must independently verify this disposition against **`afdbee79..final`**, not just recent prompt edits.
+Old fresh-message next-cycle latency, span-only/Jev-only labels and memory-only card/timestamp persistence are intentionally superseded. Chronological backlog latency and bounded derived persistence (now v6) are the approved replacements. Full review must independently verify this disposition against **`afdbee79..final`**, not just recent prompt edits.
 
 ## Limits of the evidence
 

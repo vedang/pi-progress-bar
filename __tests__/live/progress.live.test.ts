@@ -40,6 +40,7 @@ let attempts = 0;
 let active = 0;
 let blocked = 0;
 let ready = false;
+const consideredEntries = new Set<string>();
 const usage = { input_tokens: 0, output_tokens: 0 };
 const record = (value: unknown) =>
   appendFileSync(artifact, `${JSON.stringify(value)}\n`);
@@ -94,6 +95,9 @@ beforeAll(() => {
       );
     }
     const request = JSON.parse(body);
+    if (request.questions.source)
+      for (const candidate of request.state.candidates ?? [])
+        consideredEntries.add(candidate.entryId);
     if (request.model !== MODEL) throw new Error("Unexpected live model");
     const attempt = ++attempts;
     active++;
@@ -315,7 +319,9 @@ it.each([userMessageQa.investigation, userMessageQa.regression])(
           throw new Error(`Live QA blocked: ${monitor.error ?? artifact}`);
         if (
           (monitor.conversation.cursor?.id === id ||
-            (allowUnresolved && monitor.scopeIsUnresolved())) &&
+            (allowUnresolved &&
+              monitor.scopeIsUnresolved() &&
+              !monitor.conversation.hasPendingDiscovery())) &&
           active === 0
         )
           return;
@@ -325,12 +331,18 @@ it.each([userMessageQa.investigation, userMessageQa.regression])(
     };
     try {
       expect(monitor.turnOn("/nonexistent-live-fixture")).toBeUndefined();
-      await settle("qa-reading-delivered");
+      await settle("qa-reading-delivered", true);
+      record({
+        type: "qa-follow-up-baseline",
+        unresolved: monitor.scopeIsUnresolved(),
+        tasks: monitor.ledger?.tasks,
+      });
       entries.push(qaEntry(message, "qa-reading-delivered"));
       // This exact multi-sentence investigation yielded weak span classification
       // in the recorded run. Honest ambiguity is valid; never lower model gates.
       const canBeUnresolved = message.id === userMessageQa.investigation.id;
       await settle(message.id, canBeUnresolved);
+      expect(consideredEntries.has(message.id)).toBe(true);
       const tasks =
         monitor.ledger?.tasks.filter(
           (task) => task.included && task.ref.entryId === message.id,

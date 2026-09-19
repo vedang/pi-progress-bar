@@ -24,7 +24,7 @@ New sessions default ON. Missing/rejected Jev credentials leave the monitor OFF.
 
 ## How progress works
 
-1. Read whole visible user/assistant messages from the **active canonical branch**, in chronological order.
+1. Read whole visible user/assistant messages and inbound `intercom_message` custom messages from the **active canonical branch**, in chronological order. Delegation retains a distinct `intercom` source role; arbitrary custom messages, audit receipts and tool results are not task input. Triggered, steering and follow-up intercom deliveries are observed at normal agent lifecycle boundaries. Pi emits no public extension hook for idle custom delivery without a triggered turn, so that delivery is assessed on the next real turn (no polling).
 2. Ask pinned `jev-1.13.0` whether task scope changed. Only confidently **unchanged** skips extraction. Gate confidence must be >=0.5 and selected probability >=0.8; uncertainty remains distinct from a confident negative.
 3. When needed, ask the **currently selected Pi model** for a strict grounded task patch. New tasks can be action or response deliverables. A new question after completed work can create a new response task, even on the same topic. User approvals and other people's work are not assistant tasks.
 4. Independently ask Jev about each included task. Completion of an earlier task is **not** a prerequisite for completing later tasks. Newly extracted tasks can be assessed in the same observation. Done tasks receive a separate withdrawal judgment.

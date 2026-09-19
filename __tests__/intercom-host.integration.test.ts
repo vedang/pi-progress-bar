@@ -131,6 +131,13 @@ it.each(["trigger", "steer", "followUp", "idle"] as const)(
       );
       release();
       await running;
+      if (mode === "idle") {
+        // Pi persists idle custom messages without firing ExtensionRunner hooks.
+        // No polling: the next actual turn exposes the pending canonical record.
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(assessed.filter((o) => o.role === "intercom")).toHaveLength(0);
+        await session.prompt("Please continue with the delegated request.");
+      }
       await vi.waitFor(
         () =>
           expect(assessed.filter((o) => o.role === "intercom")).toHaveLength(1),
@@ -155,7 +162,7 @@ it.each(["trigger", "steer", "followUp", "idle"] as const)(
             (entry) =>
               entry.type === "message" && entry.message.role === "user",
           ),
-      ).toHaveLength(mode === "steer" || mode === "followUp" ? 1 : 0);
+      ).toHaveLength(mode === "trigger" ? 0 : 1);
       await session.agent.waitForIdle();
       // Re-observing on ON must not bill the accepted inbound entry again.
       await session.prompt("/progress on");

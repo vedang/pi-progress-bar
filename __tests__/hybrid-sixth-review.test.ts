@@ -3,6 +3,7 @@ import { processObservation } from "../src/core/hybrid";
 import {
   encodeCheckpoint,
   monitorCheckpointMetadata,
+  restoreCheckpoint,
 } from "../src/core/hybrid-checkpoint";
 import type { HybridState } from "../src/core/hybrid-state";
 import { backend, noPatch, observation } from "./fixtures/hybrid";
@@ -359,6 +360,142 @@ it.each(["lower", "absent"])(
     );
   },
 );
+async function heldActive() {
+  const { h, entry } = await fixture();
+  const original = h.fetch.getMockImplementation();
+  if (!original) throw new Error("Missing transport");
+  let release: ((override?: Response) => void) | undefined;
+  let held = false;
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body));
+    const response = await original(url, init);
+    if (
+      !held &&
+      request.questions.gate &&
+      request.state.latest.id === "active"
+    ) {
+      held = true;
+      return new Promise<Response>((resolve) => {
+        release = (override) => resolve(override ?? response);
+      });
+    }
+    return response;
+  });
+  const active = branchEntry("active", "Working on parser.", "assistant");
+  const checkpoint = h.monitor.checkpoint();
+  h.replace([entry, active]);
+  for (let step = 0; step < 100 && !release; step++)
+    await vi.advanceTimersByTimeAsync(1);
+  if (!release) throw new Error("Active gate did not dispatch");
+  return { h, entry, active, checkpoint, release };
+}
+
+it("ON invalidates an accepted pending gate when preceding context changed while OFF", async () => {
+  const f = await pendingFixture();
+  f.h.monitor.stop();
+  f.h.reader.mockImplementation(() => f.entries);
+  await finishRestore(
+    f.h.monitor.restore(
+      cwd,
+      encodeCheckpoint(f.state, { ...f.metadata, enabled: false }),
+      false,
+      f.h.reader,
+    ),
+  );
+  const inserted = branchEntry("inserted", "A changed preceding instruction.");
+  f.entries.splice(f.entries.length - 1, 0, inserted);
+  f.h.requests.length = 0;
+  f.h.save.mockClear();
+  f.h.monitor.turnOn(cwd);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(f.h.monitor.state.cursor?.id).toBe("target");
+  const gates = f.h.requests.filter(
+    (request) =>
+      "gate" in request.questions &&
+      (request.state as { latest?: { id?: string } }).latest?.id === "target",
+  );
+  expect(gates).toHaveLength(1);
+  expect(
+    (gates[0].state as { earlier: { id: string }[] }).earlier.map(
+      (item) => item.id,
+    ),
+  ).toEqual(["goal", "inserted"]);
+  const canonical = [
+    observation(f.entry.id, f.entry.message.content),
+    observation(inserted.id, inserted.message.content),
+    f.latest,
+  ];
+  for (const [saved] of f.h.save.mock.calls) {
+    expect(
+      restoreCheckpoint(
+        saved,
+        f.state.sourceId,
+        (id) => canonical.find((item) => item.id === id),
+        (id) => {
+          const index = canonical.findIndex((item) => item.id === id);
+          return canonical.slice(Math.max(0, index - 2), index);
+        },
+      ),
+    ).toBeDefined();
+  }
+});
+
+it("tree restore settles a provider-first barrier so restored suffix can drain", async () => {
+  const f = await heldActive();
+  f.h.replace([f.entry, ...blanks(), f.active]);
+  f.release();
+  for (let step = 0; step < 20; step++) await Promise.resolve();
+  expect(f.h.monitor.debugSnapshot().processing).toBe("processing");
+  await finishRestore(f.h.monitor.restore(cwd, f.checkpoint, true, f.h.reader));
+  f.h.append("restored-suffix", "Continue current work.");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(f.h.monitor.state.cursor?.id).toBe("restored-suffix");
+  expect(f.h.monitor.debugSnapshot().processing).toBe("idle");
+});
+
+it("authority-first amendment resolves cancellation rather than rejecting an unconsumed barrier", async () => {
+  const f = await heldActive();
+  f.h.replace([
+    f.entry,
+    branchEntry("inserted", "Changed preceding instruction."),
+    ...blanks(),
+    f.active,
+  ]);
+  // Observe the raw deferred before any transport consumer exists. Attach a
+  // rejection observer so the regression is a deterministic assertion, not a
+  // runner-global unhandled rejection. Cancellation must resolve, then rely
+  // on the owning request's epoch check to reject stale admission.
+  const active = Reflect.get(f.h.monitor, "activeObservation") as {
+    barrier?: { promise: Promise<void> };
+  };
+  expect(active.barrier).toBeDefined();
+  const outcome = active.barrier?.promise.then(
+    () => "resolved",
+    () => "rejected",
+  );
+  await vi.advanceTimersByTimeAsync(500);
+  expect(await outcome).toBe("resolved");
+  f.release();
+  await f.h.settle("active");
+  const gates = f.h.requests.filter(
+    (request) =>
+      "gate" in request.questions &&
+      (request.state as { latest?: { id?: string } }).latest?.id === "active",
+  );
+  expect(gates).toHaveLength(2);
+});
+
+it("permanent provider failure settles an incomplete authority barrier and leaves OFF idle", async () => {
+  const f = await heldActive();
+  f.h.replace([f.entry, ...blanks(), f.active]);
+  f.release(new Response("Unauthorized", { status: 401 }));
+  await vi.advanceTimersByTimeAsync(500);
+  expect(f.h.monitor.enabled).toBe(false);
+  expect(f.h.monitor.debugSnapshot().processing).toBe("idle");
+  expect(f.h.monitor.state.cursor?.id).toBe("goal");
+  expect(f.h.monitor.state.pending).toBeUndefined();
+});
+
 it("terminal negative tail and later settled suffix clear catch-up and leave no idle scan", async () => {
   const { h, entry } = await fixture();
   h.replace([entry, ...blanks(1000)]);

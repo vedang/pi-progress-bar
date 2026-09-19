@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import type { ExtractionInput } from "../analysis/extractor";
 import {
   type EvaluationRequest,
@@ -14,12 +12,7 @@ import {
   readBeadsExport,
 } from "../sources/beads";
 import { EvidenceStore, redEvidenceLabel } from "../sources/evidence";
-import {
-  canonicalHeaders,
-  canonicalObservation,
-  MAX_CANONICAL_PAGE_BYTES,
-  MAX_CANONICAL_PAGE_MESSAGES,
-} from "../sources/messages";
+import { CanonicalPass } from "../sources/messages";
 import {
   DurabilityCapacityError,
   processObservation,
@@ -157,37 +150,6 @@ const boundedHealthText = (text: string, maxBytes: number) => {
   return `${bounded}\n[bounded canonical text omitted]`;
 };
 
-const payloadHash = (value: unknown) =>
-  createHash("sha256")
-    .update(JSON.stringify(value) ?? "undefined")
-    .digest("hex");
-
-/**
- * Read own descriptors only. Plain host payload edits change this fingerprint;
- * accessor-backed payloads receive bounded canonical round-robin validation.
- */
-const authorityFingerprint = (entry: Record<string, unknown>) => {
-  const message = Object.getOwnPropertyDescriptor(entry, "message")?.value;
-  if (!message || typeof message !== "object") return "no-message";
-  const content = Object.getOwnPropertyDescriptor(message, "content");
-  if (!content) return "no-content";
-  if (content.get || content.set) return `accessor:${String(content.get)}`;
-  if (typeof content.value === "string")
-    return `text:${payloadHash(content.value)}`;
-  if (!Array.isArray(content.value)) return `other:${typeof content.value}`;
-  const blocks = content.value.map((block) => {
-    if (!block || typeof block !== "object") return "other";
-    const item = block as Record<string, unknown>;
-    const type = Object.getOwnPropertyDescriptor(item, "type")?.value;
-    const text = Object.getOwnPropertyDescriptor(item, "text");
-    return [
-      type,
-      text?.get || text?.set ? "accessor" : payloadHash(text?.value),
-    ];
-  });
-  return `blocks:${payloadHash(blocks)}`;
-};
-
 const sameBeads = (
   left: ReadonlyMap<string, BeadsPresentation>,
   right: ReadonlyMap<string, BeadsPresentation>,
@@ -238,12 +200,8 @@ export class Monitor {
   private catchingUp = false;
   /** Initial backlog target; remains set until its observation commits. */
   private catchupTarget?: { id: string; hash: string };
-  /** Bounded derived authority facts; never store canonical text. */
-  private authorityIndex = new Map<
-    string,
-    { hash: string; role: Observation["role"]; fingerprint: string }
-  >();
-  private authoritySampleCursor = 0;
+  /** Set only by startup/restore history boundaries, never live appends. */
+  private latchHistoricalCatchup = false;
   private epoch = 0;
   private extractionController?: AbortController;
   private healthObservation?: HealthWork;
@@ -310,6 +268,11 @@ export class Monitor {
 
   turnOn(cwd: string): string | undefined {
     if (this.enabled) return;
+    return this.turnOnWithPass(cwd, this.beginCanonicalPass());
+  }
+
+  /** OFF→ON uses one canonical snapshot before gateway admission. */
+  private turnOnWithPass(cwd: string, pass: CanonicalPass): string | undefined {
     this.cwd = cwd;
     if (!process.env.TYPESAFE_API_KEY?.trim()) {
       this.error = "TYPESAFE_API_KEY is required; progress monitor is OFF";
@@ -320,7 +283,8 @@ export class Monitor {
     const sourceId = this.options.sourceId();
     if (sourceId !== this.state.sourceId) this.resetState(sourceId);
     // OFF history can change while no observer callback runs. Reset first.
-    if (this.hasCanonicalAmendment(true)) this.resetForCanonicalAmendment();
+    if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
+    this.latchHistoricalCatchup = true;
     this.enabled = true;
     this.error = undefined;
     this.waitingForWake = false;
@@ -328,7 +292,7 @@ export class Monitor {
     this.epoch++;
     this.gateway.enable(this.identity());
     this.save();
-    this.requeue();
+    this.requeue(pass, true);
     this.refreshBeads();
     this.publish();
     this.drain();
@@ -366,6 +330,8 @@ export class Monitor {
   /** Model select is an explicit eligible wake for a paused selected-model phase. */
   modelSelected() {
     if (!this.enabled) return;
+    const pass = this.beginCanonicalPass();
+    if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
     this.clearRetry();
     this.epoch++;
     this.extractionController?.abort();
@@ -373,7 +339,7 @@ export class Monitor {
     this.gateway.pause();
     this.gateway.enable(this.identity());
     this.waitingForWake = false;
-    this.requeue();
+    this.requeue(pass);
     this.publish();
     this.drain();
   }
@@ -382,8 +348,9 @@ export class Monitor {
   observe(reader: () => readonly unknown[]) {
     this.reader = reader;
     if (!this.enabled) return;
-    if (this.hasCanonicalAmendment()) this.resetForCanonicalAmendment();
-    this.requeue();
+    const pass = this.beginCanonicalPass();
+    if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
+    this.requeue(pass);
     if (this.queued.length) this.cancelHealth();
     this.drain();
   }
@@ -414,32 +381,37 @@ export class Monitor {
     this.activeObservation = undefined;
     this.catchingUp = false;
     this.catchupTarget = undefined;
-    this.authorityIndex.clear();
-    this.authoritySampleCursor = 0;
+    this.latchHistoricalCatchup = false;
     this.beads.clear();
     this.beadsGeneration++;
     this.evidence.reset();
     this.diagnostics.clear();
     if (reader) this.reader = reader;
+    const pass = this.beginCanonicalPass();
     const sourceId = this.options.sourceId();
     const restored = restoreCheckpoint(data, sourceId, (entryId) =>
-      this.resolveObservation(entryId),
+      this.resolveObservation(pass, entryId),
     );
     const metadata = monitorCheckpointMetadata(data);
     if (restored) {
       this.state = copyState(restored);
       this.precedingContext = this.rehydratePreceding(
+        pass,
         restored.pending?.observation.entryId ?? restored.cursor?.id,
         !restored.pending,
       );
-      this.applyMetadata(metadata);
+      this.latchHistoricalCatchup = true;
+      if (this.hasCanonicalAmendment(pass)) {
+        this.resetState(sourceId);
+        this.latchHistoricalCatchup = true;
+      } else this.applyMetadata(metadata);
     } else {
       if (data !== undefined) this.note("saved-state-rejected");
       this.resetState(sourceId);
     }
     const resume = preserveControls ? wasEnabled : (metadata?.enabled ?? true);
     this.enabled = false;
-    if (resume) this.turnOn(cwd);
+    if (resume) this.turnOnWithPass(cwd, pass);
     else this.publish();
   }
 
@@ -501,6 +473,11 @@ export class Monitor {
     return `${this.state.sourceId}:${this.epoch}`;
   }
 
+  /** Only canonical boundary factory reads host history. */
+  private beginCanonicalPass() {
+    return new CanonicalPass(this.reader ? this.reader() : []);
+  }
+
   private resetState(sourceId: string) {
     this.state = emptyState(sourceId);
     this.card = undefined;
@@ -513,8 +490,7 @@ export class Monitor {
     this.activeObservation = undefined;
     this.catchingUp = false;
     this.catchupTarget = undefined;
-    this.authorityIndex.clear();
-    this.authoritySampleCursor = 0;
+    this.latchHistoricalCatchup = false;
     this.evidence.reset();
     this.beads.clear();
     this.beadsGeneration++;
@@ -661,7 +637,9 @@ export class Monitor {
       () => {
         this.retryTimer = undefined;
         if (!this.enabled || epoch !== this.epoch) return;
-        this.requeue();
+        const pass = this.beginCanonicalPass();
+        if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
+        this.requeue(pass);
         this.publish();
         this.drain();
       },
@@ -697,9 +675,8 @@ export class Monitor {
     this.publish();
   }
 
-  /** Validate only bounded state authority, never the unbounded history payload. */
-  private hasCanonicalAmendment(force = false) {
-    if (!this.reader) return false;
+  /** Every current state/proof/runtime source is authoritative for this pass. */
+  private canonicalReferences() {
     const references: {
       entryId: string;
       messageHash: string;
@@ -714,15 +691,6 @@ export class Monitor {
         ? [this.state.scopeAssessment.source]
         : []),
       ...(this.state.pending ? [this.state.pending.observation] : []),
-      ...(this.state.pending?.proofs
-        ? [
-            ...(this.state.pending.proofs.gate?.context ?? []),
-            ...(this.state.pending.proofs.patch?.context ?? []),
-            ...this.state.pending.proofs.completions.flatMap(
-              (proof) => proof.context,
-            ),
-          ]
-        : []),
       ...(this.state.cursor
         ? [
             {
@@ -731,6 +699,21 @@ export class Monitor {
             },
           ]
         : []),
+      ...this.precedingContext.map((observation) => ({
+        entryId: observation.id,
+        messageHash: observation.hash,
+        role: observation.role,
+      })),
+      ...this.page.map((observation) => ({
+        entryId: observation.id,
+        messageHash: observation.hash,
+        role: observation.role,
+      })),
+      ...this.queued.map((observation) => ({
+        entryId: observation.id,
+        messageHash: observation.hash,
+        role: observation.role,
+      })),
       ...(this.retryObservation
         ? [
             {
@@ -749,38 +732,80 @@ export class Monitor {
             },
           ]
         : []),
+      ...(this.healthObservation
+        ? [
+            {
+              entryId: this.healthObservation.observation.id,
+              messageHash: this.healthObservation.observation.hash,
+              role: this.healthObservation.observation.role,
+            },
+          ]
+        : []),
+      ...(this.catchupTarget
+        ? [
+            {
+              entryId: this.catchupTarget.id,
+              messageHash: this.catchupTarget.hash,
+            },
+          ]
+        : []),
+      ...(this.blockedPending
+        ? [
+            {
+              entryId: this.blockedPending.id,
+              messageHash: this.blockedPending.hash,
+            },
+          ]
+        : []),
     ];
-    if (!references.length) return false;
-    const headers = new Map(
-      canonicalHeaders(this.reader()).map((header) => [header.id, header]),
-    );
-    const byId = new Map<string, typeof references>();
-    for (const reference of references) {
-      const group = byId.get(reference.entryId) ?? [];
-      group.push(reference);
-      byId.set(reference.entryId, group);
+    const proofs = this.state.pending?.proofs;
+    for (const proof of [
+      proofs?.gate,
+      proofs?.patch,
+      ...(proofs?.completions ?? []),
+    ]) {
+      if (!proof) continue;
+      references.push(
+        ...proof.context,
+        ...proof.tasks.flatMap((task) => (task.source ? [task.source] : [])),
+      );
     }
-    const sampleStart = this.authoritySampleCursor % byId.size;
-    let referenceIndex = 0;
+    for (const completion of proofs?.completions ?? []) {
+      references.push(
+        ...completion.events.map((event) => event.source),
+        ...completion.results.map((result) => result.assessment.source),
+      );
+    }
+    return references;
+  }
+
+  private sameContext(
+    expected: readonly { entryId: string; messageHash: string; role: string }[],
+    actual: readonly Observation[],
+  ) {
+    return (
+      expected.length === actual.length &&
+      expected.every(
+        (reference, index) =>
+          reference.entryId === actual[index]?.id &&
+          reference.messageHash === actual[index]?.hash &&
+          reference.role === actual[index]?.role,
+      )
+    );
+  }
+
+  /** Full relevant-source validation on one ephemeral coherent pass. */
+  private hasCanonicalAmendment(pass: CanonicalPass) {
+    let amended = false;
+    const byId = new Map<string, ReturnType<typeof this.canonicalReferences>>();
+    for (const reference of this.canonicalReferences()) {
+      const expected = byId.get(reference.entryId) ?? [];
+      expected.push(reference);
+      byId.set(reference.entryId, expected);
+    }
+    // Do not short circuit: all relevant payload getters run once per boundary.
     for (const [entryId, expected] of byId) {
-      const sampleOffset =
-        (referenceIndex++ - sampleStart + byId.size) % byId.size;
-      const header = headers.get(entryId);
-      if (!header) return true;
-      const fingerprint = authorityFingerprint(header.entry);
-      const cached = this.authorityIndex.get(entryId);
-      const needsMaterialization =
-        force ||
-        !cached ||
-        cached.fingerprint !== fingerprint ||
-        expected.some(
-          (reference) =>
-            cached.hash !== reference.messageHash ||
-            (reference.role !== undefined && cached.role !== reference.role),
-        ) ||
-        (fingerprint.includes("accessor") && sampleOffset < 4);
-      if (!needsMaterialization) continue;
-      const current = canonicalObservation(header);
+      const current = pass.observation(entryId);
       if (
         !current ||
         expected.some(
@@ -789,15 +814,35 @@ export class Monitor {
             (reference.role !== undefined && current.role !== reference.role),
         )
       )
-        return true;
-      this.authorityIndex.set(entryId, {
-        hash: current.hash,
-        role: current.role,
-        fingerprint,
-      });
+        amended = true;
     }
-    this.authoritySampleCursor = (sampleStart + 4) % byId.size;
-    return false;
+    const pending = this.state.pending;
+    const proofs = pending?.proofs;
+    if (pending && proofs) {
+      for (const proof of [proofs.gate, proofs.patch, ...proofs.completions]) {
+        if (
+          proof &&
+          !this.sameContext(
+            proof.context,
+            pass.preceding(pending.observation.entryId),
+          )
+        )
+          amended = true;
+      }
+    }
+    if (
+      this.activeObservation &&
+      !this.sameContext(
+        this.precedingContext.map((observation) => ({
+          entryId: observation.id,
+          messageHash: observation.hash,
+          role: observation.role,
+        })),
+        pass.preceding(this.activeObservation.observation.id),
+      )
+    )
+      amended = true;
+    return amended;
   }
 
   /** Drop stale derived evidence before replaying a canonically amended branch. */
@@ -811,132 +856,66 @@ export class Monitor {
     this.clearRetry();
     this.gateway.pause();
     this.resetState(sourceId);
+    this.latchHistoricalCatchup = true;
     this.activity = "Idle";
     if (this.enabled) this.gateway.enable(this.identity());
     this.save();
     this.publish();
   }
 
-  /** Read one bounded chronological page; header scans never access payload text. */
-  private loadPage(after?: { id: string; hash: string }) {
-    const entries = this.reader?.() ?? [];
-    const headers = canonicalHeaders(entries);
-    let afterIndex = -1;
-    if (after) {
-      const index = headers.findIndex((header) => header.id === after.id);
-      const header = index < 0 ? undefined : headers[index];
-      const cached = header ? this.authorityIndex.get(header.id) : undefined;
-      const current =
-        header &&
-        cached?.hash === after.hash &&
-        cached.fingerprint === authorityFingerprint(header.entry)
-          ? undefined
-          : header
-            ? canonicalObservation(header)
-            : undefined;
-      if (header && current && current.hash === after.hash)
-        this.authorityIndex.set(header.id, {
-          hash: current.hash,
-          role: current.role,
-          fingerprint: authorityFingerprint(header.entry),
-        });
-      if (
-        !header ||
-        (current && current.hash !== after.hash) ||
-        (!current && (!cached || cached.hash !== after.hash))
-      ) {
-        this.resetForCanonicalAmendment();
-      } else afterIndex = index;
-    }
+  /** Read one bounded chronological page from this boundary's canonical pass. */
+  private loadPage(
+    pass: CanonicalPass,
+    after?: { id: string; hash: string },
+    historical = false,
+  ) {
+    const result = pass.page(after);
+    if (!result.afterValid) return false;
     if (
-      !after &&
-      !this.state.cursor &&
+      (historical || this.latchHistoricalCatchup) &&
       !this.catchupTarget &&
-      headers.length > 1
+      (result.page.length > 1 || result.hasMore)
     ) {
-      for (let index = headers.length - 1; index >= 0; index--) {
-        const latest = canonicalObservation(headers[index]);
-        if (latest) {
-          this.catchupTarget = { id: latest.id, hash: latest.hash };
-          break;
-        }
-      }
+      const target = pass.latestAfter(after);
+      if (target) this.catchupTarget = { id: target.id, hash: target.hash };
     }
-    const page: Observation[] = [];
-    let bytes = 0;
-    let hasMore = false;
-    for (let index = afterIndex + 1; index < headers.length; index++) {
-      const header = headers[index];
-      if (!header) continue;
-      const observation = canonicalObservation(header);
-      if (!observation) continue;
-      const size = Buffer.byteLength(observation.text);
-      if (
-        page.length &&
-        (page.length >= MAX_CANONICAL_PAGE_MESSAGES ||
-          bytes + size > MAX_CANONICAL_PAGE_BYTES)
-      ) {
-        hasMore = true;
-        break;
-      }
-      page.push(observation);
-      bytes += size;
-    }
-    this.page = page;
-    this.catchingUp = !!this.catchupTarget || hasMore;
+    this.latchHistoricalCatchup = false;
+    this.page = result.page;
+    this.catchingUp = !!this.catchupTarget || result.hasMore;
+    return true;
   }
 
   /** Restore at most two immediately preceding eligible observations. */
   private rehydratePreceding(
+    pass: CanonicalPass,
     entryId: string | undefined,
     includeTarget = false,
   ) {
-    if (!entryId || !this.reader) return [];
-    const headers = canonicalHeaders(this.reader());
-    const index = headers.findIndex((header) => header.id === entryId);
-    if (index < 0) return [];
-    const context: Observation[] = [];
-    let bytes = 0;
-    for (
-      let cursor = includeTarget ? index : index - 1;
-      cursor >= 0 && context.length < 2;
-      cursor--
-    ) {
-      const header = headers[cursor];
-      if (!header) continue;
-      const observation = canonicalObservation(header);
-      if (!observation) continue;
-      const size = Buffer.byteLength(JSON.stringify(observation));
-      if (bytes + size > 4 * 1024) break;
-      context.unshift(observation);
-      bytes += size;
-    }
-    return context;
+    return entryId ? pass.preceding(entryId, includeTarget) : [];
   }
 
-  /** Resolve one current canonical ref without retaining or materializing history. */
-  private resolveObservation(entryId: string): Observation | undefined {
-    const header = canonicalHeaders(this.reader?.() ?? []).find(
-      (item) => item.id === entryId,
-    );
-    const observation = header ? canonicalObservation(header) : undefined;
-    if (header && observation)
-      this.authorityIndex.set(entryId, {
-        hash: observation.hash,
-        role: observation.role,
-        fingerprint: authorityFingerprint(header.entry),
-      });
-    return observation;
+  /** Resolve one current canonical ref from the current pass only. */
+  private resolveObservation(pass: CanonicalPass, entryId: string) {
+    return pass.observation(entryId);
   }
 
-  private requeue() {
+  private requeue(pass: CanonicalPass, historical = false) {
     if (this.waitingForWake) return;
     if (this.blockedPending && !this.state.pending) {
       this.queued = [];
       return;
     }
     if (this.retryObservation) {
-      this.queued = [this.retryObservation];
+      const current = this.resolveObservation(pass, this.retryObservation.id);
+      if (
+        !current ||
+        current.hash !== this.retryObservation.hash ||
+        current.role !== this.retryObservation.role
+      ) {
+        this.resetForCanonicalAmendment();
+        this.loadPage(pass, undefined, true);
+        this.queued = [...this.page];
+      } else this.queued = [current];
       return;
     }
     const pending = this.state.pending?.observation;
@@ -948,14 +927,14 @@ export class Monitor {
         this.queued = [];
         return;
       }
-      const current = this.resolveObservation(pending.entryId);
+      const current = this.resolveObservation(pass, pending.entryId);
       if (
         !current ||
         current.hash !== pending.messageHash ||
         current.role !== pending.role
       ) {
         this.resetForCanonicalAmendment();
-        this.loadPage();
+        this.loadPage(pass, undefined, true);
         this.queued = [...this.page];
         return;
       }
@@ -963,19 +942,10 @@ export class Monitor {
       return;
     }
     const cursor = this.state.cursor;
-    const current = cursor
-      ? this.page.find(
-          (item) => item.id === cursor.id && item.hash === cursor.hash,
-        )
-      : undefined;
-    if (current) {
-      const index = this.page.indexOf(current);
-      if (index < this.page.length - 1) {
-        this.queued = this.page.slice(index + 1);
-        return;
-      }
+    if (!this.loadPage(pass, cursor, historical)) {
+      this.resetForCanonicalAmendment();
+      this.loadPage(pass, undefined, true);
     }
-    this.loadPage(cursor);
     this.queued = [...this.page];
   }
 
@@ -1113,7 +1083,9 @@ export class Monitor {
         this.activeObservation = undefined;
       if (epoch === this.epoch) {
         this.activity = "Idle";
-        this.requeue();
+        const pass = this.beginCanonicalPass();
+        if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
+        this.requeue(pass);
         this.publish();
       }
       this.drain();
@@ -1143,7 +1115,12 @@ export class Monitor {
     flight: { epoch: number; token: number },
   ) {
     try {
-      await this.assessHealth(flight.epoch, work, flight);
+      const pass = this.beginCanonicalPass();
+      if (this.hasCanonicalAmendment(pass)) {
+        this.resetForCanonicalAmendment();
+        return;
+      }
+      await this.assessHealth(flight.epoch, work, flight, pass);
     } catch (error) {
       if (this.healthFlight !== flight) return;
       if (error instanceof RetryableJevError) this.note("jev-unavailable");
@@ -1306,8 +1283,9 @@ export class Monitor {
   private projectedHealth(
     task: HybridTask,
     observation: Observation,
+    pass: CanonicalPass,
   ): HealthSnapshot | undefined {
-    const source = this.resolveObservation(task.source.entryId);
+    const source = this.resolveObservation(pass, task.source.entryId);
     if (!source || source.hash !== task.source.messageHash) return;
     const requirements = source.text
       .slice(task.source.start, task.source.end)
@@ -1376,6 +1354,7 @@ export class Monitor {
     epoch: number,
     work: HealthWork,
     flight: { epoch: number; token: number },
+    pass: CanonicalPass,
   ) {
     const task = this.state.tasks.find(
       (item) =>
@@ -1384,7 +1363,7 @@ export class Monitor {
         item.included,
     );
     if (!task) return;
-    const snapshot = this.projectedHealth(task, work.observation);
+    const snapshot = this.projectedHealth(task, work.observation, pass);
     if (!snapshot || this.cardIsCurrent(task, snapshot.identity)) return;
     let combined: ValidatedResult | undefined;
     for (const request of snapshot.requests) {
@@ -1416,8 +1395,13 @@ export class Monitor {
         item.revision === work.revision &&
         item.included,
     );
+    const currentPass = this.beginCanonicalPass();
+    if (this.hasCanonicalAmendment(currentPass)) {
+      this.resetForCanonicalAmendment();
+      return;
+    }
     const current = currentTask
-      ? this.projectedHealth(currentTask, work.observation)
+      ? this.projectedHealth(currentTask, work.observation, currentPass)
       : undefined;
     if (!current || current.identity !== snapshot.identity) return;
     const acceptance = combined.answers.acceptance;

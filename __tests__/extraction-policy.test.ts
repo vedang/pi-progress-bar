@@ -20,3 +20,23 @@ it("requires independently verifiable tasks for explicitly separate requested ac
     "independently verifiable completion condition",
   );
 });
+
+it("reconciles assistant implementation details with existing deliverables and permits safe no-ops", () => {
+  const input = extractionInput(
+    emptyState("session:test"),
+    observation("report", "I am verifying the fix and saving the changes."),
+    [],
+  );
+  expect(input.instructions).toContain(
+    "Reconcile against existing tasks before adding",
+  );
+  expect(input.instructions).toContain(
+    "distinct deliverable not already covered",
+  );
+  expect(input.instructions).toContain(
+    "not for progress reports or newly learned implementation details",
+  );
+  expect(input.instructions).toContain(
+    "do not treat a safe no-op as ambiguous scope",
+  );
+});

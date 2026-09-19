@@ -42,6 +42,7 @@ it("states the follow-up response lifecycle explicitly in the semantic gate rubr
     "A completed task does not satisfy a later request",
   );
   expect(instruction).toContain("acknowledgments");
+  expect(instruction).toContain("Track only work for the assistant");
   expect(JSON.stringify(request.questions.gate?.criteria)).toContain(
     "response",
   );
@@ -50,6 +51,18 @@ it("states the follow-up response lifecycle explicitly in the semantic gate rubr
       (task) => task.status === "done",
     ),
   ).toBe(true);
+});
+
+it("extraction policy excludes user decisions and unaccepted conditional offers", () => {
+  const request = extractionInput(
+    emptyState("session:test"),
+    initialMessage,
+    [],
+  );
+  expect(request.instructions).toContain(
+    "Do not add tasks assigned to the user",
+  );
+  expect(request.instructions).toContain("conditional offers");
 });
 
 it("does not bill semantic analysis for tool-only, thinking-only, or blank assistant messages", async () => {

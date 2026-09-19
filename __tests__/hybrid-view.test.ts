@@ -93,6 +93,12 @@ it.each([40, 80])(
     expect(view).toEqual(before);
   },
 );
+it("shows actual Jev dispatch freshness rather than an opaque Ready label", () => {
+  const lines = render(fixture(), 80);
+  const freshness = lines.find((line) => /last.*jev|jev.*last/i.test(line));
+  expect(freshness).toBeDefined();
+  expect(freshness).toMatch(/00:00:01|1\/1\/1970|1970-01-01/);
+});
 it.each(["previous", "empty"])(
   "does not render current percentages for %s progress",
   (kind) => {

@@ -29,19 +29,24 @@ const response = () =>
 
 describe("shared analysis scheduling", () => {
   it("gives discovery and ordered reports turns despite continuously changing health", async () => {
-    let now = 0;
     const dispatched: string[] = [];
     const gateway = new JevGateway({
       getApiKey: () => "test-key",
-      now: () => now,
       fetch: async (_url, init) => {
         dispatched.push(JSON.parse(String(init?.body)).state.purpose);
         return response();
       },
     });
     gateway.enable("consented");
-    const evaluate = vi.spyOn(gateway, "evaluate");
-    const scheduler = new AnalysisScheduler(gateway, () => {});
+    let changes = 0;
+    const scheduler = new AnalysisScheduler(gateway, () => {
+      if (++changes <= 2)
+        scheduler.enqueue("health", {
+          request: request("health", changes),
+          consentIdentity: "consented",
+          admit,
+        });
+    });
     const admit = vi.fn();
     for (const purpose of ["health", "discovery", "reports"])
       scheduler.enqueue(purpose, {
@@ -49,19 +54,11 @@ describe("shared analysis scheduling", () => {
         consentIdentity: "consented",
         admit,
       });
-    for (let i = 0; i < 3; i++) {
-      scheduler.enqueue("health", {
-        request: request("health", i),
-        consentIdentity: "consented",
-        admit,
-      });
-      scheduler.startCycle(1);
-      await evaluate.mock.results.at(-1)?.value;
-      await Promise.resolve();
-      now += 15000;
-    }
-    expect(dispatched).toEqual(["health", "discovery", "reports"]);
-    expect(admit).toHaveBeenCalledTimes(3);
+    scheduler.tick();
+    await vi.waitFor(() =>
+      expect(admit.mock.calls.length).toBeGreaterThanOrEqual(3),
+    );
+    expect(dispatched.slice(0, 3)).toEqual(["health", "discovery", "reports"]);
     scheduler.clear();
   });
   it("invalidating health alone does not cancel an in-flight report chunk", async () => {
@@ -85,7 +82,7 @@ describe("shared analysis scheduling", () => {
       consentIdentity: "consented",
       admit,
     });
-    scheduler.startCycle(1);
+    scheduler.tick();
     scheduler.discard("health");
     expect(signal?.aborted).toBe(false);
     finish(response());

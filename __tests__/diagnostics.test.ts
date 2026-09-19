@@ -53,7 +53,7 @@ describe("bounded progress diagnostics", () => {
     expect(help).toContain("Diagnostics: candidate-rejected:1");
     expect(help).toContain("Service unavailable");
     expect(help).toContain("retry backed off");
-    expect(help).toContain("/progress interval <seconds>");
+    expect(help).not.toMatch(/interval/i);
     expect(help).not.toContain("/progress reset");
     monitor.stop();
   });

@@ -16,10 +16,10 @@ afterEach(() => {
 });
 
 describe("automatic monitor lifecycle", () => {
-  it("defaults to 15 seconds and refuses to turn on without a key", () => {
+  it("has no interval property and refuses to turn on without a key", () => {
     delete process.env.TYPESAFE_API_KEY;
     const monitor = new Monitor(vi.fn(), vi.fn());
-    expect(monitor.interval).toBe(15);
+    expect(monitor).not.toHaveProperty("interval");
     expect(monitor.turnOn("/workspace")).toMatch(/TYPESAFE_API_KEY.*OFF/i);
     expect(monitor.enabled).toBe(false);
   });
@@ -36,10 +36,10 @@ describe("automatic monitor lifecycle", () => {
     monitor.turnOn("/workspace");
     const checkpoint = monitor.checkpoint();
     expect(checkpoint).toMatchObject({
-      version: 3,
+      version: 4,
       enabled: true,
-      interval: 15,
     });
+    expect(checkpoint).not.toHaveProperty("interval");
     expect(JSON.stringify(checkpoint)).not.toContain("Private alpha");
     expect(JSON.stringify(checkpoint)).not.toContain("secret-key");
     monitor.turnOff();
@@ -65,9 +65,8 @@ describe("automatic monitor lifecycle", () => {
     const monitor = new Monitor(vi.fn(), vi.fn());
     monitor.observe(() => branch);
     await monitor.restore("/workspace", {
-      version: 3,
+      version: 4,
       enabled: false,
-      interval: 60,
       source: {
         kind: "conversation",
         entryId: goal.id,
@@ -162,11 +161,10 @@ describe("automatic monitor lifecycle", () => {
       false,
     );
     expect(monitor.enabled).toBe(true);
-    expect(monitor.interval).toBe(15);
-    monitor.setInterval(7, "/workspace");
+    expect(monitor).not.toHaveProperty("interval");
     monitor.turnOff();
     await monitor.restore("/workspace", undefined, true);
     expect(monitor.enabled).toBe(false);
-    expect(monitor.interval).toBe(7);
+    expect(monitor.checkpoint()).not.toHaveProperty("interval");
   });
 });

@@ -103,7 +103,8 @@ describe("Jev-derived response work", () => {
       monitor.source = f.conversation.source(f.proposed);
       monitor.ledger = reconcileLedger(undefined, f.proposed.snapshot);
       const checkpoint = monitor.checkpoint();
-      if (mutation === "version") Object.assign(checkpoint, { version: 2 });
+      if (mutation === "version")
+        Object.assign(checkpoint, { version: 3, interval: 15 });
       if (mutation === "task-kind")
         Reflect.deleteProperty(checkpoint.tasks[0] ?? {}, "workKind");
       if (mutation === "source-kind")

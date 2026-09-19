@@ -155,14 +155,23 @@ function beyondWindow(entries: Entry[], enabled: boolean): Entry[] {
   return result;
 }
 
-function runtime(initial: Entry[] = replayEntries(4), respond = verdict) {
+function runtime(
+  initial: Entry[] = replayEntries(4),
+  respond: (
+    request: EvaluationRequest,
+  ) => ValidatedResult | Promise<ValidatedResult> = verdict,
+  paced = false,
+) {
   vi.useFakeTimers();
   vi.stubEnv("TYPESAFE_API_KEY", "offline-fixture-key");
   const requests: EvaluationRequest[] = [];
   const fetch = vi.fn(async (_url: string, init?: RequestInit) => {
     const request = JSON.parse(String(init?.body)) as EvaluationRequest;
     requests.push(request);
-    return new Response(JSON.stringify(respond(request)), { status: 200 });
+    if (paced) await new Promise((resolve) => setTimeout(resolve, 10));
+    return new Response(JSON.stringify(await respond(request)), {
+      status: 200,
+    });
   });
   vi.stubGlobal("fetch", fetch);
   let entries = initial;
@@ -174,9 +183,10 @@ function runtime(initial: Entry[] = replayEntries(4), respond = verdict) {
   });
   monitor.observe(() => entries);
   monitor.turnOn("/nonexistent-offline-fixture");
+  const observe = () => monitor.observe(() => entries);
   const settle = async (id: string) => {
+    observe();
     for (let i = 0; i < 1500; i++) {
-      monitor.scheduleAnalysis();
       await vi.advanceTimersByTimeAsync(1);
       if (monitor.conversation.cursor?.id === id) return;
     }
@@ -202,6 +212,7 @@ function runtime(initial: Entry[] = replayEntries(4), respond = verdict) {
     requests,
     fetch,
     settle,
+    observe,
     append,
     replace: (next: typeof initial) => {
       entries = next;
@@ -213,7 +224,7 @@ describe("fresh-session ordered production controller", () => {
   it.each([40, 520])(
     "admits a Jev-confirmed fresh replacement without replaying %i older messages first",
     async (padding) => {
-      const r = runtime(replayEntries(1));
+      const r = runtime(replayEntries(1), verdict, true);
       try {
         await r.settle("old-goal");
         for (let i = 0; i < padding; i++)
@@ -232,10 +243,19 @@ describe("fresh-session ordered production controller", () => {
           "Read the advisory plan and supporting documents instead.",
         );
         const before = r.requests.length;
-        // Three normal cycles allow selection, classification and scope, without
-        // increasing per-cycle request budget or treating selection as admission.
-        await vi.advanceTimersByTimeAsync(45_000);
-        expect(r.requests.length - before).toBeLessThanOrEqual(9);
+        r.observe();
+        // Three semantic stages, each serviced within three dispatch opportunities.
+        // Fake transport pacing prevents full history draining before inspection.
+        await vi.advanceTimersByTimeAsync(100);
+        const selection = r.requests
+          .slice(before, before + 3)
+          .some(
+            (request) =>
+              request.questions.source &&
+              (request.state as TestState).candidates?.[0]?.entryId ===
+                "replacement",
+          );
+        expect(selection).toBe(true);
         const active =
           r.monitor.ledger?.tasks.filter((task) => task.included) ?? [];
         expect(active).toHaveLength(1);
@@ -248,11 +268,180 @@ describe("fresh-session ordered production controller", () => {
           r.monitor.ledger?.tasks.filter((task) => task.included) ?? [];
         expect(after.map((task) => task.ref.entryId)).toEqual(["replacement"]);
         expect(after[0]?.status).not.toBe("done");
+        const checkpoint = r.checkpoints.at(-1);
+        expect(checkpoint).toBeDefined();
+        await r.monitor.restore("/nonexistent-offline-fixture", checkpoint);
+        await r.settle("replacement");
+        expect(
+          r.monitor.ledger?.tasks
+            .filter((task) => task.included)
+            .map((task) => task.ref.entryId),
+        ).toEqual(["replacement"]);
+        expect(r.monitor.scopeIsUnresolved()).toBe(false);
       } finally {
         r.monitor.stop();
       }
     },
   );
+  it("considers every burst user while historical work receives bounded dispatch opportunities", async () => {
+    const r = runtime(replayEntries(1), verdict, true);
+    try {
+      await r.settle("old-goal");
+      for (let i = 0; i < 40; i++)
+        r.append(
+          `qa-fair-history-${i}`,
+          "An unrelated explanatory note.",
+          "assistant",
+        );
+      const ids = Array.from({ length: 5 }, (_, i) => `qa-burst-${i}`);
+      for (const id of ids) r.append(id, "Thanks for that clarification.");
+      const before = r.requests.length;
+      r.observe();
+      await vi.advanceTimersByTimeAsync(160);
+      const selectionIds = r.requests
+        .slice(before)
+        .filter((request) => request.questions.source)
+        .flatMap(
+          (request) =>
+            (request.state as TestState).candidates?.map(
+              (candidate) => candidate.entryId,
+            ) ?? [],
+        );
+      expect(selectionIds.filter((id) => ids.includes(id ?? ""))).toEqual(ids);
+      expect(selectionIds.slice(0, 3)).toContain(ids[0]);
+      expect(
+        selectionIds
+          .slice(0, 3)
+          .some((id) => id?.startsWith("qa-fair-history-")),
+      ).toBe(true);
+      expect(
+        selectionIds.some((id) => id?.startsWith("qa-fair-history-")),
+      ).toBe(true);
+      expect(
+        r.monitor.ledger?.tasks
+          .filter((task) => task.included)
+          .map((task) => task.ref.entryId),
+      ).toEqual(["old-goal"]);
+    } finally {
+      r.monitor.stop();
+    }
+  });
+
+  it.each(["continue", "ambiguous", "low-confidence"])(
+    "does not cut over history on a fresh %s scope result",
+    async (outcome) => {
+      const r = runtime(
+        replayEntries(1),
+        (request) => {
+          const result = verdict(request);
+          if (
+            request.questions.scope &&
+            (request.state as TestState).candidates?.[0]?.ref?.entryId ===
+              "replacement"
+          ) {
+            const choice = outcome === "low-confidence" ? "new-goal" : outcome;
+            result.answers.scope = {
+              type: "choice",
+              choice,
+              confidence: outcome === "low-confidence" ? 0.4 : 1,
+              probabilities:
+                outcome === "low-confidence"
+                  ? { "new-goal": 0.79, continue: 0.21, ambiguous: 0 }
+                  : Object.fromEntries(
+                      Object.keys(request.questions.scope.criteria).map(
+                        (key) => [key, key === choice ? 1 : 0],
+                      ),
+                    ),
+            };
+          }
+          return result;
+        },
+        true,
+      );
+      try {
+        await r.settle("old-goal");
+        for (let i = 0; i < 40; i++)
+          r.append(
+            `qa-guard-history-${i}`,
+            "An unrelated explanatory note.",
+            "assistant",
+          );
+        r.append(
+          "replacement",
+          "Read the advisory plan and supporting documents instead.",
+        );
+        r.observe();
+        await vi.advanceTimersByTimeAsync(100);
+        expect(
+          r.requests.some(
+            (request) =>
+              request.questions.scope &&
+              (request.state as TestState).candidates?.[0]?.ref?.entryId ===
+                "replacement",
+          ),
+        ).toBe(true);
+        expect(
+          r.monitor.ledger?.tasks
+            .filter((task) => task.included)
+            .map((task) => task.ref.entryId),
+        ).toEqual(["old-goal"]);
+        expect(r.monitor.conversation.cursor?.id).not.toBe("replacement");
+        expect(
+          r.checkpoints.at(-1)?.conversation?.discoveryCursor?.id,
+        ).not.toBe("replacement");
+      } finally {
+        r.monitor.stop();
+      }
+    },
+  );
+
+  it("discards an in-flight fresh cutover when monitoring turns off", async () => {
+    const deferred: { release?: () => void } = {};
+    const r = runtime(
+      replayEntries(1),
+      (request) => {
+        const result = verdict(request);
+        if (
+          request.questions.scope &&
+          (request.state as TestState).candidates?.[0]?.ref?.entryId ===
+            "replacement"
+        )
+          return new Promise((resolve) => {
+            deferred.release = () => resolve(result);
+          });
+        return result;
+      },
+      true,
+    );
+    try {
+      await r.settle("old-goal");
+      for (let i = 0; i < 40; i++)
+        r.append(
+          `qa-cancel-history-${i}`,
+          "An unrelated explanatory note.",
+          "assistant",
+        );
+      r.append(
+        "replacement",
+        "Read the advisory plan and supporting documents instead.",
+      );
+      r.observe();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(deferred.release).toBeDefined();
+      r.monitor.turnOff();
+      const ledger = structuredClone(r.monitor.ledger);
+      const calls = r.requests.length;
+      deferred.release?.();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(r.monitor.ledger).toEqual(ledger);
+      expect(r.requests).toHaveLength(calls);
+      expect(r.monitor.enabled).toBe(false);
+    } finally {
+      deferred.release?.();
+      r.monitor.stop();
+    }
+  });
+
   it("replaces historical scope, tracks current work, completes, reopens and cancels without rebilling unchanged history", async () => {
     const r = runtime([]);
     try {

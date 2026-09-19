@@ -12,7 +12,7 @@ afterEach(() => {
 
 describe("September 19 user-message QA: reassessment latency", () => {
   it.each([0, 40, 520])(
-    "considers new user messages within a normal cycle with %i historical entries pending",
+    "considers new user messages within three eligible dispatches with %i historical entries pending",
     async (padding) => {
       vi.useFakeTimers();
       vi.stubEnv("TYPESAFE_API_KEY", "offline-fixture-key");
@@ -39,6 +39,8 @@ describe("September 19 user-message QA: reassessment latency", () => {
           expect(Object.keys(request.questions)).toEqual(["source"]);
           const source = request.questions.source;
           if (!source) throw new Error("Missing source-selection question");
+          // Hold each request long enough to observe dispatch order, not polling cadence.
+          await new Promise((resolve) => setTimeout(resolve, 5));
           return new Response(
             JSON.stringify({
               model: request.model,
@@ -76,10 +78,9 @@ describe("September 19 user-message QA: reassessment latency", () => {
         const before = requests.length;
         entries.push(qaEntry(message, entries.at(-1)?.id ?? null));
         monitor.observe(() => entries);
-        await vi.advanceTimersByTimeAsync(15_000);
-        const cycle = requests.slice(before);
-        expect(cycle.length).toBeLessThanOrEqual(3);
-        const assessedIds = cycle.flatMap((request) => {
+        await vi.advanceTimersByTimeAsync(20);
+        const opportunities = requests.slice(before, before + 3);
+        const assessedIds = opportunities.flatMap((request) => {
           const state = request.state as { candidates?: { entryId: string }[] };
           return state.candidates?.map((candidate) => candidate.entryId) ?? [];
         });

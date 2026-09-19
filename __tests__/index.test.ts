@@ -19,7 +19,7 @@ const directories: string[] = [];
 const entry = (id: string, role: "user" | "assistant", text: string) => ({
   type: "message",
   id,
-  parentId: null,
+  parentId: null as string | null,
   timestamp: "2026-09-18T00:00:00Z",
   message: { role, content: [{ type: "text", text }], timestamp: 1 },
 });
@@ -372,6 +372,87 @@ describe("automatic Pi host contract", () => {
 // Event-driven contract supersedes interval assertions; the real host ordering
 // proof lives in host-events.integration.test.ts, not this synthetic harness.
 describe("event-driven host contract", () => {
+  it("keeps one flight while distinct accepted messages arrive; OFF aborts without late work", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
+    let finish: ((response: Response) => void) | undefined;
+    const fetcher = vi.fn(
+      (_url: string, _init?: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const branch = [entry("first", "user", "Explain the parser.")];
+    const h = await harness(branch);
+    await h.event("session_start");
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 5; i++) {
+      branch.push({
+        ...entry(`next-${i}`, "user", `Explain issue ${i}.`),
+        parentId: branch.at(-1)?.id ?? null,
+      });
+      await h.event("context");
+      await h.event("context");
+    }
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const signal = fetcher.mock.calls[0]?.[1]?.signal;
+    await h.command("off");
+    expect(signal?.aborted).toBe(true);
+    const body = JSON.parse(
+      String(fetcher.mock.calls[0]?.[1]?.body),
+    ) as JevBody;
+    finish?.(jevResponse(body));
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    await h.event("session_shutdown");
+  });
+
+  it("never discovers custom or tool-result text and clears pending retry on OFF", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
+    const fetcher = vi.fn(
+      async () =>
+        new Response(null, { status: 429, headers: { "Retry-After": "2" } }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const branch: unknown[] = [
+      {
+        type: "custom",
+        id: "own",
+        customType: "pi-progress-bar",
+        data: { text: "PRIVATE" },
+      },
+      {
+        type: "message",
+        id: "tool",
+        message: {
+          role: "toolResult",
+          content: [{ type: "text", text: "PRIVATE" }],
+        },
+      },
+      {
+        type: "message",
+        id: "private",
+        message: { role: "custom", content: "PRIVATE" },
+      },
+    ];
+    const h = await harness(branch);
+    await h.event("session_start");
+    await h.event("context");
+    await h.event("turn_end");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetcher).not.toHaveBeenCalled();
+    branch.push(entry("retry", "user", "Explain parser behavior."));
+    await h.event("context");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await h.command("off");
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await h.event("session_shutdown");
+  });
   function noWorkTransport() {
     const requests: { state?: { candidates?: { entryId: string }[] } }[] = [];
     const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {

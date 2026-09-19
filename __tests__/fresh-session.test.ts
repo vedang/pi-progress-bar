@@ -221,6 +221,210 @@ function runtime(
 }
 
 describe("fresh-session ordered production controller", () => {
+  it.each(["assistant", "overflow-user"])(
+    "preserves post-boundary %s work arriving during fresh scope evaluation",
+    async (kind) => {
+      let release: (() => void) | undefined;
+      const r = runtime(
+        replayEntries(1),
+        (request) => {
+          const result = verdict(request);
+          if (
+            request.questions.scope &&
+            (request.state as TestState).candidates?.[0]?.ref?.entryId ===
+              "replacement"
+          )
+            return new Promise((resolve) => {
+              release = () => resolve(result);
+            });
+          return result;
+        },
+        true,
+      );
+      try {
+        await r.settle("old-goal");
+        r.append(
+          "replacement",
+          "1. Implement the new requested parser instead.",
+        );
+        r.observe();
+        await vi.advanceTimersByTimeAsync(100);
+        expect(release).toBeDefined();
+        if (kind === "overflow-user")
+          for (let i = 0; i < 519; i++)
+            r.append(`overflow-${i}`, "Thanks for that clarification.");
+        r.append(
+          "assistant-plan",
+          "1. Add Unicode regression tests",
+          kind === "assistant" ? "assistant" : "user",
+        );
+        r.observe();
+        release?.();
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(
+          r.requests.some(
+            (request) =>
+              request.questions.source &&
+              (request.state as TestState).candidates?.[0]?.entryId ===
+                "assistant-plan",
+          ),
+        ).toBe(true);
+        expect(
+          r.monitor.ledger?.tasks.some(
+            (task) => task.included && task.ref.entryId === "assistant-plan",
+          ),
+        ).toBe(true);
+      } finally {
+        release?.();
+        r.monitor.stop();
+      }
+    },
+  );
+
+  it.each(["continue", "ambiguous", "low-confidence", "multi-chunk"])(
+    "does not initialize a no-ledger fresh %s proposal ahead of unsettled history",
+    async (outcome) => {
+      const history: Entry[] = Array.from({ length: 40 }, (_, i) => ({
+        type: "message",
+        id: `veto-history-${i}`,
+        parentId: i ? `veto-history-${i - 1}` : null,
+        message: {
+          role: "assistant",
+          content: "An unrelated explanatory note.",
+        },
+      }));
+      const r = runtime(
+        history,
+        (request) => {
+          const result = verdict(request);
+          if (request.questions.scope && outcome !== "multi-chunk") {
+            const choice = outcome === "low-confidence" ? "new-goal" : outcome;
+            result.answers.scope = {
+              type: "choice",
+              choice,
+              confidence: outcome === "low-confidence" ? 0.4 : 1,
+              probabilities: Object.fromEntries(
+                Object.keys(request.questions.scope.criteria).map((key) => [
+                  key,
+                  key === choice ? 1 : 0,
+                ]),
+              ),
+            };
+          }
+          return result;
+        },
+        true,
+      );
+      try {
+        await vi.advanceTimersByTimeAsync(1);
+        r.append(
+          "replacement",
+          outcome === "multi-chunk"
+            ? Array.from(
+                { length: 27 },
+                (_, i) => `${i + 1}. Implement new feature ${i + 1}`,
+              ).join("\n")
+            : "1. Read the advisory plan instead.",
+        );
+        r.observe();
+        await vi.advanceTimersByTimeAsync(100);
+        expect(
+          r.requests.some(
+            (request) =>
+              (request.state as TestState).candidate?.entryId === "replacement",
+          ),
+        ).toBe(true);
+        expect(r.monitor.ledger).toBeUndefined();
+        expect(
+          r.checkpoints.at(-1)?.conversation?.discoveryCursor?.id,
+        ).not.toBe("replacement");
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(r.monitor.conversation.hasPendingDiscovery()).toBe(false);
+        if (outcome === "continue" || outcome === "multi-chunk")
+          expect(
+            r.monitor.ledger?.tasks.some(
+              (task) => task.included && task.ref.entryId === "replacement",
+            ),
+          ).toBe(true);
+      } finally {
+        r.monitor.stop();
+      }
+    },
+  );
+
+  it("preserves accepted scope chunks across OFF/ON without rebilling them", async () => {
+    let release: (() => void) | undefined;
+    let hold = true;
+    let firstScope: string | undefined;
+    const r = runtime(replayEntries(1), (request) => {
+      const result = verdict(request);
+      if (request.questions.scope) {
+        if (Object.hasOwn(request.questions, "0"))
+          firstScope ??= JSON.stringify(request);
+        else if (hold)
+          return new Promise((resolve) => {
+            release = () => resolve(result);
+          });
+      }
+      return result;
+    });
+    try {
+      await r.settle("old-goal");
+      r.append(
+        "29acae97",
+        Array.from(
+          { length: 27 },
+          (_, i) => `${i + 1}. New task ${i + 1}`,
+        ).join("\n"),
+      );
+      r.observe();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(release).toBeDefined();
+      expect(r.monitor.checkpoint().partialScope?.index).toBe(1);
+      r.monitor.turnOff();
+      expect.soft(r.checkpoints.at(-1)?.partialScope?.index).toBe(1);
+      hold = false;
+      release?.();
+      r.monitor.turnOn("/nonexistent-offline-fixture");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(
+        r.requests.filter((request) => JSON.stringify(request) === firstScope),
+      ).toHaveLength(1);
+      expect(countReported(r.monitor.ledger).total).toBe(27);
+    } finally {
+      release?.();
+      r.monitor.stop();
+    }
+  });
+
+  it("bounds fresh-intake payload reads after a long-session baseline", async () => {
+    let reads = 0;
+    const history: Entry[] = Array.from({ length: 10_000 }, (_, i) => ({
+      type: "message",
+      id: `bounded-history-${i}`,
+      parentId: i ? `bounded-history-${i - 1}` : null,
+      get message() {
+        reads++;
+        return {
+          role: "user" as const,
+          content: "An unrelated explanatory note.",
+        };
+      },
+    }));
+    const r = runtime(history, () => new Promise(() => {}));
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      reads = 0;
+      r.append("replacement", "1. Read the new plan instead.");
+      r.observe();
+      expect(reads).toBeLessThan(4096);
+      reads = 0;
+      r.observe();
+      expect(reads).toBeLessThan(4096);
+    } finally {
+      r.monitor.stop();
+    }
+  });
   it("retains later actionable burst turns across the first early cutover", async () => {
     const r = runtime(replayEntries(1), verdict, true);
     try {

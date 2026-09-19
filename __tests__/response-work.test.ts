@@ -91,7 +91,7 @@ describe("Jev-derived response work", () => {
     ).toHaveProperty(ledger.tasks[0]?.id ?? "missing");
   });
 
-  it.each(["version", "task-kind", "source-kind"])(
+  it.each(["version", "task-kind", "source-kind", "obsolete-interval"])(
     "rejects obsolete persisted shape: %s",
     async (mutation) => {
       vi.stubEnv("TYPESAFE_API_KEY", "");
@@ -105,6 +105,8 @@ describe("Jev-derived response work", () => {
       const checkpoint = monitor.checkpoint();
       if (mutation === "version")
         Object.assign(checkpoint, { version: 3, interval: 15 });
+      if (mutation === "obsolete-interval")
+        Object.assign(checkpoint, { interval: 15 });
       if (mutation === "task-kind")
         Reflect.deleteProperty(checkpoint.tasks[0] ?? {}, "workKind");
       if (mutation === "source-kind")

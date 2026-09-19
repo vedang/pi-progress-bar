@@ -36,10 +36,18 @@ export function selectedModelExtractor(
   current: () => Pick<ExtensionContext, "model" | "modelRegistry">,
 ): MonitorOptions["extract"] {
   return async (input: ExtractionInput, signal: AbortSignal) => {
+    if (signal.aborted) throw new RetryableProviderError();
     const context = current();
     if (!context.model) throw new RetryableProviderError();
     const controller = new AbortController();
-    const abort = () => controller.abort();
+    let rejectAbort: (error: RetryableProviderError) => void = () => {};
+    const aborted = new Promise<never>((_, reject) => {
+      rejectAbort = reject;
+    });
+    const abort = () => {
+      controller.abort();
+      rejectAbort(new RetryableProviderError());
+    };
     signal.addEventListener("abort", abort, { once: true });
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -76,8 +84,14 @@ export function selectedModelExtractor(
           },
         ),
         timed,
+        aborted,
       ]);
-      if (signal.aborted || controller.signal.aborted)
+      if (
+        signal.aborted ||
+        controller.signal.aborted ||
+        response.stopReason === "error" ||
+        response.stopReason === "aborted"
+      )
         throw new RetryableProviderError();
       const usage = response.usage as unknown as {
         input?: unknown;

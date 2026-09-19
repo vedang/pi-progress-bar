@@ -222,6 +222,29 @@ function validPending(value: unknown): value is PendingObservation {
   );
 }
 
+function completedJournalHasProvenance(state: HybridState) {
+  const pending = state.pending;
+  if (pending?.phase !== "complete") return true;
+  if (!pending.completedTaskIds.length)
+    return pending.completionHashes.length === 0;
+  if (
+    !pending.completionHashes.length ||
+    pending.completionHashes.length > pending.completedTaskIds.length
+  )
+    return false;
+  return pending.completedTaskIds.every((id) => {
+    const assessment = state.tasks.find(
+      (task) => task.id === id,
+    )?.latestAssessment;
+    return (
+      !!assessment &&
+      assessment.source.entryId === pending.observation.entryId &&
+      assessment.source.messageHash === pending.observation.messageHash &&
+      assessment.source.role === pending.observation.role
+    );
+  });
+}
+
 function validCursor(value: unknown): value is { id: string; hash: string } {
   return (
     record(value) &&
@@ -278,6 +301,7 @@ function validState(value: unknown): value is HybridState {
 
   const taskIds = new Set(state.tasks.map((task) => task.id));
   if (taskIds.size !== state.tasks.length) return false;
+  if (!completedJournalHasProvenance(state)) return false;
   if (state.tasks.filter((task) => task.included).length > MAX_ACTIVE_TASKS)
     return false;
   const maxTaskId = Math.max(

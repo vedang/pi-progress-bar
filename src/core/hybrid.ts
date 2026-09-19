@@ -22,6 +22,7 @@ import {
 
 const MAX_ACTIVE_TASKS = 20;
 const MAX_TOTAL_TASKS = 200;
+const MAX_EVENTS = 1000;
 const MAX_LATEST_MESSAGE_BYTES = 12 * 1024;
 
 /** Transport failed before a semantic result; retain accepted journal for explicit wake. */
@@ -148,6 +149,13 @@ function validateLifecyclePatch(
     patch.restore.length;
   if (active > MAX_ACTIVE_TASKS)
     throw new Error("Task ledger exceeds 20 active tasks");
+  const mutations =
+    patch.add.length +
+    patch.revise.length +
+    patch.archive.length +
+    patch.restore.length;
+  if (state.events.length + mutations > MAX_EVENTS)
+    throw new Error("Task mutation event capacity exceeds 1000");
 }
 
 /** Apply a fully grounded patch atomically after every lifecycle target is valid. */
@@ -380,6 +388,11 @@ async function applyCompletion(
           latestAssessment: decision.assessment,
         };
       });
+      if (next.events.length + events.length > MAX_EVENTS)
+        return {
+          ...next,
+          completionError: "Task mutation event capacity exceeds 1000",
+        };
       const accepted = [
         ...(next.pending?.completedTaskIds ?? []),
         ...chunk.map((task) => task.id),
@@ -436,13 +449,15 @@ export async function processObservation(
 
   let next = clearTransientErrors(prior);
   if (!resuming) {
-    if (Buffer.byteLength(observation.text) > MAX_LATEST_MESSAGE_BYTES) {
-      next = {
+    if (Buffer.byteLength(observation.text) > MAX_LATEST_MESSAGE_BYTES)
+      return {
         ...next,
-        pending: pending(observation, "complete"),
-        scopeError: "Latest scope message exceeds 12KiB",
+        cursor: { id: observation.id, hash: observation.hash },
+        focusTaskId: focusTaskId(next),
+        scopeUnresolved: true,
+        scopeError: "Latest message exceeds 12KiB unresolved overflow",
       };
-    } else {
+    else {
       try {
         const gate = gateResult(
           await providers.evaluate(gateRequest(next, observation, preceding)),
@@ -473,6 +488,17 @@ export async function processObservation(
 
   if (next.pending?.phase === "extract") {
     next = await applyScopePatch(next, observation, providers, preceding);
+    if (next.scopeError?.includes("capacity"))
+      return {
+        ...next,
+        pending: pending(observation, "complete", [], {
+          completionHashes: [],
+          ...(next.pending?.gateHash
+            ? { gateHash: next.pending.gateHash }
+            : {}),
+        }),
+        completionError: next.scopeError,
+      };
     next = {
       ...next,
       pending: pending(observation, "complete", [], {

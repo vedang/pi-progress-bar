@@ -142,8 +142,15 @@ export function beadsPresentation(
   completed: boolean,
   source: BeadsExport,
 ): BeadsPresentation | undefined {
-  const ids = label.match(/[A-Za-z0-9][A-Za-z0-9._-]{2,127}/g) ?? [];
-  const matches = [...new Set(ids)].flatMap((id) => {
+  const tokens = label.match(/[A-Za-z0-9][A-Za-z0-9._-]{2,127}/g) ?? [];
+  const ids = new Set<string>();
+  for (const token of tokens) {
+    if (source.records.has(token)) ids.add(token);
+    // A period terminating natural prose is not part of an adjacent Beads ID.
+    if (token.endsWith(".") && source.records.has(token.slice(0, -1)))
+      ids.add(token.slice(0, -1));
+  }
+  const matches = [...ids].flatMap((id) => {
     const item = source.records.get(id);
     return item ? [item] : [];
   });

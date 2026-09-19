@@ -12,7 +12,12 @@ import {
   readBeadsExport,
 } from "../sources/beads";
 import { EvidenceStore, redEvidenceLabel } from "../sources/evidence";
-import { canonicalMessages } from "../sources/messages";
+import {
+  canonicalHeaders,
+  canonicalObservation,
+  MAX_CANONICAL_PAGE_BYTES,
+  MAX_CANONICAL_PAGE_MESSAGES,
+} from "../sources/messages";
 import { processObservation, RetryableProviderError } from "./hybrid";
 import {
   encodeCheckpoint,
@@ -98,7 +103,11 @@ const diagnosticLabels: Record<string, string> = {
   "model-unavailable": "Selected model unavailable",
   "saved-state-rejected": "Saved state rejected",
   "beads-unavailable": "Beads export unavailable",
+  "unresolved-overflow": "Progress input exceeds safe limit",
+  "capacity-exhausted": "Progress state capacity reached",
 };
+
+class RetryableJevError extends RetryableProviderError {}
 
 const copyUsage = (usage: ProviderUsage): ProviderUsage => ({ ...usage });
 const validUsage = (usage: ProviderUsage) => ({
@@ -154,10 +163,15 @@ export class Monitor {
 
   private reader?: () => readonly unknown[];
   private cwd?: string;
-  private observations: Observation[] = [];
+  /** Current bounded canonical page; historical source stays behind reader. */
+  private page: Observation[] = [];
+  private precedingContext: Observation[] = [];
   private queued: Observation[] = [];
   private processing = false;
   private waitingForWake = false;
+  private retryTimer?: ReturnType<typeof setTimeout>;
+  private retryObservation?: Observation;
+  private blockedPending?: { id: string; hash: string };
   private epoch = 0;
   private extractionController?: AbortController;
   private healthObservation?: Observation;
@@ -182,6 +196,7 @@ export class Monitor {
     this.gateway = new JevGateway({
       fetch: (url, init) => globalThis.fetch(url, init),
       getApiKey: () => process.env.TYPESAFE_API_KEY,
+      onDispatch: (at) => this.recordJevDispatch(at),
       onPermanentError: () => this.forceOff(),
     });
   }
@@ -235,6 +250,7 @@ export class Monitor {
     this.enabled = true;
     this.error = undefined;
     this.waitingForWake = false;
+    this.clearRetry();
     this.epoch++;
     this.gateway.enable(this.identity());
     this.save();
@@ -249,6 +265,7 @@ export class Monitor {
     this.enabled = false;
     this.error = undefined;
     this.waitingForWake = false;
+    this.clearRetry();
     this.epoch++;
     this.extractionController?.abort();
     this.cancelHealth();
@@ -262,6 +279,7 @@ export class Monitor {
   stop() {
     this.enabled = false;
     this.waitingForWake = false;
+    this.clearRetry();
     this.epoch++;
     this.extractionController?.abort();
     this.cancelHealth();
@@ -274,6 +292,7 @@ export class Monitor {
   /** Model select is an explicit eligible wake for a paused selected-model phase. */
   modelSelected() {
     if (!this.enabled) return;
+    this.clearRetry();
     this.epoch++;
     this.extractionController?.abort();
     this.cancelHealth();
@@ -288,7 +307,6 @@ export class Monitor {
   /** Canonical branch is read only on host observation, never from projections. */
   observe(reader: () => readonly unknown[]) {
     this.reader = reader;
-    this.observations = canonicalMessages(reader());
     if (!this.enabled) return;
     this.requeue();
     if (this.queued.length) this.cancelHealth();
@@ -312,6 +330,9 @@ export class Monitor {
     this.cancelHealth();
     this.gateway.pause();
     this.waitingForWake = false;
+    this.clearRetry();
+    this.page = [];
+    this.precedingContext = [];
     this.queued = [];
     this.healthObservation = undefined;
     this.beads.clear();
@@ -319,10 +340,9 @@ export class Monitor {
     this.evidence.reset();
     this.diagnostics.clear();
     if (reader) this.reader = reader;
-    this.observations = this.reader ? canonicalMessages(this.reader()) : [];
     const sourceId = this.options.sourceId();
     const restored = restoreCheckpoint(data, sourceId, (entryId) =>
-      this.observations.find((item) => item.id === entryId),
+      this.resolveObservation(entryId),
     );
     const metadata = monitorCheckpointMetadata(data);
     if (restored) {
@@ -395,8 +415,11 @@ export class Monitor {
     this.state = emptyState(sourceId);
     this.card = undefined;
     this.cardHealthIdentity = undefined;
+    this.page = [];
+    this.precedingContext = [];
     this.queued = [];
     this.healthObservation = undefined;
+    this.blockedPending = undefined;
     this.beads.clear();
     this.beadsGeneration++;
     this.lastJevCallAt = undefined;
@@ -525,6 +548,32 @@ export class Monitor {
     this.gateway.invalidate();
   }
 
+  private clearRetry() {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    this.retryObservation = undefined;
+  }
+
+  /** One gateway-truth wake for durable or not-yet-accepted semantic work. */
+  private scheduleRetry(observation: Observation) {
+    if (!this.enabled || this.retryTimer) return;
+    const delay = this.gateway.retryDelayMs;
+    if (delay === undefined) return;
+    this.retryObservation = { ...observation };
+    const epoch = this.epoch;
+    this.retryTimer = setTimeout(
+      () => {
+        this.retryTimer = undefined;
+        if (!this.enabled || epoch !== this.epoch) return;
+        this.requeue();
+        this.publish();
+        this.drain();
+      },
+      Math.max(0, delay),
+    );
+    this.publish();
+  }
+
   private service() {
     if (!this.enabled) return { code: "monitor-off", label: "Monitoring off" };
     if (this.waitingForWake)
@@ -542,6 +591,7 @@ export class Monitor {
   private forceOff() {
     this.enabled = false;
     this.error = "Progress service unavailable";
+    this.clearRetry();
     this.epoch++;
     this.extractionController?.abort();
     this.cancelHealth();
@@ -551,31 +601,97 @@ export class Monitor {
     this.publish();
   }
 
+  /** Read one bounded chronological page; header scans never access payload text. */
+  private loadPage(after?: { id: string; hash: string }) {
+    const entries = this.reader?.() ?? [];
+    const headers = canonicalHeaders(entries);
+    const afterIndex = after
+      ? headers.findIndex((header) => header.id === after.id)
+      : -1;
+    if (after && afterIndex < 0) {
+      this.page = [];
+      return;
+    }
+    const page: Observation[] = [];
+    let bytes = 0;
+    for (let index = afterIndex + 1; index < headers.length; index++) {
+      const header = headers[index];
+      if (!header) continue;
+      const observation = canonicalObservation(header);
+      if (!observation) continue;
+      const size = Buffer.byteLength(observation.text);
+      if (
+        page.length &&
+        (page.length >= MAX_CANONICAL_PAGE_MESSAGES ||
+          bytes + size > MAX_CANONICAL_PAGE_BYTES)
+      )
+        break;
+      page.push(observation);
+      bytes += size;
+      if (page.length >= MAX_CANONICAL_PAGE_MESSAGES) break;
+    }
+    this.page = page;
+  }
+
+  /** Resolve one canonical ref without retaining or materializing whole history. */
+  private resolveObservation(entryId: string): Observation | undefined {
+    const cached = this.page.find((item) => item.id === entryId);
+    if (cached) return cached;
+    const header = canonicalHeaders(this.reader?.() ?? []).find(
+      (item) => item.id === entryId,
+    );
+    return header ? canonicalObservation(header) : undefined;
+  }
+
   private requeue() {
     if (this.waitingForWake) return;
+    if (this.retryObservation) {
+      this.queued = [this.retryObservation];
+      return;
+    }
     const pending = this.state.pending?.observation;
     if (pending) {
-      const current = this.observations.find(
-        (item) =>
-          item.id === pending.entryId &&
-          item.hash === pending.messageHash &&
-          item.role === pending.role,
-      );
-      this.queued = current ? [current] : [];
+      if (
+        this.blockedPending?.id === pending.entryId &&
+        this.blockedPending.hash === pending.messageHash
+      ) {
+        this.queued = [];
+        return;
+      }
+      const current = this.resolveObservation(pending.entryId);
+      this.queued =
+        current &&
+        current.hash === pending.messageHash &&
+        current.role === pending.role
+          ? [current]
+          : [];
       return;
     }
     const cursor = this.state.cursor;
-    const start = cursor
-      ? this.observations.findIndex(
+    const current = cursor
+      ? this.page.find(
           (item) => item.id === cursor.id && item.hash === cursor.hash,
-        ) + 1
-      : 0;
-    this.queued =
-      start > 0 ? this.observations.slice(start) : [...this.observations];
+        )
+      : undefined;
+    if (current) {
+      const index = this.page.indexOf(current);
+      if (index < this.page.length - 1) {
+        this.queued = this.page.slice(index + 1);
+        return;
+      }
+    }
+    this.loadPage(cursor);
+    this.queued = [...this.page];
   }
 
   private drain() {
-    if (!this.enabled || this.processing || this.waitingForWake) return;
+    if (
+      !this.enabled ||
+      this.processing ||
+      this.waitingForWake ||
+      this.retryTimer
+    )
+      return;
     const observation = this.queued[0];
     if (observation) {
       const epoch = this.epoch;
@@ -592,13 +708,22 @@ export class Monitor {
     void this.processHealth(healthObservation, flight);
   }
 
-  private preceding(observation: Observation) {
-    const index = this.observations.findIndex(
-      (item) => item.id === observation.id && item.hash === observation.hash,
-    );
-    return index > 0
-      ? this.observations.slice(Math.max(0, index - 2), index)
-      : [];
+  private preceding(_observation: Observation) {
+    return this.precedingContext;
+  }
+
+  private rememberPreceding(observation: Observation) {
+    const context: Observation[] = [];
+    let bytes = 0;
+    for (const candidate of [...this.precedingContext, observation]
+      .slice(-2)
+      .reverse()) {
+      const size = Buffer.byteLength(JSON.stringify(candidate));
+      if (bytes + size > 4 * 1024) break;
+      context.unshift(candidate);
+      bytes += size;
+    }
+    this.precedingContext = context;
   }
 
   private async processOne(observation: Observation, epoch: number) {
@@ -615,9 +740,32 @@ export class Monitor {
       );
       if (!this.enabled || epoch !== this.epoch) return;
       this.commit(next);
-      this.scheduleHealth(observation);
+      if (
+        next.cursor?.id === observation.id &&
+        next.cursor.hash === observation.hash
+      ) {
+        this.blockedPending = undefined;
+        if (
+          this.retryObservation?.id === observation.id &&
+          this.retryObservation.hash === observation.hash
+        )
+          this.retryObservation = undefined;
+        if (next.scopeError?.includes("12KiB"))
+          this.note("unresolved-overflow");
+        else {
+          this.rememberPreceding(observation);
+          this.scheduleHealth(observation);
+        }
+        return;
+      }
+      if (next.completionError) {
+        this.blockedPending = { id: observation.id, hash: observation.hash };
+        this.note("capacity-exhausted");
+      }
     } catch (error) {
-      if (error instanceof RetryableProviderError) {
+      if (!this.enabled || epoch !== this.epoch) return;
+      if (error instanceof RetryableJevError) this.scheduleRetry(observation);
+      else if (error instanceof RetryableProviderError) {
         this.waitingForWake = true;
         this.note("model-unavailable");
       } else this.note("invalid-scope-result");
@@ -645,7 +793,8 @@ export class Monitor {
       await this.assessHealth(flight.epoch, observation, flight);
     } catch (error) {
       if (this.healthFlight !== flight) return;
-      if (error instanceof RetryableProviderError) {
+      if (error instanceof RetryableJevError) this.note("jev-unavailable");
+      else if (error instanceof RetryableProviderError) {
         this.waitingForWake = true;
         this.note("model-unavailable");
       } else this.note("invalid-scope-result");
@@ -686,20 +835,25 @@ export class Monitor {
       };
   }
 
+  private recordJevDispatch(at: number) {
+    if (this.lastJevCallAt === at) return;
+    this.lastJevCallAt = at;
+    this.save();
+    this.publish();
+  }
+
   private async evaluateJev(request: EvaluationRequest, epoch: number) {
     if (!this.enabled || epoch !== this.epoch)
       throw new RetryableProviderError();
     this.activity = "Assessing progress";
     this.publish();
     const result = await this.gateway.evaluate(request, this.identity(), true);
-    const dispatchedAt = this.gateway.lastCallAt;
-    if (dispatchedAt !== this.lastJevCallAt) {
-      this.lastJevCallAt = dispatchedAt;
-      this.save();
-      this.publish();
-    }
-    if (!this.enabled || epoch !== this.epoch || !result)
+    if (!this.enabled || epoch !== this.epoch)
       throw new RetryableProviderError();
+    if (!result) {
+      if (this.gateway.retryPending) throw new RetryableJevError();
+      throw new RetryableProviderError();
+    }
     this.usage.jev.calls++;
     this.usage.jev.inputTokens += result.usage.input_tokens;
     this.usage.jev.outputTokens += result.usage.output_tokens;

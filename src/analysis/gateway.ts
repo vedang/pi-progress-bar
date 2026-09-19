@@ -6,7 +6,7 @@ export const MAX_REQUEST_BYTES = 24 * 1024;
 const MAX_RESPONSE_BYTES = 128 * 1024;
 const MAX_QUESTIONS = 20;
 const DEADLINE_MS = 10_000;
-const MIN_BACKOFF_MS = 60_000;
+const MIN_BACKOFF_MS = 10_000;
 const COOLDOWN_MS = 5 * 60_000;
 const MAX_BURST_FAILURES = 3;
 type Question =
@@ -44,6 +44,8 @@ interface Options {
   fetch: (url: string, init?: RequestInit) => Promise<Response>;
   getApiKey: () => string | undefined;
   now?: () => number;
+  /** Called at transport admission, including eventual failures. */
+  onDispatch?: (at: number) => void;
   onPermanentError?: (message: string) => void;
 }
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -297,6 +299,11 @@ export class JevGateway {
         // This is transport truth: update immediately before fetch, so failed
         // HTTP responses, throws and timeouts remain visible as real attempts.
         this.lastDispatchAt = this.now();
+        try {
+          this.options.onDispatch?.(this.lastDispatchAt);
+        } catch {
+          // Display observers never control transport admission.
+        }
         const response = await this.options.fetch(ENDPOINT, {
           method: "POST",
           headers: {
@@ -360,7 +367,10 @@ export class JevGateway {
     } catch {
       if (generation === this.generation) {
         this.failures++;
-        if (this.failures >= MAX_BURST_FAILURES) {
+        if (this.retryAfter > this.now()) {
+          this.nextAttempt = -Infinity;
+          this.status = "Pending: Retry-After";
+        } else if (this.failures >= MAX_BURST_FAILURES) {
           this.failures = 0;
           this.nextAttempt = this.now() + COOLDOWN_MS;
           this.status = "Offline: retry cooldown (5 minutes)";

@@ -63,51 +63,113 @@ export interface MutationEvent {
   source: ObservationRef;
 }
 
-export interface TaskProjection {
+export type Presence<T> = { present: false } | { present: true; value: T };
+export interface Cursor {
   id: string;
-  label: string;
-  kind: TaskKind;
-  basis: TaskBasis;
-  status: TaskStatus;
-  included: boolean;
-  revision: number;
-  source?: SourceRef;
+  hash: string;
+  role: ObservationRole;
 }
 
-/** Bounded request identity: hashes/refs/projections only, never source text. */
-export interface RequestProof {
-  phase: "gate" | "patch" | "completion";
-  requestHash: string;
-  inputHash: string;
-  context: ObservationRef[];
-  tasks: TaskProjection[];
-}
-
-export interface CompletionJournalProof extends RequestProof {
-  taskIds: string[];
-  resultHash: string;
-  results: {
-    taskId: string;
-    status: TaskStatus;
-    assessment: Assessment;
-  }[];
+export interface ReplayCore {
+  sourceId: string;
+  cursor: Presence<Cursor>;
+  tasks: HybridTask[];
   events: MutationEvent[];
+  nextTaskId: number;
+  focusTaskId: Presence<string>;
+  scopeAssessment: Presence<Assessment>;
+  scopeUnresolved: boolean;
 }
 
-interface PendingProofs {
-  gate?: RequestProof;
-  patch?: RequestProof;
-  completions: CompletionJournalProof[];
+export interface GateRecord {
+  originHash: string;
+  requestHash: string;
+  context: ObservationRef[];
+  assessment: Assessment;
+  priorScopeAssessment: Presence<Assessment>;
 }
+
+export interface NormalizedPatch {
+  add: Array<{
+    label: string;
+    kind: TaskKind;
+    basis: TaskBasis;
+    source: SourceRef;
+  }>;
+  revise: Array<{
+    id: string;
+    label: string;
+    requirementsChanged: boolean;
+    source: SourceRef;
+  }>;
+  archive: Array<{ id: string; source: SourceRef }>;
+  restore: Array<{
+    id: string;
+    label: string;
+    requirementsChanged: boolean;
+    source: SourceRef;
+  }>;
+  unresolved: boolean;
+}
+
+export interface PatchUndo {
+  revise: Array<{
+    index: number;
+    label: string;
+    status: TaskStatus;
+    revision: number;
+    source: SourceRef;
+  }>;
+  archive: Array<{ index: number; included: boolean }>;
+  restore: Array<{
+    index: number;
+    label: string;
+    status: TaskStatus;
+    included: boolean;
+    revision: number;
+    source: SourceRef;
+  }>;
+  nextTaskId: number;
+  focusTaskId: Presence<string>;
+  scopeUnresolved: boolean;
+  eventLength: number;
+}
+
+export interface PatchRecord {
+  requestHash: string;
+  outcome: NormalizedPatch;
+  undo: PatchUndo;
+}
+
+export interface CompletionRecord {
+  requestHash: string;
+  chunkIds: string[];
+  assessments: Assessment[];
+  undo: {
+    tasks: Array<{
+      status: TaskStatus;
+      latestAssessment: Presence<Assessment>;
+    }>;
+    eventLength: number;
+  };
+}
+
+export type PendingBlock =
+  | "invalid-patch"
+  | "input-overflow"
+  | "task-capacity"
+  | "event-capacity"
+  | "completion-build";
 
 export interface PendingObservation {
   observation: ObservationRef;
   phase: "extract" | "complete";
-  completedTaskIds: string[];
-  completionHashes: string[];
-  gateHash?: string;
-  patchHash?: string;
-  proofs?: PendingProofs;
+  block: Presence<PendingBlock>;
+  journal: {
+    gate: GateRecord;
+    patch?: PatchRecord;
+    completions: CompletionRecord[];
+  };
 }
 
 export type ScopeFailure = "capacity" | "invalid" | "overflow";
@@ -117,7 +179,7 @@ export interface HybridState {
   tasks: HybridTask[];
   events: MutationEvent[];
   nextTaskId: number;
-  cursor?: { id: string; hash: string };
+  cursor?: Cursor;
   pending?: PendingObservation;
   focusTaskId?: string;
   scopeAssessment?: Assessment;
@@ -149,49 +211,5 @@ export function observationRef(observation: Observation): ObservationRef {
 
 /** Clone each mutable branch so pure reducers never alter caller-owned state. */
 export function copyState(state: HybridState): HybridState {
-  return {
-    ...state,
-    tasks: state.tasks.map((task) => ({
-      ...task,
-      source: { ...task.source },
-      ...(task.latestAssessment
-        ? {
-            latestAssessment: {
-              ...task.latestAssessment,
-              source: { ...task.latestAssessment.source },
-            },
-          }
-        : {}),
-    })),
-    events: state.events.map((event) => ({
-      ...event,
-      source: { ...event.source },
-    })),
-    ...(state.cursor ? { cursor: { ...state.cursor } } : {}),
-    ...(state.pending
-      ? {
-          pending: {
-            ...state.pending,
-            observation: { ...state.pending.observation },
-            completedTaskIds: [...state.pending.completedTaskIds],
-            completionHashes: [...state.pending.completionHashes],
-            ...(state.pending.proofs
-              ? {
-                  proofs: JSON.parse(
-                    JSON.stringify(state.pending.proofs),
-                  ) as PendingProofs,
-                }
-              : {}),
-          },
-        }
-      : {}),
-    ...(state.scopeAssessment
-      ? {
-          scopeAssessment: {
-            ...state.scopeAssessment,
-            source: { ...state.scopeAssessment.source },
-          },
-        }
-      : {}),
-  };
+  return structuredClone(state);
 }

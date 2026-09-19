@@ -2,127 +2,57 @@ import { createHash } from "node:crypto";
 
 import type {
   Assessment,
-  CompletionJournalProof,
+  Cursor,
   HybridState,
-  HybridTask,
-  MutationEvent,
-  Observation,
-  ObservationRef,
-  RequestProof,
-  TaskProjection,
-  TaskStatus,
+  Presence,
+  ReplayCore,
 } from "./hybrid-state";
 
-const proofHash = (value: unknown) =>
+export const proofHash = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-export const gateProof = (assessment: Assessment) => proofHash(assessment);
+export const absent = <T>(): Presence<T> => ({ present: false });
+export const present = <T>(value: T): Presence<T> => ({ present: true, value });
 
-export const patchProof = (state: HybridState) =>
-  proofHash({
-    tasks: state.tasks,
-    events: state.events,
-    scopeUnresolved: state.scopeUnresolved,
-  });
+/** Own undefined and checkpoint null both normalize to journal absence. */
+export const optionalPresence = <T>(
+  value: T | undefined | null,
+): Presence<T> =>
+  value === undefined || value === null ? absent() : present(value);
 
-/** Binds each skipped completion decision to its task revision and observation. */
-export const completionProof = (
-  task: HybridTask,
-  observation: Pick<Observation, "id" | "hash" | "role">,
-) =>
-  proofHash({
-    observation: {
-      id: observation.id,
-      hash: observation.hash,
-      role: observation.role,
-    },
-    task: {
-      id: task.id,
-      revision: task.revision,
-      status: task.status,
-      latestAssessment: task.latestAssessment,
-    },
-  });
-
-const observationRef = (observation: Observation): ObservationRef => ({
-  entryId: observation.id,
-  messageHash: observation.hash,
-  role: observation.role,
+export const replayCore = (state: HybridState): ReplayCore => ({
+  sourceId: state.sourceId,
+  cursor: optionalPresence<Cursor>(state.cursor),
+  tasks: structuredClone(state.tasks),
+  events: structuredClone(state.events),
+  nextTaskId: state.nextTaskId,
+  focusTaskId: optionalPresence(state.focusTaskId),
+  scopeAssessment: optionalPresence(state.scopeAssessment),
+  scopeUnresolved: state.scopeUnresolved,
 });
 
-const taskProjection = (task: HybridTask): TaskProjection => ({
-  id: task.id,
-  label: task.label,
-  kind: task.kind,
-  basis: task.basis,
-  status: task.status,
-  included: task.included,
-  revision: task.revision,
-  ...(task.source ? { source: { ...task.source } } : {}),
-});
+/** Consistency digest only; it is not an authenticity or provenance signature. */
+export const originHash = (state: HybridState) => proofHash(replayCore(state));
+export const requestHash = (request: unknown) => proofHash(request);
 
-const inputHash = (
-  phase: RequestProof["phase"],
-  requestHash: string,
-  observation: Observation,
-  context: ObservationRef[],
-  tasks: TaskProjection[],
-) =>
-  proofHash({
-    phase,
-    requestHash,
-    observation: observationRef(observation),
-    context,
-    tasks,
-  });
+export const sameJson = (left: unknown, right: unknown) =>
+  JSON.stringify(left) === JSON.stringify(right);
 
-/** Persists bounded, replayable evidence for an accepted model request. */
-export const requestProof = (
-  request: unknown,
-  phase: RequestProof["phase"],
-  observation: Observation,
-  preceding: Observation[],
-  tasks: HybridTask[],
-): RequestProof => {
-  const context = preceding.map(observationRef);
-  const projections = tasks.map(taskProjection);
-  const requestHash = proofHash(request);
-  return {
-    phase,
-    requestHash,
-    inputHash: inputHash(phase, requestHash, observation, context, projections),
-    context,
-    tasks: projections,
-  };
+/** Gate semantics shared by live mutation and checkpoint replay. */
+export const gateDecision = (assessment: Assessment) => {
+  if (assessment.reason !== "accepted") return "extract" as const;
+  if (assessment.rawChoice === "changed") return "changed" as const;
+  if (assessment.rawChoice === "unchanged") return "unchanged" as const;
+  return "extract" as const;
 };
 
-export const validRequestProofHash = (
-  proof: RequestProof,
-  observation: Observation,
+/** Completion status is normalized from prestate plus accepted assessment. */
+export const completionStatus = (
+  status: "not-started" | "reopened" | "done",
+  assessment: Assessment,
 ) =>
-  proof.inputHash ===
-  inputHash(
-    proof.phase,
-    proof.requestHash,
-    observation,
-    proof.context,
-    proof.tasks,
-  );
-
-export const completionJournalProof = (
-  request: unknown,
-  observation: Observation,
-  preceding: Observation[],
-  tasks: HybridTask[],
-  results: { taskId: string; status: TaskStatus; assessment: Assessment }[],
-  events: MutationEvent[],
-): CompletionJournalProof => ({
-  ...requestProof(request, "completion", observation, preceding, tasks),
-  taskIds: tasks.map((task) => task.id),
-  resultHash: proofHash(results),
-  results,
-  events: events.map((event) => ({ ...event })),
-});
-
-export const validCompletionResultHash = (proof: CompletionJournalProof) =>
-  proof.resultHash === proofHash(proof.results);
+  assessment.reason === "accepted" && assessment.rawChoice === "yes"
+    ? status === "done"
+      ? ("reopened" as const)
+      : ("done" as const)
+    : status;

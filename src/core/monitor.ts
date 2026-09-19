@@ -389,8 +389,11 @@ export class Monitor {
     if (reader) this.reader = reader;
     const pass = this.beginCanonicalPass();
     const sourceId = this.options.sourceId();
-    const restored = restoreCheckpoint(data, sourceId, (entryId) =>
-      this.resolveObservation(pass, entryId),
+    const restored = restoreCheckpoint(
+      data,
+      sourceId,
+      (entryId) => this.resolveObservation(pass, entryId),
+      (entryId) => this.rehydratePreceding(pass, entryId),
     );
     const metadata = monitorCheckpointMetadata(data);
     if (restored) {
@@ -696,6 +699,7 @@ export class Monitor {
             {
               entryId: this.state.cursor.id,
               messageHash: this.state.cursor.hash,
+              role: this.state.cursor.role,
             },
           ]
         : []),
@@ -758,23 +762,33 @@ export class Monitor {
           ]
         : []),
     ];
-    const proofs = this.state.pending?.proofs;
-    for (const proof of [
-      proofs?.gate,
-      proofs?.patch,
-      ...(proofs?.completions ?? []),
-    ]) {
-      if (!proof) continue;
+    const pending = this.state.pending;
+    if (pending) {
+      const { gate, patch, completions } = pending.journal;
       references.push(
-        ...proof.context,
-        ...proof.tasks.flatMap((task) => (task.source ? [task.source] : [])),
+        ...gate.context,
+        gate.assessment.source,
+        ...(gate.priorScopeAssessment.present
+          ? [gate.priorScopeAssessment.value.source]
+          : []),
+        ...completions.flatMap((completion) => [
+          ...completion.assessments.map((assessment) => assessment.source),
+          ...completion.undo.tasks.flatMap((undo) =>
+            undo.latestAssessment.present
+              ? [undo.latestAssessment.value.source]
+              : [],
+          ),
+        ]),
       );
-    }
-    for (const completion of proofs?.completions ?? []) {
-      references.push(
-        ...completion.events.map((event) => event.source),
-        ...completion.results.map((result) => result.assessment.source),
-      );
+      if (patch)
+        references.push(
+          ...patch.outcome.add.map((operation) => operation.source),
+          ...patch.outcome.revise.map((operation) => operation.source),
+          ...patch.outcome.archive.map((operation) => operation.source),
+          ...patch.outcome.restore.map((operation) => operation.source),
+          ...patch.undo.revise.map((operation) => operation.source),
+          ...patch.undo.restore.map((operation) => operation.source),
+        );
     }
     return references;
   }
@@ -817,19 +831,14 @@ export class Monitor {
         amended = true;
     }
     const pending = this.state.pending;
-    const proofs = pending?.proofs;
-    if (pending && proofs) {
-      for (const proof of [proofs.gate, proofs.patch, ...proofs.completions]) {
-        if (
-          proof &&
-          !this.sameContext(
-            proof.context,
-            pass.preceding(pending.observation.entryId),
-          )
-        )
-          amended = true;
-      }
-    }
+    if (
+      pending &&
+      !this.sameContext(
+        pending.journal.gate.context,
+        pass.preceding(pending.observation.entryId),
+      )
+    )
+      amended = true;
     if (
       this.activeObservation &&
       !this.sameContext(
@@ -1052,6 +1061,17 @@ export class Monitor {
             this.note("invalid-scope-result");
           this.scheduleHealth(observation, completedHealthTarget);
         }
+        return;
+      }
+      if (next.pending?.block.present) {
+        this.blockedPending = { id: observation.id, hash: observation.hash };
+        this.note(
+          next.pending.block.value === "input-overflow"
+            ? "unresolved-overflow"
+            : next.pending.block.value === "invalid-patch"
+              ? "invalid-scope-result"
+              : "capacity-exhausted",
+        );
         return;
       }
       if (

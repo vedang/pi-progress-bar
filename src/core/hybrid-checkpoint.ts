@@ -1,23 +1,42 @@
 import { createHash } from "node:crypto";
+import { completionRequest } from "../analysis/completion";
+import { extractionInput } from "../analysis/extractor";
+import { gateRequest } from "../analysis/gate";
 import {
-  completionProof,
-  gateProof,
-  patchProof,
-  validCompletionResultHash,
-  validRequestProofHash,
+  acceptedCompletionIds,
+  applyCompletionRecord,
+  applyGate,
+  applyPatch,
+  completionChunks,
+  completionUndo,
+  patchUndo,
+} from "./hybrid";
+import {
+  absent,
+  gateDecision,
+  optionalPresence,
+  originHash,
+  replayCore,
+  requestHash,
+  sameJson,
 } from "./hybrid-proof";
 import {
   type Assessment,
   copyState,
+  type Cursor,
+  type GateRecord,
   type HybridState,
   type HybridTask,
   type MutationEvent,
+  type NormalizedPatch,
   type Observation,
   type ObservationRef,
+  type PatchUndo,
+  type PendingBlock,
   type PendingObservation,
-  type RequestProof,
+  type Presence,
   type SourceRef,
-  type TaskProjection,
+  type TaskStatus,
 } from "./hybrid-state";
 
 const VERSION = 5;
@@ -26,6 +45,7 @@ const MAX_ACTIVE_TASKS = 20;
 const MAX_EVENTS = 1000;
 const MAX_LABEL_CHARACTERS = 240;
 const MAX_BYTES = 512 * 1024;
+const MAX_COMPLETIONS = 20;
 
 export interface MonitorCheckpointMetadata {
   enabled: boolean;
@@ -124,16 +144,15 @@ function validSourceRef(value: unknown): value is SourceRef {
     ])
   )
     return false;
-  const { start, end } = value;
   return (
     typeof value.entryId === "string" &&
     !!value.entryId &&
     hashIsValid(value.messageHash) &&
     roleIsValid(value.role) &&
-    Number.isSafeInteger(start) &&
-    (start as number) >= 0 &&
-    positiveInteger(end) &&
-    (end as number) > (start as number) &&
+    Number.isSafeInteger(value.start) &&
+    (value.start as number) >= 0 &&
+    positiveInteger(value.end) &&
+    (value.end as number) > (value.start as number) &&
     hashIsValid(value.quoteHash)
   );
 }
@@ -158,6 +177,25 @@ function validAssessment(value: unknown): value is Assessment {
   );
 }
 
+function validPresence<T>(
+  value: unknown,
+  valid: (candidate: unknown) => candidate is T,
+): value is Presence<T> {
+  return (
+    (record(value) &&
+      exactKeys(value, ["present"]) &&
+      value.present === false) ||
+    (record(value) &&
+      exactKeys(value, ["present", "value"]) &&
+      value.present === true &&
+      valid(value.value))
+  );
+}
+
+function validTaskStatus(value: unknown): value is TaskStatus {
+  return value === "not-started" || value === "reopened" || value === "done";
+}
+
 function validTask(value: unknown): value is HybridTask {
   return (
     record(value) &&
@@ -176,14 +214,10 @@ function validTask(value: unknown): value is HybridTask {
       ["latestAssessment"],
     ) &&
     taskIdIsValid(value.id) &&
-    typeof value.label === "string" &&
-    !!value.label.trim() &&
-    Array.from(value.label).length <= MAX_LABEL_CHARACTERS &&
+    safeLabel(value.label) &&
     (value.kind === "action" || value.kind === "response") &&
     (value.basis === "explicit" || value.basis === "derived") &&
-    (value.status === "not-started" ||
-      value.status === "reopened" ||
-      value.status === "done") &&
+    validTaskStatus(value.status) &&
     typeof value.included === "boolean" &&
     positiveInteger(value.revision) &&
     validSourceRef(value.source) &&
@@ -209,286 +243,291 @@ function validEvent(value: unknown): value is MutationEvent {
   );
 }
 
-function validTaskProjection(value: unknown): value is TaskProjection {
+function validCursor(value: unknown): value is Cursor {
   return (
     record(value) &&
-    exactKeys(
-      value,
-      ["id", "label", "kind", "basis", "status", "included", "revision"],
-      ["source"],
-    ) &&
-    taskIdIsValid(value.id) &&
-    safeLabel(value.label) &&
-    (value.kind === "action" || value.kind === "response") &&
-    (value.basis === "explicit" || value.basis === "derived") &&
-    (value.status === "not-started" ||
-      value.status === "reopened" ||
-      value.status === "done") &&
-    typeof value.included === "boolean" &&
-    positiveInteger(value.revision) &&
-    (!Object.hasOwn(value, "source") || validSourceRef(value.source))
+    exactKeys(value, ["id", "hash", "role"]) &&
+    typeof value.id === "string" &&
+    !!value.id &&
+    hashIsValid(value.hash) &&
+    roleIsValid(value.role)
   );
 }
 
-function validRequestProof(
+function validPatch(value: unknown): value is NormalizedPatch {
+  if (
+    !record(value) ||
+    !exactKeys(value, ["add", "revise", "archive", "restore", "unresolved"])
+  )
+    return false;
+  const add = value.add;
+  const revise = value.revise;
+  const archive = value.archive;
+  const restore = value.restore;
+  if (
+    !Array.isArray(add) ||
+    add.length > 6 ||
+    !Array.isArray(revise) ||
+    revise.length > 12 ||
+    !Array.isArray(archive) ||
+    archive.length > 12 ||
+    !Array.isArray(restore) ||
+    restore.length > 12 ||
+    typeof value.unresolved !== "boolean"
+  )
+    return false;
+  if (
+    !add.every(
+      (operation) =>
+        record(operation) &&
+        exactKeys(operation, ["label", "kind", "basis", "source"]) &&
+        safeLabel(operation.label) &&
+        (operation.kind === "action" || operation.kind === "response") &&
+        (operation.basis === "explicit" || operation.basis === "derived") &&
+        validSourceRef(operation.source),
+    )
+  )
+    return false;
+  if (
+    !revise.every(
+      (operation) =>
+        record(operation) &&
+        exactKeys(operation, [
+          "id",
+          "label",
+          "requirementsChanged",
+          "source",
+        ]) &&
+        taskIdIsValid(operation.id) &&
+        safeLabel(operation.label) &&
+        typeof operation.requirementsChanged === "boolean" &&
+        validSourceRef(operation.source),
+    )
+  )
+    return false;
+  if (
+    !archive.every(
+      (operation) =>
+        record(operation) &&
+        exactKeys(operation, ["id", "source"]) &&
+        taskIdIsValid(operation.id) &&
+        validSourceRef(operation.source),
+    )
+  )
+    return false;
+  if (
+    !restore.every(
+      (operation) =>
+        record(operation) &&
+        exactKeys(operation, [
+          "id",
+          "label",
+          "requirementsChanged",
+          "source",
+        ]) &&
+        taskIdIsValid(operation.id) &&
+        safeLabel(operation.label) &&
+        typeof operation.requirementsChanged === "boolean" &&
+        validSourceRef(operation.source),
+    )
+  )
+    return false;
+  const ids = [...revise, ...archive, ...restore].map(
+    (operation) => operation.id,
+  );
+  return (
+    new Set(ids).size === ids.length &&
+    (!value.unresolved ||
+      !(add.length || revise.length || archive.length || restore.length)) &&
+    new Set(add.map((operation) => `${operation.kind}:${operation.label}`))
+      .size === add.length
+  );
+}
+
+function validPatchUndo(
   value: unknown,
-  observation: Observation,
-): value is RequestProof {
+  outcome: NormalizedPatch,
+): value is PatchUndo {
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      "revise",
+      "archive",
+      "restore",
+      "nextTaskId",
+      "focusTaskId",
+      "scopeUnresolved",
+      "eventLength",
+    ])
+  )
+    return false;
+  if (
+    !Array.isArray(value.revise) ||
+    value.revise.length !== outcome.revise.length ||
+    !Array.isArray(value.archive) ||
+    value.archive.length !== outcome.archive.length ||
+    !Array.isArray(value.restore) ||
+    value.restore.length !== outcome.restore.length
+  )
+    return false;
+  return (
+    value.revise.every(
+      (undo) =>
+        record(undo) &&
+        exactKeys(undo, ["index", "label", "status", "revision", "source"]) &&
+        nonNegativeInteger(undo.index) &&
+        safeLabel(undo.label) &&
+        validTaskStatus(undo.status) &&
+        positiveInteger(undo.revision) &&
+        validSourceRef(undo.source),
+    ) &&
+    value.archive.every(
+      (undo) =>
+        record(undo) &&
+        exactKeys(undo, ["index", "included"]) &&
+        nonNegativeInteger(undo.index) &&
+        typeof undo.included === "boolean",
+    ) &&
+    value.restore.every(
+      (undo) =>
+        record(undo) &&
+        exactKeys(undo, [
+          "index",
+          "label",
+          "status",
+          "included",
+          "revision",
+          "source",
+        ]) &&
+        nonNegativeInteger(undo.index) &&
+        safeLabel(undo.label) &&
+        validTaskStatus(undo.status) &&
+        typeof undo.included === "boolean" &&
+        positiveInteger(undo.revision) &&
+        validSourceRef(undo.source),
+    ) &&
+    positiveInteger(value.nextTaskId) &&
+    validPresence(value.focusTaskId, taskIdIsValid) &&
+    typeof value.scopeUnresolved === "boolean" &&
+    nonNegativeInteger(value.eventLength)
+  );
+}
+
+function validGate(value: unknown): value is GateRecord {
   return (
     record(value) &&
     exactKeys(value, [
-      "phase",
+      "originHash",
       "requestHash",
-      "inputHash",
       "context",
-      "tasks",
+      "assessment",
+      "priorScopeAssessment",
     ]) &&
-    (value.phase === "gate" ||
-      value.phase === "patch" ||
-      value.phase === "completion") &&
+    hashIsValid(value.originHash) &&
     hashIsValid(value.requestHash) &&
-    hashIsValid(value.inputHash) &&
     Array.isArray(value.context) &&
     value.context.length <= 2 &&
     value.context.every(validObservationRef) &&
-    Array.isArray(value.tasks) &&
-    value.tasks.length <= MAX_ACTIVE_TASKS &&
-    value.tasks.every(validTaskProjection) &&
-    new Set(value.tasks.map((task) => task.id)).size === value.tasks.length &&
-    validRequestProofHash(value as unknown as RequestProof, observation)
+    new Set(value.context.map((item) => item.entryId)).size ===
+      value.context.length &&
+    validAssessment(value.assessment) &&
+    validPresence(value.priorScopeAssessment, validAssessment)
   );
 }
 
 function validPending(value: unknown): value is PendingObservation {
-  return (
-    record(value) &&
-    exactKeys(
-      value,
-      ["observation", "phase", "completedTaskIds", "completionHashes"],
-      ["gateHash", "patchHash", "proofs"],
-    ) &&
-    validObservationRef(value.observation) &&
-    (value.phase === "extract" || value.phase === "complete") &&
-    Array.isArray(value.completedTaskIds) &&
-    value.completedTaskIds.every(taskIdIsValid) &&
-    new Set(value.completedTaskIds).size === value.completedTaskIds.length &&
-    Array.isArray(value.completionHashes) &&
-    value.completionHashes.length <= MAX_EVENTS &&
-    value.completionHashes.every(hashIsValid) &&
-    (!Object.hasOwn(value, "gateHash") || hashIsValid(value.gateHash)) &&
-    (!Object.hasOwn(value, "patchHash") || hashIsValid(value.patchHash)) &&
-    (!Object.hasOwn(value, "proofs") ||
-      (record(value.proofs) &&
-        exactKeys(value.proofs, ["completions"], ["gate", "patch"]) &&
-        Array.isArray(value.proofs.completions) &&
-        value.proofs.completions.length <= MAX_EVENTS))
-  );
-}
-
-const projectionMatchesTask = (projection: TaskProjection, task: HybridTask) =>
-  projection.id === task.id &&
-  projection.label === task.label &&
-  projection.kind === task.kind &&
-  projection.basis === task.basis &&
-  projection.included === task.included &&
-  projection.revision === task.revision &&
-  JSON.stringify(projection.source) === JSON.stringify(task.source);
-
-function validCompletionJournalProof(
-  value: unknown,
-  observation: Observation,
-): boolean {
   if (
     !record(value) ||
-    !exactKeys(value, [
-      "phase",
-      "requestHash",
-      "inputHash",
-      "context",
-      "tasks",
-      "taskIds",
-      "resultHash",
-      "results",
-      "events",
-    ]) ||
-    value.phase !== "completion" ||
-    !hashIsValid(value.requestHash) ||
-    !hashIsValid(value.inputHash) ||
-    !Array.isArray(value.context) ||
-    value.context.length > 2 ||
-    !value.context.every(validObservationRef) ||
-    !Array.isArray(value.tasks) ||
-    value.tasks.length > MAX_ACTIVE_TASKS ||
-    !value.tasks.every(validTaskProjection) ||
-    !Array.isArray(value.taskIds) ||
-    !value.taskIds.every(taskIdIsValid) ||
-    new Set(value.taskIds).size !== value.taskIds.length ||
-    !hashIsValid(value.resultHash) ||
-    !Array.isArray(value.results) ||
-    !value.results.every(
-      (result) =>
-        record(result) &&
-        exactKeys(result, ["taskId", "status", "assessment"]) &&
-        taskIdIsValid(result.taskId) &&
-        (result.status === "not-started" ||
-          result.status === "reopened" ||
-          result.status === "done") &&
-        validAssessment(result.assessment),
+    !exactKeys(value, ["observation", "phase", "block", "journal"]) ||
+    !validObservationRef(value.observation) ||
+    (value.phase !== "extract" && value.phase !== "complete") ||
+    !validPresence(
+      value.block,
+      (block): block is PendingBlock =>
+        block === "invalid-patch" ||
+        block === "input-overflow" ||
+        block === "task-capacity" ||
+        block === "event-capacity" ||
+        block === "completion-build",
     ) ||
-    !Array.isArray(value.events) ||
-    !value.events.every(validEvent)
+    !record(value.journal) ||
+    !exactKeys(value.journal, ["gate", "completions"], ["patch"]) ||
+    !validGate(value.journal.gate) ||
+    !Array.isArray(value.journal.completions) ||
+    value.journal.completions.length > MAX_COMPLETIONS
   )
     return false;
-  const proof =
-    value as unknown as import("./hybrid-state").CompletionJournalProof;
-  return (
-    proof.taskIds.length === proof.tasks.length &&
-    proof.taskIds.every((id, index) => id === proof.tasks[index]?.id) &&
-    proof.results.length === proof.taskIds.length &&
-    proof.results.every(
-      (result, index) => result.taskId === proof.taskIds[index],
-    ) &&
-    validRequestProofHash(proof, observation) &&
-    validCompletionResultHash(proof)
-  );
-}
-
-function pendingProofsAreConsistent(state: HybridState) {
-  const pending = state.pending;
-  if (!pending) return true;
-  const observation: Observation = {
-    id: pending.observation.entryId,
-    hash: pending.observation.messageHash,
-    role: pending.observation.role,
-    text: "",
-  };
-  const assessment = state.scopeAssessment;
-  const unacceptedGate =
-    pending.phase === "extract" &&
-    !!state.scopeFailure &&
-    !assessment &&
-    !pending.gateHash;
-  if (unacceptedGate)
-    return (
-      pending.completedTaskIds.length === 0 &&
-      pending.completionHashes.length === 0 &&
-      !pending.patchHash &&
-      !pending.proofs
-    );
+  const observation = value.observation;
+  const gate = value.journal.gate;
+  if (!sameRef(gate.assessment.source, observation)) return false;
   if (
-    !assessment ||
-    !pending.gateHash ||
-    pending.gateHash !== gateProof(assessment) ||
-    assessment.source.entryId !== pending.observation.entryId ||
-    assessment.source.messageHash !== pending.observation.messageHash ||
-    assessment.source.role !== pending.observation.role ||
-    !pending.proofs?.gate ||
-    pending.proofs.gate.phase !== "gate" ||
-    !validRequestProof(pending.proofs.gate, observation)
+    gate.priorScopeAssessment.present &&
+    !validAssessment(gate.priorScopeAssessment.value)
   )
     return false;
-  const requiresPatch = !(
-    assessment.rawChoice === "unchanged" && assessment.reason === "accepted"
-  );
-  if (
-    !requiresPatch &&
-    pending.proofs.gate.tasks.some((projection) => {
-      const task = state.tasks.find(
-        (candidate) => candidate.id === projection.id,
-      );
-      return !task || !projectionMatchesTask(projection, task);
-    })
-  )
-    return false;
-  if (pending.phase === "extract")
-    return (
-      requiresPatch &&
-      !pending.patchHash &&
-      pending.completedTaskIds.length === 0 &&
-      pending.completionHashes.length === 0 &&
-      pending.proofs.completions.length === 0
-    );
-  if (requiresPatch) {
+  if (value.journal.patch) {
     if (
-      !pending.patchHash ||
-      pending.patchHash !== patchProof(state) ||
-      !pending.proofs.patch ||
-      pending.proofs.patch.phase !== "patch" ||
-      !validRequestProof(pending.proofs.patch, observation)
+      !record(value.journal.patch) ||
+      !exactKeys(value.journal.patch, ["requestHash", "outcome", "undo"]) ||
+      !hashIsValid(value.journal.patch.requestHash) ||
+      !validPatch(value.journal.patch.outcome) ||
+      !validPatchUndo(value.journal.patch.undo, value.journal.patch.outcome)
     )
       return false;
-  } else if (pending.patchHash || pending.proofs.patch) return false;
-  if (
-    !pending.proofs.completions.every((proof) =>
-      validCompletionJournalProof(proof, observation),
-    )
-  )
-    return false;
-  const completedByProof = pending.proofs.completions.flatMap(
-    (proof) => proof.taskIds,
-  );
-  if (
-    completedByProof.length !== pending.completedTaskIds.length ||
-    completedByProof.some((id, index) => id !== pending.completedTaskIds[index])
-  )
-    return false;
-  for (const proof of pending.proofs.completions) {
-    if (
-      proof.tasks.some((projection) => {
-        const task = state.tasks.find(
-          (candidate) => candidate.id === projection.id,
-        );
-        return !task || !projectionMatchesTask(projection, task);
-      }) ||
-      proof.events.some(
-        (proofEvent) =>
-          !state.events.some(
-            (event) => JSON.stringify(event) === JSON.stringify(proofEvent),
-          ),
-      )
-    )
-      return false;
-    for (const result of proof.results) {
-      const task = state.tasks.find(
-        (candidate) => candidate.id === result.taskId,
-      );
-      if (
-        !task ||
-        task.status !== result.status ||
-        JSON.stringify(task.latestAssessment) !==
-          JSON.stringify(result.assessment)
-      )
-        return false;
-    }
   }
-  if (pending.completedTaskIds.length !== pending.completionHashes.length)
-    return false;
-  return pending.completedTaskIds.every((id, index) => {
-    const task = state.tasks.find((candidate) => candidate.id === id);
-    return (
-      !!task &&
-      !!task.latestAssessment &&
-      task.latestAssessment.source.entryId === pending.observation.entryId &&
-      task.latestAssessment.source.messageHash ===
-        pending.observation.messageHash &&
-      task.latestAssessment.source.role === pending.observation.role &&
-      pending.completionHashes[index] ===
-        completionProof(task, {
-          id: pending.observation.entryId,
-          hash: pending.observation.messageHash,
-          role: pending.observation.role,
-        })
-    );
-  });
+  const ids = new Set<string>();
+  let count = 0;
+  for (const completion of value.journal.completions) {
+    if (
+      !record(completion) ||
+      !exactKeys(completion, [
+        "requestHash",
+        "chunkIds",
+        "assessments",
+        "undo",
+      ]) ||
+      !hashIsValid(completion.requestHash) ||
+      !Array.isArray(completion.chunkIds) ||
+      completion.chunkIds.length < 1 ||
+      completion.chunkIds.length > MAX_COMPLETIONS ||
+      !completion.chunkIds.every(taskIdIsValid) ||
+      !Array.isArray(completion.assessments) ||
+      completion.assessments.length !== completion.chunkIds.length ||
+      !completion.assessments.every(validAssessment) ||
+      !record(completion.undo) ||
+      !exactKeys(completion.undo, ["tasks", "eventLength"]) ||
+      !Array.isArray(completion.undo.tasks) ||
+      completion.undo.tasks.length !== completion.chunkIds.length ||
+      !completion.undo.tasks.every(
+        (undo) =>
+          record(undo) &&
+          exactKeys(undo, ["status", "latestAssessment"]) &&
+          validTaskStatus(undo.status) &&
+          validPresence(undo.latestAssessment, validAssessment),
+      ) ||
+      !nonNegativeInteger(completion.undo.eventLength)
+    )
+      return false;
+    for (const id of completion.chunkIds) {
+      count++;
+      if (ids.has(id)) return false;
+      ids.add(id);
+    }
+    if (
+      !completion.assessments.every((assessment) =>
+        sameRef(assessment.source, observation),
+      )
+    )
+      return false;
+  }
+  return count <= MAX_COMPLETIONS;
 }
 
-function validCursor(value: unknown): value is { id: string; hash: string } {
+function sameRef(left: ObservationRef, right: ObservationRef) {
   return (
-    record(value) &&
-    exactKeys(value, ["id", "hash"]) &&
-    typeof value.id === "string" &&
-    !!value.id &&
-    hashIsValid(value.hash)
+    left.entryId === right.entryId &&
+    left.messageHash === right.messageHash &&
+    left.role === right.role
   );
 }
 
@@ -540,11 +579,11 @@ function validState(value: unknown): value is HybridState {
       typeof state.completionError !== "string")
   )
     return false;
-
   const taskIds = new Set(state.tasks.map((task) => task.id));
-  if (taskIds.size !== state.tasks.length) return false;
-  if (!pendingProofsAreConsistent(state)) return false;
-  if (state.tasks.filter((task) => task.included).length > MAX_ACTIVE_TASKS)
+  if (
+    taskIds.size !== state.tasks.length ||
+    state.tasks.filter((task) => task.included).length > MAX_ACTIVE_TASKS
+  )
     return false;
   const maxTaskId = Math.max(
     0,
@@ -582,15 +621,15 @@ function validState(value: unknown): value is HybridState {
     return false;
   if (
     state.pending &&
-    ((state.pending.phase === "extract" &&
-      (state.pending.completedTaskIds.length > 0 ||
-        state.pending.completionHashes.length > 0)) ||
-      state.pending.completionHashes.length >
-        state.pending.completedTaskIds.length ||
-      state.pending.completedTaskIds.some((id) => !taskIds.has(id)) ||
-      (state.cursor &&
-        state.cursor.id === state.pending.observation.entryId &&
-        state.cursor.hash === state.pending.observation.messageHash))
+    state.cursor &&
+    sameRef(
+      {
+        entryId: state.cursor.id,
+        messageHash: state.cursor.hash,
+        role: state.cursor.role,
+      },
+      state.pending.observation,
+    )
   )
     return false;
   return true;
@@ -674,9 +713,11 @@ function canonicalObservation(
 ) {
   const observation = resolve(reference.entryId);
   return observation &&
-    observation.id === reference.entryId &&
-    observation.role === reference.role &&
-    observation.hash === reference.messageHash &&
+    sameRef(reference, {
+      entryId: observation.id,
+      messageHash: observation.hash,
+      role: observation.role,
+    }) &&
     hash(observation.text) === observation.hash
     ? observation
     : undefined;
@@ -687,11 +728,44 @@ function canonicalSource(
   resolve: (entryId: string) => Observation | undefined,
 ) {
   const observation = canonicalObservation(source, resolve);
-  return (
-    observation &&
+  return observation &&
     source.end <= observation.text.length &&
     hash(observation.text.slice(source.start, source.end)) === source.quoteHash
-  );
+    ? observation
+    : undefined;
+}
+
+function journalReferencesResolve(
+  pending: PendingObservation,
+  resolve: (entryId: string) => Observation | undefined,
+) {
+  const refs: ObservationRef[] = [
+    ...pending.journal.gate.context,
+    pending.journal.gate.assessment.source,
+    ...(pending.journal.gate.priorScopeAssessment.present
+      ? [pending.journal.gate.priorScopeAssessment.value.source]
+      : []),
+    ...pending.journal.completions.flatMap((completion) => [
+      ...completion.assessments.map((assessment) => assessment.source),
+      ...completion.undo.tasks.flatMap((undo) =>
+        undo.latestAssessment.present
+          ? [undo.latestAssessment.value.source]
+          : [],
+      ),
+    ]),
+  ];
+  if (pending.journal.patch) {
+    const { outcome, undo } = pending.journal.patch;
+    refs.push(
+      ...outcome.add.map((operation) => operation.source),
+      ...outcome.revise.map((operation) => operation.source),
+      ...outcome.archive.map((operation) => operation.source),
+      ...outcome.restore.map((operation) => operation.source),
+      ...undo.revise.map((operation) => operation.source),
+      ...undo.restore.map((operation) => operation.source),
+    );
+  }
+  return refs.every((reference) => canonicalObservation(reference, resolve));
 }
 
 function referencesResolve(
@@ -719,34 +793,22 @@ function referencesResolve(
     return false;
   if (
     state.pending &&
-    !canonicalObservation(state.pending.observation, resolve)
+    (!canonicalObservation(state.pending.observation, resolve) ||
+      !journalReferencesResolve(state.pending, resolve))
   )
     return false;
   if (
-    state.pending?.proofs &&
-    [
-      state.pending.proofs.gate,
-      state.pending.proofs.patch,
-      ...state.pending.proofs.completions,
-    ].some(
-      (proof) =>
-        !!proof &&
-        proof.context.some(
-          (reference) => !canonicalObservation(reference, resolve),
-        ),
+    state.cursor &&
+    !canonicalObservation(
+      {
+        entryId: state.cursor.id,
+        messageHash: state.cursor.hash,
+        role: state.cursor.role,
+      },
+      resolve,
     )
   )
     return false;
-  if (state.cursor) {
-    const observation = resolve(state.cursor.id);
-    if (
-      !observation ||
-      observation.id !== state.cursor.id ||
-      observation.hash !== state.cursor.hash ||
-      hash(observation.text) !== observation.hash
-    )
-      return false;
-  }
   return true;
 }
 
@@ -756,7 +818,7 @@ function checkpointState(state: HybridState): HybridState {
     Object.hasOwn(snapshot, "focusTaskId") &&
     snapshot.focusTaskId === undefined
   )
-    (snapshot as unknown as { focusTaskId: null }).focusTaskId = null;
+    (snapshot as unknown as { focusTaskId?: string | null }).focusTaskId = null;
   return snapshot;
 }
 
@@ -781,24 +843,286 @@ export function monitorCheckpointMetadata(
   data: unknown,
 ): MonitorCheckpointMetadata | undefined {
   if (!validCheckpoint(data) || !data.monitor) return;
-  return JSON.parse(JSON.stringify(data.monitor)) as MonitorCheckpointMetadata;
+  return structuredClone(data.monitor);
 }
 
-/** Fail closed on malformed storage or references absent from canonical active history. */
+const operationCount = (outcome: NormalizedPatch) =>
+  outcome.add.length +
+  outcome.revise.length +
+  outcome.archive.length +
+  outcome.restore.length;
+
+function restorePresence<T>(
+  state: HybridState,
+  key: "focusTaskId" | "scopeAssessment",
+  value: Presence<T>,
+) {
+  if (value.present)
+    Object.assign(state, { [key]: structuredClone(value.value) });
+  else delete (state as unknown as Record<string, unknown>)[key];
+}
+
+function reversePatch(
+  state: HybridState,
+  record: NonNullable<PendingObservation["journal"]["patch"]>,
+) {
+  const { outcome, undo } = record;
+  if (state.events.length !== undo.eventLength + operationCount(outcome))
+    throw new Error("Patch event suffix mismatch");
+  const additions = outcome.add.length;
+  const expectedAdditions = outcome.add.map(
+    (_, index) => `task:${undo.nextTaskId + index}`,
+  );
+  if (
+    state.tasks.length < additions ||
+    (additions > 0 &&
+      !sameJson(
+        state.tasks.slice(-additions).map((task) => task.id),
+        expectedAdditions,
+      ))
+  )
+    throw new Error("Patch added tail mismatch");
+  const base = state.tasks.slice(0, state.tasks.length - additions);
+  const indexes = new Set<number>();
+  const at = (index: number, id: string) => {
+    if (
+      !Number.isSafeInteger(index) ||
+      index < 0 ||
+      index >= base.length ||
+      indexes.has(index) ||
+      base[index]?.id !== id
+    )
+      throw new Error("Patch undo target mismatch");
+    indexes.add(index);
+    return base[index] as HybridTask;
+  };
+  outcome.revise.forEach((operation, index) => {
+    const prior = undo.revise[index];
+    if (!prior) throw new Error("Patch revise undo missing");
+    const task = at(prior.index, operation.id);
+    if (!task.included) throw new Error("Patch revise lifecycle mismatch");
+    base[prior.index] = {
+      ...task,
+      label: prior.label,
+      status: prior.status,
+      revision: prior.revision,
+      source: structuredClone(prior.source),
+    };
+  });
+  outcome.archive.forEach((operation, index) => {
+    const prior = undo.archive[index];
+    if (!prior) throw new Error("Patch archive undo missing");
+    const task = at(prior.index, operation.id);
+    if (task.included || !prior.included)
+      throw new Error("Patch archive lifecycle mismatch");
+    base[prior.index] = { ...task, included: prior.included };
+  });
+  outcome.restore.forEach((operation, index) => {
+    const prior = undo.restore[index];
+    if (!prior) throw new Error("Patch restore undo missing");
+    const task = at(prior.index, operation.id);
+    if (!task.included || prior.included)
+      throw new Error("Patch restore lifecycle mismatch");
+    base[prior.index] = {
+      ...task,
+      label: prior.label,
+      status: prior.status,
+      included: prior.included,
+      revision: prior.revision,
+      source: structuredClone(prior.source),
+    };
+  });
+  state.tasks = base;
+  state.events = state.events.slice(0, undo.eventLength);
+  state.nextTaskId = undo.nextTaskId;
+  restorePresence(state, "focusTaskId", undo.focusTaskId);
+  state.scopeUnresolved = undo.scopeUnresolved;
+}
+
+function reversePending(finalState: HybridState): HybridState {
+  const state = copyState(finalState);
+  const pending = state.pending;
+  if (!pending) return state;
+  delete state.pending;
+  delete state.scopeError;
+  delete state.scopeFailure;
+  delete state.completionError;
+  for (const completion of [...pending.journal.completions].reverse()) {
+    if (state.events.length < completion.undo.eventLength)
+      throw new Error("Completion event length invalid");
+    completion.chunkIds.forEach((id, index) => {
+      const taskIndex = state.tasks.findIndex((task) => task.id === id);
+      const task = state.tasks[taskIndex];
+      const undo = completion.undo.tasks[index];
+      if (!task || !undo) throw new Error("Completion undo target missing");
+      const restored = { ...task, status: undo.status };
+      if (undo.latestAssessment.present)
+        restored.latestAssessment = structuredClone(
+          undo.latestAssessment.value,
+        );
+      else delete restored.latestAssessment;
+      state.tasks[taskIndex] = restored;
+    });
+    state.events = state.events.slice(0, completion.undo.eventLength);
+  }
+  if (pending.journal.patch) reversePatch(state, pending.journal.patch);
+  restorePresence(
+    state,
+    "scopeAssessment",
+    pending.journal.gate.priorScopeAssessment,
+  );
+  return state;
+}
+
+function patchTargetsMatchInput(
+  input: ReturnType<typeof extractionInput>,
+  outcome: NormalizedPatch,
+) {
+  const ids = new Set(input.tasks.map((task) => task.id));
+  return [...outcome.revise, ...outcome.archive, ...outcome.restore].every(
+    (operation) => ids.has(operation.id),
+  );
+}
+
+function sameContext(
+  expected: readonly ObservationRef[],
+  actual: readonly Observation[],
+) {
+  return (
+    expected.length === actual.length &&
+    expected.every((reference, index) =>
+      sameRef(reference, {
+        entryId: actual[index]?.id ?? "",
+        messageHash: actual[index]?.hash ?? "",
+        role: actual[index]?.role ?? "user",
+      }),
+    )
+  );
+}
+
+function replayPending(
+  finalState: HybridState,
+  resolve: (entryId: string) => Observation | undefined,
+  preceding: (entryId: string) => readonly Observation[],
+) {
+  const pending = finalState.pending;
+  if (!pending) return true;
+  const latest = canonicalObservation(pending.observation, resolve);
+  if (!latest) return false;
+  const context = [...preceding(latest.id)];
+  if (
+    !context.every((item) =>
+      canonicalObservation(
+        { entryId: item.id, messageHash: item.hash, role: item.role },
+        resolve,
+      ),
+    ) ||
+    !sameContext(pending.journal.gate.context, context)
+  )
+    return false;
+  const state = reversePending(finalState);
+  const gate = pending.journal.gate;
+  if (originHash(state) !== gate.originHash) return false;
+  const gateRequestValue = gateRequest(state, latest, context);
+  if (requestHash(gateRequestValue) !== gate.requestHash) return false;
+  if (!sameRef(gate.assessment.source, pending.observation)) return false;
+  let replayed = applyGate(state, gate.assessment);
+  const decision = gateDecision(gate.assessment);
+  const patch = pending.journal.patch;
+  if (patch) {
+    if (decision === "unchanged" || pending.phase !== "complete") return false;
+    const input = extractionInput(replayed, latest, context);
+    if (
+      requestHash(input) !== patch.requestHash ||
+      !patchTargetsMatchInput(input, patch.outcome) ||
+      !sameJson(patchUndo(replayed, patch.outcome), patch.undo)
+    )
+      return false;
+    replayed = applyPatch(replayed, patch.outcome);
+  } else if (
+    (decision === "unchanged" && pending.phase !== "complete") ||
+    (decision !== "unchanged" && pending.phase !== "extract")
+  )
+    return false;
+  if (pending.block.present) {
+    if (
+      pending.block.value === "completion-build"
+        ? pending.phase !== "complete"
+        : pending.phase !== "extract" ||
+          !!patch ||
+          pending.journal.completions.length > 0
+    )
+      return false;
+  }
+  if (pending.phase === "extract" && pending.journal.completions.length)
+    return false;
+  for (const completion of pending.journal.completions) {
+    if (pending.phase !== "complete") return false;
+    const accepted = new Set(
+      acceptedCompletionIds({
+        ...pending,
+        journal: {
+          ...pending.journal,
+          completions: pending.journal.completions.slice(
+            0,
+            pending.journal.completions.indexOf(completion),
+          ),
+        },
+      }),
+    );
+    const remaining = replayed.tasks.filter(
+      (task) => task.included && !accepted.has(task.id),
+    );
+    const chunk = completionChunks(latest, remaining, context)[0];
+    if (
+      !chunk ||
+      !sameJson(
+        chunk.map((task) => task.id),
+        completion.chunkIds,
+      )
+    )
+      return false;
+    const request = completionRequest(latest, chunk, context);
+    if (
+      requestHash(request) !== completion.requestHash ||
+      !sameJson(completionUndo(replayed, chunk), completion.undo)
+    )
+      return false;
+    if (
+      !completion.assessments.every((assessment) =>
+        sameRef(assessment.source, pending.observation),
+      )
+    )
+      return false;
+    replayed = applyCompletionRecord(
+      replayed,
+      completion.chunkIds,
+      completion.assessments,
+    );
+  }
+  return sameJson(replayCore(replayed), replayCore(finalState));
+}
+
+/**
+ * Fail closed on malformed storage, missing canonical source, or journal whose
+ * real gate/extraction/completion builders cannot reproduce its request hashes.
+ */
 export function restoreCheckpoint(
   data: unknown,
   sourceId: string,
   resolve: (entryId: string) => Observation | undefined,
+  preceding: (entryId: string) => readonly Observation[],
 ): HybridState | undefined {
   try {
     if (
       !validCheckpoint(data) ||
       byteLength(data) > MAX_BYTES ||
       data.state.sourceId !== sourceId ||
-      !referencesResolve(data.state, resolve)
+      !referencesResolve(data.state, resolve) ||
+      !replayPending(data.state, resolve, preceding)
     )
       return;
-    const state = JSON.parse(JSON.stringify(data.state)) as HybridState;
+    const state = structuredClone(data.state);
     if ((state as HybridState & { focusTaskId?: unknown }).focusTaskId === null)
       state.focusTaskId = undefined;
     return copyState(state);

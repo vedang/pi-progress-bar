@@ -126,7 +126,11 @@ describe("hybrid fresh-session core vertical", () => {
       end: ci.text.length,
       quoteHash: hash(ci.text),
     });
-    expect(state.cursor).toMatchObject({ id: ci.id, hash: ci.hash });
+    expect(state.cursor).toMatchObject({
+      id: ci.id,
+      hash: ci.hash,
+      role: ci.role,
+    });
     expect(state.focusTaskId).toBe("task:1");
     expect(p.extract).toHaveBeenCalledTimes(1);
     expect(
@@ -417,7 +421,7 @@ describe("strict atomic task extraction", () => {
     "unresolved-mutation",
     "invalid-kind",
   ])(
-    "rejects %s without mutating prior tasks, while completion remains independent",
+    "rejects %s atomically and blocks the unaccepted transaction before completion",
     async (variant) => {
       const initial = await seeded();
       const observation = message(
@@ -458,13 +462,13 @@ describe("strict atomic task extraction", () => {
       const state = await processObservation(initial, observation, p);
       expect(state.tasks.map((task) => task.label)).toEqual(labels);
       expect(state.nextTaskId).toBe(initial.nextTaskId);
-      expect(state.tasks.map((task) => task.status)).toEqual([
-        "not-started",
-        "not-started",
-        "done",
-      ]);
-      expect(state.scopeError).toBeTruthy();
-      expect(state.cursor?.id).toBe(observation.id);
+      expect(state.tasks).toEqual(initial.tasks);
+      expect(state.pending?.block).toEqual({
+        present: true,
+        value: "invalid-patch",
+      });
+      expect(state.cursor).toEqual(initial.cursor);
+      expect(p.evaluate).toHaveBeenCalledTimes(1);
       expect(initial.tasks.every((task) => task.status === "not-started")).toBe(
         true,
       );

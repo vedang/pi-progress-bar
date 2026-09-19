@@ -201,7 +201,11 @@ describe("hybrid task lifecycle", () => {
       if (variant === "duplicate")
         patch.archive.push({ id: "task:1", quote: message.text });
       const after = await processObservation(before, message, backend(patch));
-      expect(after.scopeError).toBeTruthy();
+      expect(after.pending?.block).toEqual({
+        present: true,
+        value: "invalid-patch",
+      });
+      expect(after.cursor).toEqual(before.cursor);
       expect(
         after.tasks.map(({ latestAssessment: _, ...task }) => task),
       ).toEqual(before.tasks.map(({ latestAssessment: _, ...task }) => task));

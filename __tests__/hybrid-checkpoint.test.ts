@@ -30,6 +30,7 @@ function restore(state: HybridState, messages = [initialMessage]) {
     encodeCheckpoint(state),
     "session:test",
     resolver(messages),
+    () => [],
   );
   expect(restored).toBeDefined();
   if (!restored) throw new Error("Expected checkpoint restoration");
@@ -60,6 +61,7 @@ describe("strict hybrid v5 checkpoint", () => {
           checkpoint,
           "session:test",
           resolver([initialMessage]),
+          () => [],
         ),
       ).toBeUndefined();
     },
@@ -71,6 +73,7 @@ describe("strict hybrid v5 checkpoint", () => {
         { ...checkpoint, interval: 15 },
         "session:test",
         resolver([initialMessage]),
+        () => [],
       ),
     ).toBeUndefined();
     expect(
@@ -78,16 +81,23 @@ describe("strict hybrid v5 checkpoint", () => {
         checkpoint,
         "another-session",
         resolver([initialMessage]),
+        () => [],
       ),
     ).toBeUndefined();
     expect(
-      restoreCheckpoint(checkpoint, "session:test", () => undefined),
+      restoreCheckpoint(
+        checkpoint,
+        "session:test",
+        () => undefined,
+        () => [],
+      ),
     ).toBeUndefined();
     expect(
       restoreCheckpoint(
         checkpoint,
         "session:test",
         resolver([observation(initialMessage.id, "different source")]),
+        () => [],
       ),
     ).toBeUndefined();
   });

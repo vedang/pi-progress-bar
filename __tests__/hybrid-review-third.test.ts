@@ -96,7 +96,8 @@ it.each(["status", "active-set"])(
     const accepted = j.saved.find(
       (state) =>
         state.pending?.phase === "complete" &&
-        !state.pending.completedTaskIds.length,
+        !state.pending.journal.completions.flatMap((record) => record.chunkIds)
+          .length,
     );
     if (!accepted?.tasks[0] || !accepted.tasks[2])
       throw new Error("Missing accepted unchanged gate");
@@ -110,21 +111,12 @@ it.each(["status", "active-set"])(
 it("reconstructs actual gate input rather than trusting a rehashed forged projection", async () => {
   const j = await journal("changed");
   const accepted = j.saved.find((state) => state.pending?.phase === "extract");
-  const proof = accepted?.pending?.proofs?.gate;
+  const proof = accepted?.pending?.journal.gate;
   const forged = structuredClone(j.state);
-  if (!accepted || !proof?.tasks[0] || !forged.tasks[0])
+  if (!accepted || !proof || !forged.tasks[0])
     throw new Error("Missing gate proof");
   forged.tasks[0].label = "Forged gate-only deliverable";
-  proof.tasks[0].label = forged.tasks[0].label;
   proof.requestHash = hash(gateRequest(forged, j.latest, []));
-  if ("inputHash" in proof)
-    proof.inputHash = hash({
-      phase: proof.phase,
-      requestHash: proof.requestHash,
-      observation: accepted.pending?.observation,
-      context: proof.context,
-      tasks: proof.tasks,
-    });
   expect(restore(accepted, j.messages)).toBeUndefined();
 });
 
@@ -133,16 +125,23 @@ it.each(["missing", "historical-substitute", "reordered-state"])(
   async (variant) => {
     const j = await journal("unchanged", "yes");
     const accepted = j.saved.find(
-      (state) => !!state.pending?.completedTaskIds.length,
+      (state) =>
+        !!state.pending?.journal.completions.flatMap(
+          (record) => record.chunkIds,
+        ).length,
     );
-    const proof = accepted?.pending?.proofs?.completions[0];
-    if (!accepted || !proof?.events.length || !accepted.events[0])
+    const proof = accepted?.pending?.journal.completions[0];
+    if (!accepted || !proof || !accepted.events[0])
       throw new Error("Missing completion event fixture");
     expect(restore(accepted, j.messages)).toBeDefined();
-    if (variant === "missing") proof.events = [];
-    else if (variant === "historical-substitute")
-      proof.events = [structuredClone(accepted.events[0])];
-    else accepted.events.reverse();
+    if (variant === "missing") accepted.events.splice(proof.undo.eventLength);
+    else if (variant === "historical-substitute") {
+      const event = accepted.events[proof.undo.eventLength];
+      if (!event) throw new Error("Missing derived event");
+      Object.assign(event, structuredClone(accepted.events[0]), {
+        id: event.id,
+      });
+    } else accepted.events.reverse();
     expect(restore(accepted, j.messages)).toBeUndefined();
   },
 );
@@ -150,10 +149,15 @@ it.each(["missing", "historical-substitute", "reordered-state"])(
 it("preserves a genuine empty completion event delta", async () => {
   const j = await journal("unchanged");
   const accepted = j.saved.find(
-    (state) => !!state.pending?.completedTaskIds.length,
+    (state) =>
+      !!state.pending?.journal.completions.flatMap((record) => record.chunkIds)
+        .length,
   );
   if (!accepted) throw new Error("Missing completion fixture");
-  expect(accepted.pending?.proofs?.completions[0]?.events).toEqual([]);
+  expect(accepted.events).toEqual(j.state.events);
+  expect(accepted.pending?.journal.completions[0]?.undo.eventLength).toBe(
+    j.state.events.length,
+  );
   expect(restore(accepted, j.messages)).toBeDefined();
 });
 
@@ -176,7 +180,7 @@ it.each(["reordered", "inserted"])(
   },
 );
 
-it("journals every admitted archived extraction input, in request order", async () => {
+it("binds every admitted archived extraction input and omitted count without duplicate projections", async () => {
   const base = await initial();
   const task = base.tasks[0],
     event = base.events[0];
@@ -194,14 +198,17 @@ it("journals every admitted archived extraction input, in request order", async 
   }));
   base.nextTaskId = 201;
   const j = await journal("changed", "no", base);
-  const accepted = j.saved.find((state) => !!state.pending?.proofs?.patch);
+  const accepted = j.saved.find((state) => !!state.pending?.journal.patch);
   const input = extractionInput(base, j.latest, []);
   expect(input.tasks.some((item) => !item.included)).toBe(true);
-  expect(
-    accepted?.pending?.proofs?.patch?.tasks.map((item) => item.id),
-  ).toEqual(input.tasks.map((item) => item.id));
-  expect(accepted?.pending?.proofs?.patch).toHaveProperty(
-    "omittedArchivedTasks",
-    input.omittedArchivedTasks,
-  );
+  const patch = accepted?.pending?.journal.patch;
+  if (!accepted || !patch) throw new Error("Missing archive request record");
+  expect(patch.requestHash).toBe(hash(input));
+  expect(patch).not.toHaveProperty("tasks");
+  expect(restore(accepted, j.messages)).toBeDefined();
+  patch.requestHash = hash({
+    ...input,
+    omittedArchivedTasks: input.omittedArchivedTasks + 1,
+  });
+  expect(restore(accepted, j.messages)).toBeUndefined();
 });

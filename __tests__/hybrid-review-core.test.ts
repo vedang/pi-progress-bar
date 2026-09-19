@@ -39,6 +39,7 @@ async function ledger(total: number, active: number, long = false) {
       encodeCheckpoint(state),
       "session:test",
       () => initialMessage,
+      () => [],
     ),
   ).toBeDefined();
   return state;
@@ -62,7 +63,10 @@ it.each([
     );
     expect(result.cursor).toEqual(state.cursor);
     expect(result.pending?.phase).toBe("extract");
-    expect(result.scopeUnresolved).toBe(true);
+    expect(result.pending?.block).toEqual({
+      present: true,
+      value: "task-capacity",
+    });
   },
 );
 
@@ -78,8 +82,11 @@ it("rejects malformed extraction visibly instead of presenting the previous ledg
   expect(result.tasks.map((task) => task.id)).toEqual(
     state.tasks.map((task) => task.id),
   );
-  expect(result.scopeUnresolved).toBe(true);
-  expect(result.scopeError).toBeTruthy();
+  expect(result.scopeUnresolved).toBe(state.scopeUnresolved);
+  expect(result.pending?.block).toEqual({
+    present: true,
+    value: "invalid-patch",
+  });
 });
 
 it("gate construction overflow cannot masquerade as an accepted completion phase", async () => {
@@ -139,7 +146,10 @@ it("does not restore an omitted archive target by guessing its identity", async 
   const result = await processObservation(state, message, p);
   expect(p.extract).toHaveBeenCalledTimes(1);
   expect(result.tasks[0]?.included).toBe(false);
-  expect(result.scopeUnresolved).toBe(true);
+  expect(result.pending?.block).toEqual({
+    present: true,
+    value: "invalid-patch",
+  });
 });
 
 async function snapshots() {
@@ -166,7 +176,9 @@ it.each([
     const saved = await snapshots();
     const state = saved.find((item) =>
       variant === "wrong-completion"
-        ? !!item.pending?.completedTaskIds.length
+        ? !!item.pending?.journal.completions.flatMap(
+            (record) => record.chunkIds,
+          ).length
         : variant === "wrong-patch"
           ? item.pending?.phase === "complete" && item.tasks.length > 0
           : item.pending?.phase === "extract",
@@ -175,14 +187,27 @@ it.each([
     const checkpoint = encodeCheckpoint(state);
     const pending = checkpoint.state.pending;
     if (!pending) throw new Error("Missing pending phase");
-    if (variant === "missing-gate") delete pending.gateHash;
-    if (variant === "wrong-gate") pending.gateHash = "a".repeat(64);
+    if (variant === "missing-gate")
+      Reflect.deleteProperty(pending.journal, "gate");
+    if (variant === "wrong-gate")
+      pending.journal.gate.requestHash = "a".repeat(64);
     if (variant === "forged-phase") pending.phase = "complete";
-    if (variant === "wrong-patch") pending.patchHash = "b".repeat(64);
-    if (variant === "wrong-completion")
-      pending.completionHashes[0] = "c".repeat(64);
+    if (variant === "wrong-patch") {
+      if (!pending.journal.patch) throw new Error("Missing patch record");
+      pending.journal.patch.requestHash = "b".repeat(64);
+    }
+    if (variant === "wrong-completion") {
+      const completion = pending.journal.completions[0];
+      if (!completion) throw new Error("Missing completion record");
+      completion.requestHash = "c".repeat(64);
+    }
     expect(
-      restoreCheckpoint(checkpoint, "session:test", () => initialMessage),
+      restoreCheckpoint(
+        checkpoint,
+        "session:test",
+        () => initialMessage,
+        () => [],
+      ),
     ).toBeUndefined();
   },
 );
@@ -209,8 +234,11 @@ it("exposes extraction construction overflow even when the smaller gate request 
   const p = backend();
   const result = await processObservation(state, target, p);
   expect(p.extract).not.toHaveBeenCalled();
-  expect(result.scopeUnresolved).toBe(true);
-  expect(result.scopeError).toBeTruthy();
+  expect(result.scopeUnresolved).toBe(state.scopeUnresolved);
+  expect(result.pending?.block).toEqual({
+    present: true,
+    value: "input-overflow",
+  });
 });
 
 it.each(["label", "kind", "completed-label", "completion-event"])(
@@ -236,8 +264,12 @@ it.each(["label", "kind", "completed-label", "completion-event"])(
       (state) =>
         state.pending?.phase === "complete" &&
         (variant.startsWith("complet")
-          ? !!state.pending.completedTaskIds.length
-          : !state.pending.completedTaskIds.length),
+          ? !!state.pending.journal.completions.flatMap(
+              (record) => record.chunkIds,
+            ).length
+          : !state.pending.journal.completions.flatMap(
+              (record) => record.chunkIds,
+            ).length),
     );
     if (!partial) throw new Error("Missing accepted unchanged journal");
     const checkpoint = encodeCheckpoint(partial);
@@ -254,8 +286,11 @@ it.each(["label", "kind", "completed-label", "completion-event"])(
       event.kind = "withdraw";
     }
     expect(
-      restoreCheckpoint(checkpoint, "session:test", (id) =>
-        [initialMessage, latest].find((message) => message.id === id),
+      restoreCheckpoint(
+        checkpoint,
+        "session:test",
+        (id) => [initialMessage, latest].find((message) => message.id === id),
+        () => [],
       ),
     ).toBeUndefined();
   },
@@ -284,8 +319,12 @@ it("binds an accepted gate to the canonical earlier context used by its request"
     "assistant",
   );
   expect(
-    restoreCheckpoint(checkpoint, "session:test", (id) =>
-      [initialMessage, amended, latest].find((message) => message.id === id),
+    restoreCheckpoint(
+      checkpoint,
+      "session:test",
+      (id) =>
+        [initialMessage, amended, latest].find((message) => message.id === id),
+      () => [],
     ),
   ).toBeUndefined();
 });

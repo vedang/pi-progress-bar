@@ -76,7 +76,7 @@ async function settledAtBytes(target: number, withCard = false) {
         revision: 1,
         source: observationRef(i === 899 ? tail : source),
       });
-    state.cursor = { id: source.id, hash: source.hash };
+    state.cursor = { id: source.id, hash: source.hash, role: source.role };
     return { state, source, tail };
   }
   const zero = size(encodeCheckpoint(candidate(0).state, meta));
@@ -153,7 +153,9 @@ it("finalizes a fully accepted journal above 496KiB without rebilling providers"
     f.messages.slice(-2),
   );
   const accepted = saved.find(
-    (state) => state.pending?.completedTaskIds.length === 3,
+    (state) =>
+      state.pending?.journal.completions.flatMap((record) => record.chunkIds)
+        .length === 3,
   );
   if (!accepted) throw new Error("Missing fully accepted journal");
   const checkpoint = encodeCheckpoint(accepted, f.meta);

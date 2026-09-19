@@ -82,7 +82,7 @@ it("never admits an in-memory patch or cursor beyond the checkpoint byte bound",
       "assistant",
     );
     fillEvents(state, 900, source);
-    state.cursor = { id: source.id, hash: source.hash };
+    state.cursor = { id: source.id, hash: source.hash, role: source.role };
     return { state, source };
   }
   const bytes = Buffer.byteLength(
@@ -288,7 +288,7 @@ it("validates every distinct authoritative accessor once per duplicate hook", as
         },
       },
     });
-    state.cursor = { id: source.id, hash: source.hash };
+    state.cursor = { id: source.id, hash: source.hash, role: source.role };
   }
   const h = fixture([]);
   h.replace(entries);
@@ -386,7 +386,7 @@ it("detects a deep accessor amendment in one hook, without reading unrelated old
         },
       },
     });
-    state.cursor = { id: source.id, hash: source.hash };
+    state.cursor = { id: source.id, hash: source.hash, role: source.role };
   }
   const h = fixture([]);
   h.replace(entries);

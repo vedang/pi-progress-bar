@@ -117,7 +117,10 @@ it("does not reread 10k settled historical payloads on ordinary append or duplic
   h.observe();
   const last = observation("history-9999", "History 9999.");
   const checkpoint = encodeCheckpoint(
-    { ...emptyState("session:test"), cursor: { id: last.id, hash: last.hash } },
+    {
+      ...emptyState("session:test"),
+      cursor: { id: last.id, hash: last.hash, role: last.role },
+    },
     {
       enabled: false,
       usage: {
@@ -237,9 +240,10 @@ it("rejects event-cap mutation before admitting unpersistable completion", async
     state.tasks.map((t) => t.status),
   );
   expect(next.cursor).toEqual(state.cursor);
-  expect(`${next.scopeError ?? ""} ${next.completionError ?? ""}`).toMatch(
-    /capacity|limit|1000/i,
-  );
+  expect(next.pending?.block).toEqual({
+    present: true,
+    value: "event-capacity",
+  });
 });
 
 it.each([false, true])(
@@ -263,8 +267,11 @@ it.each([false, true])(
       completionHashes: withHash ? ["a".repeat(64)] : [],
     };
     expect(
-      restoreCheckpoint(raw, "session:test", (id) =>
-        [initialMessage, report].find((m) => m.id === id),
+      restoreCheckpoint(
+        raw,
+        "session:test",
+        (id) => [initialMessage, report].find((m) => m.id === id),
+        () => [],
       ),
     ).toBeUndefined();
   },
@@ -278,7 +285,10 @@ it("does not persist malformed model response text through JSON parser exception
     initialMessage,
     p,
   );
-  expect(state.scopeError).toBeDefined();
+  expect(state.pending?.block).toEqual({
+    present: true,
+    value: "invalid-patch",
+  });
   expect(JSON.stringify(encodeCheckpoint(state))).not.toContain(
     "PRIVATE_PROVIDER_SENTINEL",
   );
@@ -318,6 +328,7 @@ it("does not turn a capacity-rejected scope patch into accepted completion work 
     encodeCheckpoint(first),
     "session:test",
     (id) => [initialMessage, message].find((m) => m.id === id),
+    () => [],
   );
   expect(restored).toBeDefined();
   if (!restored) throw new Error("Missing restored blocked state");
@@ -338,8 +349,11 @@ it("notices a changed canonical latest message with the same ID without rereadin
   expect(h.monitor.state.cursor?.hash).toBe(observation("goal", text).hash);
   expect(h.extract.mock.calls.at(-1)?.[0].latest.text).toBe(text);
   expect(
-    restoreCheckpoint(h.monitor.checkpoint(), "session:test", (id) =>
-      id === "goal" ? observation("goal", text) : undefined,
+    restoreCheckpoint(
+      h.monitor.checkpoint(),
+      "session:test",
+      (id) => (id === "goal" ? observation("goal", text) : undefined),
+      () => [],
     ),
   ).toBeDefined();
 });

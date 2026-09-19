@@ -73,7 +73,11 @@ it("restores an OFF-interrupted completion chunk without rebilling any accepted 
   for (let i = 0; i < 200 && completionCalls < 2; i++)
     await vi.advanceTimersByTimeAsync(1);
   expect(completionCalls).toBe(2);
-  const accepted = [...(h.monitor.state.pending?.completedTaskIds ?? [])];
+  const accepted = [
+    ...(h.monitor.state.pending?.journal.completions.flatMap(
+      (record) => record.chunkIds,
+    ) ?? []),
+  ];
   expect(accepted.length).toBeGreaterThan(0);
   expect(accepted.length).toBeLessThan(20);
   const checkpoint = h.monitor.checkpoint();

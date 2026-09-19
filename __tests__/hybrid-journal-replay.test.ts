@@ -250,3 +250,88 @@ it("has no hidden runtime compatibility aliases on pending transactions", async 
     ).toBeUndefined();
   }
 });
+
+it.each([false, true])(
+  "preserves prior unresolved=%s when an accepted gate is blocked by an invalid patch",
+  async (unresolved) => {
+    const state = await initial();
+    state.scopeUnresolved = unresolved;
+    const latest = observation("invalid-block", "Add another deliverable.");
+    const providers = backend();
+    providers.extract.mockResolvedValue("invalid JSON");
+    const blocked = await processObservation(state, latest, providers);
+    expect(blocked.pending?.block).toEqual({
+      present: true,
+      value: "invalid-patch",
+    });
+    expect(blocked.scopeUnresolved).toBe(unresolved);
+    expect(
+      restore(encodeCheckpoint(blocked), [initialMessage, latest]),
+    ).toBeDefined();
+  },
+);
+
+it("restores an accepted completion phase blocked at the event limit", async () => {
+  const state = await initial();
+  const seed = state.events[0];
+  if (!seed) throw new Error("Missing seed");
+  while (state.events.length < 1000)
+    state.events.push({
+      ...structuredClone(seed),
+      id: `event:${state.events.length + 1}`,
+      kind: "revise",
+    });
+  const latest = observation(
+    "event-block",
+    "All tasks are complete.",
+    "assistant",
+  );
+  const blocked = await processObservation(
+    state,
+    latest,
+    backend(noPatch(), { gate: "unchanged", complete: "yes" }),
+  );
+  expect(blocked.pending?.phase).toBe("complete");
+  expect(blocked.pending?.block).toEqual({
+    present: true,
+    value: "event-capacity",
+  });
+  expect(
+    restore(encodeCheckpoint(blocked), [initialMessage, latest]),
+  ).toBeDefined();
+});
+
+it("replays identical canonical context with a different object construction order", async () => {
+  const context = observation(
+    "context-keys",
+    "We mean the streaming parser.",
+    "assistant",
+  );
+  const latest = observation("context-replay", "Explain that parser.");
+  const saved: HybridState[] = [];
+  await processObservation(
+    await initial(),
+    latest,
+    backend(noPatch(), { save: (state) => saved.push(structuredClone(state)) }),
+    [context],
+  );
+  const gate = saved.find((state) => state.pending?.phase === "extract");
+  if (!gate) throw new Error("Missing accepted gate");
+  const canonical = {
+    id: context.id,
+    role: context.role,
+    text: context.text,
+    hash: context.hash,
+  };
+  expect(canonical).toEqual(context);
+  const checkpoint = encodeCheckpoint(gate);
+  expect(
+    restoreCheckpoint(
+      checkpoint,
+      "session:test",
+      (id) =>
+        [initialMessage, canonical, latest].find((item) => item.id === id),
+      () => [canonical],
+    ),
+  ).toBeDefined();
+});

@@ -35,7 +35,12 @@ it("publishes rejected scope as previous with an allowlisted diagnostic", async 
     usage: { inputTokens: 0, outputTokens: 0 },
   });
   h.append("extra", "Also deliver a separate report.");
-  await h.settle("extra");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.state.cursor?.id).toBe("goal");
+  expect(h.monitor.state.pending?.block).toEqual({
+    present: true,
+    value: "invalid-patch",
+  });
   expect(h.monitor.presentationSnapshot().progress.kind).toBe("previous");
   expect(h.monitor.debugSnapshot().diagnostics).toEqual(
     expect.arrayContaining([
@@ -162,7 +167,10 @@ it("resumes an accepted gate with the same earlier evidence, without rebilling t
   const latest = observation("extra", "Explain that mode.");
   const saved: HybridState[] = [];
   await processObservation(
-    { ...emptyState("session:test"), cursor: { id: b.id, hash: b.hash } },
+    {
+      ...emptyState("session:test"),
+      cursor: { id: b.id, hash: b.hash, role: b.role },
+    },
     latest,
     backend(noPatch(), { save: (state) => saved.push(structuredClone(state)) }),
     [a, b],

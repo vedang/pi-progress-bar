@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { processObservation } from "../src/core/hybrid";
 import {
+  checkpointStorageStatus,
   encodeCheckpoint,
+  MAX_CHECKPOINT_BYTES,
   restoreCheckpoint,
 } from "../src/core/hybrid-checkpoint";
-import type { HybridState, HybridTask } from "../src/core/hybrid-state";
-import * as stateModule from "../src/core/hybrid-state";
+import {
+  emptyState,
+  tasksNewestFirst as newest,
+} from "../src/core/hybrid-state";
 import {
   addPatch,
   backend,
@@ -15,20 +19,6 @@ import {
   observation,
 } from "./fixtures/hybrid";
 import { monitorHarness } from "./fixtures/hybrid-monitor";
-
-// U04 adds a pure display-order projection without duplicating durable ordinals.
-function newest(state: HybridState): HybridTask[] {
-  const fn = (
-    stateModule as unknown as {
-      tasksNewestFirst?: (state: HybridState) => HybridTask[];
-    }
-  ).tasksNewestFirst;
-  expect(fn, "tasksNewestFirst uses validated create-event order").toBeTypeOf(
-    "function",
-  );
-  if (!fn) throw new Error("Missing task-order projection");
-  return fn(state);
-}
 
 describe("stable retained-task admission order", () => {
   it("uses create-event order rather than current array position and never mutates state", async () => {
@@ -145,13 +135,55 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+function checkpointAtBytes(bytes: number) {
+  const value = {
+    version: 6,
+    state: { ...emptyState("session:test"), scopeError: "" },
+  };
+  value.state.scopeError = "x".repeat(
+    bytes - Buffer.byteLength(JSON.stringify(value)),
+  );
+  expect(Buffer.byteLength(JSON.stringify(value))).toBe(bytes);
+  return value;
+}
+
 describe("rejected storage never resets or rebills history", () => {
+  it("classifies structurally valid storage by exact UTF-8 byte ceiling", () => {
+    expect(
+      checkpointStorageStatus(checkpointAtBytes(MAX_CHECKPOINT_BYTES)),
+    ).toBe("supported");
+    expect(
+      checkpointStorageStatus(checkpointAtBytes(MAX_CHECKPOINT_BYTES + 1)),
+    ).toBe("corrupt");
+    const unicode = checkpointAtBytes(MAX_CHECKPOINT_BYTES - 1);
+    unicode.state.scopeError = `${unicode.state.scopeError.slice(0, -1)}界`;
+    expect(Buffer.byteLength(JSON.stringify(unicode))).toBe(
+      MAX_CHECKPOINT_BYTES + 1,
+    );
+    expect(checkpointStorageStatus(unicode)).toBe("corrupt");
+  });
+
+  it("never replays a valid-shaped checkpoint one byte over the limit", async () => {
+    const h = fixture();
+    const data = checkpointAtBytes(MAX_CHECKPOINT_BYTES + 1);
+    const before = structuredClone(data);
+    await h.monitor.restore("/nonexistent-hybrid-test", data, false, h.reader);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.monitor.enabled).toBe(false);
+    expect(h.monitor.presentationSnapshot().service.code).toBe(
+      "saved-state-corrupt",
+    );
+    expect(h.save).not.toHaveBeenCalled();
+    expect(h.fetch).not.toHaveBeenCalled();
+    expect(h.extract).not.toHaveBeenCalled();
+    expect(data).toEqual(before);
+  });
   it.each([0, 5, 7, 99])(
     "blocks unsupported version %s before save or dispatch",
     async (version) => {
       const h = fixture();
       const checkpoint = {
-        ...encodeCheckpoint(stateModule.emptyState("session:test")),
+        ...encodeCheckpoint(emptyState("session:test")),
         version,
       };
       const before = structuredClone(checkpoint);
@@ -182,7 +214,7 @@ describe("rejected storage never resets or rebills history", () => {
     "oversize",
   ])("blocks corrupt %s rather than treating it as absent", async (kind) => {
     const h = fixture();
-    const valid = encodeCheckpoint(stateModule.emptyState("session:test"));
+    const valid = encodeCheckpoint(emptyState("session:test"));
     const data =
       kind === "null"
         ? null
@@ -210,7 +242,7 @@ describe("rejected storage never resets or rebills history", () => {
   it("ON/OFF, model change, observation and shutdown cannot bypass rejection or write a replacement", async () => {
     const h = fixture();
     const checkpoint = {
-      ...encodeCheckpoint(stateModule.emptyState("session:test")),
+      ...encodeCheckpoint(emptyState("session:test")),
       version: 5,
     };
     await h.monitor.restore(

@@ -19,3 +19,11 @@
 - U02 source04037091 accepted after main static test import, private unused type cleanup and actualhost fixture wired to production adapter. Main format/check/395unit+12integration PASS; installed0.85.1 PTY regular/fullscreen PASS using actual createUiHost, no providers. No widget/index wiring yet.
 - U03 main tests frozen: ux-order-restore15cases (14red/1pass) plus index host2reds/4existingpass; format/checkPASS. Three order cases require pure tasksNewestFirst projection over existing create events; no new ordinal schema requested. Rejected-storage cases cover old/future versions, null/malformed/overcap, no saves/calls, ON/OFF/model/observation/stop latch and fresh restore; supported no-rebill control passes.
 - U04 must preserve accepted root canonical amendment reconciliation and metadata/authority invariants: unsupported/malformed STORAGE is not the same as supported source content legitimately amended. Do not reclassify every historical reference mismatch as structural corruption or erase root tests. Main owns any required test changes.
+
+## U04 main acceptance, byte-bound correction and batch review
+- Worker source commit `530ef53a`: event-derived newest-first projection; structural checkpoint classification; rejected restore latch with fresh-session guidance and no save/provider path.
+- Main switched frozen projection tests to static imports (assertions unchanged) for Knip reachability.
+- Main inspection found structurally valid >512KiB storage classified supported. Added two regressions: exact byte-cap and multibyte classification; monitor no-replay one-byte-over boundary. Both failed before fix (`u04-byte-red.log`), 15 original tests passed.
+- Main corrected classifier to enforce existing UTF-8 checkpoint ceiling; no schema or canonical-amendment change.
+- `make format`, `make check`, `make test` PASS: 412 unit +14 integration. Logs `u04-{format,check,test}.log`.
+- U04 stays in_progress until cumulative U00–U04 reviewer acceptance. No later ticket released.

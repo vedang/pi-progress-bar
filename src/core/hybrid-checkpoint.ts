@@ -758,7 +758,13 @@ export function checkpointStorageStatus(
   if (!record(data)) return "corrupt";
   if (typeof data.version === "number" && data.version !== VERSION)
     return "unsupported";
-  return validCheckpoint(data) ? "supported" : "corrupt";
+  try {
+    return validCheckpoint(data) && byteLength(data) <= MAX_CHECKPOINT_BYTES
+      ? "supported"
+      : "corrupt";
+  } catch {
+    return "corrupt";
+  }
 }
 
 function canonicalObservation(

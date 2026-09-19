@@ -86,7 +86,9 @@ describe("intercom canonical task intake", () => {
       },
     ]);
     expect(pass.page().page.map((o) => o.id)).toEqual(["goal", "answer"]);
-    expect(pass.preceding("answer")[0]).toMatchObject({
+    const preceding = pass.precedingResult("answer");
+    expect(preceding.complete).toBe(true);
+    expect(preceding.context[0]).toMatchObject({
       id: "goal",
       role: "intercom",
     });

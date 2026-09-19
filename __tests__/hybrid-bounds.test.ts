@@ -283,3 +283,63 @@ it("does not persist malformed model response text through JSON parser exception
     "PRIVATE_PROVIDER_SENTINEL",
   );
 });
+
+it("does not turn a capacity-rejected scope patch into accepted completion work after restart", async () => {
+  const state = await initial();
+  const source = state.events[0]?.source;
+  if (!source) throw new Error("Missing source");
+  while (state.events.length < 1000)
+    state.events.push({
+      id: `event:${state.events.length + 1}`,
+      kind: "revise",
+      taskId: "task:1",
+      revision: 1,
+      source: { ...source },
+    });
+  const message = observation(
+    "capacity-scope",
+    "Revise the parser requirement.",
+  );
+  const patch = {
+    ...noPatch(),
+    revise: [
+      {
+        id: "task:1",
+        label: "Implement Unicode parser",
+        requirementsChanged: true,
+        quote: message.text,
+      },
+    ],
+  };
+  const first = await processObservation(state, message, backend(patch));
+  expect(first.cursor).toEqual(state.cursor);
+  expect(first.pending?.phase).toBe("extract");
+  const restored = restoreCheckpoint(
+    encodeCheckpoint(first),
+    "session:test",
+    (id) => [initialMessage, message].find((m) => m.id === id),
+  );
+  expect(restored).toBeDefined();
+  if (!restored) throw new Error("Missing restored blocked state");
+  const next = await processObservation(restored, message, backend(patch));
+  expect(next.cursor).toEqual(state.cursor);
+  expect(next.tasks).toEqual(state.tasks);
+  expect(next.events).toEqual(state.events);
+});
+
+it("notices a changed canonical latest message with the same ID without rereading history", async () => {
+  const h = fixture();
+  h.start();
+  await h.settle("goal");
+  const text =
+    "Implement parser, add regression, and validate it. Also clarify Unicode handling.";
+  h.replace([branchEntry("goal", text)]);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.state.cursor?.hash).toBe(observation("goal", text).hash);
+  expect(h.extract.mock.calls.at(-1)?.[0].latest.text).toBe(text);
+  expect(
+    restoreCheckpoint(h.monitor.checkpoint(), "session:test", (id) =>
+      id === "goal" ? observation("goal", text) : undefined,
+    ),
+  ).toBeDefined();
+});

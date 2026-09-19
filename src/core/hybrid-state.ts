@@ -173,9 +173,12 @@ export interface PendingObservation {
 }
 
 export type ScopeFailure = "capacity" | "invalid" | "overflow";
+type CapacityState = "clear" | "limit";
 
 export interface HybridState {
   sourceId: string;
+  /** Fixed-width durable admission marker; `limit` blocks paid phase work. */
+  capacity: CapacityState;
   tasks: HybridTask[];
   events: MutationEvent[];
   nextTaskId: number;
@@ -194,6 +197,7 @@ export function emptyState(sourceId: string): HybridState {
   if (!sourceId.trim()) throw new Error("Source ID is required");
   return {
     sourceId,
+    capacity: "clear",
     tasks: [],
     events: [],
     nextTaskId: 1,

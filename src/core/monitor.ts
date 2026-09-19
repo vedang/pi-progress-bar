@@ -14,12 +14,15 @@ import {
 import { EvidenceStore, redEvidenceLabel } from "../sources/evidence";
 import { CanonicalPass } from "../sources/messages";
 import {
+  type AdmissionPlan,
   DurabilityCapacityError,
   processObservation,
   RetryableProviderError,
 } from "./hybrid";
 import {
+  checkpointBytes,
   encodeCheckpoint,
+  MAX_CHECKPOINT_BYTES,
   type MonitorCheckpointMetadata,
   monitorCheckpointMetadata,
   restoreCheckpoint,
@@ -81,6 +84,11 @@ interface HealthWork {
   revision: number;
 }
 
+interface CapacityEnvelope {
+  boundaries: Record<string, number>;
+  maximum: number;
+}
+
 export interface PresentationSnapshot {
   enabled: boolean;
   progress: {
@@ -103,9 +111,6 @@ export interface DebugSnapshot {
   service: { code: string; label: string };
   diagnostics: { code: string; label: string; count: number }[];
 }
-
-const CHECKPOINT_BYTES = 512 * 1024;
-const TRANSACTION_JOURNAL_RESERVE_BYTES = 16 * 1024;
 
 const diagnosticLabels: Record<string, string> = {
   "invalid-scope-result": "Scope result rejected",
@@ -424,7 +429,9 @@ export class Monitor {
     const done = active.filter((task) => task.status === "done").length;
     const kind = !active.length
       ? "empty"
-      : this.state.scopeUnresolved || this.state.pending?.block.present
+      : this.state.capacity === "limit" ||
+          this.state.scopeUnresolved ||
+          this.state.pending?.block.present
         ? "previous"
         : "current";
     return {
@@ -1003,12 +1010,6 @@ export class Monitor {
 
   private async processOne(observation: Observation, epoch: number) {
     try {
-      // Reserve bounded journal room before any provider dispatch.
-      if (!this.hasTransactionHeadroom()) {
-        this.rejectCapacity();
-        this.blockedPending = { id: observation.id, hash: observation.hash };
-        return;
-      }
       const healthTarget = this.state.tasks.find(
         (task) =>
           task.id === this.state.focusTaskId &&
@@ -1019,6 +1020,7 @@ export class Monitor {
         this.state,
         observation,
         {
+          admit: (plan) => this.admit(plan),
           evaluate: (request) => this.evaluateJev(request, epoch),
           extract: (input) => this.extract(input, epoch),
           save: (state) => this.commit(state),
@@ -1036,6 +1038,11 @@ export class Monitor {
             task.status === "done",
         );
       this.commit(next);
+      if (next.capacity === "limit") {
+        this.blockedPending = { id: observation.id, hash: observation.hash };
+        this.note("capacity-exhausted");
+        return;
+      }
       if (
         next.cursor?.id === observation.id &&
         next.cursor.hash === observation.hash
@@ -1158,32 +1165,139 @@ export class Monitor {
     }
   }
 
-  private hasTransactionHeadroom() {
-    try {
-      return (
-        Buffer.byteLength(
-          JSON.stringify(encodeCheckpoint(this.state, this.metadata())),
-        ) <=
-        CHECKPOINT_BYTES - TRANSACTION_JOURNAL_RESERVE_BYTES
-      );
-    } catch {
-      return false;
-    }
+  /** Saturating metadata bounds every dispatch and usage persistence boundary. */
+  private capacityMetadata(card = this.card): MonitorCheckpointMetadata {
+    const maximum = Number.MAX_SAFE_INTEGER;
+    return {
+      enabled: this.enabled,
+      usage: {
+        jev: {
+          calls: maximum,
+          inputTokens: maximum,
+          outputTokens: maximum,
+        },
+        extraction: {
+          calls: maximum,
+          inputTokens: maximum,
+          outputTokens: maximum,
+        },
+      },
+      lastJevCallAt: maximum,
+      lastExtractionCallAt: maximum,
+      ...(card ? { card: copyCard(card) } : {}),
+    };
   }
 
-  /** Preserve current durable transaction while exposing capacity as unresolved. */
-  private rejectCapacity() {
-    const rejected: HybridState = {
-      ...this.state,
-      scopeUnresolved: true,
-      scopeFailure: "capacity",
-      scopeError: "Hybrid checkpoint exceeds durable capacity",
+  private retainedCardFor(state: HybridState) {
+    const card = this.card;
+    if (!card) return;
+    const task = state.tasks.find((item) => item.id === card.taskId);
+    if (
+      card.retained ||
+      !task ||
+      task.status === "done" ||
+      state.focusTaskId !== card.taskId ||
+      task.revision !== card.revision ||
+      task.label !== card.label
+    )
+      return {
+        ...copyCard(card),
+        ...(card.retained && card.replacementPending && task?.status === "done"
+          ? { replacementPending: false }
+          : { retained: true }),
+      };
+    return copyCard(card);
+  }
+
+  /** All named persisted phase boundaries use strict encoded checkpoint bytes. */
+  private capacityEnvelope(
+    phase: AdmissionPlan["phase"] | "health",
+    candidate: HybridState,
+    card = this.retainedCardFor(candidate),
+    schemaBytes = 0,
+  ): CapacityEnvelope {
+    const current = this.metadata();
+    const dispatch = this.capacityMetadata(card);
+    const limit = { ...candidate, capacity: "limit" as const };
+    const boundaries = {
+      current: checkpointBytes(this.state, current),
+      [`${phase}-timestamp`]: checkpointBytes(candidate, dispatch),
+      [`${phase}-usage`]: checkpointBytes(candidate, dispatch),
+      [`${phase}-accepted`]: checkpointBytes(candidate, dispatch),
+      [`${phase}-limit-marker`]: checkpointBytes(limit, dispatch),
     };
+    return {
+      boundaries,
+      maximum: Math.max(...Object.values(boundaries)) + schemaBytes,
+    };
+  }
+
+  /** Required by core before any paid phase or dispatch timestamp. */
+  private admit(plan: AdmissionPlan) {
+    if (this.state.capacity === "limit") return false;
+    try {
+      const envelope = this.capacityEnvelope(
+        plan.phase,
+        plan.candidate,
+        undefined,
+        plan.schemaBytes,
+      );
+      if (envelope.maximum <= MAX_CHECKPOINT_BYTES) return true;
+    } catch {
+      // Invalid or unencodable candidate has no durable admission proof.
+    }
+    this.rejectCapacity();
+    return false;
+  }
+
+  private maximumHealthCard(task: HybridTask): RetainedCard {
+    return {
+      taskId: task.id,
+      revision: task.revision,
+      label: task.label,
+      retained: false,
+      replacementPending: false,
+      assessedAt: Number.MAX_SAFE_INTEGER,
+      health: {
+        requirements: "mostly clear",
+        acceptance: "not-found-in-context",
+        newRedTest: "Not needed",
+        redEvidence: "Contradictory",
+        implementation: "appears complete",
+      },
+    };
+  }
+
+  /** Whole health batch admission precedes its first Jev request. */
+  private admitHealth(task: HybridTask) {
+    if (this.state.capacity === "limit") return false;
+    try {
+      if (
+        this.capacityEnvelope(
+          "health",
+          this.state,
+          this.maximumHealthCard(task),
+        ).maximum <= MAX_CHECKPOINT_BYTES
+      )
+        return true;
+    } catch {
+      // Invalid or unencodable health projection has no admission proof.
+    }
+    this.rejectCapacity();
+    return false;
+  }
+
+  /** Fixed-width marker preserves prior accepted journal/card at byte edge. */
+  private rejectCapacity() {
+    const previousCard = this.card ? copyCard(this.card) : undefined;
+    const rejected: HybridState = { ...this.state, capacity: "limit" };
+    if (this.card) this.card = { ...copyCard(this.card), retained: true };
     try {
       const checkpoint = encodeCheckpoint(rejected, this.metadata());
       this.state = copyState(rejected);
       this.persist(checkpoint);
     } catch {
+      this.card = previousCard;
       this.note("saved-state-rejected");
     }
     this.note("capacity-exhausted");
@@ -1385,6 +1499,7 @@ export class Monitor {
     if (!task) return;
     const snapshot = this.projectedHealth(task, work.observation, pass);
     if (!snapshot || this.cardIsCurrent(task, snapshot.identity)) return;
+    if (!this.admitHealth(task)) return;
     let combined: ValidatedResult | undefined;
     for (const request of snapshot.requests) {
       const result = await this.evaluateJev(request, epoch);

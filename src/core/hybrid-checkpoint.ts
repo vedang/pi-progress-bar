@@ -42,7 +42,7 @@ const MAX_TASKS = 200;
 const MAX_ACTIVE_TASKS = 20;
 const MAX_EVENTS = 1000;
 const MAX_LABEL_CHARACTERS = 240;
-const MAX_BYTES = 512 * 1024;
+export const MAX_CHECKPOINT_BYTES = 512 * 1024;
 const MAX_COMPLETIONS = 20;
 
 export interface MonitorCheckpointMetadata {
@@ -165,7 +165,12 @@ function validAssessment(value: unknown): value is Assessment {
       "reason",
       "source",
     ]) &&
-    typeof value.rawChoice === "string" &&
+    (value.rawChoice === "changed" ||
+      value.rawChoice === "unchanged" ||
+      value.rawChoice === "uncertain" ||
+      value.rawChoice === "yes" ||
+      value.rawChoice === "no" ||
+      value.rawChoice === "invalid") &&
     unit(value.confidence) &&
     unit(value.probability) &&
     (value.reason === "accepted" ||
@@ -534,7 +539,14 @@ function validState(value: unknown): value is HybridState {
     !record(value) ||
     !exactKeys(
       value,
-      ["sourceId", "tasks", "events", "nextTaskId", "scopeUnresolved"],
+      [
+        "sourceId",
+        "capacity",
+        "tasks",
+        "events",
+        "nextTaskId",
+        "scopeUnresolved",
+      ],
       [
         "cursor",
         "pending",
@@ -547,6 +559,7 @@ function validState(value: unknown): value is HybridState {
     ) ||
     typeof value.sourceId !== "string" ||
     !value.sourceId.trim() ||
+    (value.capacity !== "clear" && value.capacity !== "limit") ||
     !Array.isArray(value.tasks) ||
     !Array.isArray(value.events) ||
     !positiveInteger(value.nextTaskId) ||
@@ -820,20 +833,36 @@ function checkpointState(state: HybridState): HybridState {
   return snapshot;
 }
 
-/** Encode only bounded derived state; source text and provider envelopes never persist. */
-export function encodeCheckpoint(
+/** Exact encoded bytes after strict v5 shape validation, before capacity denial. */
+export function checkpointBytes(
   state: HybridState,
   monitor?: MonitorCheckpointMetadata,
-): Checkpoint {
+) {
   if (!validState(state)) throw new Error("Invalid hybrid checkpoint state");
   const checkpoint: Checkpoint = {
     version: VERSION,
     state: checkpointState(state),
     ...(monitor ? { monitor } : {}),
   };
-  if (!validCheckpoint(checkpoint) || byteLength(checkpoint) > MAX_BYTES)
+  if (!validCheckpoint(checkpoint))
+    throw new Error("Invalid hybrid checkpoint");
+  return byteLength(checkpoint);
+}
+
+/** Encode only bounded derived state; source text and provider envelopes never persist. */
+export function encodeCheckpoint(
+  state: HybridState,
+  monitor?: MonitorCheckpointMetadata,
+): Checkpoint {
+  if (checkpointBytes(state, monitor) > MAX_CHECKPOINT_BYTES)
     throw new Error("Hybrid checkpoint exceeds v5 bounds");
-  return JSON.parse(JSON.stringify(checkpoint)) as Checkpoint;
+  return JSON.parse(
+    JSON.stringify({
+      version: VERSION,
+      state: checkpointState(state),
+      ...(monitor ? { monitor } : {}),
+    }),
+  ) as Checkpoint;
 }
 
 /** Read only validated monitor-owned metadata; unknown checkpoint fields fail closed. */
@@ -1122,7 +1151,7 @@ export function restoreCheckpoint(
   try {
     if (
       !validCheckpoint(data) ||
-      byteLength(data) > MAX_BYTES ||
+      byteLength(data) > MAX_CHECKPOINT_BYTES ||
       data.state.sourceId !== sourceId ||
       !referencesResolve(data.state, resolve) ||
       !replayPending(data.state, resolve, preceding)

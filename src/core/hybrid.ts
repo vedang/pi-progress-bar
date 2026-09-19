@@ -38,12 +38,27 @@ import {
   type PendingBlock,
   type PendingObservation,
   type ScopeFailure,
+  type SourceRef,
 } from "./hybrid-state";
 
 const MAX_ACTIVE_TASKS = 20;
 const MAX_TOTAL_TASKS = 200;
 const MAX_EVENTS = 1000;
 const MAX_LATEST_MESSAGE_BYTES = 12 * 1024;
+const MAX_SCHEMA_LABEL = "\ud800".repeat(240);
+
+type AdmissionPhase = "gate" | "extraction" | "completion";
+
+/**
+ * Exact candidate state for one paid phase plus any conservative schema
+ * supplement that cannot be represented as one lifecycle-legal candidate.
+ */
+export interface AdmissionPlan {
+  phase: AdmissionPhase;
+  candidate: HybridState;
+  request: EvaluationRequest | ExtractionInput;
+  schemaBytes: number;
+}
 
 /** Transport failed before a semantic result; retain accepted journal for explicit wake. */
 export class RetryableProviderError extends Error {
@@ -64,6 +79,8 @@ export class DurabilityCapacityError extends Error {
 export interface HybridProviders {
   evaluate(request: EvaluationRequest): Promise<ValidatedResult>;
   extract(input: ReturnType<typeof extractionInput>): Promise<string>;
+  /** Required synchronous capacity authority before any provider dispatch. */
+  admit?(plan: AdmissionPlan): boolean;
   /** Durably writes immutable snapshots after every accepted transaction phase. */
   save?(state: HybridState): void;
 }
@@ -118,6 +135,7 @@ function completeTransaction(state: HybridState, observation: Observation) {
   const { pending: _pending, ...committed } = state;
   return {
     ...committed,
+    capacity: "clear" as const,
     cursor: {
       id: observation.id,
       hash: observation.hash,
@@ -499,17 +517,172 @@ function blockPending(
   state: HybridState,
   block: PendingBlock,
   failure: ScopeFailure,
+  capacityLimited = false,
 ): HybridState {
   const current = state.pending;
   if (!current)
     throw new Error("Accepted gate journal is required before block");
   return {
     ...state,
+    ...(capacityLimited ? { capacity: "limit" as const } : {}),
     pending: {
       ...current,
       block: present(block),
     },
     scopeFailure: failure,
+  };
+}
+
+function capacityLimited(state: HybridState): HybridState {
+  return { ...state, capacity: "limit" };
+}
+
+function admissionAllowed(providers: HybridProviders, plan: AdmissionPlan) {
+  return typeof providers.admit === "function" && providers.admit(plan);
+}
+
+function maximumAssessment(observation: Observation): Assessment {
+  return {
+    rawChoice: "yes",
+    confidence: 0.30000000000000004,
+    probability: 0.30000000000000004,
+    reason: "accepted",
+    source: observationRef(observation),
+  };
+}
+
+function maximumSource(observation: Observation): SourceRef {
+  return {
+    ...observationRef(observation),
+    start: 0,
+    end: Math.max(1, observation.text.length),
+    quoteHash: observation.hash,
+  };
+}
+
+function gateAdmissionPlan(
+  state: HybridState,
+  observation: Observation,
+  context: readonly Observation[],
+  request: EvaluationRequest,
+): AdmissionPlan {
+  const assessment = {
+    ...maximumAssessment(observation),
+    rawChoice: "unchanged",
+    reason: "semantic-unknown" as const,
+  };
+  const record: GateRecord = {
+    originHash: originHash(state),
+    requestHash: requestHash(request),
+    context: context.map(observationRef),
+    assessment,
+    priorScopeAssessment: optionalPresence(state.scopeAssessment),
+  };
+  const candidate = {
+    ...applyGate(state, assessment),
+    pending: pending(observation, "extract", record),
+  };
+  return { phase: "gate", candidate, request, schemaBytes: 0 };
+}
+
+function maximumPatch(state: HybridState, observation: Observation) {
+  const source = maximumSource(observation);
+  const additions = Math.min(
+    6,
+    MAX_TOTAL_TASKS - state.tasks.length,
+    MAX_ACTIVE_TASKS - state.tasks.filter((task) => task.included).length,
+  );
+  return {
+    add: Array.from({ length: additions }, (_, index) => ({
+      // Parser forbids same kind/label additions. Preserve 240 code points
+      // while making every maximum-schema addition lifecycle-legal.
+      label: `${MAX_SCHEMA_LABEL.slice(0, -1)}${index}`,
+      kind: "action" as const,
+      basis: "explicit" as const,
+      source,
+    })),
+    // A revise repeats both new and undo labels/source, so it upper-bounds
+    // archive/restore choices for each currently mutable task.
+    revise: state.tasks
+      .filter((task) => task.included)
+      .slice(0, 12)
+      .map((task) => ({
+        id: task.id,
+        label: MAX_SCHEMA_LABEL,
+        requirementsChanged: true,
+        source,
+      })),
+    archive: [],
+    restore: [],
+    unresolved: false,
+  } satisfies NormalizedPatch;
+}
+
+function extractionAdmissionPlan(
+  state: HybridState,
+  observation: Observation,
+  input: ExtractionInput,
+): AdmissionPlan {
+  try {
+    const outcome = maximumPatch(state, observation);
+    const undo = patchUndo(state, outcome);
+    const patched = applyPatch(state, outcome);
+    const candidate = {
+      ...patched,
+      pending: pending(
+        observation,
+        "complete",
+        state.pending?.journal.gate ??
+          (() => {
+            throw new Error("Accepted gate journal is required");
+          })(),
+        { requestHash: requestHash(input), outcome, undo },
+      ),
+    };
+    return { phase: "extraction", candidate, request: input, schemaBytes: 0 };
+  } catch {
+    // A legal maximum that already violates a structural cap cannot be paid.
+    return {
+      phase: "extraction",
+      candidate: copyState(state),
+      request: input,
+      schemaBytes: Number.POSITIVE_INFINITY,
+    };
+  }
+}
+
+function completionAdmissionPlan(
+  state: HybridState,
+  observation: Observation,
+  chunk: readonly HybridTask[],
+  request: EvaluationRequest,
+): AdmissionPlan {
+  const assessments = chunk.map(() => maximumAssessment(observation));
+  const undo = completionUndo(state, chunk);
+  const committed = applyCompletionRecord(
+    state,
+    chunk.map((task) => task.id),
+    assessments,
+  );
+  const journal = state.pending?.journal;
+  if (!journal) throw new Error("Accepted gate journal is required");
+  const record: CompletionRecord = {
+    requestHash: requestHash(request),
+    chunkIds: chunk.map((task) => task.id),
+    assessments,
+    undo,
+  };
+  return {
+    phase: "completion",
+    candidate: {
+      ...committed,
+      pending: pending(observation, "complete", journal.gate, journal.patch, [
+        ...journal.completions,
+        record,
+      ]),
+    },
+    request,
+    schemaBytes: 0,
   };
 }
 
@@ -552,6 +725,10 @@ export async function processObservation(
 
   let next = clearTransientErrors(prior);
   if (resuming?.block.present) return next;
+  // A durable limit never permits a fresh paid transaction. A replay-valid
+  // pending observation may still finish locally below without provider work.
+  if (!resuming && next.capacity === "limit") return next;
+  const context = preceding.slice(-2);
   if (!resuming) {
     if (Buffer.byteLength(observation.text) > MAX_LATEST_MESSAGE_BYTES)
       return {
@@ -568,12 +745,19 @@ export async function processObservation(
       };
     try {
       const beforeGate = copyState(next);
-      const request = gateRequest(beforeGate, observation, preceding);
+      const request = gateRequest(beforeGate, observation, context);
+      if (
+        !admissionAllowed(
+          providers,
+          gateAdmissionPlan(beforeGate, observation, context, request),
+        )
+      )
+        return capacityLimited(next);
       const gate = gateResult(await providers.evaluate(request), observation);
       const record: GateRecord = {
         originHash: originHash(beforeGate),
         requestHash: requestHash(request),
-        context: preceding.map(observationRef),
+        context: context.map(observationRef),
         assessment: structuredClone(gate.assessment),
         priorScopeAssessment: optionalPresence(beforeGate.scopeAssessment),
       };
@@ -611,13 +795,20 @@ export async function processObservation(
   if (next.pending?.phase === "extract") {
     let input: ExtractionInput;
     try {
-      input = extractionInput(next, observation, preceding);
+      input = extractionInput(next, observation, context);
     } catch (error) {
       if (error instanceof ExtractionInputOverflowError)
         return blockPending(next, "input-overflow", "overflow");
       throw error;
     }
     try {
+      if (
+        !admissionAllowed(
+          providers,
+          extractionAdmissionPlan(next, observation, input),
+        )
+      )
+        return blockPending(next, "event-capacity", "capacity", true);
       const outcome = normalizedPatch(
         groundPatch(
           parsePatch(await providers.extract(input)),
@@ -672,11 +863,18 @@ export async function processObservation(
         (task) => task.included && !accepted.has(task.id),
       );
       if (!remaining.length) break;
-      const chunk = completionChunks(observation, remaining, preceding)[0];
+      const chunk = completionChunks(observation, remaining, context)[0];
       if (!chunk) break;
       if (next.events.length + chunk.length > MAX_EVENTS)
         return blockPending(next, "event-capacity", "capacity");
-      const request = completionRequest(observation, chunk, preceding);
+      const request = completionRequest(observation, chunk, context);
+      if (
+        !admissionAllowed(
+          providers,
+          completionAdmissionPlan(next, observation, chunk, request),
+        )
+      )
+        return blockPending(next, "completion-build", "capacity", true);
       const decisions = completionDecisions(
         await providers.evaluate(request),
         observation,

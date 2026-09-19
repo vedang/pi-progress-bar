@@ -331,6 +331,79 @@ describe("hybrid fresh-session core vertical", () => {
   });
 });
 
+describe("hybrid accepted contract regressions", () => {
+  it("retains display focus when the focused task completes instead of selecting first unfinished", async () => {
+    const initial = await seeded();
+    const state = await processObservation(
+      initial,
+      message("first-done", "Investigation is complete.", "assistant"),
+      providers(
+        blank(),
+        { choice: "unchanged" },
+        { "complete:task:1": { choice: "yes" } },
+      ),
+    );
+    expect(state.tasks[0]?.status).toBe("done");
+    expect(state.focusTaskId).toBe(initial.focusTaskId);
+  });
+  it("focuses the first newly touched active task rather than an unrelated old unfinished task", async () => {
+    const observation = message("added", "Also write the release notes.");
+    const state = await processObservation(
+      await seeded(),
+      observation,
+      providers(additions(observation.text, ["Write release notes"])),
+    );
+    expect(state.focusTaskId).toBe("task:4");
+  });
+  it("gives the scope gate current tasks and preceding context so it can judge change", async () => {
+    const earlier = message(
+      "clarification",
+      "The existing diagnostic task is the one I mean.",
+    );
+    const p = providers(blank(), { choice: "unchanged" });
+    await processObservation(
+      await seeded(),
+      message("same", "Keep that task unchanged."),
+      p,
+      [earlier],
+    );
+    const gate = p.evaluate.mock.calls.find(
+      ([request]) => "gate" in request.questions,
+    )?.[0];
+    expect(JSON.stringify(gate?.state)).toContain(labels[0]);
+    expect(JSON.stringify(gate?.state)).toContain(earlier.text);
+  });
+  it("gives completion bounded earlier context for task-local references", async () => {
+    const earlier = message(
+      "doing",
+      "I am working on the diagnostic task.",
+      "assistant",
+    );
+    const p = providers(blank(), { choice: "unchanged" });
+    await processObservation(
+      await seeded(),
+      message("reference", "That is finished now.", "assistant"),
+      p,
+      [earlier],
+    );
+    const completion = p.evaluate.mock.calls.find(
+      ([request]) => "complete:task:1" in request.questions,
+    )?.[0];
+    expect(JSON.stringify(completion?.state)).toContain(earlier.text);
+  });
+  it("preserves the successful completion rubric's delivered-result and response-answer rules", async () => {
+    const p = providers();
+    await processObservation(emptyState("session:test"), ci, p);
+    const question = p.evaluate.mock.calls.find(
+      ([request]) => "complete:task:1" in request.questions,
+    )?.[0].questions["complete:task:1"];
+    expect(question?.instructions).toContain("concrete delivered result");
+    expect(question?.instructions).toContain(
+      "actually giving the requested answer",
+    );
+  });
+});
+
 describe("strict atomic task extraction", () => {
   it.each([
     "malformed",

@@ -178,9 +178,12 @@ export class Conversation {
   /** Bounded append detection avoids rereading immutable branch history. */
   private branchEntryCount = 0;
   private branchTailId?: string;
+  /** Raw append offset keeps overflow replay bounded without rescanning prefix. */
+  private appendReplayStart?: number;
   private loadedDiscoveryCursor?: Reference;
   private observations?: Observation[];
   private reportTrajectory?: Trajectory;
+  private loadedReportAnchor?: Reference;
   private sourceObservation?: Observation;
   private cursorObservation?: Observation;
   private candidatesPending: Candidate[] = [];
@@ -188,13 +191,14 @@ export class Conversation {
   private freshCandidates: Candidate[] = [];
   private historicalDiscovery?: DiscoveryWork;
   private freshDiscovery?: DiscoveryWork;
-  /** First observed branch is history; later canonical user additions are fresh. */
-  private freshBaselineEstablished = false;
   /** At most two fresh dispatches may pass eligible historical work. */
   private freshDispatchesSinceHistorical = 0;
-  /** Bounded predecessor journal avoids rehydrating full branch for fresh work. */
+  /** Historical predecessor journal never accepts later append arrivals. */
   private recentUserDirections: { id: string; text: string }[] = [];
   private recentUserEntryId?: string;
+  /** Fresh arrivals follow known history but never contaminate paged history. */
+  private freshUserDirections: { id: string; text: string }[] = [];
+  private freshUserEntryId?: string;
   private candidateContexts = new Map<string, CandidateContext>();
   private pending?: PendingReport;
   private narrowedEntryId?: string;
@@ -266,33 +270,56 @@ export class Conversation {
    */
   update(entries: readonly unknown[], fresh = false) {
     const appendStart = this.appendStart(entries);
+    const previousTailId = this.branchTailId;
+    const appendedNow =
+      appendStart !== undefined && appendStart < entries.length;
     const cursorChanged = !this.sameReference(
       this.loadedDiscoveryCursor,
       this.discoveryCursor,
     );
     this.observations = undefined;
     this.bindBranch(entries);
+    if (appendStart === undefined) this.appendReplayStart = undefined;
+    if (cursorChanged && this.appendReplayStart !== undefined) {
+      if (this.loadAppendReplay(entries)) return;
+      this.appendReplayStart = undefined;
+    }
     if (appendStart !== undefined && !cursorChanged) {
-      if (appendStart < entries.length) {
-        // Only newly appended entries receive payload reads. Their parent may
-        // precede this bounded slice; candidate extraction stays exact.
-        // Fresh priority inspects newest bounded appended refs first. Earlier
-        // overflow stays replayable through chronological discovery windows.
-        const tailStart = Math.max(
-          appendStart,
-          entries.length - MAX_FRESH_CANDIDATES,
+      if (appendedNow) {
+        // Parse appended originals from their first exact ref. A bounded prefix
+        // becomes the next chronological page; it is never replaced by a tail.
+        const appended = collectTrajectory(
+          entries.slice(appendStart, appendStart + MAX_FRESH_CANDIDATES),
+          { chronological: true, detached: true },
         );
-        const appended = collectTrajectory(entries.slice(tailStart), {
-          chronological: true,
-        });
-        this.updateCandidates(
-          findCandidates(appended),
-          fresh || this.freshBaselineEstablished,
-          true,
-        );
+        if (appendStart + MAX_FRESH_CANDIDATES < entries.length)
+          appended.hasMore = true;
+        this.updateCandidates(findCandidates(appended), fresh, true);
+        // Arrival priority needs newest exact user refs too, but never replaces
+        // prefix replay. Overlap dedupes by canonical candidate ID/hash.
+        if (fresh && appended.hasMore) {
+          const tail = collectTrajectory(
+            entries.slice(
+              Math.max(appendStart, entries.length - MAX_FRESH_CANDIDATES),
+            ),
+            { chronological: true, detached: true },
+          );
+          this.updateCandidates(
+            findCandidates(tail).filter(
+              (candidate) => candidate.role === "user",
+            ),
+            true,
+            true,
+          );
+        }
+        // Do not replace a historical page currently awaiting its raw cursor.
+        // Once caught up, append overflow uses the ordinary replayable cursor.
+        if (!this.trajectory.hasMore) {
+          this.trajectory = appended;
+          if (appended.hasMore) this.appendReplayStart = appendStart;
+        }
+        this.appendReportTrajectory(entries, appendStart, previousTailId);
       }
-      this.freshBaselineEstablished = true;
-      this.updateReportTrajectory();
       return;
     }
     // Unknown branch replacement/reload is a conservative new baseline, not
@@ -315,10 +342,22 @@ export class Conversation {
             }
           : this.trajectory,
       ),
-      appendStart !== undefined && (fresh || this.freshBaselineEstablished),
+      // A raw page continuation is historical even if a fresh append arrived
+      // while its predecessor page was being drained.
+      appendedNow && fresh,
     );
-    this.freshBaselineEstablished = true;
-    this.updateReportTrajectory();
+    if (
+      !this.sameReference(
+        this.loadedReportAnchor,
+        this.initialReportPending
+          ? this.sourceObservation && {
+              id: this.sourceObservation.id,
+              hash: this.sourceObservation.hash,
+            }
+          : this.cursor,
+      )
+    )
+      this.updateReportTrajectory();
   }
   private sameReference(left?: Reference, right?: Reference) {
     return (
@@ -346,6 +385,50 @@ export class Conversation {
     this.branchEntries = entries;
     this.branchEntryCount = entries.length;
     this.branchTailId = this.entryId(entries.at(-1));
+  }
+  /** Load next append suffix page from raw index plus exact offset-aware cursor. */
+  private loadAppendReplay(entries: readonly unknown[]) {
+    const cursor = this.discoveryCursor;
+    const replayStart = this.appendReplayStart;
+    if (!cursor || replayStart === undefined) return false;
+    let index = -1;
+    for (let i = replayStart; i < entries.length; i++)
+      if (this.entryId(entries[i]) === cursor.id) {
+        index = i;
+        break;
+      }
+    if (index < 0) return false;
+    const start = cursor.offset === undefined ? index + 1 : index;
+    const end = Math.min(entries.length, start + MAX_FRESH_CANDIDATES);
+    this.trajectory = collectTrajectory(entries.slice(start, end), {
+      chronological: true,
+      detached: true,
+      ...(cursor.offset === undefined
+        ? {}
+        : {
+            after: { id: cursor.id, hash: cursor.hash, offset: cursor.offset },
+          }),
+    });
+    if (end < entries.length) this.trajectory.hasMore = true;
+    this.loadedDiscoveryCursor = { ...cursor };
+    this.updateCandidates(
+      findCandidates(
+        this.narrowedEntryId
+          ? {
+              ...this.trajectory,
+              messages: this.trajectory.messages.filter(
+                (item) => item.id === this.narrowedEntryId,
+              ),
+            }
+          : this.trajectory,
+      ),
+      // This cursor belongs only to an observed append batch. Ordinary raw
+      // history paging never enters this path and therefore stays historical.
+      true,
+    );
+    if (!this.trajectory.hasMore && end === entries.length)
+      this.appendReplayStart = undefined;
+    return true;
   }
   private candidateKey(candidate: Pick<Candidate, "id" | "hash">) {
     return `${candidate.id}:${candidate.hash}`;
@@ -400,10 +483,50 @@ export class Conversation {
     this.discoverySettledCandidates.add(this.candidateKey(candidate));
     this.settledCandidates.add(this.candidateKey(candidate));
     this.advanceSemanticCursor();
+    this.retireSettledDiscovery();
+  }
+  /** Retain one bounded visible window; trim only settled, non-durable prefix. */
+  private retireSettledDiscovery() {
+    if (this.candidates.length <= MAX_FRESH_CANDIDATES) return;
+    const durable = new Set<string>([
+      ...this.candidatesPending.map((item) => this.candidateKey(item)),
+      ...this.discoveryWorks().map((work) => this.candidateKey(work.candidate)),
+      ...this.proposals.map((item) => this.candidateKey(item.candidate)),
+      ...this.freshProposals.map((item) => this.candidateKey(item.candidate)),
+      ...this.freshCandidates.map((item) => this.candidateKey(item)),
+    ]);
+    let cut = 0;
+    while (this.candidates.length - cut > MAX_FRESH_CANDIDATES) {
+      const candidate = this.candidates[cut];
+      if (!candidate) break;
+      const key = this.candidateKey(candidate);
+      if (!this.settledCandidates.has(key) || durable.has(key)) break;
+      this.seenCandidates.delete(key);
+      this.discoverySettledCandidates.delete(key);
+      this.settledCandidates.delete(key);
+      this.candidateContexts.delete(key);
+      cut++;
+    }
+    if (cut) this.candidates = this.candidates.slice(cut);
   }
   /** Scope admission is a durable semantic phase, separate from report cursor. */
   commitScope(candidate: Pick<Candidate, "id" | "hash">) {
+    const key = this.candidateKey(candidate);
+    this.proposals = this.proposals.filter(
+      (item) => this.candidateKey(item.candidate) !== key,
+    );
+    this.freshProposals = this.freshProposals.filter(
+      (item) => this.candidateKey(item.candidate) !== key,
+    );
     this.settleCandidate(candidate);
+  }
+  /** Early cutover cannot split a single oversized original into lost remainder. */
+  canCutOverFrom(candidate: Pick<Candidate, "entryId" | "hash">) {
+    const original = this.original({
+      id: candidate.entryId,
+      hash: candidate.hash,
+    });
+    return !!original && Buffer.byteLength(original.text) <= 16 * 1024;
   }
   /** Initial scope cannot leap unresolved earlier discovery without cutover proof. */
   canInitializeFrom(candidate: Pick<Candidate, "id" | "entryId" | "hash">) {
@@ -436,22 +559,29 @@ export class Conversation {
     let freshAdded = false;
     for (const candidate of candidates) {
       const key = this.candidateKey(candidate);
+      const preceding = fresh
+        ? [...this.recentUserDirections, ...this.freshUserDirections].slice(-2)
+        : this.recentUserDirections;
       if (!this.candidateContexts.has(key))
         this.candidateContexts.set(key, {
-          precedingUserMessages: this.recentUserDirections.map((item) => ({
-            ...item,
-          })),
+          precedingUserMessages: preceding.map((item) => ({ ...item })),
         });
-      if (
-        candidate.role === "user" &&
-        candidate.entryId !== this.recentUserEntryId
-      ) {
-        this.recentUserDirections.push({
-          id: candidate.entryId,
-          text: candidate.text,
-        });
-        this.recentUserDirections = this.recentUserDirections.slice(-2);
-        this.recentUserEntryId = candidate.entryId;
+      if (candidate.role === "user") {
+        if (fresh && candidate.entryId !== this.freshUserEntryId) {
+          this.freshUserDirections.push({
+            id: candidate.entryId,
+            text: candidate.text,
+          });
+          this.freshUserDirections = this.freshUserDirections.slice(-2);
+          this.freshUserEntryId = candidate.entryId;
+        } else if (!fresh && candidate.entryId !== this.recentUserEntryId) {
+          this.recentUserDirections.push({
+            id: candidate.entryId,
+            text: candidate.text,
+          });
+          this.recentUserDirections = this.recentUserDirections.slice(-2);
+          this.recentUserEntryId = candidate.entryId;
+        }
       }
       if (this.seenCandidates.has(key)) continue;
       this.seenCandidates.add(key);
@@ -619,6 +749,7 @@ export class Conversation {
         : undefined;
     if (!anchor) {
       this.reportTrajectory = undefined;
+      this.loadedReportAnchor = undefined;
       return;
     }
     const next = collectTrajectory(this.branchEntries, {
@@ -627,9 +758,72 @@ export class Conversation {
       wholeEntries: true,
     });
     this.cursorObservation = anchor;
+    this.loadedReportAnchor = { id: anchor.id, hash: anchor.hash };
     this.reportTrajectory = {
       ...next,
       messages: [anchor, ...next.messages],
+    };
+  }
+  /** Append report visibility without re-reading selected-source history. */
+  private appendReportTrajectory(
+    entries: readonly unknown[],
+    start: number,
+    previousTailId?: string,
+  ) {
+    // A paged report window already has replayable unseen work. Rebuilding it
+    // for every append would read full branch history and cannot expose tail yet.
+    if (!this.reportTrajectory || this.reportTrajectory.hasMore) return;
+    const ids = new Set(
+      entries
+        .slice(start, start + MAX_FRESH_CANDIDATES)
+        .map((entry) => this.entryId(entry))
+        .filter(Boolean),
+    );
+    if (previousTailId) ids.add(previousTailId);
+    const orphaned = entries
+      .slice(start, start + MAX_FRESH_CANDIDATES)
+      .some(
+        (entry) =>
+          entry &&
+          typeof entry === "object" &&
+          !Array.isArray(entry) &&
+          typeof (entry as { parentId?: unknown }).parentId === "string" &&
+          !ids.has((entry as { parentId: string }).parentId),
+      );
+    const appended = collectTrajectory(
+      entries.slice(start, start + MAX_FRESH_CANDIDATES),
+      { chronological: true, wholeEntries: true, detached: true },
+    );
+    if (start + MAX_FRESH_CANDIDATES < entries.length) appended.hasMore = true;
+    const known = new Set(
+      this.reportTrajectory.messages.map(
+        (item) => `${item.id}:${item.hash}:${item.offset ?? ""}`,
+      ),
+    );
+    const additions = appended.messages.filter(
+      (item) => !known.has(`${item.id}:${item.hash}:${item.offset ?? ""}`),
+    );
+    if (!additions.length && !appended.hasMore) return;
+    // Keep exact work replayable via the normal cursor once this bounded view
+    // fills. No report candidate is silently dropped from branch authority.
+    const limit = Math.max(
+      0,
+      MAX_FRESH_CANDIDATES - this.reportTrajectory.messages.length,
+    );
+    this.reportTrajectory = {
+      ...this.reportTrajectory,
+      complete:
+        this.reportTrajectory.complete && appended.complete && !orphaned,
+      omissions: [
+        ...this.reportTrajectory.omissions,
+        ...appended.omissions,
+        ...(orphaned ? ["Missing original ancestral entry"] : []),
+      ],
+      messages: [
+        ...this.reportTrajectory.messages,
+        ...additions.slice(0, limit),
+      ],
+      hasMore: appended.hasMore || additions.length > limit || undefined,
     };
   }
   preview(ledger?: Ledger) {
@@ -1386,6 +1580,7 @@ export class Conversation {
     this.semanticDiscoveryCursor =
       checkpoint.discoveryCursor ?? checkpoint.cursor;
     this.discoveryCursor = this.semanticDiscoveryCursor;
+    this.appendReplayStart = undefined;
     this.candidatesPending = [];
     this.freshCandidates = [];
     this.historicalDiscovery = undefined;
@@ -1396,6 +1591,8 @@ export class Conversation {
     this.candidateContexts.clear();
     this.recentUserDirections = [];
     this.recentUserEntryId = undefined;
+    this.freshUserDirections = [];
+    this.freshUserEntryId = undefined;
     this.discoverySettledCandidates.clear();
     this.settledCandidates.clear();
     this.initialReportPending = checkpoint.initialReportPending === true;

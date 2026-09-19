@@ -95,11 +95,15 @@ exact source spans, role, and bounded preceding visible user direction. New chec
 schema v4 and require explicit `action` or `response` work kinds for every source span and saved
 task; v3, obsolete polling fields (including `interval`), and malformed shapes rebuild from the
 active branch rather than migrate. A newly observed user candidate keeps its exact ID/hash in a
-bounded fresh lane outside the normal history window.
+bounded fresh lane outside the normal history window. Large append batches begin at their first
+exact reference and continue through the same replayable cursor; newest fresh user refs may queue
+for priority without dropping earlier append work. Settled discovery state retires behind its bounded
+visible window, while unresolved scope work retains only its exact canonical references.
 When fresh and historical work both run, no class receives more than two consecutive dispatches.
 Only a complete, single-chunk, high-confidence `new-goal` transaction with all-new relations can
-replace current scope early; all other outcomes return to chronological reconciliation. Preceding
-direction grounds assistant plans without vetoing a new user request. It processes one chronological
+replace current scope early; oversized original entries return to chronological reconciliation so a
+same-entry remainder cannot be discarded. Preceding direction is source-chronological: later fresh
+users never ground an earlier paged assistant plan, and it does not veto a new user request. It processes one chronological
 observation through selection/classification, scope/current reconciliation, and then that
 observation's report cursor; a later goal cannot affect an earlier report. Action-task reports remain bounded multi-task batches. Each Jev-classified response task
 uses one small target-local report request with full lifecycle and current-task choices, so an answer

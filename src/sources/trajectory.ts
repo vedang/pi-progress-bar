@@ -32,6 +32,8 @@ export interface CollectOptions {
   unbounded?: boolean;
   /** Keep an oversized report entry whole so it can fail closed, never clip. */
   wholeEntries?: boolean;
+  /** Bounded appended suffix has an external parent; do not call it a history gap. */
+  detached?: boolean;
 }
 export interface Span {
   id: string;
@@ -129,14 +131,16 @@ export function collectTrajectory(
       gap("Branch entry missing a bounded ID");
       continue;
     }
-    if (typeof entry.parentId === "string" && !hasOriginal(entry.parentId))
-      gap("Missing original ancestral entry");
-    if (
-      entry.type === "compaction" &&
-      typeof entry.firstKeptEntryId === "string" &&
-      !hasOriginal(entry.firstKeptEntryId)
-    )
-      gap("Compacted original history unavailable");
+    if (!options.detached) {
+      if (typeof entry.parentId === "string" && !hasOriginal(entry.parentId))
+        gap("Missing original ancestral entry");
+      if (
+        entry.type === "compaction" &&
+        typeof entry.firstKeptEntryId === "string" &&
+        !hasOriginal(entry.firstKeptEntryId)
+      )
+        gap("Compacted original history unavailable");
+    }
     if (entry.type !== "message" || !record(entry.message)) continue;
     const message = entry.message;
     if (message.role !== "user" && message.role !== "assistant") continue;

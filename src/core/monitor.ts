@@ -671,7 +671,8 @@ export class Monitor {
         if (candidate === proposal) break;
         if (this.blockedScopeCandidates.delete(id)) {
           this.blockedScopeSources.delete(id);
-          this.scopedCandidates.add(id);
+          this.conversation.commitScope(candidate.candidate);
+          this.scopedCandidates.delete(id);
           this.conversation.note("superseded-unresolved-source");
         }
       }
@@ -687,10 +688,8 @@ export class Monitor {
     this.ledger = ledger;
     this.scopeUnresolved = false;
     this.conversation.commitScope(proposal.candidate);
+    this.scopedCandidates.delete(this.proposalId(proposal));
     this.conversation.select(source, true, true);
-    this.scopedCandidates.add(
-      `${proposal.candidate.id}:${proposal.candidate.hash}`,
-    );
     this.evidenceIdentity = undefined;
     this.save();
     if (this.cwd) void this.refreshBeads(this.cwd);
@@ -709,7 +708,11 @@ export class Monitor {
       // They cannot cut over, but validated source/task semantics may initialize
       // scope once their normal ordered path reaches them.
     };
-    if (proposal.ambiguous || this.freshMustRemainOrdered(proposal)) {
+    if (
+      proposal.ambiguous ||
+      this.freshMustRemainOrdered(proposal) ||
+      !this.conversation.canCutOverFrom(proposal.candidate)
+    ) {
       defer(proposal.ambiguous ? "ambiguous-discovery" : "fresh-ordered");
       return;
     }
@@ -842,7 +845,7 @@ export class Monitor {
     this.scopedCandidates = new Set(
       [...this.scopedCandidates].filter((id) => laterProposalIds.has(id)),
     );
-    this.scopedCandidates.add(this.proposalId(proposal));
+    this.scopedCandidates.delete(this.proposalId(proposal));
     const laterBlocked = new Map(
       [...this.blockedScopeSources].filter(
         ([, blocked]) =>
@@ -1147,8 +1150,8 @@ export class Monitor {
             ) {
               this.blockedScopeCandidates.delete(id);
               this.blockedScopeSources.delete(id);
-              this.scopedCandidates.add(id);
               this.conversation.commitScope(blocked);
+              this.scopedCandidates.delete(id);
             }
           }
       }
@@ -1156,8 +1159,8 @@ export class Monitor {
         this.scopeUnresolvedOverflow = false;
       this.scopeUnresolved =
         this.blockedScopeCandidates.size > 0 || this.scopeUnresolvedOverflow;
-      this.scopedCandidates.add(work.proposalId);
       this.conversation.commitScope(work.candidate);
+      this.scopedCandidates.delete(work.proposalId);
       this.save();
       if (this.cwd) void this.refreshBeads(this.cwd);
     });

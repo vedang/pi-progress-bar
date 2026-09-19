@@ -70,18 +70,18 @@ const requestFits = (request: EvaluationRequest) =>
   Buffer.byteLength(JSON.stringify(request)) <= MAX_REQUEST_BYTES;
 const criterionQuestion = (criterion: string) => ({
   type: "choice" as const,
-  instructions: `Assess exact criterion ${JSON.stringify(criterion)} for this exact task revision. Passive facts are CANDIDATES, not task ownership: establish concrete support and relevance from canonical requirements, latest report, and candidate facts. Bare agent self-report alone is insufficient. Missing, stale, truncated, unrelated, or unlinked facts are insufficient; explicit contrary current evidence contradicts. Choose partial for explicit incomplete support. Choose not-needed only when this criterion has no implementation deliverable from supplied context.`,
+  instructions: `First determine whether this task requires creating or changing an implementation artifact such as code or configuration. A request only to explain, report status, or provide information is not-needed even without passive evidence. Not-needed does not mean implementation work is unfinished. Only when implementation is required should missing passive evidence lead to insufficient. Assess exact criterion ${JSON.stringify(criterion)} for this exact task revision. Passive facts are CANDIDATES, not task ownership: establish concrete support and relevance from canonical requirements, latest report, and candidate facts. Bare agent self-report alone is insufficient. Missing, stale, truncated, unrelated, or unlinked facts are insufficient; explicit contrary current evidence contradicts. Choose partial for explicit incomplete support.`,
   criteria: {
     supports:
-      "Current concrete candidate evidence supports this complete criterion",
+      "When implementation is required, current concrete candidate evidence supports this complete criterion",
     partial:
-      "Current concrete candidate evidence supports only part of this criterion",
+      "When implementation is required, current concrete candidate evidence supports only part of this criterion",
     contradicts:
-      "Current concrete candidate evidence contradicts this criterion",
+      "When implementation is required, current concrete candidate evidence contradicts this criterion",
     insufficient:
-      "Evidence is missing, stale, incomplete, unrelated, or unlinked",
+      "When implementation is required, evidence is missing, stale, incomplete, unrelated, or unlinked",
     "not-needed":
-      "This criterion has no implementation deliverable in supplied context",
+      "No implementation artifact is required for this criterion in supplied context",
   },
 });
 

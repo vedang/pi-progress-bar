@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { processObservation } from "../src/core/hybrid";
 import {
+  checkpointBytes,
   encodeCheckpoint,
   type MonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
@@ -35,7 +36,12 @@ afterEach(() => {
 });
 
 /** Exact legal byte pressure using bounded event count, not oversized text. */
-async function settledAtBytes(target: number, withCard = false, tasks = 3) {
+async function settledAtBytes(
+  target: number,
+  withCard = false,
+  tasks = 3,
+  enabled = false,
+) {
   const seed = await initial();
   if (tasks !== 3) {
     const first = seed.tasks[0];
@@ -55,6 +61,7 @@ async function settledAtBytes(target: number, withCard = false, tasks = 3) {
     seed.nextTaskId = tasks + 1;
   }
   const meta = structuredClone(metadata);
+  meta.enabled = enabled;
   if (withCard)
     meta.card = {
       taskId: "task:1",
@@ -132,6 +139,85 @@ async function restored(
   expect(h.monitor.state.events.length).toBeGreaterThanOrEqual(900);
   return h;
 }
+
+it.each([false, true])(
+  "restored ON-only exact-edge checkpoint remains safely OFF with unchanged accepted work (pending=%s)",
+  async (pending) => {
+    const latest = observation(
+      "edge-pending",
+      "Report current work.",
+      "assistant",
+    );
+    let target = pending ? 508 * 1024 : 512 * 1024;
+    let f = await settledAtBytes(target, false, 3, true);
+    let state = f.state;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      f = await settledAtBytes(target, false, 3, true);
+      state = f.state;
+      if (pending) {
+        const saved: HybridState[] = [];
+        const p = Object.assign(
+          backend(noPatch(), {
+            gate: "unchanged",
+            save: (value) => saved.push(structuredClone(value)),
+          }),
+          { admit: (plan: { phase: string }) => plan.phase !== "completion" },
+        );
+        await processObservation(state, latest, p, f.messages.slice(-2));
+        const accepted = saved.find((value) => value.pending?.journal.gate);
+        if (!accepted) throw new Error("Missing accepted gate");
+        state = accepted;
+      }
+      const bytes = checkpointBytes(state, f.meta);
+      if (bytes === 512 * 1024) break;
+      target += 512 * 1024 - bytes;
+    }
+    const checkpoint = encodeCheckpoint(state, f.meta);
+    expect(size(checkpoint)).toBe(512 * 1024);
+    expect(checkpointBytes(state, { ...f.meta, enabled: false })).toBe(
+      512 * 1024 + 1,
+    );
+    const prefix = JSON.stringify(state.pending?.journal);
+    const h = await restored(f, checkpoint, pending ? latest : undefined);
+    expect(h.monitor.enabled).toBe(false);
+    expect(h.monitor.state.tasks).toEqual(state.tasks);
+    expect(JSON.stringify(h.monitor.state.pending?.journal)).toBe(prefix);
+    h.monitor.turnOff();
+    h.monitor.turnOn("/nonexistent-hybrid-test");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.monitor.enabled).toBe(false);
+    expect(h.fetch).not.toHaveBeenCalled();
+    expect(h.extract).not.toHaveBeenCalled();
+    expect(JSON.stringify(h.monitor.state.pending?.journal)).toBe(prefix);
+    for (const [saved] of h.save.mock.calls) {
+      expect(size(saved)).toBeLessThanOrEqual(512 * 1024);
+      expect(saved).toHaveProperty("monitor.enabled", false);
+    }
+    h.monitor.stop();
+    const restart = await restored(f, checkpoint, pending ? latest : undefined);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(restart.monitor.enabled).toBe(false);
+    expect(restart.fetch).not.toHaveBeenCalled();
+    expect(restart.extract).not.toHaveBeenCalled();
+    expect(JSON.stringify(restart.monitor.state.pending?.journal)).toBe(prefix);
+  },
+);
+
+it("provider-free commit cannot create a state too large for OFF control", async () => {
+  const small = await settledAtBytes(480 * 1024, false, 3, true);
+  const h = await restored(small);
+  const previous = structuredClone(h.monitor.state);
+  const edge = await settledAtBytes(512 * 1024, false, 3, true);
+  expect(() =>
+    Reflect.apply(Reflect.get(h.monitor, "commit"), h.monitor, [edge.state]),
+  ).toThrow();
+  expect(h.monitor.state.tasks).toEqual(previous.tasks);
+  expect(h.monitor.state.events).toEqual(previous.events);
+  h.monitor.turnOff();
+  const last = h.save.mock.calls.at(-1)?.[0];
+  expect(last).toHaveProperty("monitor.enabled", false);
+  expect(size(last)).toBeLessThanOrEqual(512 * 1024);
+});
 
 it("denies gate dispatch when exact observation references alone exceed the 16KiB reserve", async () => {
   const f = await settledAtBytes(491 * 1024);

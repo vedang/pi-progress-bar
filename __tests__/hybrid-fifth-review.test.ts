@@ -151,12 +151,15 @@ it("restores exact pending context across skipped candidates without unbounded r
   }));
   h.replace([goal, ...tail, branchEntry(latest.id, latest.text, latest.role)]);
   h.requests.length = 0;
-  await h.monitor.restore(
+  const restoring = h.monitor.restore(
     "/nonexistent-hybrid-test",
     checkpoint,
     false,
     h.reader,
   );
+  // A correct async restore settles only after yielded context work completes.
+  await vi.advanceTimersByTimeAsync(1000);
+  await restoring;
   expect(maximumBoundaryReads).toBeLessThanOrEqual(256);
   await h.settle(latest.id);
   expect(h.requests.some((request) => "gate" in request.questions)).toBe(false);

@@ -258,7 +258,7 @@ it.each([10, 70])(
   },
 );
 
-it("does not rematerialize 1000 unchanged authoritative event payloads on duplicate hooks", async () => {
+it("validates every distinct authoritative accessor once per duplicate hook", async () => {
   const state = await initial();
   let reads = 0;
   const entries: unknown[] = [
@@ -304,7 +304,9 @@ it("does not rematerialize 1000 unchanged authoritative event payloads on duplic
   h.observe();
   h.observe();
   h.observe();
-  expect(reads).toBeLessThanOrEqual(12);
+  // User explicitly replaced sampled validation with full relevant-source reads.
+  // Three seed events share the plain initial source; 997 use distinct getters.
+  expect(reads).toBe(3 * 997);
 });
 
 it.each(["string", "text-block"])(
@@ -339,3 +341,242 @@ it.each(["string", "text-block"])(
     );
   },
 );
+
+it("detects a deep accessor amendment in one hook, without reading unrelated old payloads", async () => {
+  const state = await initial();
+  const entries: unknown[] = [
+    branchEntry(initialMessage.id, initialMessage.text),
+  ];
+  let unrelatedReads = 0;
+  for (let i = 0; i < 200; i++)
+    entries.push({
+      type: "message",
+      id: `unrelated-${i}`,
+      message: {
+        role: "assistant",
+        get content() {
+          unrelatedReads++;
+          return "Unrelated old payload.";
+        },
+      },
+    });
+  let amended = false;
+  for (let i = state.events.length; i < 1000; i++) {
+    const source = observation(
+      `deep-source-${i}`,
+      `Historical report ${i}.`,
+      "assistant",
+    );
+    state.events.push({
+      id: `event:${i + 1}`,
+      kind: "revise",
+      taskId: "task:1",
+      revision: 1,
+      source: observationRef(source),
+    });
+    entries.push({
+      type: "message",
+      id: source.id,
+      message: {
+        role: source.role,
+        get content() {
+          return amended && i === 800
+            ? "Amended authoritative report."
+            : source.text;
+        },
+      },
+    });
+    state.cursor = { id: source.id, hash: source.hash };
+  }
+  const h = fixture([]);
+  h.replace(entries);
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    encodeCheckpoint(state, metadata),
+    false,
+    h.reader,
+  );
+  h.monitor.turnOn("/nonexistent-hybrid-test");
+  unrelatedReads = 0;
+  h.observe();
+  expect(unrelatedReads).toBe(0);
+  amended = true;
+  h.observe();
+  expect(h.monitor.state.events.length).toBeLessThan(1000);
+  expect(h.monitor.state.cursor).toBeUndefined();
+});
+
+it("detects an in-place role amendment despite identical payload text", async () => {
+  const entry = branchEntry(
+    "goal",
+    "Implement parser, add regression, and validate it.",
+  );
+  const h = fixture([entry, branchEntry("tail", "Acknowledged.", "assistant")]);
+  h.start();
+  await h.settle("tail");
+  expect(h.monitor.state.tasks[0]?.source.role).toBe("user");
+  entry.message.role = "assistant";
+  h.observe();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.state.tasks[0]?.source.role).toBe("assistant");
+});
+
+it.each([10, 70])(
+  "qualifies %i messages already after a restored cursor as history",
+  async (count) => {
+    const state = await initial();
+    const h = fixture([
+      branchEntry(initialMessage.id, initialMessage.text),
+      ...Array.from({ length: count }, (_, i) =>
+        branchEntry(`restored-${i}`, `Historical observation ${i}.`),
+      ),
+    ]);
+    const original = h.fetch.getMockImplementation();
+    if (!original) throw new Error("Missing fetch");
+    const heldId = `restored-${count === 10 ? 0 : 64}`;
+    h.fetch.mockImplementation((url, init) => {
+      const request = JSON.parse(String(init?.body));
+      return request.questions.gate && request.state.latest.id === heldId
+        ? new Promise<never>(() => {})
+        : original(url, init);
+    });
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      encodeCheckpoint(state, metadata),
+      false,
+      h.reader,
+    );
+    h.monitor.turnOn("/nonexistent-hybrid-test");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(
+      h.fetch.mock.calls.some(
+        ([, init]) =>
+          JSON.parse(String(init?.body)).state.latest?.id === heldId,
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(h.monitor.presentationSnapshot())).toMatch(
+      /catching up history/i,
+    );
+  },
+);
+
+it("gates every visible acknowledgement/question once regardless of role, never idle callbacks", async () => {
+  const h = fixture([]);
+  h.start();
+  const messages = [
+    branchEntry("user-ack", "Thanks."),
+    branchEntry("user-question", "What is left?"),
+    branchEntry("assistant-ack", "Understood.", "assistant"),
+    branchEntry("assistant-question", "Can you approve this?", "assistant"),
+  ];
+  for (const entry of messages) {
+    h.append(entry.id, entry.message.content, entry.message.role);
+    await h.settle(entry.id);
+  }
+  h.replace([
+    ...messages,
+    {
+      type: "message",
+      id: "tool-only",
+      message: { role: "toolResult", content: "Tool output." },
+    },
+    {
+      type: "message",
+      id: "thinking-only",
+      message: {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "Private reasoning." }],
+      },
+    },
+    branchEntry("blank", "   "),
+  ]);
+  const calls = h.fetch.mock.calls.length;
+  h.observe();
+  h.observe();
+  h.observe();
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect(
+    h.requests
+      .filter((r) => "gate" in r.questions)
+      .map((r) => {
+        const latest = (r.state as { latest: { id: string; role: string } })
+          .latest;
+        return [latest.id, latest.role];
+      }),
+  ).toEqual(messages.map((entry) => [entry.id, entry.message.role]));
+  expect(h.fetch).toHaveBeenCalledTimes(calls);
+  expect(h.extract).not.toHaveBeenCalled();
+});
+
+it("invalidates a held gate when context order changes without any text amendment", async () => {
+  const entries = [
+    branchEntry("goal", "Implement parser, add regression, and validate it."),
+    branchEntry("context-a", "First clarification."),
+    branchEntry("context-b", "Second clarification."),
+  ];
+  const h = fixture(entries);
+  h.start();
+  await h.settle("context-b");
+  const original = h.fetch.getMockImplementation();
+  if (!original) throw new Error("Missing fetch");
+  let release: () => void = () => {};
+  let held = false;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body));
+    if (
+      request.questions.gate &&
+      request.state.latest.id === "latest" &&
+      !held
+    ) {
+      held = true;
+      await barrier;
+    }
+    return original(url, init);
+  });
+  const latest = branchEntry("latest", "Acknowledged.", "assistant");
+  h.append(latest.id, latest.message.content, latest.message.role);
+  await vi.advanceTimersByTimeAsync(5);
+  expect(held).toBe(true);
+  h.replace([
+    ...entries,
+    branchEntry("inserted-context", "New intervening clarification."),
+    latest,
+  ]);
+  release();
+  await vi.advanceTimersByTimeAsync(200);
+  const gates = h.requests.filter(
+    (r) =>
+      "gate" in r.questions &&
+      (r.state as { latest: { id: string } }).latest.id === "latest",
+  );
+  const current = gates.at(-1)?.state as
+    | { earlier?: { id: string }[] }
+    | undefined;
+  expect(current?.earlier?.map((message) => message.id)).toEqual([
+    "context-b",
+    "inserted-context",
+  ]);
+  expect(h.monitor.state.cursor?.id).toBe("latest");
+});
+
+it("does not label a single live append after restoration as historical catch-up", async () => {
+  const state = await initial();
+  const h = fixture([branchEntry(initialMessage.id, initialMessage.text)]);
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    encodeCheckpoint(state, metadata),
+    false,
+    h.reader,
+  );
+  h.monitor.turnOn("/nonexistent-hybrid-test");
+  h.fetch.mockImplementationOnce(() => new Promise<never>(() => {}));
+  h.append("live-append", "Acknowledged.", "user");
+  await vi.advanceTimersByTimeAsync(5);
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+  expect(JSON.stringify(h.monitor.presentationSnapshot())).not.toMatch(
+    /catching up history/i,
+  );
+});

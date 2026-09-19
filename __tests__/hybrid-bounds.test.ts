@@ -343,3 +343,16 @@ it("notices a changed canonical latest message with the same ID without rereadin
     ),
   ).toBeDefined();
 });
+
+it("retains no cross-hook authority index after 1201 settled observations", async () => {
+  const h = fixture([]);
+  h.start();
+  for (let i = 0; i < 1201; i++) {
+    const id = `authority-growth-${i}`;
+    h.append(id, `Acknowledgement ${i}.`, "user");
+    await h.settle(id);
+  }
+  expect(retainedPayloads(h.monitor).length).toBeLessThanOrEqual(66);
+  expect(h.monitor).not.toHaveProperty("authorityIndex");
+  expect(h.monitor).not.toHaveProperty("authoritySampleCursor");
+});

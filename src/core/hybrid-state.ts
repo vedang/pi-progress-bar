@@ -1,7 +1,7 @@
 export type ObservationRole = "user" | "assistant";
 export type TaskKind = "action" | "response";
 export type TaskBasis = "explicit" | "derived";
-type TaskStatus = "not-started" | "reopened" | "done";
+export type TaskStatus = "not-started" | "reopened" | "done";
 type AssessmentReason =
   | "accepted"
   | "semantic-unknown"
@@ -63,6 +63,43 @@ export interface MutationEvent {
   source: ObservationRef;
 }
 
+export interface TaskProjection {
+  id: string;
+  label: string;
+  kind: TaskKind;
+  basis: TaskBasis;
+  status: TaskStatus;
+  included: boolean;
+  revision: number;
+  source?: SourceRef;
+}
+
+/** Bounded request identity: hashes/refs/projections only, never source text. */
+export interface RequestProof {
+  phase: "gate" | "patch" | "completion";
+  requestHash: string;
+  inputHash: string;
+  context: ObservationRef[];
+  tasks: TaskProjection[];
+}
+
+export interface CompletionJournalProof extends RequestProof {
+  taskIds: string[];
+  resultHash: string;
+  results: {
+    taskId: string;
+    status: TaskStatus;
+    assessment: Assessment;
+  }[];
+  events: MutationEvent[];
+}
+
+interface PendingProofs {
+  gate?: RequestProof;
+  patch?: RequestProof;
+  completions: CompletionJournalProof[];
+}
+
 export interface PendingObservation {
   observation: ObservationRef;
   phase: "extract" | "complete";
@@ -70,6 +107,7 @@ export interface PendingObservation {
   completionHashes: string[];
   gateHash?: string;
   patchHash?: string;
+  proofs?: PendingProofs;
 }
 
 export type ScopeFailure = "capacity" | "invalid" | "overflow";
@@ -137,6 +175,13 @@ export function copyState(state: HybridState): HybridState {
             observation: { ...state.pending.observation },
             completedTaskIds: [...state.pending.completedTaskIds],
             completionHashes: [...state.pending.completionHashes],
+            ...(state.pending.proofs
+              ? {
+                  proofs: JSON.parse(
+                    JSON.stringify(state.pending.proofs),
+                  ) as PendingProofs,
+                }
+              : {}),
           },
         }
       : {}),

@@ -1,5 +1,6 @@
 import { completionDecisions, completionRequest } from "../analysis/completion";
 import {
+  type ExtractionInput,
   ExtractionInputOverflowError,
   extractionInput,
   groundPatch,
@@ -11,7 +12,13 @@ import {
   gateResult,
 } from "../analysis/gate";
 import type { EvaluationRequest, ValidatedResult } from "../analysis/gateway";
-import { completionProof, gateProof, patchProof } from "./hybrid-proof";
+import {
+  completionJournalProof,
+  completionProof,
+  gateProof,
+  patchProof,
+  requestProof,
+} from "./hybrid-proof";
 import {
   copyState,
   type HybridState,
@@ -35,6 +42,14 @@ export class RetryableProviderError extends Error {
   constructor() {
     super("Provider transport unavailable");
     this.name = "RetryableProviderError";
+  }
+}
+
+/** Snapshot must encode before monitor may accept an in-memory transaction. */
+export class DurabilityCapacityError extends Error {
+  constructor() {
+    super("Hybrid checkpoint exceeds durable capacity");
+    this.name = "DurabilityCapacityError";
   }
 }
 
@@ -83,7 +98,7 @@ const pending = (
   completedTaskIds: string[] = [],
   journal: Pick<
     PendingObservation,
-    "completionHashes" | "gateHash" | "patchHash"
+    "completionHashes" | "gateHash" | "patchHash" | "proofs"
   > = { completionHashes: [] },
 ): PendingObservation => ({
   observation: observationRef(observation),
@@ -92,6 +107,7 @@ const pending = (
   completionHashes: [...journal.completionHashes],
   ...(journal.gateHash ? { gateHash: journal.gateHash } : {}),
   ...(journal.patchHash ? { patchHash: journal.patchHash } : {}),
+  ...(journal.proofs ? { proofs: journal.proofs } : {}),
 });
 
 const event = (
@@ -181,9 +197,11 @@ async function applyScopePatch(
   observation: Observation,
   providers: HybridProviders,
   preceding: readonly Observation[],
+  suppliedInput?: ExtractionInput,
 ): Promise<HybridState> {
   try {
-    const input = extractionInput(state, observation, preceding);
+    const input =
+      suppliedInput ?? extractionInput(state, observation, preceding);
     const raw = await providers.extract(input);
     const patch = groundPatch(
       parsePatch(raw),
@@ -320,7 +338,11 @@ async function applyScopePatch(
           : {}),
     };
   } catch (error) {
-    if (error instanceof RetryableProviderError) throw error;
+    if (
+      error instanceof RetryableProviderError ||
+      error instanceof DurabilityCapacityError
+    )
+      throw error;
     const rejection =
       error instanceof ScopeRejection
         ? error
@@ -382,10 +404,17 @@ async function applyCompletion(
   let next = state;
   try {
     for (const chunk of completionChunks(observation, tasks, preceding)) {
+      // Every task can emit one mutation; reject before a billed completion call.
+      if (next.events.length + chunk.length > MAX_EVENTS)
+        return {
+          ...next,
+          scopeUnresolved: true,
+          scopeFailure: "capacity",
+          completionError: "Task mutation event capacity exceeds 1000",
+        };
+      const request = completionRequest(observation, chunk, preceding);
       const decisions = completionDecisions(
-        await providers.evaluate(
-          completionRequest(observation, chunk, preceding),
-        ),
+        await providers.evaluate(request),
         observation,
         chunk,
       );
@@ -418,6 +447,8 @@ async function applyCompletion(
       if (next.events.length + events.length > MAX_EVENTS)
         return {
           ...next,
+          scopeUnresolved: true,
+          scopeFailure: "capacity",
           completionError: "Task mutation event capacity exceeds 1000",
         };
       const accepted = [
@@ -442,13 +473,36 @@ async function applyCompletion(
           completionHashes,
           ...(journal?.gateHash ? { gateHash: journal.gateHash } : {}),
           ...(journal?.patchHash ? { patchHash: patchProof(committed) } : {}),
+          proofs: {
+            ...(journal?.proofs?.gate ? { gate: journal.proofs.gate } : {}),
+            ...(journal?.proofs?.patch ? { patch: journal.proofs.patch } : {}),
+            completions: [
+              ...(journal?.proofs?.completions ?? []),
+              completionJournalProof(
+                request,
+                observation,
+                [...preceding],
+                chunk,
+                decisions.map((decision) => ({
+                  taskId: decision.taskId,
+                  status: decision.status,
+                  assessment: decision.assessment,
+                })),
+                events,
+              ),
+            ],
+          },
         }),
       };
       saveAccepted(next, providers);
     }
     return next;
   } catch (error) {
-    if (error instanceof RetryableProviderError) throw error;
+    if (
+      error instanceof RetryableProviderError ||
+      error instanceof DurabilityCapacityError
+    )
+      throw error;
     return {
       ...next,
       completionError:
@@ -493,10 +547,8 @@ export async function processObservation(
       };
     else {
       try {
-        const gate = gateResult(
-          await providers.evaluate(gateRequest(next, observation, preceding)),
-          observation,
-        );
+        const request = gateRequest(next, observation, preceding);
+        const gate = gateResult(await providers.evaluate(request), observation);
         next = {
           ...next,
           scopeAssessment: gate.assessment,
@@ -504,12 +556,29 @@ export async function processObservation(
             observation,
             gate.decision === "unchanged" ? "complete" : "extract",
             [],
-            { completionHashes: [], gateHash: gateProof(gate.assessment) },
+            {
+              completionHashes: [],
+              gateHash: gateProof(gate.assessment),
+              proofs: {
+                gate: requestProof(
+                  request,
+                  "gate",
+                  observation,
+                  [...preceding],
+                  next.tasks.filter((task) => task.included),
+                ),
+                completions: [],
+              },
+            },
           ),
         };
         saveAccepted(next, providers);
       } catch (error) {
-        if (error instanceof RetryableProviderError) throw error;
+        if (
+          error instanceof RetryableProviderError ||
+          error instanceof DurabilityCapacityError
+        )
+          throw error;
         const { scopeAssessment: _scopeAssessment, ...unassessed } = next;
         const rejection =
           error instanceof GateRequestOverflowError
@@ -530,7 +599,33 @@ export async function processObservation(
   }
 
   if (next.pending?.phase === "extract") {
-    next = await applyScopePatch(next, observation, providers, preceding);
+    let input: ExtractionInput;
+    try {
+      input = extractionInput(next, observation, preceding);
+    } catch (error) {
+      if (error instanceof ExtractionInputOverflowError)
+        return {
+          ...next,
+          scopeUnresolved: true,
+          scopeFailure: "overflow",
+          scopeError: error.message,
+        };
+      throw error;
+    }
+    const patchRequest = requestProof(
+      input,
+      "patch",
+      observation,
+      [...preceding],
+      next.tasks.filter((task) => task.included),
+    );
+    next = await applyScopePatch(
+      next,
+      observation,
+      providers,
+      preceding,
+      input,
+    );
     // Capacity and construction overflow have not applied accepted scope work.
     // Keep extract pending for an explicit eligible retry without cursor commit.
     if (next.scopeFailure === "capacity" || next.scopeFailure === "overflow")
@@ -541,6 +636,13 @@ export async function processObservation(
         completionHashes: [],
         ...(next.pending?.gateHash ? { gateHash: next.pending.gateHash } : {}),
         patchHash: patchProof(next),
+        proofs: {
+          ...(next.pending?.proofs?.gate
+            ? { gate: next.pending.proofs.gate }
+            : {}),
+          patch: patchRequest,
+          completions: [],
+        },
       }),
     };
     saveAccepted(next, providers);

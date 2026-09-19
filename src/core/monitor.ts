@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { ExtractionInput } from "../analysis/extractor";
 import {
   type EvaluationRequest,
@@ -18,7 +20,11 @@ import {
   MAX_CANONICAL_PAGE_BYTES,
   MAX_CANONICAL_PAGE_MESSAGES,
 } from "../sources/messages";
-import { processObservation, RetryableProviderError } from "./hybrid";
+import {
+  DurabilityCapacityError,
+  processObservation,
+  RetryableProviderError,
+} from "./hybrid";
 import {
   encodeCheckpoint,
   type MonitorCheckpointMetadata,
@@ -99,6 +105,9 @@ export interface DebugSnapshot {
   diagnostics: { code: string; label: string; count: number }[];
 }
 
+const CHECKPOINT_BYTES = 512 * 1024;
+const TRANSACTION_JOURNAL_RESERVE_BYTES = 16 * 1024;
+
 const diagnosticLabels: Record<string, string> = {
   "invalid-scope-result": "Scope result rejected",
   "jev-unavailable": "Jev service unavailable",
@@ -128,6 +137,37 @@ const presentationCard = (
   ...copyCard(card),
   ...(beads ? { beads: { ...beads } } : {}),
 });
+const payloadHash = (value: unknown) =>
+  createHash("sha256")
+    .update(JSON.stringify(value) ?? "undefined")
+    .digest("hex");
+
+/**
+ * Read own descriptors only. Plain host payload edits change this fingerprint;
+ * accessor-backed payloads receive bounded canonical round-robin validation.
+ */
+const authorityFingerprint = (entry: Record<string, unknown>) => {
+  const message = Object.getOwnPropertyDescriptor(entry, "message")?.value;
+  if (!message || typeof message !== "object") return "no-message";
+  const content = Object.getOwnPropertyDescriptor(message, "content");
+  if (!content) return "no-content";
+  if (content.get || content.set) return `accessor:${String(content.get)}`;
+  if (typeof content.value === "string")
+    return `text:${payloadHash(content.value)}`;
+  if (!Array.isArray(content.value)) return `other:${typeof content.value}`;
+  const blocks = content.value.map((block) => {
+    if (!block || typeof block !== "object") return "other";
+    const item = block as Record<string, unknown>;
+    const type = Object.getOwnPropertyDescriptor(item, "type")?.value;
+    const text = Object.getOwnPropertyDescriptor(item, "text");
+    return [
+      type,
+      text?.get || text?.set ? "accessor" : payloadHash(text?.value),
+    ];
+  });
+  return `blocks:${payloadHash(blocks)}`;
+};
+
 const sameBeads = (
   left: ReadonlyMap<string, BeadsPresentation>,
   right: ReadonlyMap<string, BeadsPresentation>,
@@ -176,6 +216,14 @@ export class Monitor {
   private blockedPending?: { id: string; hash: string };
   private activeObservation?: { observation: Observation; epoch: number };
   private catchingUp = false;
+  /** Initial backlog target; remains set until its observation commits. */
+  private catchupTarget?: { id: string; hash: string };
+  /** Bounded derived authority facts; never store canonical text. */
+  private authorityIndex = new Map<
+    string,
+    { hash: string; role: Observation["role"]; fingerprint: string }
+  >();
+  private authoritySampleCursor = 0;
   private epoch = 0;
   private extractionController?: AbortController;
   private healthObservation?: Observation;
@@ -251,6 +299,8 @@ export class Monitor {
     }
     const sourceId = this.options.sourceId();
     if (sourceId !== this.state.sourceId) this.resetState(sourceId);
+    // OFF history can change while no observer callback runs. Reset first.
+    if (this.hasCanonicalAmendment(true)) this.resetForCanonicalAmendment();
     this.enabled = true;
     this.error = undefined;
     this.waitingForWake = false;
@@ -343,6 +393,9 @@ export class Monitor {
     this.blockedPending = undefined;
     this.activeObservation = undefined;
     this.catchingUp = false;
+    this.catchupTarget = undefined;
+    this.authorityIndex.clear();
+    this.authoritySampleCursor = 0;
     this.beads.clear();
     this.beadsGeneration++;
     this.evidence.reset();
@@ -439,6 +492,9 @@ export class Monitor {
     this.blockedPending = undefined;
     this.activeObservation = undefined;
     this.catchingUp = false;
+    this.catchupTarget = undefined;
+    this.authorityIndex.clear();
+    this.authoritySampleCursor = 0;
     this.beads.clear();
     this.beadsGeneration++;
     this.lastJevCallAt = undefined;
@@ -621,7 +677,7 @@ export class Monitor {
   }
 
   /** Validate only bounded state authority, never the unbounded history payload. */
-  private hasCanonicalAmendment() {
+  private hasCanonicalAmendment(force = false) {
     if (!this.reader) return false;
     const references: {
       entryId: string;
@@ -637,6 +693,15 @@ export class Monitor {
         ? [this.state.scopeAssessment.source]
         : []),
       ...(this.state.pending ? [this.state.pending.observation] : []),
+      ...(this.state.pending?.proofs
+        ? [
+            ...(this.state.pending.proofs.gate?.context ?? []),
+            ...(this.state.pending.proofs.patch?.context ?? []),
+            ...this.state.pending.proofs.completions.flatMap(
+              (proof) => proof.context,
+            ),
+          ]
+        : []),
       ...(this.state.cursor
         ? [
             {
@@ -674,9 +739,27 @@ export class Monitor {
       group.push(reference);
       byId.set(reference.entryId, group);
     }
+    const sampleStart = this.authoritySampleCursor % byId.size;
+    let referenceIndex = 0;
     for (const [entryId, expected] of byId) {
+      const sampleOffset =
+        (referenceIndex++ - sampleStart + byId.size) % byId.size;
       const header = headers.get(entryId);
-      const current = header ? canonicalObservation(header) : undefined;
+      if (!header) return true;
+      const fingerprint = authorityFingerprint(header.entry);
+      const cached = this.authorityIndex.get(entryId);
+      const needsMaterialization =
+        force ||
+        !cached ||
+        cached.fingerprint !== fingerprint ||
+        expected.some(
+          (reference) =>
+            cached.hash !== reference.messageHash ||
+            (reference.role !== undefined && cached.role !== reference.role),
+        ) ||
+        (fingerprint.includes("accessor") && sampleOffset < 4);
+      if (!needsMaterialization) continue;
+      const current = canonicalObservation(header);
       if (
         !current ||
         expected.some(
@@ -686,7 +769,13 @@ export class Monitor {
         )
       )
         return true;
+      this.authorityIndex.set(entryId, {
+        hash: current.hash,
+        role: current.role,
+        fingerprint,
+      });
     }
+    this.authoritySampleCursor = (sampleStart + 4) % byId.size;
     return false;
   }
 
@@ -714,11 +803,43 @@ export class Monitor {
     let afterIndex = -1;
     if (after) {
       const index = headers.findIndex((header) => header.id === after.id);
+      const header = index < 0 ? undefined : headers[index];
+      const cached = header ? this.authorityIndex.get(header.id) : undefined;
       const current =
-        index < 0 ? undefined : canonicalObservation(headers[index]);
-      if (!current || current.hash !== after.hash) {
+        header &&
+        cached?.hash === after.hash &&
+        cached.fingerprint === authorityFingerprint(header.entry)
+          ? undefined
+          : header
+            ? canonicalObservation(header)
+            : undefined;
+      if (header && current && current.hash === after.hash)
+        this.authorityIndex.set(header.id, {
+          hash: current.hash,
+          role: current.role,
+          fingerprint: authorityFingerprint(header.entry),
+        });
+      if (
+        !header ||
+        (current && current.hash !== after.hash) ||
+        (!current && (!cached || cached.hash !== after.hash))
+      ) {
         this.resetForCanonicalAmendment();
       } else afterIndex = index;
+    }
+    if (
+      !after &&
+      !this.state.cursor &&
+      !this.catchupTarget &&
+      headers.length > 1
+    ) {
+      for (let index = headers.length - 1; index >= 0; index--) {
+        const latest = canonicalObservation(headers[index]);
+        if (latest) {
+          this.catchupTarget = { id: latest.id, hash: latest.hash };
+          break;
+        }
+      }
     }
     const page: Observation[] = [];
     let bytes = 0;
@@ -741,7 +862,7 @@ export class Monitor {
       bytes += size;
     }
     this.page = page;
-    this.catchingUp = hasMore;
+    this.catchingUp = !!this.catchupTarget || hasMore;
   }
 
   /** Restore at most two immediately preceding eligible observations. */
@@ -777,11 +898,22 @@ export class Monitor {
     const header = canonicalHeaders(this.reader?.() ?? []).find(
       (item) => item.id === entryId,
     );
-    return header ? canonicalObservation(header) : undefined;
+    const observation = header ? canonicalObservation(header) : undefined;
+    if (header && observation)
+      this.authorityIndex.set(entryId, {
+        hash: observation.hash,
+        role: observation.role,
+        fingerprint: authorityFingerprint(header.entry),
+      });
+    return observation;
   }
 
   private requeue() {
     if (this.waitingForWake) return;
+    if (this.blockedPending && !this.state.pending) {
+      this.queued = [];
+      return;
+    }
     if (this.retryObservation) {
       this.queued = [this.retryObservation];
       return;
@@ -871,6 +1003,12 @@ export class Monitor {
 
   private async processOne(observation: Observation, epoch: number) {
     try {
+      // Reserve bounded journal room before any provider dispatch.
+      if (!this.hasTransactionHeadroom()) {
+        this.rejectCapacity();
+        this.blockedPending = { id: observation.id, hash: observation.hash };
+        return;
+      }
       const next = await processObservation(
         this.state,
         observation,
@@ -893,11 +1031,19 @@ export class Monitor {
           this.retryObservation.hash === observation.hash
         )
           this.retryObservation = undefined;
+        // Cursor progression, including overflow, owns bounded context parity.
+        this.rememberPreceding(observation);
+        if (
+          this.catchupTarget?.id === observation.id &&
+          this.catchupTarget.hash === observation.hash
+        ) {
+          this.catchupTarget = undefined;
+          this.catchingUp = false;
+        }
         if (next.scopeFailure === "overflow") this.note("unresolved-overflow");
         else {
           if (next.scopeFailure === "invalid")
             this.note("invalid-scope-result");
-          this.rememberPreceding(observation);
           this.scheduleHealth(observation);
         }
         return;
@@ -916,7 +1062,11 @@ export class Monitor {
       }
     } catch (error) {
       if (!this.enabled || epoch !== this.epoch) return;
-      if (error instanceof RetryableJevError) this.scheduleRetry(observation);
+      if (error instanceof DurabilityCapacityError) {
+        this.blockedPending = { id: observation.id, hash: observation.hash };
+        this.note("capacity-exhausted");
+      } else if (error instanceof RetryableJevError)
+        this.scheduleRetry(observation);
       else if (error instanceof RetryableProviderError) {
         this.waitingForWake = true;
         this.note("model-unavailable");
@@ -962,10 +1112,56 @@ export class Monitor {
     }
   }
 
+  private hasTransactionHeadroom() {
+    try {
+      return (
+        Buffer.byteLength(
+          JSON.stringify(encodeCheckpoint(this.state, this.metadata())),
+        ) <=
+        CHECKPOINT_BYTES - TRANSACTION_JOURNAL_RESERVE_BYTES
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** Preserve current durable transaction while exposing capacity as unresolved. */
+  private rejectCapacity() {
+    const rejected: HybridState = {
+      ...this.state,
+      scopeUnresolved: true,
+      scopeFailure: "capacity",
+      scopeError: "Hybrid checkpoint exceeds durable capacity",
+    };
+    try {
+      const checkpoint = encodeCheckpoint(rejected, this.metadata());
+      this.state = copyState(rejected);
+      this.persist(checkpoint);
+    } catch {
+      this.note("saved-state-rejected");
+    }
+    this.note("capacity-exhausted");
+    this.publish();
+  }
+
   private commit(state: HybridState) {
+    const previousCard = this.card ? copyCard(this.card) : undefined;
     this.retainCardBeforeReplacement(state);
+    let checkpoint: unknown;
+    try {
+      // Preflight full state plus monitor metadata before replacing durable state.
+      checkpoint = encodeCheckpoint(state, this.metadata());
+    } catch {
+      this.card = previousCard;
+      this.rejectCapacity();
+      throw new DurabilityCapacityError();
+    }
     this.state = copyState(state);
-    this.save();
+    try {
+      this.persist(checkpoint);
+    } catch {
+      this.note("saved-state-rejected");
+    }
     this.refreshBeads();
     this.publish();
   }

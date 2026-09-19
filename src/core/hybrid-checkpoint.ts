@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { completionProof, gateProof, patchProof } from "./hybrid-proof";
+import {
+  completionProof,
+  gateProof,
+  patchProof,
+  validCompletionResultHash,
+  validRequestProofHash,
+} from "./hybrid-proof";
 import {
   type Assessment,
   copyState,
@@ -9,7 +15,9 @@ import {
   type Observation,
   type ObservationRef,
   type PendingObservation,
+  type RequestProof,
   type SourceRef,
+  type TaskProjection,
 } from "./hybrid-state";
 
 const VERSION = 5;
@@ -201,13 +209,63 @@ function validEvent(value: unknown): value is MutationEvent {
   );
 }
 
+function validTaskProjection(value: unknown): value is TaskProjection {
+  return (
+    record(value) &&
+    exactKeys(
+      value,
+      ["id", "label", "kind", "basis", "status", "included", "revision"],
+      ["source"],
+    ) &&
+    taskIdIsValid(value.id) &&
+    safeLabel(value.label) &&
+    (value.kind === "action" || value.kind === "response") &&
+    (value.basis === "explicit" || value.basis === "derived") &&
+    (value.status === "not-started" ||
+      value.status === "reopened" ||
+      value.status === "done") &&
+    typeof value.included === "boolean" &&
+    positiveInteger(value.revision) &&
+    (!Object.hasOwn(value, "source") || validSourceRef(value.source))
+  );
+}
+
+function validRequestProof(
+  value: unknown,
+  observation: Observation,
+): value is RequestProof {
+  return (
+    record(value) &&
+    exactKeys(value, [
+      "phase",
+      "requestHash",
+      "inputHash",
+      "context",
+      "tasks",
+    ]) &&
+    (value.phase === "gate" ||
+      value.phase === "patch" ||
+      value.phase === "completion") &&
+    hashIsValid(value.requestHash) &&
+    hashIsValid(value.inputHash) &&
+    Array.isArray(value.context) &&
+    value.context.length <= 2 &&
+    value.context.every(validObservationRef) &&
+    Array.isArray(value.tasks) &&
+    value.tasks.length <= MAX_ACTIVE_TASKS &&
+    value.tasks.every(validTaskProjection) &&
+    new Set(value.tasks.map((task) => task.id)).size === value.tasks.length &&
+    validRequestProofHash(value as unknown as RequestProof, observation)
+  );
+}
+
 function validPending(value: unknown): value is PendingObservation {
   return (
     record(value) &&
     exactKeys(
       value,
       ["observation", "phase", "completedTaskIds", "completionHashes"],
-      ["gateHash", "patchHash"],
+      ["gateHash", "patchHash", "proofs"],
     ) &&
     validObservationRef(value.observation) &&
     (value.phase === "extract" || value.phase === "complete") &&
@@ -218,13 +276,92 @@ function validPending(value: unknown): value is PendingObservation {
     value.completionHashes.length <= MAX_EVENTS &&
     value.completionHashes.every(hashIsValid) &&
     (!Object.hasOwn(value, "gateHash") || hashIsValid(value.gateHash)) &&
-    (!Object.hasOwn(value, "patchHash") || hashIsValid(value.patchHash))
+    (!Object.hasOwn(value, "patchHash") || hashIsValid(value.patchHash)) &&
+    (!Object.hasOwn(value, "proofs") ||
+      (record(value.proofs) &&
+        exactKeys(value.proofs, ["completions"], ["gate", "patch"]) &&
+        Array.isArray(value.proofs.completions) &&
+        value.proofs.completions.length <= MAX_EVENTS))
+  );
+}
+
+const projectionMatchesTask = (projection: TaskProjection, task: HybridTask) =>
+  projection.id === task.id &&
+  projection.label === task.label &&
+  projection.kind === task.kind &&
+  projection.basis === task.basis &&
+  projection.included === task.included &&
+  projection.revision === task.revision &&
+  JSON.stringify(projection.source) === JSON.stringify(task.source);
+
+function validCompletionJournalProof(
+  value: unknown,
+  observation: Observation,
+): boolean {
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      "phase",
+      "requestHash",
+      "inputHash",
+      "context",
+      "tasks",
+      "taskIds",
+      "resultHash",
+      "results",
+      "events",
+    ]) ||
+    value.phase !== "completion" ||
+    !hashIsValid(value.requestHash) ||
+    !hashIsValid(value.inputHash) ||
+    !Array.isArray(value.context) ||
+    value.context.length > 2 ||
+    !value.context.every(validObservationRef) ||
+    !Array.isArray(value.tasks) ||
+    value.tasks.length > MAX_ACTIVE_TASKS ||
+    !value.tasks.every(validTaskProjection) ||
+    !Array.isArray(value.taskIds) ||
+    !value.taskIds.every(taskIdIsValid) ||
+    new Set(value.taskIds).size !== value.taskIds.length ||
+    !hashIsValid(value.resultHash) ||
+    !Array.isArray(value.results) ||
+    !value.results.every(
+      (result) =>
+        record(result) &&
+        exactKeys(result, ["taskId", "status", "assessment"]) &&
+        taskIdIsValid(result.taskId) &&
+        (result.status === "not-started" ||
+          result.status === "reopened" ||
+          result.status === "done") &&
+        validAssessment(result.assessment),
+    ) ||
+    !Array.isArray(value.events) ||
+    !value.events.every(validEvent)
+  )
+    return false;
+  const proof =
+    value as unknown as import("./hybrid-state").CompletionJournalProof;
+  return (
+    proof.taskIds.length === proof.tasks.length &&
+    proof.taskIds.every((id, index) => id === proof.tasks[index]?.id) &&
+    proof.results.length === proof.taskIds.length &&
+    proof.results.every(
+      (result, index) => result.taskId === proof.taskIds[index],
+    ) &&
+    validRequestProofHash(proof, observation) &&
+    validCompletionResultHash(proof)
   );
 }
 
 function pendingProofsAreConsistent(state: HybridState) {
   const pending = state.pending;
   if (!pending) return true;
+  const observation: Observation = {
+    id: pending.observation.entryId,
+    hash: pending.observation.messageHash,
+    role: pending.observation.role,
+    text: "",
+  };
   const assessment = state.scopeAssessment;
   const unacceptedGate =
     pending.phase === "extract" &&
@@ -235,7 +372,8 @@ function pendingProofsAreConsistent(state: HybridState) {
     return (
       pending.completedTaskIds.length === 0 &&
       pending.completionHashes.length === 0 &&
-      !pending.patchHash
+      !pending.patchHash &&
+      !pending.proofs
     );
   if (
     !assessment ||
@@ -243,23 +381,86 @@ function pendingProofsAreConsistent(state: HybridState) {
     pending.gateHash !== gateProof(assessment) ||
     assessment.source.entryId !== pending.observation.entryId ||
     assessment.source.messageHash !== pending.observation.messageHash ||
-    assessment.source.role !== pending.observation.role
+    assessment.source.role !== pending.observation.role ||
+    !pending.proofs?.gate ||
+    pending.proofs.gate.phase !== "gate" ||
+    !validRequestProof(pending.proofs.gate, observation)
   )
     return false;
   const requiresPatch = !(
     assessment.rawChoice === "unchanged" && assessment.reason === "accepted"
   );
+  if (
+    !requiresPatch &&
+    pending.proofs.gate.tasks.some((projection) => {
+      const task = state.tasks.find(
+        (candidate) => candidate.id === projection.id,
+      );
+      return !task || !projectionMatchesTask(projection, task);
+    })
+  )
+    return false;
   if (pending.phase === "extract")
     return (
       requiresPatch &&
       !pending.patchHash &&
       pending.completedTaskIds.length === 0 &&
-      pending.completionHashes.length === 0
+      pending.completionHashes.length === 0 &&
+      pending.proofs.completions.length === 0
     );
   if (requiresPatch) {
-    if (!pending.patchHash || pending.patchHash !== patchProof(state))
+    if (
+      !pending.patchHash ||
+      pending.patchHash !== patchProof(state) ||
+      !pending.proofs.patch ||
+      pending.proofs.patch.phase !== "patch" ||
+      !validRequestProof(pending.proofs.patch, observation)
+    )
       return false;
-  } else if (pending.patchHash) return false;
+  } else if (pending.patchHash || pending.proofs.patch) return false;
+  if (
+    !pending.proofs.completions.every((proof) =>
+      validCompletionJournalProof(proof, observation),
+    )
+  )
+    return false;
+  const completedByProof = pending.proofs.completions.flatMap(
+    (proof) => proof.taskIds,
+  );
+  if (
+    completedByProof.length !== pending.completedTaskIds.length ||
+    completedByProof.some((id, index) => id !== pending.completedTaskIds[index])
+  )
+    return false;
+  for (const proof of pending.proofs.completions) {
+    if (
+      proof.tasks.some((projection) => {
+        const task = state.tasks.find(
+          (candidate) => candidate.id === projection.id,
+        );
+        return !task || !projectionMatchesTask(projection, task);
+      }) ||
+      proof.events.some(
+        (proofEvent) =>
+          !state.events.some(
+            (event) => JSON.stringify(event) === JSON.stringify(proofEvent),
+          ),
+      )
+    )
+      return false;
+    for (const result of proof.results) {
+      const task = state.tasks.find(
+        (candidate) => candidate.id === result.taskId,
+      );
+      if (
+        !task ||
+        task.status !== result.status ||
+        JSON.stringify(task.latestAssessment) !==
+          JSON.stringify(result.assessment)
+      )
+        return false;
+    }
+  }
   if (pending.completedTaskIds.length !== pending.completionHashes.length)
     return false;
   return pending.completedTaskIds.every((id, index) => {
@@ -519,6 +720,21 @@ function referencesResolve(
   if (
     state.pending &&
     !canonicalObservation(state.pending.observation, resolve)
+  )
+    return false;
+  if (
+    state.pending?.proofs &&
+    [
+      state.pending.proofs.gate,
+      state.pending.proofs.patch,
+      ...state.pending.proofs.completions,
+    ].some(
+      (proof) =>
+        !!proof &&
+        proof.context.some(
+          (reference) => !canonicalObservation(reference, resolve),
+        ),
+    )
   )
     return false;
   if (state.cursor) {

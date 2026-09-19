@@ -580,3 +580,62 @@ it("does not label a single live append after restoration as historical catch-up
     /catching up history/i,
   );
 });
+
+it.each(["observe", "off-on"])(
+  "uses one canonical reader snapshot across a %s boundary",
+  async (boundary) => {
+    const original = branchEntry(
+      "goal",
+      "Implement parser, add regression, and validate it.",
+    );
+    const revised = branchEntry(
+      "goal",
+      "Implement the revised parser and validate it.",
+    );
+    const h = fixture([original]);
+    h.start();
+    await h.settle("goal");
+    if (boundary === "off-on") h.monitor.turnOff();
+    h.reader.mockClear();
+    h.reader.mockReturnValueOnce([original]).mockReturnValue([revised]);
+    if (boundary === "off-on") h.monitor.turnOn("/nonexistent-hybrid-test");
+    else h.observe();
+    expect(h.reader).toHaveBeenCalledTimes(1);
+    expect(h.monitor.state.tasks[0]?.source.messageHash).toBe(
+      observation(original.id, original.message.content).hash,
+    );
+    // A genuinely subsequent boundary sees the changed branch. Do not retain
+    // this boundary's canonical pass as a cross-hook authority cache.
+    h.observe();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.monitor.state.tasks[0]?.source.messageHash).toBe(
+      observation(revised.id, revised.message.content).hash,
+    );
+  },
+);
+
+it("restores from one reader snapshot even when a second read would return a different branch", async () => {
+  const state = await initial();
+  const original = branchEntry(initialMessage.id, initialMessage.text);
+  const revised = branchEntry(
+    initialMessage.id,
+    "The authoritative requirements have changed.",
+  );
+  const h = fixture([original]);
+  h.reader.mockReturnValueOnce([original]).mockReturnValue([revised]);
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    encodeCheckpoint(state, metadata),
+    false,
+    h.reader,
+  );
+  expect(h.reader).toHaveBeenCalledTimes(1);
+  expect(h.monitor.state.tasks[0]?.source.messageHash).toBe(
+    initialMessage.hash,
+  );
+  h.monitor.turnOn("/nonexistent-hybrid-test");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.state.scopeAssessment?.source.messageHash).toBe(
+    observation(revised.id, revised.message.content).hash,
+  );
+});

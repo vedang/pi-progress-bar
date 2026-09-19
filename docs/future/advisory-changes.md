@@ -1,13 +1,13 @@
 # Future plan: advisory nudges
 
-**Status:** Planning only. Future direction is requested; this document does not enable nudges or authorize implementation. Last updated: 2026-09-19. Current hybrid build `4a6b79da` remains passive and is under manual QA/independent re-review.
+**Status:** Planning only. Future direction is requested; this document does not enable nudges or authorize implementation. Last updated: 2026-09-20. Hybrid runtime `e4dcfe08` passed cumulative independent review and was published with closure `0102cde4`; human QA remains separate. The [detailed implementation plan](../design/advisory-nudges.md) has independently passed plan review. It governs execution sequencing and explicit delivery prerequisites; implementation still needs owner authorization.
 
 ## Confirmed direction
 
 - Advice is advisory, never tool blocking or automatic changes to code, tests, reviews or task statuses.
 - Explore proactive advice; do not require the agent to announce its intent first.
 - After safety gates, advisory mode should default ON for new sessions. This supersedes the earlier default-OFF proposal; a clear OFF control is still required.
-- Analyze relevant tool activity independently of progress analysis, with approximately 15 seconds as the proposed working cadence. This does not restore polling to passive progress.
+- Discover opportunities from relevant events independently of progress analysis and deliver fresh advice immediately once assessed. No 15-second cadence, delivery cooldown or polling. Only unfinished-board reconciliation has an intentional delay: hard-coded `60_000` ms after authoritative main-run settlement, canceled on restart.
 - Existing advice topics: avoid unnecessary *new* red tests and defer premature repeated reviews until meaningful work is ready. Explicit user/repository requirements always take precedence.
 
 ## New requirement: follow up unfinished work after the run ends
@@ -17,7 +17,7 @@ User requirement: **when the agent run ends but the tracker still has pending ta
 Proposed flow:
 
 1. Observe a supported, authoritative main-agent run-end event. Verify actual Pi event semantics; `agent_run` here describes user intent, not a promised API event name.
-2. If included unfinished tasks remain, arm one cancellable delay, initially 60 seconds. No periodic polling or backlog of timer ticks.
+2. Anchor one ephemeral intent at authoritative settled-run time plus `60_000` ms. Observe final canonical evidence before assessing readiness. Ordinary task changes during monitor settlement refresh the board, not the deadline. Once settled unfinished work exists, arm only the remaining delay; no periodic polling or restored timer after restart.
 3. When the delay expires, recheck the same session/branch/tracking cycle, agent idleness, advisory controls, pending task IDs/revisions and analysis state.
 4. If work remains and the evidence is settled, deliver one clearly extension-origin advisory asking the agent to explain each remaining item's status.
 5. Let the normal semantic pipeline assess the actual reply. The nudge itself never marks a task complete, archived or cancelled.
@@ -35,15 +35,15 @@ Blocked/waiting work is a valid answer and may remain pending. Do not turn a req
 - If all tasks become complete during the grace period, send nothing.
 - If progress is still catching up or a relevant phase is unsettled/failed, do not present the unfinished list as authoritative. Re-evaluate on a real settlement event, not an idle inference loop.
 - Treat deliberate user interruption/abort separately from ordinary run completion; proposed safe default is no automatic restart after an explicit stop.
-- Deduplicate by run/cycle and pending task revisions. The agent's reply to this nudge must not recursively schedule another identical nudge.
-- Bound follow-up frequency, attempts and provider spending. The exact cooldown and delay controls remain design decisions; 60 seconds is the user's initial suggestion, not a calibrated value.
-- Exclude extension-authored nudges/receipts and simple echoes from new task admission or independent completion evidence. Genuine agent status explanations may still establish completion or withdrawal through the ordinary judgments.
+- Deduplicate by semantic branch/cycle and pending task IDs/revisions/statuses, not run count or extension-owned leaf appends. Transient run generations guard freshness separately. The agent's reply must not recursively schedule another identical nudge.
+- Bound attempts and provider spending; deduplicate by stable semantic branch/cycle and task revisions, separately from transient freshness generations. No time cooldown or configurable delay: the sole nudge delay is hard-coded 60 seconds. Bounded paid Jev evaluation is already authorized; other paid providers are not blanket-authorized.
+- Exclude extension-authored nudges/receipts from task authority. Before delivery, prove exact correlated full/partial echo handling in downstream evidence consumers without rewriting canonical text or weakening replay. Genuine independent status explanations remain eligible. The detailed plan gates delivery on this contract; custom-message exclusion alone is insufficient.
 
 ### Delivery design must change from the old plan
 
 The earlier proposal admitted advice only at the next natural model-context boundary and explicitly prohibited waking an idle agent. That cannot satisfy this new run-ended requirement on its own.
 
-A supported, bounded **idle-agent follow-up mechanism** must now be investigated and approved. Prove main-session targeting, explicit extension provenance, cancellation/freshness, user interruption priority and loop suppression. Do not silently impersonate a user message or assume a queued message can be retracted. This is a narrow new requested advisory path, not permission for unlimited autonomous turns.
+A supported, bounded **idle-agent follow-up mechanism** must be characterized and approved. Prove pre-send main-session targeting, provenance, freshness and loop suppression; characterize user-interruption ordering on real hosts. Public APIs offer neither atomic enqueue nor retraction. The owner must accept the narrow irreversible post-send boundary or leave affected delivery disabled; host API changes are separate authorized work. Never impersonate a user or promise queued-message retraction.
 
 ## Existing red-test and review advice
 
@@ -67,7 +67,7 @@ Persist only bounded derived receipts needed for safe deduplication, never raw p
 3. Implement the smallest end-of-run reconciliation slice before broader proactive advice, with explicit controls and one-shot cancellation.
 4. Test all-complete/no-task suppression; late completion; still-running analysis; OFF/abort/reload/branch changes; blocked tasks; duplicate end events; self-triggered follow-up loops; and unchanged task state until real evidence arrives.
 5. Evaluate red-test/review advice separately with policy/delivery/adapter proofs, bounded paid cases where needed, and preserved failures.
-6. Independent review and manual opt-in smoke precede enabling default-ON behavior.
+6. Independent review and manual opt-in smoke precede each capability's default-ON behavior. Missing review adapters or optional debugger work do not block independently safe reconciliation. Existing sessions without advisory state stay OFF; no migration.
 
 The [UI plan](ui-changes.md) owns completed-run→new-turn board reset and opening the actual board. The [debugger](debugger.md) explains processing; it must not itself trigger advice.
 

@@ -211,7 +211,8 @@ it("QA fresh reading updates actual scope before a historical backlog drains", a
     id: string;
     parentId: string | null;
     message: { role: string; content: string };
-  }[] = replayEntries(2);
+  }[] = replayEntries(3);
+  expect(entries.at(-1)?.id).toBe("old-done");
   const monitor = new Monitor(
     () => {},
     () => {},

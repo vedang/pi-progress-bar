@@ -316,8 +316,9 @@ describe("automatic Pi host contract", () => {
     expect(vi.getTimerCount()).toBe(0);
     await h.command("on");
     await h.command("on");
-    expect(vi.getTimerCount()).toBeGreaterThanOrEqual(1);
+    await vi.advanceTimersByTimeAsync(0);
     expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1]?.[1]?.signal?.aborted).toBe(false);
     await h.event("session_shutdown");
   });
 

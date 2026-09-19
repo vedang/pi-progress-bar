@@ -221,6 +221,49 @@ function runtime(
 }
 
 describe("fresh-session ordered production controller", () => {
+  it("retains later actionable burst turns across the first early cutover", async () => {
+    const r = runtime(replayEntries(1), verdict, true);
+    try {
+      await r.settle("old-goal");
+      for (let i = 0; i < 40; i++)
+        r.append(
+          `burst-history-${i}`,
+          "An unrelated explanatory note.",
+          "assistant",
+        );
+      r.append(
+        "replacement",
+        "1. Read the advisory plan instead of earlier work.",
+      );
+      r.append("29acae97", "1. Implement the new requested parser instead.");
+      r.observe();
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(
+        r.checkpoints.some((cp) =>
+          cp.tasks.some(
+            (task) => task.included && task.ref.entryId === "replacement",
+          ),
+        ),
+      ).toBe(true);
+      expect(
+        r.monitor.ledger?.tasks
+          .filter((task) => task.included)
+          .map((task) => task.ref.entryId),
+      ).toEqual(["29acae97"]);
+      const selected = r.requests
+        .filter((request) => request.questions.source)
+        .flatMap(
+          (request) =>
+            (request.state as TestState).candidates?.map(
+              (candidate) => candidate.entryId,
+            ) ?? [],
+        );
+      expect(selected.filter((id) => id === "replacement")).toHaveLength(1);
+      expect(selected.filter((id) => id === "29acae97")).toHaveLength(1);
+    } finally {
+      r.monitor.stop();
+    }
+  });
   it("admits a fresh explicitly replacing goal without an established ledger", async () => {
     const history: Entry[] = Array.from({ length: 40 }, (_, i) => ({
       type: "message",

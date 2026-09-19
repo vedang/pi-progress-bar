@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import {
@@ -32,7 +32,7 @@ import { qaEntry, userMessageQa } from "../fixtures/user-message-qa";
 // process-wide cap. No retries/reruns or hidden direct semantic substitutes.
 const MAX_ATTEMPTS = Number(process.env.PROGRESS_LIVE_MAX_ATTEMPTS ?? 64);
 const directory = resolve(
-  ".agents/plans/20260919T072656--diagnose-user-message-reassessment__active",
+  ".agents/plans/20260919T084013--plan-event-driven-qa-repair__planning",
 );
 const artifact = resolve(directory, `live-${Date.now()}.jsonl`);
 const realFetch = globalThis.fetch;
@@ -63,6 +63,20 @@ beforeAll(() => {
     maxAttempts: MAX_ATTEMPTS,
     maxRequestBytes: MAX_REQUEST_BYTES,
     fixture: "sanitized incremental live-session reconstruction",
+    sourceHash: hashText(
+      readdirSync("src", { recursive: true })
+        .filter((path) => typeof path === "string" && path.endsWith(".ts"))
+        .sort()
+        .map(
+          (path) =>
+            `${path}\n${readFileSync(resolve("src", String(path)), "utf8")}`,
+        )
+        .join("\n"),
+    ),
+    fixtureHash: hashText(
+      readFileSync("__tests__/fixtures/user-message-qa.ts", "utf8"),
+    ),
+    revision: process.env.PROGRESS_LIVE_REVISION ?? "unrecorded",
     timestamp: new Date().toISOString(),
   });
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
@@ -157,7 +171,6 @@ it("QA user reading request becomes tracked work after an old delivery", async (
     while (Date.now() < deadline) {
       if (blocked) throw new Error(`Live attempt cap reached; see ${artifact}`);
       if (!monitor.enabled) throw new Error(monitor.error ?? "Monitor stopped");
-      monitor.scheduleAnalysis();
       const reading = monitor.ledger?.tasks.find(
         (task) =>
           task.included && task.ref.entryId === userMessageQa.reading.id,
@@ -192,6 +205,88 @@ it("QA user reading request becomes tracked work after an old delivery", async (
   }
 });
 
+it("QA fresh reading updates actual scope before a historical backlog drains", async () => {
+  const entries: {
+    type: string;
+    id: string;
+    parentId: string | null;
+    message: { role: string; content: string };
+  }[] = replayEntries(2);
+  const monitor = new Monitor(
+    () => {},
+    () => {},
+  );
+  monitor.observe(() => entries);
+  const waitFor = async (condition: () => boolean) => {
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      if (blocked) throw new Error(`Live attempt cap reached; see ${artifact}`);
+      if (!monitor.enabled) throw new Error(monitor.error ?? "Monitor stopped");
+      if (condition() && active === 0) return;
+      await pause(25);
+    }
+    throw new Error(
+      `Fresh backlog did not settle: ${monitor.progressState()}; ${artifact}`,
+    );
+  };
+  try {
+    expect(monitor.turnOn("/nonexistent-live-fixture")).toBeUndefined();
+    await waitFor(() => monitor.conversation.cursor?.id === "old-done");
+    for (let i = 0; i < 40; i++)
+      entries.push({
+        type: "message",
+        id: `live-synthetic-backlog-${i}`,
+        parentId: entries.at(-1)?.id ?? null,
+        message: {
+          role: "assistant",
+          content:
+            "An unrelated explanatory note about the already delivered work.",
+        },
+      });
+    monitor.observe(() => entries);
+    await pause(0); // Let history begin a real request before the fresh user arrives.
+    const before = attempts;
+    entries.push({
+      type: "message",
+      id: userMessageQa.reading.id,
+      parentId: entries.at(-1)?.id ?? null,
+      message: { role: "user", content: userMessageQa.reading.text },
+    });
+    monitor.observe(() => entries);
+    await waitFor(
+      () =>
+        attempts - before > 12 ||
+        (!!monitor.ledger?.tasks.some(
+          (task) =>
+            task.included && task.ref.entryId === userMessageQa.reading.id,
+        ) &&
+          !monitor.scopeIsUnresolved()),
+    );
+    const tasks = monitor.ledger?.tasks.filter((task) => task.included) ?? [];
+    record({
+      type: "qa-fresh-backlog",
+      attemptsAfterFresh: attempts - before,
+      tasks,
+      diagnostics: monitor.diagnostics(),
+    });
+    expect(attempts - before).toBeLessThanOrEqual(12);
+    expect(
+      tasks.some(
+        (task) =>
+          task.ref.entryId === userMessageQa.reading.id &&
+          task.text.includes("read through and understand"),
+      ),
+    ).toBe(true);
+    expect(
+      tasks
+        .filter((task) => task.ref.entryId === userMessageQa.reading.id)
+        .every((task) => task.status !== "done"),
+    ).toBe(true);
+  } finally {
+    monitor.stop();
+  }
+});
+
 it("fresh-session production pipeline follows a changed goal and consumes completion only after scope", async () => {
   let entries: {
     type: string;
@@ -205,12 +300,12 @@ it("fresh-session production pipeline follows a changed goal and consumes comple
   );
   monitor.observe(() => entries);
   const settleThrough = async (entryId: string) => {
+    monitor.observe(() => entries);
     const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
       if (blocked) throw new Error(`Live attempt cap reached; see ${artifact}`);
       if (!monitor.enabled)
         throw new Error(monitor.error ?? "Monitor stopped unexpectedly");
-      monitor.scheduleAnalysis();
       if (monitor.conversation.cursor?.id === entryId && active === 0) {
         await pause(100);
         if (!active) return;
@@ -284,7 +379,7 @@ it("fresh-session production pipeline follows a changed goal and consumes comple
     // Same history may hit local cache, but must never generate new paid requests.
     const before = attempts;
     for (let i = 0; i < 20; i++) {
-      monitor.scheduleAnalysis();
+      monitor.observe(() => entries);
       await pause(10);
     }
     expect(attempts).toBe(before);
@@ -432,10 +527,10 @@ it("status questions preserve ongoing work and repeated requests do not inherit 
   );
   monitor.observe(() => entries);
   const settle = async (id: string) => {
+    monitor.observe(() => entries);
     const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
       if (blocked) throw new Error(`Live cap reached: ${artifact}`);
-      monitor.scheduleAnalysis();
       if (monitor.conversation.cursor?.id === id && active === 0) return;
       await pause(25);
     }

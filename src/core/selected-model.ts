@@ -12,19 +12,23 @@ const systemPrompt =
 const number = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 
+const record = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+
+const textBlock = (value: unknown): value is { text: string } =>
+  record(value) && value.type === "text" && typeof value.text === "string";
+
+const thinkingBlock = (value: unknown) =>
+  record(value) &&
+  value.type === "thinking" &&
+  typeof value.thinking === "string";
+
 const responseText = (content: readonly unknown[]) => {
-  if (
-    content.some(
-      (part) =>
-        !part ||
-        typeof part !== "object" ||
-        (part as { type?: unknown }).type !== "text",
-    )
-  )
+  if (!content.every((part) => textBlock(part) || thinkingBlock(part)))
     return "";
   return content
-    .map((part) => (part as { text?: unknown }).text)
-    .filter((text): text is string => typeof text === "string")
+    .filter(textBlock)
+    .map((part) => part.text)
     .join("\n");
 };
 

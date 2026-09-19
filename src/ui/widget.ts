@@ -1,3 +1,5 @@
+import { stripVTControlCharacters } from "node:util";
+
 import {
   type ExtensionContext,
   truncateToVisualLines,
@@ -5,7 +7,8 @@ import {
 import type { PresentationSnapshot } from "../core/monitor";
 
 export const widgetName = "pi-progress-bar";
-const plain = (text: string) => text.replace(/[\p{Cc}\p{Cf}]/gu, " ");
+const plain = (text: string) =>
+  stripVTControlCharacters(text).replace(/[\p{Cc}\p{Cf}]/gu, " ");
 
 export function clarityLabel(score: unknown): string {
   if (
@@ -22,12 +25,7 @@ export function clarityLabel(score: unknown): string {
 }
 
 const clipVisualLine = (line: string, width: number) => {
-  const visualLines = truncateToVisualLines(
-    plain(line),
-    1000,
-    width,
-    0,
-  ).visualLines;
+  const visualLines = truncateToVisualLines(line, 1000, width, 0).visualLines;
   return visualLines.length ? [visualLines[0] ?? ""] : [""];
 };
 const timestamp = (value: number | undefined) => {
@@ -79,19 +77,23 @@ export function paint(ctx: ExtensionContext, view: PresentationSnapshot) {
             "Implementation: unverified",
           ];
       const lines = [
-        theme.fg("accent", progressLine),
-        ...provenance.map((line) => theme.fg("muted", line)),
-        ...(card ? [theme.fg("muted", `Task: ${card.label}`)] : []),
-        theme.fg("muted", `${view.activity} • ${view.service.label}`),
+        theme.fg("accent", plain(progressLine)),
+        ...provenance.map((line) => theme.fg("muted", plain(line))),
+        ...(card ? [theme.fg("muted", plain(`Task: ${card.label}`))] : []),
+        theme.fg("muted", plain(`${view.activity} • ${view.service.label}`)),
         theme.fg(
           "muted",
-          `Last Jev dispatch: ${timestamp(view.lastJevCallAt)} • Last extraction dispatch: ${timestamp(view.lastExtractionCallAt)}`,
+          plain(
+            `Last Jev dispatch: ${timestamp(view.lastJevCallAt)} • Last extraction dispatch: ${timestamp(view.lastExtractionCallAt)}`,
+          ),
         ),
         theme.fg(
           "muted",
-          `Jev ${view.usage.jev.inputTokens}/${view.usage.jev.outputTokens} tokens • extraction ${view.usage.extraction.inputTokens}/${view.usage.extraction.outputTokens} tokens`,
+          plain(
+            `Jev ${view.usage.jev.inputTokens}/${view.usage.jev.outputTokens} tokens • extraction ${view.usage.extraction.inputTokens}/${view.usage.extraction.outputTokens} tokens`,
+          ),
         ),
-        ...health.map((line) => theme.fg("muted", line)),
+        ...health.map((line) => theme.fg("muted", plain(line))),
       ];
       return lines.flatMap((line) => clipVisualLine(line, width));
     },

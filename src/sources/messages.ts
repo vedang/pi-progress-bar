@@ -65,7 +65,7 @@ export function canonicalObservation(
   const message = header.entry.message;
   if (!record(message) || message.role !== header.role) return;
   const text = visibleText(message.content);
-  if (text === undefined) return;
+  if (text === undefined || !text.trim()) return;
   return {
     id: header.id,
     role: header.role,

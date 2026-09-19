@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { completionRequest } from "../src/analysis/completion";
 import { processObservation } from "../src/core/hybrid";
 import {
+  checkpointBytes,
   encodeCheckpoint,
   restoreCheckpoint,
 } from "../src/core/hybrid-checkpoint";
@@ -53,6 +54,49 @@ function object(value: unknown): Record<string, unknown> {
 }
 
 describe("Jev-selected current task focus", () => {
+  it("bounds real combined focus outcomes including long decimal abstentions", async () => {
+    const state = await initial();
+    state.tasks = state.tasks.slice(0, 1);
+    state.events = state.events.slice(0, 1);
+    const saved: HybridState[] = [];
+    const p = backend(noPatch(), {
+      gate: "unchanged",
+      complete: "yes",
+      focus: "concurrent",
+      focusConfidence: 0.30000000000000004,
+      focusProbability: 0.30000000000000004,
+      save: (value) => saved.push(structuredClone(value)),
+    });
+    let admittedBytes = 0;
+    p.admit.mockImplementation((...args: unknown[]) => {
+      const plan = object(args[0]);
+      if (plan.phase === "completion")
+        admittedBytes =
+          checkpointBytes(plan.candidate as HybridState) +
+          Number(plan.schemaBytes);
+      return true;
+    });
+    const original = p.evaluate.getMockImplementation();
+    if (!original) throw new Error("Missing evaluator");
+    p.evaluate.mockImplementation(async (request) => {
+      const result = await original(request);
+      for (const [key, answer] of Object.entries(result.answers)) {
+        if (!key.startsWith("complete:") || answer.type !== "choice") continue;
+        answer.confidence = 0.5000000000000001;
+        answer.probabilities = {
+          yes: 0.8000000000000002,
+          no: 0.0999999999999999,
+          uncertain: 0.0999999999999999,
+        };
+      }
+      return result;
+    });
+    await processObservation(state, latest, p);
+    const accepted = saved.find((s) => s.pending?.journal.completions.length);
+    expect(accepted).toBeDefined();
+    if (!accepted) throw new Error("No accepted result");
+    expect(checkpointBytes(accepted)).toBeLessThanOrEqual(admittedBytes);
+  });
   it.each([false, true])(
     "fits all twenty full-label focus candidates without needless duplication (unicode=%s)",
     async (unicode) => {

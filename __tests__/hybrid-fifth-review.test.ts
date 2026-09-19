@@ -1,4 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { processObservation } from "../src/core/hybrid";
+import {
+  encodeCheckpoint,
+  monitorCheckpointMetadata,
+} from "../src/core/hybrid-checkpoint";
+import type { HybridState } from "../src/core/hybrid-state";
+import { backend, noPatch, observation } from "./fixtures/hybrid";
 import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
 
 const running: ReturnType<typeof monitorHarness>[] = [];
@@ -83,6 +90,122 @@ it.each([false, true])(
     expect(h.requests).toHaveLength(calls);
   },
 );
+
+it("restores exact pending context across skipped candidates without unbounded reads or rebilling the gate", async () => {
+  const goal = branchEntry(
+    "goal",
+    "Implement parser, add regression, and validate it.",
+  );
+  const h = monitorHarness([goal]);
+  running.push(h);
+  h.start();
+  await h.settle("goal");
+  const latest = observation(
+    "pending-after-skips",
+    "Work continues on the parser.",
+    "assistant",
+  );
+  const saved: HybridState[] = [];
+  await processObservation(
+    h.monitor.state,
+    latest,
+    backend(noPatch(), {
+      gate: "unchanged",
+      save: (value) => saved.push(structuredClone(value)),
+    }),
+    [observation(goal.id, goal.message.content)],
+  );
+  const pending = saved.find(
+    (value) =>
+      value.pending?.journal.gate && !value.pending.journal.completions.length,
+  );
+  if (!pending) throw new Error("Missing accepted gate");
+  const checkpoint = encodeCheckpoint(
+    pending,
+    monitorCheckpointMetadata(h.monitor.checkpoint()),
+  );
+  h.monitor.stop();
+  let reads = 0,
+    boundaryStart = 0,
+    maximumBoundaryReads = 0;
+  const reader = h.reader.getMockImplementation();
+  if (!reader) throw new Error("Missing reader");
+  h.reader.mockImplementation(() => {
+    boundaryStart = reads;
+    return reader();
+  });
+  const tail = Array.from({ length: 10_000 }, (_, index) => ({
+    type: "message",
+    id: `skip-before-context-${index}`,
+    message: {
+      role: "assistant",
+      get content() {
+        reads++;
+        maximumBoundaryReads = Math.max(
+          maximumBoundaryReads,
+          reads - boundaryStart,
+        );
+        return " ";
+      },
+    },
+  }));
+  h.replace([goal, ...tail, branchEntry(latest.id, latest.text, latest.role)]);
+  h.requests.length = 0;
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    checkpoint,
+    false,
+    h.reader,
+  );
+  expect(maximumBoundaryReads).toBeLessThanOrEqual(256);
+  await h.settle(latest.id);
+  expect(h.requests.some((request) => "gate" in request.questions)).toBe(false);
+  expect(maximumBoundaryReads).toBeLessThanOrEqual(256);
+});
+
+it("restoring an amended same-source branch preserves saved billing telemetry", async () => {
+  const goal = branchEntry(
+    "goal",
+    "Implement parser, add regression, and validate it.",
+  );
+  const h = monitorHarness([goal]);
+  running.push(h);
+  h.start();
+  await h.settle("goal");
+  const saved = h.monitor.checkpoint();
+  const before = h.monitor.presentationSnapshot();
+  h.monitor.stop();
+  goal.message.content += " Changed while extension was stopped.";
+  h.fetch.mockImplementation(() => new Promise<Response>(() => {}));
+  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  const after = h.monitor.presentationSnapshot();
+  expect(h.monitor.state.tasks).toHaveLength(0);
+  expect(after.card).toBeUndefined();
+  expect(after.usage).toEqual(before.usage);
+  expect(after.lastExtractionCallAt).toBe(before.lastExtractionCallAt);
+  expect(after.lastJevCallAt).toBeGreaterThanOrEqual(before.lastJevCallAt ?? 0);
+});
+
+it("a true source replacement resets old session billing telemetry", async () => {
+  const h = monitorHarness();
+  running.push(h);
+  h.start();
+  await h.settle("goal");
+  h.monitor.turnOff();
+  Reflect.set(
+    Reflect.get(h.monitor, "options"),
+    "sourceId",
+    () => "session:replacement",
+  );
+  h.fetch.mockImplementation(() => new Promise<Response>(() => {}));
+  h.monitor.turnOn("/nonexistent-hybrid-test");
+  expect(h.monitor.state.sourceId).toBe("session:replacement");
+  expect(h.monitor.presentationSnapshot().usage).toEqual({
+    jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
+    extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
+  });
+  expect(h.monitor.presentationSnapshot().lastExtractionCallAt).toBeUndefined();
+});
 
 it("same-source canonical amendment preserves incurred usage and dispatch timestamps", async () => {
   const goal = branchEntry(

@@ -608,8 +608,10 @@ function longestJsonString(values: readonly string[]) {
 
 /**
  * Supplement only scalar encodings impossible to put in a valid candidate:
- * JSON's largest finite-number spelling bounds every legal unit number.
- * The record itself carries the largest legal task/special choice and reason.
+ * JS shortest decimal output has a 24-byte legal unit exemplar:
+ * `0.0000010000000000000002` (17 significant digits plus `0.` and five
+ * leading zeros); scientific-form unit values are shorter. The record itself
+ * carries the largest legal task/special choice and reason.
  */
 function assessmentSchemaBytes(
   assessment: Assessment,
@@ -618,8 +620,8 @@ function assessmentSchemaBytes(
   const upper = {
     ...assessment,
     rawChoice: largestRawChoice,
-    confidence: Number.MAX_VALUE,
-    probability: Number.MAX_VALUE,
+    confidence: 0.0000010000000000000002,
+    probability: 0.0000010000000000000002,
     reason: "threshold-abstention",
   };
   const actual = Buffer.byteLength(JSON.stringify(assessment));

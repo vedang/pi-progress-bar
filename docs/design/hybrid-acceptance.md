@@ -2,9 +2,11 @@
 
 ## Status
 
-Runtime freeze: **`7a3fca75`**, with final mechanical test update `40c04c22`. Main independently passed format, TypeScript, Biome, Knip, **358 unit +12 integration tests**, **12 global-host integration tests**, and package dry-run. Local host is Pi0.84.2/pi-ai0.84.4; global host is Pi0.85.1. **Independent cumulative review and publication remain pending**; these results alone do not close H5 or earlier82j acceptance.
+Runtime freeze: **`ba24602c`**. Main independently passed format, TypeScript, Biome, Knip, **371 unit +12 integration tests**, **12 global-host integration tests**, and package dry-run. Local host is Pi0.84.2/pi-ai0.84.4; global host is Pi0.85.1. **Independent cumulative review and publication remain pending**; these results alone do not close H5 or earlier82j acceptance.
 
 ### Latest repair evidence
+
+Review of `7a3fca75` found continuation/control regressions despite green gates. Main `04d0017c` reproduced11 failures with two continuous/reload controls. Source `ba24602c` unifies restore/enable control intent, awaits target restoration, preserves OFF intent, freezes active request context behind an authority barrier, removes competing backward-latest scanning, preserves same-session tree telemetry, and clears terminal catch-up. All regressions and full gates above pass; logs `sixth-main-*.log`. **Independent cumulative rereview remains pending.** No new paid calls were used for these local invariant repairs.
 
 The next cumulative review judged `124ee557`'s paid admission/replay repairs sound, but found three further blockers: OFF/local-save capacity, skipped blank/thinking candidate traversal, and telemetry reset on same-source amendment. Source `21a2a6d2` plus `7a3fca75` repairs these and two main-discovered frontier invalidation bugs. Main gates above passed; logs are `fifth-final-*.log`. **Independent cumulative rereview remains pending.** An existing exact-limit ON-only checkpoint now fails safely OFF without losing its valid accepted journal; newly committed states must fit OFF. Same-source semantic invalidation preserves incurred usage and dispatch timestamps.
 

@@ -5,6 +5,7 @@ import type {
 } from "../src/analysis/gateway";
 import { countReported } from "../src/core/ledger";
 import { type Checkpoint, Monitor } from "../src/core/monitor";
+import { collectTrajectory, findCandidates } from "../src/sources/trajectory";
 import { replayEntries } from "./fixtures/live-session";
 import { renderWidget } from "./fixtures/render-widget";
 
@@ -221,6 +222,38 @@ function runtime(
 }
 
 describe("fresh-session ordered production controller", () => {
+  it("does not lose later candidates from the same oversized fresh entry at cutover", async () => {
+    const r = runtime(replayEntries(1), verdict, true);
+    try {
+      await r.settle("old-goal");
+      const text = `1. Implement the new scope instead.\n2. ${"detail ".repeat(2600)}Finish the additional work.`;
+      const candidates = findCandidates(
+        collectTrajectory([
+          {
+            type: "message",
+            id: "replacement",
+            parentId: null,
+            message: { role: "user", content: text },
+          },
+        ]),
+      );
+      expect(candidates.length).toBeGreaterThan(1);
+      r.append("replacement", text);
+      r.observe();
+      await vi.advanceTimersByTimeAsync(2000);
+      const selected = r.requests
+        .filter((request) => request.questions.source)
+        .flatMap((request) =>
+          ((request.state as TestState).candidates ?? []).map(
+            (candidate) => candidate.id,
+          ),
+        );
+      for (const candidate of candidates)
+        expect(selected).toContain(candidate.id);
+    } finally {
+      r.monitor.stop();
+    }
+  });
   it.each(["assistant", "overflow-user"])(
     "preserves post-boundary %s work arriving during fresh scope evaluation",
     async (kind) => {

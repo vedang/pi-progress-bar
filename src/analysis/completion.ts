@@ -50,7 +50,7 @@ function focusQuestion(candidates: readonly HybridTask[]) {
       ...Object.fromEntries(
         candidates.map((task) => [
           task.id,
-          `Current actual assistant activity is specifically on ${JSON.stringify(focusTaskState(task))}.`,
+          `Current actual assistant activity is specifically on the entry in \`state.openTasks\` whose id is ${JSON.stringify(task.id)}.`,
         ]),
       ),
       none: "No supplied task has established current assistant activity.",

@@ -12,7 +12,7 @@ import {
   readBeadsExport,
 } from "../sources/beads";
 import { EvidenceStore, redEvidenceLabel } from "../sources/evidence";
-import { CanonicalPass } from "../sources/messages";
+import { type CanonicalFrontier, CanonicalPass } from "../sources/messages";
 import {
   type AdmissionPlan,
   DurabilityCapacityError,
@@ -208,7 +208,24 @@ export class Monitor {
   private cwd?: string;
   /** Current bounded canonical page; historical source stays behind reader. */
   private page: Observation[] = [];
+  private pageBytes = 0;
+  private pageFrontier?: CanonicalFrontier;
+  private latestFrontier?: CanonicalFrontier;
   private precedingContext: Observation[] = [];
+  private precedingFrontier?: CanonicalFrontier;
+  private precedingTarget?: { id: string; includeTarget: boolean };
+  private canonicalContinuationTimer?: ReturnType<typeof setTimeout>;
+  private canonicalIncomplete = false;
+  private restoring?: {
+    data: unknown;
+    sourceId: string;
+    metadata: MonitorCheckpointMetadata | undefined;
+    resume: boolean;
+    target?: { id: string; includeTarget: boolean };
+    frontier?: CanonicalFrontier;
+    context: Observation[];
+    epoch: number;
+  };
   private queued: Observation[] = [];
   private processing = false;
   private waitingForWake = false;
@@ -303,6 +320,19 @@ export class Monitor {
     if (sourceId !== this.state.sourceId) this.resetState(sourceId);
     // OFF history can change while no observer callback runs. Reset first.
     if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
+    if (this.canonicalIncomplete) {
+      this.scheduleCanonicalContinuation();
+      this.publish();
+      return;
+    }
+    // A legacy exact-edge ON checkpoint remains readable but cannot enable.
+    if (!this.falseProjectionFits()) {
+      this.enabled = false;
+      this.gateway.pause();
+      this.note("capacity-exhausted");
+      this.publish();
+      return "Progress state capacity reached; monitoring remains OFF";
+    }
     this.latchHistoricalCatchup = true;
     this.enabled = true;
     this.error = undefined;
@@ -329,6 +359,7 @@ export class Monitor {
     this.healthObservation = undefined;
     this.gateway.pause();
     this.evidence.clearPending();
+    this.clearCanonicalContinuations();
     this.save();
     this.publish();
   }
@@ -343,6 +374,7 @@ export class Monitor {
     this.healthObservation = undefined;
     this.gateway.pause();
     this.evidence.clearPending();
+    this.clearCanonicalContinuations();
     this.publish();
   }
 
@@ -351,6 +383,11 @@ export class Monitor {
     if (!this.enabled) return;
     const pass = this.beginCanonicalPass();
     if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
+    if (this.canonicalIncomplete) {
+      this.scheduleCanonicalContinuation();
+      this.publish();
+      return;
+    }
     this.clearRetry();
     this.epoch++;
     this.extractionController?.abort();
@@ -369,6 +406,11 @@ export class Monitor {
     if (!this.enabled) return;
     const pass = this.beginCanonicalPass();
     if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
+    if (this.canonicalIncomplete) {
+      this.scheduleCanonicalContinuation();
+      this.publish();
+      return;
+    }
     this.requeue(pass);
     if (this.queued.length) this.cancelHealth();
     this.drain();
@@ -376,6 +418,105 @@ export class Monitor {
 
   checkpoint(): unknown {
     return encodeCheckpoint(this.state, this.metadata());
+  }
+
+  private restoreSourceMatches(data: unknown, sourceId: string) {
+    if (!data || typeof data !== "object") return false;
+    const state = (data as { state?: unknown }).state;
+    return (
+      !!state &&
+      typeof state === "object" &&
+      (state as { sourceId?: unknown }).sourceId === sourceId
+    );
+  }
+
+  private restoreTarget(data: unknown) {
+    if (!data || typeof data !== "object") return;
+    const state = (data as { state?: unknown }).state;
+    if (!state || typeof state !== "object") return;
+    const pending = (state as { pending?: unknown }).pending;
+    if (pending && typeof pending === "object") {
+      const observation = (pending as { observation?: unknown }).observation;
+      const entryId =
+        observation && typeof observation === "object"
+          ? (observation as { entryId?: unknown }).entryId
+          : undefined;
+      if (typeof entryId === "string" && entryId)
+        return { id: entryId, includeTarget: false };
+    }
+    const cursor = (state as { cursor?: unknown }).cursor;
+    const id =
+      cursor && typeof cursor === "object"
+        ? (cursor as { id?: unknown }).id
+        : undefined;
+    return typeof id === "string" && id
+      ? { id, includeTarget: true }
+      : undefined;
+  }
+
+  private continueRestore(work: NonNullable<Monitor["restoring"]>) {
+    if (this.restoring !== work || work.epoch !== this.epoch) return;
+    const pass = this.beginCanonicalPass();
+    const context = work.target
+      ? pass.precedingResult(
+          work.target.id,
+          work.target.includeTarget,
+          work.frontier,
+          work.context,
+        )
+      : { context: [] as Observation[], complete: true };
+    if (!context.complete) {
+      work.context = context.context;
+      work.frontier = context.frontier;
+      this.scheduleCanonicalContinuation();
+      this.publish();
+      return;
+    }
+    if (work.target) {
+      this.precedingContext = context.context;
+      this.precedingFrontier = context.frontier;
+      this.precedingTarget = { ...work.target };
+    }
+    this.restoring = undefined;
+    const restored = restoreCheckpoint(
+      work.data,
+      work.sourceId,
+      (entryId) => this.resolveObservation(pass, entryId),
+      (entryId) =>
+        work.target?.id === entryId
+          ? context.context
+          : this.rehydratePreceding(pass, entryId),
+    );
+    if (restored) {
+      this.state = copyState(restored);
+      // Lifetime telemetry belongs to the saved source/session before semantic
+      // reconciliation may discard stale task/card authority.
+      this.applyMetadata(work.metadata);
+      this.latchHistoricalCatchup = true;
+      if (this.hasCanonicalAmendment(pass)) {
+        this.resetState(work.sourceId, false);
+        this.latchHistoricalCatchup = true;
+      } else if (this.canonicalIncomplete) {
+        // Replay cannot use an incomplete context as an empty authoritative one.
+        this.restoring = work;
+        this.scheduleCanonicalContinuation();
+        this.publish();
+        return;
+      }
+    } else if (this.restoreSourceMatches(work.data, work.sourceId)) {
+      // A canonical amendment can make strict replay reject before it returns
+      // state. Saved lifetime telemetry remains true even as semantic state
+      // rebuilds from the amended branch.
+      this.applyMetadata(work.metadata);
+      this.resetState(work.sourceId, false);
+      this.latchHistoricalCatchup = true;
+    } else {
+      if (work.data !== undefined) this.note("saved-state-rejected");
+      this.resetState(work.sourceId);
+    }
+    this.enabled = false;
+    if (work.resume) this.turnOnWithPass(this.cwd ?? "", pass);
+    else this.publish();
   }
 
   async restore(
@@ -392,8 +533,7 @@ export class Monitor {
     this.gateway.pause();
     this.waitingForWake = false;
     this.clearRetry();
-    this.page = [];
-    this.precedingContext = [];
+    this.clearCanonicalContinuations();
     this.queued = [];
     this.healthObservation = undefined;
     this.blockedPending = undefined;
@@ -406,35 +546,18 @@ export class Monitor {
     this.evidence.reset();
     this.diagnostics.clear();
     if (reader) this.reader = reader;
-    const pass = this.beginCanonicalPass();
-    const sourceId = this.options.sourceId();
-    const restored = restoreCheckpoint(
-      data,
-      sourceId,
-      (entryId) => this.resolveObservation(pass, entryId),
-      (entryId) => this.rehydratePreceding(pass, entryId),
-    );
     const metadata = monitorCheckpointMetadata(data);
-    if (restored) {
-      this.state = copyState(restored);
-      this.precedingContext = this.rehydratePreceding(
-        pass,
-        restored.pending?.observation.entryId ?? restored.cursor?.id,
-        !restored.pending,
-      );
-      this.latchHistoricalCatchup = true;
-      if (this.hasCanonicalAmendment(pass)) {
-        this.resetState(sourceId);
-        this.latchHistoricalCatchup = true;
-      } else this.applyMetadata(metadata);
-    } else {
-      if (data !== undefined) this.note("saved-state-rejected");
-      this.resetState(sourceId);
-    }
-    const resume = preserveControls ? wasEnabled : (metadata?.enabled ?? true);
-    this.enabled = false;
-    if (resume) this.turnOnWithPass(cwd, pass);
-    else this.publish();
+    const work = {
+      data,
+      sourceId: this.options.sourceId(),
+      metadata,
+      resume: preserveControls ? wasEnabled : (metadata?.enabled ?? true),
+      target: this.restoreTarget(data),
+      context: [] as Observation[],
+      epoch: this.epoch,
+    };
+    this.restoring = work;
+    this.continueRestore(work);
   }
 
   /** Detached plain projection; it does not read history, persist, or schedule. */
@@ -502,12 +625,27 @@ export class Monitor {
     return new CanonicalPass(this.reader ? this.reader() : []);
   }
 
-  private resetState(sourceId: string) {
+  private clearCanonicalContinuations() {
+    if (this.canonicalContinuationTimer)
+      clearTimeout(this.canonicalContinuationTimer);
+    this.canonicalContinuationTimer = undefined;
+    this.page = [];
+    this.pageBytes = 0;
+    this.pageFrontier = undefined;
+    this.latestFrontier = undefined;
+    this.precedingContext = [];
+    this.precedingFrontier = undefined;
+    this.precedingTarget = undefined;
+    this.canonicalIncomplete = false;
+    this.restoring = undefined;
+  }
+
+  /** Semantic authority resets on amendment; billing lifetime resets only by source. */
+  private resetState(sourceId: string, resetTelemetry = true) {
     this.state = emptyState(sourceId);
     this.card = undefined;
     this.cardHealthIdentity = undefined;
-    this.page = [];
-    this.precedingContext = [];
+    this.clearCanonicalContinuations();
     this.queued = [];
     this.healthObservation = undefined;
     this.blockedPending = undefined;
@@ -518,6 +656,7 @@ export class Monitor {
     this.evidence.reset();
     this.beads.clear();
     this.beadsGeneration++;
+    if (!resetTelemetry) return;
     this.lastJevCallAt = undefined;
     this.lastExtractionCallAt = undefined;
     this.usage.jev.calls = 0;
@@ -528,9 +667,9 @@ export class Monitor {
     this.usage.extraction.outputTokens = 0;
   }
 
-  private metadata(): MonitorCheckpointMetadata {
+  private metadata(enabled = this.enabled): MonitorCheckpointMetadata {
     return {
-      enabled: this.enabled,
+      enabled,
       usage: {
         jev: validUsage(this.usage.jev),
         extraction: validUsage(this.usage.extraction),
@@ -541,6 +680,47 @@ export class Monitor {
         : {}),
       ...(this.card ? { card: copyCard(this.card) } : {}),
     };
+  }
+
+  /** Every new durable semantic state must also support durable OFF control. */
+  private falseProjectionFits(state = this.state) {
+    try {
+      checkpointBytes(state, this.metadata(false));
+      return (
+        checkpointBytes(state, this.metadata(false)) <= MAX_CHECKPOINT_BYTES
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** A finite scan continuation, not an interval or idle polling loop. */
+  private scheduleCanonicalContinuation() {
+    if (
+      this.canonicalContinuationTimer ||
+      (this.restoring === undefined && !this.enabled)
+    )
+      return;
+    const epoch = this.epoch;
+    this.canonicalContinuationTimer = setTimeout(() => {
+      this.canonicalContinuationTimer = undefined;
+      if (epoch !== this.epoch) return;
+      if (this.restoring) {
+        this.continueRestore(this.restoring);
+        return;
+      }
+      if (!this.enabled) return;
+      const pass = this.beginCanonicalPass();
+      if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
+      if (this.canonicalIncomplete) {
+        this.scheduleCanonicalContinuation();
+        this.publish();
+        return;
+      }
+      this.requeue(pass);
+      this.publish();
+      this.drain();
+    }, 0);
   }
 
   private applyMetadata(metadata: MonitorCheckpointMetadata | undefined) {
@@ -558,6 +738,12 @@ export class Monitor {
   }
 
   private save() {
+    // Legacy ON-only exact-edge state is readable but must never write a stale
+    // enabled control record after OFF or any local persistence boundary.
+    if (!this.falseProjectionFits()) {
+      this.note("capacity-exhausted");
+      return;
+    }
     try {
       this.persist(this.checkpoint());
     } catch {
@@ -663,7 +849,8 @@ export class Monitor {
         if (!this.enabled || epoch !== this.epoch) return;
         const pass = this.beginCanonicalPass();
         if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
-        this.requeue(pass);
+        if (this.canonicalIncomplete) this.scheduleCanonicalContinuation();
+        else this.requeue(pass);
         this.publish();
         this.drain();
       },
@@ -831,6 +1018,7 @@ export class Monitor {
 
   /** Full relevant-source validation on one ephemeral coherent pass. */
   private hasCanonicalAmendment(pass: CanonicalPass) {
+    this.canonicalIncomplete = false;
     let amended = false;
     const byId = new Map<string, ReturnType<typeof this.canonicalReferences>>();
     for (const reference of this.canonicalReferences()) {
@@ -851,27 +1039,46 @@ export class Monitor {
       )
         amended = true;
     }
+    const exactPreceding = (target: { id: string; includeTarget: boolean }) => {
+      const sameTarget =
+        this.precedingTarget?.id === target.id &&
+        this.precedingTarget.includeTarget === target.includeTarget;
+      const result = pass.precedingResult(
+        target.id,
+        target.includeTarget,
+        sameTarget ? this.precedingFrontier : undefined,
+        sameTarget ? this.precedingContext : [],
+      );
+      this.precedingContext = result.context;
+      this.precedingFrontier = result.frontier;
+      this.precedingTarget = target;
+      if (!result.complete) {
+        this.canonicalIncomplete = true;
+        return;
+      }
+      return result.context;
+    };
     const pending = this.state.pending;
-    if (
-      pending &&
-      !this.sameContext(
-        pending.journal.gate.context,
-        pass.preceding(pending.observation.entryId),
-      )
-    )
-      amended = true;
-    if (
-      this.activeObservation &&
-      !this.sameContext(
-        this.precedingContext.map((observation) => ({
-          entryId: observation.id,
-          messageHash: observation.hash,
-          role: observation.role,
-        })),
-        pass.preceding(this.activeObservation.observation.id),
-      )
-    )
-      amended = true;
+    if (pending) {
+      const context = exactPreceding({
+        id: pending.observation.entryId,
+        includeTarget: false,
+      });
+      if (context && !this.sameContext(pending.journal.gate.context, context))
+        amended = true;
+    }
+    if (this.activeObservation) {
+      const expected = this.precedingContext.map((observation) => ({
+        entryId: observation.id,
+        messageHash: observation.hash,
+        role: observation.role,
+      }));
+      const context = exactPreceding({
+        id: this.activeObservation.observation.id,
+        includeTarget: false,
+      });
+      if (context && !this.sameContext(expected, context)) amended = true;
+    }
     return amended;
   }
 
@@ -885,7 +1092,7 @@ export class Monitor {
     this.waitingForWake = false;
     this.clearRetry();
     this.gateway.pause();
-    this.resetState(sourceId);
+    this.resetState(sourceId, false);
     this.latchHistoricalCatchup = true;
     this.activity = "Idle";
     if (this.enabled) this.gateway.enable(this.identity());
@@ -899,19 +1106,57 @@ export class Monitor {
     after?: { id: string; hash: string },
     historical = false,
   ) {
-    const result = pass.page(after);
+    const sameAnchor = this.pageFrontier?.anchorId === after?.id;
+    if (!sameAnchor) {
+      this.page = [];
+      this.pageBytes = 0;
+      this.pageFrontier = undefined;
+    }
+    const result = pass.page(
+      after,
+      this.pageFrontier,
+      this.page,
+      this.pageBytes,
+    );
     if (!result.afterValid) return false;
+    this.page.push(...result.page);
+    this.pageBytes += result.page.reduce(
+      (total, observation) => total + Buffer.byteLength(observation.text),
+      0,
+    );
+    this.pageFrontier = result.frontier;
     if (
-      (historical || this.latchHistoricalCatchup) &&
+      (historical || this.latchHistoricalCatchup || this.catchingUp) &&
       !this.catchupTarget &&
-      (result.page.length > 1 || result.hasMore)
+      (this.page.length > 1 || result.hasMore)
     ) {
-      const target = pass.latestAfter(after);
-      if (target) this.catchupTarget = { id: target.id, hash: target.hash };
+      // A final short page itself proves the target. Full pages spend the
+      // exploratory quantum, so keep the catch-up latch until that final page.
+      const finalVisible = !result.hasMore && this.page.at(-1);
+      if (finalVisible)
+        this.catchupTarget = {
+          id: finalVisible.id,
+          hash: finalVisible.hash,
+        };
+      else {
+        const latest = pass.latestAfterResult(after, this.latestFrontier);
+        this.latestFrontier = latest.frontier;
+        if (latest.latest)
+          this.catchupTarget = {
+            id: latest.latest.id,
+            hash: latest.latest.hash,
+          };
+        else if (!latest.complete) this.scheduleCanonicalContinuation();
+      }
     }
     this.latchHistoricalCatchup = false;
-    this.page = result.page;
-    this.catchingUp = !!this.catchupTarget || result.hasMore;
+    this.catchingUp =
+      this.catchingUp ||
+      !!this.catchupTarget ||
+      result.hasMore ||
+      (!!result.frontier && !result.frontier.terminal);
+    if (result.frontier && !result.frontier.terminal)
+      this.scheduleCanonicalContinuation();
     return true;
   }
 
@@ -930,6 +1175,10 @@ export class Monitor {
   }
 
   private requeue(pass: CanonicalPass, historical = false) {
+    if (this.canonicalIncomplete) {
+      this.scheduleCanonicalContinuation();
+      return;
+    }
     if (this.waitingForWake) return;
     if (this.blockedPending && !this.state.pending) {
       this.queued = [];
@@ -1141,7 +1390,8 @@ export class Monitor {
         this.activity = "Idle";
         const pass = this.beginCanonicalPass();
         if (this.hasCanonicalAmendment(pass)) this.resetForCanonicalAmendment();
-        this.requeue(pass);
+        if (this.canonicalIncomplete) this.scheduleCanonicalContinuation();
+        else this.requeue(pass);
         this.publish();
       }
       this.drain();
@@ -1360,6 +1610,8 @@ export class Monitor {
     const rejected: HybridState = { ...this.state, capacity: "limit" };
     if (this.card) this.card = { ...copyCard(this.card), retained: true };
     try {
+      // A fixed local block must preserve the same durable OFF guarantee.
+      encodeCheckpoint(rejected, this.metadata(false));
       const checkpoint = encodeCheckpoint(rejected, this.metadata());
       this.state = copyState(rejected);
       this.persist(checkpoint);
@@ -1376,7 +1628,8 @@ export class Monitor {
     this.retainCardBeforeReplacement(state);
     let checkpoint: unknown;
     try {
-      // Preflight full state plus monitor metadata before replacing durable state.
+      // No new semantic state may fit only while ON: OFF control is durable.
+      encodeCheckpoint(state, this.metadata(false));
       checkpoint = encodeCheckpoint(state, this.metadata());
     } catch {
       this.card = previousCard;

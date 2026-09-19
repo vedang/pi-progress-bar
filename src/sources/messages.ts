@@ -5,6 +5,8 @@ import type { Observation, ObservationRole } from "../core/hybrid-state";
 const MAX_CANONICAL_PAGE_MESSAGES = 64;
 const MAX_CANONICAL_PAGE_BYTES = 256 * 1024;
 const MAX_PRECEDING_BYTES = 4 * 1024;
+/** Exploratory payloads yield after the same bounded message quantum as a page. */
+const MAX_EXPLORATORY_HEADERS = MAX_CANONICAL_PAGE_MESSAGES;
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 
@@ -70,15 +72,38 @@ function canonicalObservation(
   };
 }
 
+export interface CanonicalFrontier {
+  kind: "page" | "preceding" | "latest";
+  anchorId?: string;
+  includeTarget?: boolean;
+  index: number;
+  signature: string;
+  terminal?: true;
+}
+
 export interface CanonicalPage {
   page: Observation[];
   hasMore: boolean;
   afterValid: boolean;
+  frontier?: CanonicalFrontier;
+}
+
+export interface CanonicalPreceding {
+  context: Observation[];
+  complete: boolean;
+  frontier?: CanonicalFrontier;
+}
+
+export interface CanonicalLatest {
+  latest?: Observation;
+  complete: boolean;
+  frontier?: CanonicalFrontier;
 }
 
 /**
  * One immutable host snapshot. It captures headers once and materializes every
- * requested payload at most once, including invalid/blank candidates.
+ * requested payload at most once. Direct authoritative refs are unrestricted;
+ * exploratory scans yield after one bounded candidate quantum.
  */
 export class CanonicalPass {
   readonly entries: readonly unknown[];
@@ -86,10 +111,17 @@ export class CanonicalPass {
   private readonly byId = new Map<string, CanonicalHeader>();
   private readonly duplicateIds = new Set<string>();
   private readonly materialized = new Map<string, Observation | undefined>();
+  private exploratoryReads = 0;
+  private readonly signature: string;
 
   constructor(entries: readonly unknown[]) {
     this.entries = [...entries];
     this.headers = canonicalHeaders(this.entries);
+    this.signature = hash(
+      this.headers
+        .map((header) => `${header.id}\u0000${header.role}`)
+        .join("\u0001"),
+    );
     for (const header of this.headers) {
       if (this.byId.has(header.id)) this.duplicateIds.add(header.id);
       else this.byId.set(header.id, header);
@@ -113,68 +145,208 @@ export class CanonicalPass {
     return this.headers.findIndex((header) => header.id === id);
   }
 
+  private accepts(
+    frontier: CanonicalFrontier | undefined,
+    kind: CanonicalFrontier["kind"],
+    anchorId: string | undefined,
+    includeTarget = false,
+  ) {
+    return (
+      !!frontier &&
+      frontier.kind === kind &&
+      frontier.anchorId === anchorId &&
+      frontier.includeTarget ===
+        (kind === "preceding" ? includeTarget : undefined) &&
+      frontier.signature === this.signature &&
+      frontier.index >= -1 &&
+      frontier.index <= this.headers.length
+    );
+  }
+
+  private frontier(
+    kind: CanonicalFrontier["kind"],
+    anchorId: string | undefined,
+    index: number,
+    terminal = false,
+    includeTarget = false,
+  ): CanonicalFrontier {
+    return {
+      kind,
+      ...(anchorId ? { anchorId } : {}),
+      ...(kind === "preceding" ? { includeTarget } : {}),
+      index,
+      signature: this.signature,
+      ...(terminal ? { terminal: true as const } : {}),
+    };
+  }
+
+  private exploratory(header: CanonicalHeader) {
+    this.exploratoryReads++;
+    return this.observation(header.id);
+  }
+
+  /**
+   * Direct callers get a bounded best effort. Monitor uses precedingResult so
+   * incomplete scans never become an authoritative empty context.
+   */
   preceding(entryId: string, includeTarget = false): Observation[] {
-    const index = this.indexOf(entryId);
-    if (index < 0) return [];
-    const context: Observation[] = [];
-    let bytes = 0;
-    for (
-      let cursor = includeTarget ? index : index - 1;
-      cursor >= 0 && context.length < 2;
-      cursor--
-    ) {
-      const header = this.headers[cursor];
+    return this.precedingResult(entryId, includeTarget).context;
+  }
+
+  precedingResult(
+    entryId: string,
+    includeTarget = false,
+    frontier?: CanonicalFrontier,
+    prior: readonly Observation[] = [],
+  ): CanonicalPreceding {
+    const target = this.indexOf(entryId);
+    if (target < 0) return { context: [], complete: true };
+    const accepted = this.accepts(
+      frontier,
+      "preceding",
+      entryId,
+      includeTarget,
+    );
+    let index = accepted
+      ? (frontier?.index ?? -1)
+      : includeTarget
+        ? target
+        : target - 1;
+    const context = prior.map((observation) => ({ ...observation }));
+    let bytes = context.reduce(
+      (total, observation) =>
+        total + Buffer.byteLength(JSON.stringify(observation)),
+      0,
+    );
+    if (accepted && frontier?.terminal)
+      return { context, complete: true, frontier };
+    while (index >= 0 && context.length < 2) {
+      if (this.exploratoryReads >= MAX_EXPLORATORY_HEADERS)
+        return {
+          context,
+          complete: false,
+          frontier: this.frontier(
+            "preceding",
+            entryId,
+            index,
+            false,
+            includeTarget,
+          ),
+        };
+      const header = this.headers[index];
+      index--;
       if (!header) continue;
-      const observation = this.observation(header.id);
+      const observation = this.exploratory(header);
       if (!observation) continue;
       const size = Buffer.byteLength(JSON.stringify(observation));
       if (bytes + size > MAX_PRECEDING_BYTES) break;
       context.unshift(observation);
       bytes += size;
     }
-    return context;
+    return {
+      context,
+      complete: true,
+      frontier: this.frontier("preceding", entryId, index, true, includeTarget),
+    };
   }
 
   latestAfter(after?: { id: string; hash: string }) {
-    const afterIndex = after ? this.indexOf(after.id) : -1;
-    if (after && afterIndex < 0) return;
-    for (let index = this.headers.length - 1; index > afterIndex; index--) {
-      const header = this.headers[index];
-      if (!header) continue;
-      const observation = this.observation(header.id);
-      if (observation) return observation;
-    }
+    return this.latestAfterResult(after).latest;
   }
 
-  page(after?: { id: string; hash: string }): CanonicalPage {
+  latestAfterResult(
+    after?: { id: string; hash: string },
+    frontier?: CanonicalFrontier,
+  ): CanonicalLatest {
+    const afterIndex = after ? this.indexOf(after.id) : -1;
+    const anchor = after?.id;
+    if (after && afterIndex < 0) return { complete: true };
+    if (after) {
+      const current = this.observation(after.id);
+      if (!current || current.hash !== after.hash) return { complete: true };
+    }
+    const accepted = this.accepts(frontier, "latest", anchor);
+    let index = accepted
+      ? (frontier?.index ?? afterIndex)
+      : this.headers.length - 1;
+    if (accepted && frontier?.terminal) return { complete: true, frontier };
+    while (index > afterIndex) {
+      if (this.exploratoryReads >= MAX_EXPLORATORY_HEADERS)
+        return {
+          complete: false,
+          frontier: this.frontier("latest", anchor, index),
+        };
+      const header = this.headers[index];
+      index--;
+      if (!header) continue;
+      const observation = this.exploratory(header);
+      if (observation)
+        return {
+          latest: observation,
+          complete: true,
+          frontier: this.frontier("latest", anchor, index, true),
+        };
+    }
+    return {
+      complete: true,
+      frontier: this.frontier("latest", anchor, index, true),
+    };
+  }
+
+  page(
+    after?: { id: string; hash: string },
+    frontier?: CanonicalFrontier,
+    admitted: readonly Observation[] = [],
+    admittedBytes = 0,
+  ): CanonicalPage {
     let afterIndex = -1;
+    const anchor = after?.id;
     if (after) {
       afterIndex = this.indexOf(after.id);
       const current = afterIndex < 0 ? undefined : this.observation(after.id);
       if (!current || current.hash !== after.hash)
         return { page: [], hasMore: false, afterValid: false };
     }
+    const accepted = this.accepts(frontier, "page", anchor);
+    let index = accepted ? (frontier?.index ?? afterIndex + 1) : afterIndex + 1;
+    if (accepted && frontier?.terminal)
+      return { page: [], hasMore: false, afterValid: true, frontier };
     const page: Observation[] = [];
-    let bytes = 0;
-    let hasMore = false;
-    for (let index = afterIndex + 1; index < this.headers.length; index++) {
+    let bytes = admittedBytes;
+    while (index < this.headers.length) {
+      if (
+        admitted.length + page.length >= MAX_CANONICAL_PAGE_MESSAGES ||
+        bytes >= MAX_CANONICAL_PAGE_BYTES
+      )
+        return { page, hasMore: true, afterValid: true };
+      if (this.exploratoryReads >= MAX_EXPLORATORY_HEADERS)
+        return {
+          page,
+          hasMore: true,
+          afterValid: true,
+          frontier: this.frontier("page", anchor, index),
+        };
       const header = this.headers[index];
+      index++;
       if (!header) continue;
-      const observation = this.observation(header.id);
+      const observation = this.exploratory(header);
       if (!observation) continue;
       const size = Buffer.byteLength(observation.text);
       if (
-        page.length &&
-        (page.length >= MAX_CANONICAL_PAGE_MESSAGES ||
+        admitted.length + page.length &&
+        (admitted.length + page.length >= MAX_CANONICAL_PAGE_MESSAGES ||
           bytes + size > MAX_CANONICAL_PAGE_BYTES)
-      ) {
-        hasMore = true;
-        break;
-      }
+      )
+        return { page, hasMore: true, afterValid: true };
       page.push(observation);
       bytes += size;
     }
-    return { page, hasMore, afterValid: true };
+    return {
+      page,
+      hasMore: false,
+      afterValid: true,
+      frontier: this.frontier("page", anchor, index, true),
+    };
   }
 }
 

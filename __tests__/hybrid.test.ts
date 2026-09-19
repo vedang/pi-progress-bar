@@ -94,7 +94,7 @@ function providers(
   const extract = vi.fn(async (_input: unknown) =>
     typeof patch === "string" ? patch : JSON.stringify(patch),
   );
-  return { evaluate, extract };
+  return { admit: vi.fn(() => true), evaluate, extract };
 }
 async function seeded() {
   return processObservation(emptyState("session:test"), ci, providers());

@@ -35,8 +35,25 @@ afterEach(() => {
 });
 
 /** Exact legal byte pressure using bounded event count, not oversized text. */
-async function settledAtBytes(target: number, withCard = false) {
+async function settledAtBytes(target: number, withCard = false, tasks = 3) {
   const seed = await initial();
+  if (tasks !== 3) {
+    const first = seed.tasks[0];
+    if (!first) throw new Error("Missing seed task");
+    seed.tasks = Array.from({ length: tasks }, (_, index) => ({
+      ...structuredClone(first),
+      id: `task:${index + 1}`,
+      label: `${index} ${"界".repeat(220)}`,
+    }));
+    const event = seed.events[0];
+    if (!event) throw new Error("Missing seed event");
+    seed.events = seed.tasks.map((task, index) => ({
+      ...structuredClone(event),
+      id: `event:${index + 1}`,
+      taskId: task.id,
+    }));
+    seed.nextTaskId = tasks + 1;
+  }
   const meta = structuredClone(metadata);
   if (withCard)
     meta.card = {
@@ -80,7 +97,7 @@ async function settledAtBytes(target: number, withCard = false) {
     return { state, source, tail };
   }
   const zero = size(encodeCheckpoint(candidate(0).state, meta));
-  const padding = Math.floor((target - zero) / 898); // 897 event refs + cursor.
+  const padding = Math.floor((target - zero) / (900 - seed.events.length + 1)); // Filler event refs + cursor.
   expect(padding).toBeGreaterThan(0);
   const partial = candidate(padding);
   const remainder = target - size(encodeCheckpoint(partial.state, meta));
@@ -253,3 +270,66 @@ it("accepts a limit-marked large completed journal and clears the marker during 
   expect(h.monitor.checkpoint()).toHaveProperty("state.capacity", "clear");
   expect(size(h.monitor.checkpoint())).toBeLessThan(size(checkpoint));
 });
+
+it.each([480, 499])(
+  "resumes a %iKiB partial accepted journal without rebilling its prefix",
+  async (kib) => {
+    const f = await settledAtBytes(kib * 1024, false, 20);
+    const latest = observation(
+      "partial-prefix",
+      "All deliverables are complete.",
+      "assistant",
+    );
+    const saved: HybridState[] = [];
+    await processObservation(
+      f.state,
+      latest,
+      backend(noPatch(), {
+        gate: "unchanged",
+        complete: "yes",
+        save: (state) => saved.push(structuredClone(state)),
+      }),
+      f.messages.slice(-2),
+    );
+    const accepted = saved.find(
+      (state) => state.pending?.journal.completions.length === 1,
+    );
+    if (!accepted?.pending) throw new Error("Missing accepted prefix");
+    const ids = accepted.pending.journal.completions.flatMap(
+      (record) => record.chunkIds,
+    );
+    expect(ids.length).toBeGreaterThan(0);
+    expect(ids.length).toBeLessThan(20);
+    const checkpoint = encodeCheckpoint(accepted, f.meta);
+    if (kib === 499) expect(size(checkpoint)).toBeGreaterThan(496 * 1024);
+    const h = await restored(f, checkpoint, latest);
+    h.monitor.turnOn("/nonexistent-hybrid-test");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.extract).not.toHaveBeenCalled();
+    expect(h.requests.some((request) => "gate" in request.questions)).toBe(
+      false,
+    );
+    const questioned = h.requests.flatMap((request) =>
+      Object.keys(request.questions)
+        .filter(
+          (key) => key.startsWith("complete:") || key.startsWith("withdraw:"),
+        )
+        .map((key) => key.slice(key.indexOf(":") + 1)),
+    );
+    expect(questioned.some((id) => ids.includes(id))).toBe(false);
+    if (kib === 480) expect(questioned.length).toBeGreaterThan(0);
+    if (!questioned.length) {
+      expect(h.monitor.checkpoint()).toHaveProperty("state.capacity", "limit");
+      expect(h.monitor.state.pending).toEqual(accepted.pending);
+      expect(h.monitor.state.tasks).toEqual(accepted.tasks);
+      expect(h.monitor.state.events).toEqual(accepted.events);
+      expect(h.monitor.state.scopeUnresolved).toBe(accepted.scopeUnresolved);
+    } else if (!h.monitor.state.pending) {
+      expect(h.monitor.state.cursor?.id).toBe(latest.id);
+      expect(h.monitor.checkpoint()).toHaveProperty("state.capacity", "clear");
+    }
+    expect(
+      h.save.mock.calls.every(([value]) => size(value) <= 512 * 1024),
+    ).toBe(true);
+  },
+);

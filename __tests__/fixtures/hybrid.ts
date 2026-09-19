@@ -91,6 +91,8 @@ export function backend(
     },
   );
   return {
+    // Pure-core fixtures explicitly admit; Monitor tests exercise real byte envelopes.
+    admit: vi.fn(() => true),
     evaluate,
     extract: vi.fn(async () => JSON.stringify(patch)),
     ...(options.save ? { save: options.save } : {}),

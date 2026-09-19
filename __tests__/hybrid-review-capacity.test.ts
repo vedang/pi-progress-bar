@@ -189,3 +189,65 @@ it("persists a fixed-size capacity marker at the byte edge and retains the old c
   expect(again.monitor.checkpoint()).toHaveProperty("state.capacity", "limit");
   expect(again.monitor.presentationSnapshot().progress.kind).toBe("previous");
 });
+
+it("denies an entire paid health batch before dispatch when its metadata/card cannot fit", async () => {
+  const f = await settledAtBytes(512 * 1024 - 2, true);
+  const h = await restored(f);
+  h.monitor.turnOn("/nonexistent-hybrid-test");
+  // Fixture-only scheduling of already-canonical work; no extra user message.
+  Reflect.apply(Reflect.get(h.monitor, "scheduleHealth"), h.monitor, [
+    f.source,
+  ]);
+  h.observe();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.fetch).not.toHaveBeenCalled();
+  expect(h.monitor.presentationSnapshot().usage).toEqual(metadata.usage);
+  expect(h.monitor.checkpoint()).toHaveProperty("state.capacity", "limit");
+  expect(h.monitor.presentationSnapshot().card?.retained).toBe(true);
+  expect(h.save.mock.calls.every(([saved]) => size(saved) <= 512 * 1024)).toBe(
+    true,
+  );
+});
+
+it("accepts a limit-marked large completed journal and clears the marker during local finalization", async () => {
+  const f = await settledAtBytes(499 * 1024);
+  const latest = observation(
+    "limited-final",
+    "All requested deliverables are complete.",
+    "assistant",
+  );
+  const saved: HybridState[] = [];
+  await processObservation(
+    f.state,
+    latest,
+    backend(noPatch(), {
+      gate: "unchanged",
+      complete: "yes",
+      save: (state) => saved.push(structuredClone(state)),
+    }),
+    f.messages.slice(-2),
+  );
+  const accepted = saved.find(
+    (state) =>
+      state.pending?.phase === "complete" &&
+      state.tasks.every((task) => task.status === "done"),
+  );
+  if (!accepted) throw new Error("Missing accepted journal");
+  const checkpoint = encodeCheckpoint(accepted, f.meta);
+  Reflect.set(checkpoint.state, "capacity", "limit");
+  expect(size(checkpoint)).toBeGreaterThan(496 * 1024);
+  expect(size(checkpoint)).toBeLessThanOrEqual(512 * 1024);
+  const h = await restored(f, checkpoint, latest);
+  h.monitor.turnOn("/nonexistent-hybrid-test");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.fetch).not.toHaveBeenCalled();
+  expect(h.extract).not.toHaveBeenCalled();
+  expect(h.monitor.state.pending).toBeUndefined();
+  expect(h.monitor.state.cursor).toEqual({
+    id: latest.id,
+    hash: latest.hash,
+    role: latest.role,
+  });
+  expect(h.monitor.checkpoint()).toHaveProperty("state.capacity", "clear");
+  expect(size(h.monitor.checkpoint())).toBeLessThan(size(checkpoint));
+});

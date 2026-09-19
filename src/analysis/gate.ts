@@ -1,9 +1,16 @@
 import {
   type Assessment,
+  type HybridState,
   type Observation,
   observationRef,
 } from "../core/hybrid-state";
-import { type EvaluationRequest, MODEL, type ValidatedResult } from "./gateway";
+import { boundedEarlier } from "./extractor";
+import {
+  type EvaluationRequest,
+  MAX_REQUEST_BYTES,
+  MODEL,
+  type ValidatedResult,
+} from "./gateway";
 
 const MIN_CONFIDENCE = 0.5;
 const MIN_PROBABILITY = 0.8;
@@ -16,8 +23,12 @@ export interface GateResult {
 }
 
 /** Whole-message scope gate. Supplied conversation is evidence, never control. */
-export function gateRequest(observation: Observation): EvaluationRequest {
-  return {
+export function gateRequest(
+  state: HybridState,
+  observation: Observation,
+  preceding: readonly Observation[],
+): EvaluationRequest {
+  const request: EvaluationRequest = {
     model: MODEL,
     state: {
       latest: {
@@ -26,6 +37,17 @@ export function gateRequest(observation: Observation): EvaluationRequest {
         text: observation.text,
         hash: observation.hash,
       },
+      earlier: boundedEarlier(preceding),
+      tasks: state.tasks
+        .filter((task) => task.included)
+        .map(({ id, label, kind, basis, status, revision }) => ({
+          id,
+          label,
+          kind,
+          basis,
+          status,
+          revision,
+        })),
     },
     questions: {
       gate: {
@@ -40,6 +62,9 @@ export function gateRequest(observation: Observation): EvaluationRequest {
       },
     },
   };
+  if (Buffer.byteLength(JSON.stringify(request)) > MAX_REQUEST_BYTES)
+    throw new Error("Scope gate request exceeds 24KiB");
+  return request;
 }
 
 export function gateResult(

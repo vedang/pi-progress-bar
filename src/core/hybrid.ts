@@ -25,6 +25,7 @@ const validObservation = (observation: Observation) =>
   /^[a-f0-9]{64}$/.test(observation.hash);
 
 const focusTaskId = (state: HybridState) =>
+  state.focusTaskId ??
   state.tasks.find((task) => task.included && task.status !== "done")?.id;
 
 function clearTransientErrors(state: HybridState): HybridState {
@@ -77,6 +78,7 @@ async function applyScopePatch(
         })),
       ],
       nextTaskId: state.nextTaskId + additions.length,
+      ...(additions.length ? { focusTaskId: `task:${state.nextTaskId}` } : {}),
       scopeUnresolved: patch.unresolved,
     };
   } catch (error) {
@@ -93,6 +95,7 @@ async function applyCompletion(
   state: HybridState,
   observation: Observation,
   providers: HybridProviders,
+  preceding: readonly Observation[],
 ): Promise<HybridState> {
   const tasks = state.tasks.filter((task) => task.included);
   if (!tasks.length) return state;
@@ -103,7 +106,9 @@ async function applyCompletion(
     };
   try {
     const decisions = completionDecisions(
-      await providers.evaluate(completionRequest(observation, tasks)),
+      await providers.evaluate(
+        completionRequest(observation, tasks, preceding),
+      ),
       observation,
       tasks,
     );
@@ -163,7 +168,7 @@ export async function processObservation(
   } else {
     try {
       const gate = gateResult(
-        await providers.evaluate(gateRequest(observation)),
+        await providers.evaluate(gateRequest(next, observation, preceding)),
         observation,
       );
       next = { ...next, scopeAssessment: gate.assessment };
@@ -178,6 +183,6 @@ export async function processObservation(
     }
   }
 
-  next = await applyCompletion(next, observation, providers);
+  next = await applyCompletion(next, observation, providers, preceding);
   return { ...next, focusTaskId: focusTaskId(next) };
 }

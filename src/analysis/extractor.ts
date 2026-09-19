@@ -209,7 +209,9 @@ export function parsePatch(raw: string): ScopePatch {
   return patch;
 }
 
-function boundedEarlier(preceding: readonly Observation[]): Observation[] {
+export function boundedEarlier(
+  preceding: readonly Observation[],
+): Observation[] {
   if (preceding.length > MAX_EARLIER_MESSAGES)
     throw new Error("Earlier extraction context exceeds two messages");
   const earlier = preceding.map((message) => ({ ...message }));

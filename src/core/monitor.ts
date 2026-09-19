@@ -46,6 +46,7 @@ export interface MonitorOptions {
   extract: (
     input: ExtractionInput,
     signal: AbortSignal,
+    onDispatch?: (at: number) => void,
   ) => Promise<SelectedModelResult>;
 }
 
@@ -81,6 +82,7 @@ export interface PresentationSnapshot {
     done: number;
     total: number;
     kind: "current" | "previous" | "empty";
+    catchup?: "Catching up history";
   };
   card?: PresentationCard;
   activity: string;
@@ -172,6 +174,8 @@ export class Monitor {
   private retryTimer?: ReturnType<typeof setTimeout>;
   private retryObservation?: Observation;
   private blockedPending?: { id: string; hash: string };
+  private activeObservation?: { observation: Observation; epoch: number };
+  private catchingUp = false;
   private epoch = 0;
   private extractionController?: AbortController;
   private healthObservation?: Observation;
@@ -308,6 +312,7 @@ export class Monitor {
   observe(reader: () => readonly unknown[]) {
     this.reader = reader;
     if (!this.enabled) return;
+    if (this.hasCanonicalAmendment()) this.resetForCanonicalAmendment();
     this.requeue();
     if (this.queued.length) this.cancelHealth();
     this.drain();
@@ -336,6 +341,8 @@ export class Monitor {
     this.queued = [];
     this.healthObservation = undefined;
     this.blockedPending = undefined;
+    this.activeObservation = undefined;
+    this.catchingUp = false;
     this.beads.clear();
     this.beadsGeneration++;
     this.evidence.reset();
@@ -348,6 +355,10 @@ export class Monitor {
     const metadata = monitorCheckpointMetadata(data);
     if (restored) {
       this.state = copyState(restored);
+      this.precedingContext = this.rehydratePreceding(
+        restored.pending?.observation.entryId ?? restored.cursor?.id,
+        !restored.pending,
+      );
       this.applyMetadata(metadata);
     } else {
       if (data !== undefined) this.note("saved-state-rejected");
@@ -370,7 +381,12 @@ export class Monitor {
         : "current";
     return {
       enabled: this.enabled,
-      progress: { done, total: active.length, kind },
+      progress: {
+        done,
+        total: active.length,
+        kind,
+        ...(this.catchingUp ? { catchup: "Catching up history" as const } : {}),
+      },
       ...(this.card
         ? {
             card: presentationCard(this.card, this.beads.get(this.card.taskId)),
@@ -421,6 +437,8 @@ export class Monitor {
     this.queued = [];
     this.healthObservation = undefined;
     this.blockedPending = undefined;
+    this.activeObservation = undefined;
+    this.catchingUp = false;
     this.beads.clear();
     this.beadsGeneration++;
     this.lastJevCallAt = undefined;
@@ -602,6 +620,76 @@ export class Monitor {
     this.publish();
   }
 
+  /** Validate only bounded state authority, never the unbounded history payload. */
+  private hasCanonicalAmendment() {
+    if (!this.reader) return false;
+    const references: {
+      entryId: string;
+      messageHash: string;
+      role?: Observation["role"];
+    }[] = [
+      ...this.state.tasks.flatMap((task) => [
+        task.source,
+        ...(task.latestAssessment ? [task.latestAssessment.source] : []),
+      ]),
+      ...this.state.events.map((event) => event.source),
+      ...(this.state.scopeAssessment
+        ? [this.state.scopeAssessment.source]
+        : []),
+      ...(this.state.pending ? [this.state.pending.observation] : []),
+      ...(this.state.cursor
+        ? [
+            {
+              entryId: this.state.cursor.id,
+              messageHash: this.state.cursor.hash,
+            },
+          ]
+        : []),
+      ...(this.retryObservation
+        ? [
+            {
+              entryId: this.retryObservation.id,
+              messageHash: this.retryObservation.hash,
+              role: this.retryObservation.role,
+            },
+          ]
+        : []),
+      ...(this.activeObservation
+        ? [
+            {
+              entryId: this.activeObservation.observation.id,
+              messageHash: this.activeObservation.observation.hash,
+              role: this.activeObservation.observation.role,
+            },
+          ]
+        : []),
+    ];
+    if (!references.length) return false;
+    const headers = new Map(
+      canonicalHeaders(this.reader()).map((header) => [header.id, header]),
+    );
+    const byId = new Map<string, typeof references>();
+    for (const reference of references) {
+      const group = byId.get(reference.entryId) ?? [];
+      group.push(reference);
+      byId.set(reference.entryId, group);
+    }
+    for (const [entryId, expected] of byId) {
+      const header = headers.get(entryId);
+      const current = header ? canonicalObservation(header) : undefined;
+      if (
+        !current ||
+        expected.some(
+          (reference) =>
+            current.hash !== reference.messageHash ||
+            (reference.role !== undefined && current.role !== reference.role),
+        )
+      )
+        return true;
+    }
+    return false;
+  }
+
   /** Drop stale derived evidence before replaying a canonically amended branch. */
   private resetForCanonicalAmendment() {
     const sourceId = this.state.sourceId;
@@ -634,6 +722,7 @@ export class Monitor {
     }
     const page: Observation[] = [];
     let bytes = 0;
+    let hasMore = false;
     for (let index = afterIndex + 1; index < headers.length; index++) {
       const header = headers[index];
       if (!header) continue;
@@ -644,13 +733,43 @@ export class Monitor {
         page.length &&
         (page.length >= MAX_CANONICAL_PAGE_MESSAGES ||
           bytes + size > MAX_CANONICAL_PAGE_BYTES)
-      )
+      ) {
+        hasMore = true;
         break;
+      }
       page.push(observation);
       bytes += size;
-      if (page.length >= MAX_CANONICAL_PAGE_MESSAGES) break;
     }
     this.page = page;
+    this.catchingUp = hasMore;
+  }
+
+  /** Restore at most two immediately preceding eligible observations. */
+  private rehydratePreceding(
+    entryId: string | undefined,
+    includeTarget = false,
+  ) {
+    if (!entryId || !this.reader) return [];
+    const headers = canonicalHeaders(this.reader());
+    const index = headers.findIndex((header) => header.id === entryId);
+    if (index < 0) return [];
+    const context: Observation[] = [];
+    let bytes = 0;
+    for (
+      let cursor = includeTarget ? index : index - 1;
+      cursor >= 0 && context.length < 2;
+      cursor--
+    ) {
+      const header = headers[cursor];
+      if (!header) continue;
+      const observation = canonicalObservation(header);
+      if (!observation) continue;
+      const size = Buffer.byteLength(JSON.stringify(observation));
+      if (bytes + size > 4 * 1024) break;
+      context.unshift(observation);
+      bytes += size;
+    }
+    return context;
   }
 
   /** Resolve one current canonical ref without retaining or materializing history. */
@@ -719,6 +838,7 @@ export class Monitor {
     if (observation) {
       const epoch = this.epoch;
       this.processing = true;
+      this.activeObservation = { observation: { ...observation }, epoch };
       this.setActivity("Analyzing progress");
       void this.processOne(observation, epoch);
       return;
@@ -773,17 +893,26 @@ export class Monitor {
           this.retryObservation.hash === observation.hash
         )
           this.retryObservation = undefined;
-        if (next.scopeError?.includes("12KiB"))
-          this.note("unresolved-overflow");
+        if (next.scopeFailure === "overflow") this.note("unresolved-overflow");
         else {
+          if (next.scopeFailure === "invalid")
+            this.note("invalid-scope-result");
           this.rememberPreceding(observation);
           this.scheduleHealth(observation);
         }
         return;
       }
-      if (next.completionError || next.scopeError?.includes("capacity")) {
+      if (
+        next.completionError ||
+        next.scopeFailure === "capacity" ||
+        next.scopeFailure === "overflow"
+      ) {
         this.blockedPending = { id: observation.id, hash: observation.hash };
-        this.note("capacity-exhausted");
+        this.note(
+          next.scopeFailure === "capacity" || next.completionError
+            ? "capacity-exhausted"
+            : "unresolved-overflow",
+        );
       }
     } catch (error) {
       if (!this.enabled || epoch !== this.epoch) return;
@@ -794,6 +923,8 @@ export class Monitor {
       } else this.note("invalid-scope-result");
     } finally {
       this.processing = false;
+      if (this.activeObservation?.epoch === epoch)
+        this.activeObservation = undefined;
       if (epoch === this.epoch) {
         this.activity = "Idle";
         this.requeue();
@@ -841,8 +972,13 @@ export class Monitor {
 
   private retainCardBeforeReplacement(next: HybridState) {
     const card = this.card;
-    if (!card || card.retained) return;
+    if (!card) return;
     const task = next.tasks.find((item) => item.id === card.taskId);
+    if (card.retained) {
+      if (card.replacementPending && task?.status === "done")
+        this.card = { ...copyCard(card), replacementPending: false };
+      return;
+    }
     const completed = task?.status === "done";
     if (
       !task ||
@@ -861,6 +997,13 @@ export class Monitor {
   private recordJevDispatch(at: number) {
     if (this.lastJevCallAt === at) return;
     this.lastJevCallAt = at;
+    this.save();
+    this.publish();
+  }
+
+  private recordExtractionDispatch(at: number, epoch: number) {
+    if (!this.enabled || epoch !== this.epoch) return;
+    this.lastExtractionCallAt = at;
     this.save();
     this.publish();
   }
@@ -891,10 +1034,13 @@ export class Monitor {
     const controller = new AbortController();
     this.extractionController = controller;
     this.activity = "Extracting tasks";
-    this.lastExtractionCallAt = Date.now();
     this.publish();
     try {
-      const result = await this.options.extract(input, controller.signal);
+      const result = await this.options.extract(
+        input,
+        controller.signal,
+        (at) => this.recordExtractionDispatch(at, epoch),
+      );
       if (!this.enabled || epoch !== this.epoch || controller.signal.aborted)
         throw new RetryableProviderError();
       this.usage.extraction.calls++;

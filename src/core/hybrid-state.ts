@@ -72,6 +72,8 @@ export interface PendingObservation {
   patchHash?: string;
 }
 
+export type ScopeFailure = "capacity" | "invalid" | "overflow";
+
 export interface HybridState {
   sourceId: string;
   tasks: HybridTask[];
@@ -82,6 +84,8 @@ export interface HybridState {
   focusTaskId?: string;
   scopeAssessment?: Assessment;
   scopeError?: string;
+  /** Typed unresolved outcome; display logic must not inspect error text. */
+  scopeFailure?: ScopeFailure;
   scopeUnresolved: boolean;
   completionError?: string;
 }

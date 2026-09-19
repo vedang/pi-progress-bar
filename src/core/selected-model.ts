@@ -39,7 +39,11 @@ const responseText = (content: readonly unknown[]) => {
 export function selectedModelExtractor(
   current: () => Pick<ExtensionContext, "model" | "modelRegistry">,
 ): MonitorOptions["extract"] {
-  return async (input: ExtractionInput, signal: AbortSignal) => {
+  return async (
+    input: ExtractionInput,
+    signal: AbortSignal,
+    onDispatch?: (at: number) => void,
+  ) => {
     if (signal.aborted) throw new RetryableProviderError();
     const context = current();
     if (!context.model) throw new RetryableProviderError();
@@ -61,6 +65,9 @@ export function selectedModelExtractor(
           reject(new RetryableProviderError());
         }, DEADLINE_MS);
       });
+      if (signal.aborted || controller.signal.aborted)
+        throw new RetryableProviderError();
+      onDispatch?.(Date.now());
       const response = await Promise.race([
         context.modelRegistry.complete(
           context.model,

@@ -47,11 +47,13 @@ export function paint(ctx: ExtensionContext, view: PresentationSnapshot) {
           ? Math.floor((progress.done * 100) / progress.total)
           : undefined;
       const filled = Math.floor((percent ?? 0) / 10);
-      const progressLine = current
-        ? `${percent === undefined ? "" : `[${"#".repeat(filled)}${"-".repeat(10 - filled)}] `}Reported ${progress.done}/${progress.total}${percent === undefined ? "" : ` • ${percent}%`}`
-        : progress.kind === "previous"
-          ? `Reported previous ${progress.done}/${progress.total}`
-          : "Progress: no current tasks";
+      const progressLine = progress.catchup
+        ? progress.catchup
+        : current
+          ? `${percent === undefined ? "" : `[${"#".repeat(filled)}${"-".repeat(10 - filled)}] `}Reported ${progress.done}/${progress.total}${percent === undefined ? "" : ` • ${percent}%`}`
+          : progress.kind === "previous"
+            ? `Reported previous ${progress.done}/${progress.total}`
+            : "Progress: no current tasks";
       const provenance = card
         ? [
             `Task assessment: ${card.retained ? "retained" : "current"}`,

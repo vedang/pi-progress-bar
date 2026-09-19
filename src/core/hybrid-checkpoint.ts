@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-
+import { completionProof, gateProof, patchProof } from "./hybrid-proof";
 import {
   type Assessment,
   copyState,
@@ -222,25 +222,61 @@ function validPending(value: unknown): value is PendingObservation {
   );
 }
 
-function completedJournalHasProvenance(state: HybridState) {
+function pendingProofsAreConsistent(state: HybridState) {
   const pending = state.pending;
-  if (pending?.phase !== "complete") return true;
-  if (!pending.completedTaskIds.length)
-    return pending.completionHashes.length === 0;
+  if (!pending) return true;
+  const assessment = state.scopeAssessment;
+  const unacceptedGate =
+    pending.phase === "extract" &&
+    !!state.scopeFailure &&
+    !assessment &&
+    !pending.gateHash;
+  if (unacceptedGate)
+    return (
+      pending.completedTaskIds.length === 0 &&
+      pending.completionHashes.length === 0 &&
+      !pending.patchHash
+    );
   if (
-    !pending.completionHashes.length ||
-    pending.completionHashes.length > pending.completedTaskIds.length
+    !assessment ||
+    !pending.gateHash ||
+    pending.gateHash !== gateProof(assessment) ||
+    assessment.source.entryId !== pending.observation.entryId ||
+    assessment.source.messageHash !== pending.observation.messageHash ||
+    assessment.source.role !== pending.observation.role
   )
     return false;
-  return pending.completedTaskIds.every((id) => {
-    const assessment = state.tasks.find(
-      (task) => task.id === id,
-    )?.latestAssessment;
+  const requiresPatch = !(
+    assessment.rawChoice === "unchanged" && assessment.reason === "accepted"
+  );
+  if (pending.phase === "extract")
     return (
-      !!assessment &&
-      assessment.source.entryId === pending.observation.entryId &&
-      assessment.source.messageHash === pending.observation.messageHash &&
-      assessment.source.role === pending.observation.role
+      requiresPatch &&
+      !pending.patchHash &&
+      pending.completedTaskIds.length === 0 &&
+      pending.completionHashes.length === 0
+    );
+  if (requiresPatch) {
+    if (!pending.patchHash || pending.patchHash !== patchProof(state))
+      return false;
+  } else if (pending.patchHash) return false;
+  if (pending.completedTaskIds.length !== pending.completionHashes.length)
+    return false;
+  return pending.completedTaskIds.every((id, index) => {
+    const task = state.tasks.find((candidate) => candidate.id === id);
+    return (
+      !!task &&
+      !!task.latestAssessment &&
+      task.latestAssessment.source.entryId === pending.observation.entryId &&
+      task.latestAssessment.source.messageHash ===
+        pending.observation.messageHash &&
+      task.latestAssessment.source.role === pending.observation.role &&
+      pending.completionHashes[index] ===
+        completionProof(task, {
+          id: pending.observation.entryId,
+          hash: pending.observation.messageHash,
+          role: pending.observation.role,
+        })
     );
   });
 }
@@ -267,6 +303,7 @@ function validState(value: unknown): value is HybridState {
         "focusTaskId",
         "scopeAssessment",
         "scopeError",
+        "scopeFailure",
         "completionError",
       ],
     ) ||
@@ -294,6 +331,10 @@ function validState(value: unknown): value is HybridState {
       !validAssessment(state.scopeAssessment)) ||
     (Object.hasOwn(state, "scopeError") &&
       typeof state.scopeError !== "string") ||
+    (Object.hasOwn(state, "scopeFailure") &&
+      state.scopeFailure !== "capacity" &&
+      state.scopeFailure !== "invalid" &&
+      state.scopeFailure !== "overflow") ||
     (Object.hasOwn(state, "completionError") &&
       typeof state.completionError !== "string")
   )
@@ -301,7 +342,7 @@ function validState(value: unknown): value is HybridState {
 
   const taskIds = new Set(state.tasks.map((task) => task.id));
   if (taskIds.size !== state.tasks.length) return false;
-  if (!completedJournalHasProvenance(state)) return false;
+  if (!pendingProofsAreConsistent(state)) return false;
   if (state.tasks.filter((task) => task.included).length > MAX_ACTIVE_TASKS)
     return false;
   const maxTaskId = Math.max(

@@ -1,13 +1,17 @@
-import { createHash } from "node:crypto";
-
 import { completionDecisions, completionRequest } from "../analysis/completion";
 import {
+  ExtractionInputOverflowError,
   extractionInput,
   groundPatch,
   parsePatch,
 } from "../analysis/extractor";
-import { gateRequest, gateResult } from "../analysis/gate";
+import {
+  GateRequestOverflowError,
+  gateRequest,
+  gateResult,
+} from "../analysis/gate";
 import type { EvaluationRequest, ValidatedResult } from "../analysis/gateway";
+import { completionProof, gateProof, patchProof } from "./hybrid-proof";
 import {
   copyState,
   type HybridState,
@@ -17,6 +21,7 @@ import {
   type ObservationRef,
   observationRef,
   type PendingObservation,
+  type ScopeFailure,
   type SourceRef,
 } from "./hybrid-state";
 
@@ -62,8 +67,15 @@ const sourceRef = (source: SourceRef): ObservationRef => ({
   role: source.role,
 });
 
-const phaseHash = (value: unknown) =>
-  createHash("sha256").update(JSON.stringify(value)).digest("hex");
+class ScopeRejection extends Error {
+  constructor(
+    readonly failure: ScopeFailure,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ScopeRejection";
+  }
+}
 
 const pending = (
   observation: Observation,
@@ -103,6 +115,7 @@ function saveAccepted(state: HybridState, providers: HybridProviders) {
 function clearTransientErrors(state: HybridState): HybridState {
   const {
     scopeError: _scopeError,
+    scopeFailure: _scopeFailure,
     completionError: _completionError,
     ...next
   } = state;
@@ -125,7 +138,8 @@ function validateLifecyclePatch(
   const tasks = new Map(state.tasks.map((task) => [task.id, task]));
   const task = (id: string) => {
     const current = tasks.get(id);
-    if (!current) throw new Error("Extraction target does not exist");
+    if (!current)
+      throw new ScopeRejection("invalid", "Extraction target does not exist");
     return current;
   };
   for (const operation of patch.revise) {
@@ -141,21 +155,24 @@ function validateLifecyclePatch(
       throw new Error("Cannot restore an active task");
   }
   if (state.tasks.length + patch.add.length > MAX_TOTAL_TASKS)
-    throw new Error("Task ledger exceeds 200 total tasks");
+    throw new ScopeRejection("capacity", "Task ledger exceeds 200 total tasks");
   const active =
     state.tasks.filter((task) => task.included).length +
     patch.add.length -
     patch.archive.length +
     patch.restore.length;
   if (active > MAX_ACTIVE_TASKS)
-    throw new Error("Task ledger exceeds 20 active tasks");
+    throw new ScopeRejection("capacity", "Task ledger exceeds 20 active tasks");
   const mutations =
     patch.add.length +
     patch.revise.length +
     patch.archive.length +
     patch.restore.length;
   if (state.events.length + mutations > MAX_EVENTS)
-    throw new Error("Task mutation event capacity exceeds 1000");
+    throw new ScopeRejection(
+      "capacity",
+      "Task mutation event capacity exceeds 1000",
+    );
 }
 
 /** Apply a fully grounded patch atomically after every lifecycle target is valid. */
@@ -166,13 +183,12 @@ async function applyScopePatch(
   preceding: readonly Observation[],
 ): Promise<HybridState> {
   try {
-    const raw = await providers.extract(
-      extractionInput(state, observation, preceding),
-    );
+    const input = extractionInput(state, observation, preceding);
+    const raw = await providers.extract(input);
     const patch = groundPatch(
       parsePatch(raw),
       observation,
-      new Set(state.tasks.map((task) => task.id)),
+      new Set(input.tasks.map((task) => task.id)),
     );
     validateLifecyclePatch(state, patch);
 
@@ -305,11 +321,22 @@ async function applyScopePatch(
     };
   } catch (error) {
     if (error instanceof RetryableProviderError) throw error;
+    const rejection =
+      error instanceof ScopeRejection
+        ? error
+        : error instanceof ExtractionInputOverflowError
+          ? new ScopeRejection("overflow", error.message)
+          : new ScopeRejection(
+              "invalid",
+              error instanceof Error
+                ? error.message
+                : "Scope extraction failed",
+            );
     return {
       ...state,
-      scopeError:
-        error instanceof Error ? error.message : "Scope extraction failed",
-      scopeUnresolved: false,
+      scopeError: rejection.message,
+      scopeFailure: rejection.failure,
+      scopeUnresolved: true,
     };
   }
 }
@@ -398,17 +425,23 @@ async function applyCompletion(
         ...chunk.map((task) => task.id),
       ];
       const journal = next.pending;
-      next = {
+      const acceptedTasks = new Map(updated.map((task) => [task.id, task]));
+      const completionHashes = accepted.map((id) => {
+        const task = acceptedTasks.get(id);
+        if (!task) throw new Error("Accepted completion task is missing");
+        return completionProof(task, observation);
+      });
+      const committed = {
         ...next,
         tasks: updated,
         events: [...next.events, ...events],
+      };
+      next = {
+        ...committed,
         pending: pending(observation, "complete", accepted, {
-          completionHashes: [
-            ...(journal?.completionHashes ?? []),
-            phaseHash(decisions),
-          ],
+          completionHashes,
           ...(journal?.gateHash ? { gateHash: journal.gateHash } : {}),
-          ...(journal?.patchHash ? { patchHash: journal.patchHash } : {}),
+          ...(journal?.patchHash ? { patchHash: patchProof(committed) } : {}),
         }),
       };
       saveAccepted(next, providers);
@@ -455,6 +488,7 @@ export async function processObservation(
         cursor: { id: observation.id, hash: observation.hash },
         focusTaskId: focusTaskId(next),
         scopeUnresolved: true,
+        scopeFailure: "overflow",
         scopeError: "Latest message exceeds 12KiB unresolved overflow",
       };
     else {
@@ -470,17 +504,26 @@ export async function processObservation(
             observation,
             gate.decision === "unchanged" ? "complete" : "extract",
             [],
-            { completionHashes: [], gateHash: phaseHash(gate.assessment) },
+            { completionHashes: [], gateHash: gateProof(gate.assessment) },
           ),
         };
         saveAccepted(next, providers);
       } catch (error) {
         if (error instanceof RetryableProviderError) throw error;
-        next = {
-          ...next,
-          pending: pending(observation, "complete"),
-          scopeError:
-            error instanceof Error ? error.message : "Scope gate failed",
+        const { scopeAssessment: _scopeAssessment, ...unassessed } = next;
+        const rejection =
+          error instanceof GateRequestOverflowError
+            ? new ScopeRejection("overflow", error.message)
+            : new ScopeRejection(
+                "invalid",
+                error instanceof Error ? error.message : "Scope gate failed",
+              );
+        return {
+          ...unassessed,
+          pending: pending(observation, "extract"),
+          scopeError: rejection.message,
+          scopeFailure: rejection.failure,
+          scopeUnresolved: true,
         };
       }
     }
@@ -488,19 +531,16 @@ export async function processObservation(
 
   if (next.pending?.phase === "extract") {
     next = await applyScopePatch(next, observation, providers, preceding);
-    // Capacity rejection has not applied the extracted patch. Keep the accepted
-    // gate journal in extract phase so restore can retry without cursor commit.
-    if (next.scopeError?.includes("capacity")) return next;
+    // Capacity and construction overflow have not applied accepted scope work.
+    // Keep extract pending for an explicit eligible retry without cursor commit.
+    if (next.scopeFailure === "capacity" || next.scopeFailure === "overflow")
+      return next;
     next = {
       ...next,
       pending: pending(observation, "complete", [], {
         completionHashes: [],
         ...(next.pending?.gateHash ? { gateHash: next.pending.gateHash } : {}),
-        patchHash: phaseHash({
-          tasks: next.tasks,
-          events: next.events,
-          scopeUnresolved: next.scopeUnresolved,
-        }),
+        patchHash: patchProof(next),
       }),
     };
     saveAccepted(next, providers);

@@ -1,0 +1,341 @@
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { encodeCheckpoint } from "../src/core/hybrid-checkpoint";
+import { type HybridState, observationRef } from "../src/core/hybrid-state";
+import {
+  addPatch,
+  initial,
+  initialMessage,
+  noPatch,
+  observation,
+} from "./fixtures/hybrid";
+import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
+
+const running: ReturnType<typeof monitorHarness>[] = [];
+function fixture(entries?: ReturnType<typeof branchEntry>[]) {
+  const h = monitorHarness(entries);
+  running.push(h);
+  return h;
+}
+const metadata = {
+  enabled: false,
+  usage: {
+    jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
+    extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
+  },
+};
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.stubEnv("TYPESAFE_API_KEY", "offline-key");
+});
+afterEach(() => {
+  for (const h of running.splice(0)) h.monitor.stop();
+  vi.clearAllTimers();
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+});
+
+function fillEvents(
+  state: HybridState,
+  count: number,
+  source: ReturnType<typeof observation>,
+) {
+  for (let i = state.events.length; i < count; i++)
+    state.events.push({
+      id: `event:${i + 1}`,
+      kind: "revise",
+      taskId: "task:1",
+      revision: 1,
+      source: observationRef(source),
+    });
+}
+
+it("presents completion-event capacity as unresolved, not current progress", async () => {
+  const state = await initial();
+  fillEvents(state, 1000, initialMessage);
+  const h = fixture([branchEntry(initialMessage.id, initialMessage.text)]);
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    encodeCheckpoint(state, metadata),
+    false,
+    h.reader,
+  );
+  h.monitor.turnOn("/nonexistent-hybrid-test");
+  h.append("delivered", "The regression and validation are complete.");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.state.events).toHaveLength(1000);
+  expect(h.monitor.state.cursor?.id).toBe(initialMessage.id);
+  expect(h.monitor.presentationSnapshot().progress.kind).toBe("previous");
+  expect(h.monitor.debugSnapshot().diagnostics).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ code: "capacity-exhausted" }),
+    ]),
+  );
+});
+
+it("never admits an in-memory patch or cursor beyond the checkpoint byte bound", async () => {
+  const base = await initial();
+  function candidate(padding: number) {
+    const state = structuredClone(base);
+    const source = observation(
+      `history-${"h".repeat(padding)}`,
+      "Historical report.",
+      "assistant",
+    );
+    fillEvents(state, 900, source);
+    state.cursor = { id: source.id, hash: source.hash };
+    return { state, source };
+  }
+  const bytes = Buffer.byteLength(
+    JSON.stringify(encodeCheckpoint(candidate(0).state, metadata)),
+  );
+  const padding = Math.floor((512 * 1024 - 4500 - bytes) / 898);
+  const { state, source } = candidate(padding);
+  const checkpoint = encodeCheckpoint(state, metadata);
+  expect(Buffer.byteLength(JSON.stringify(checkpoint))).toBeGreaterThan(
+    500 * 1024,
+  );
+  const h = fixture([
+    branchEntry(initialMessage.id, initialMessage.text),
+    branchEntry(source.id, source.text, source.role),
+  ]);
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    checkpoint,
+    false,
+    h.reader,
+  );
+  h.monitor.turnOn("/nonexistent-hybrid-test");
+  const message = observation(
+    "extra",
+    "Deliver six independent reports.",
+    "assistant",
+  );
+  h.extract.mockResolvedValueOnce({
+    text: JSON.stringify(
+      addPatch(
+        message,
+        Array.from({ length: 6 }, (_, i) => `${i} ${"🧪".repeat(230)}`),
+      ),
+    ),
+    provider: "offline",
+    model: "fixture",
+    usage: { inputTokens: 1, outputTokens: 1 },
+  });
+  h.append(message.id, message.text);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.state.tasks).toHaveLength(3);
+  expect(h.monitor.state.cursor).toEqual(state.cursor);
+  expect(h.monitor.presentationSnapshot().progress.kind).toBe("previous");
+  expect(
+    Buffer.byteLength(JSON.stringify(h.monitor.checkpoint())),
+  ).toBeLessThanOrEqual(512 * 1024);
+  expect(
+    h.save.mock.calls.every(
+      ([saved]) => Buffer.byteLength(JSON.stringify(saved)) <= 512 * 1024,
+    ),
+  ).toBe(true);
+});
+
+it("validates archived historical authority on OFF, amendment, ON before admitting old work", async () => {
+  const h = fixture();
+  h.start();
+  await h.settle("goal");
+  const archive = "Archive the first deliverable.";
+  h.extract.mockResolvedValueOnce({
+    text: JSON.stringify({
+      ...noPatch(),
+      archive: [{ id: "task:1", quote: archive }],
+    }),
+    provider: "offline",
+    model: "fixture",
+    usage: { inputTokens: 0, outputTokens: 0 },
+  });
+  h.append("extra", archive);
+  await h.settle("extra");
+  h.append("tail", "Acknowledged.");
+  await h.settle("tail");
+  expect(h.monitor.state.tasks[0]?.included).toBe(false);
+  h.monitor.turnOff();
+  const revised = "Implement the corrected parser and validate it.";
+  h.replace([
+    branchEntry("goal", revised),
+    branchEntry("extra", archive, "assistant"),
+    branchEntry("tail", "Acknowledged.", "assistant"),
+  ]);
+  h.monitor.turnOn("/nonexistent-hybrid-test");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.state.tasks[0]?.source.messageHash).toBe(
+    observation("goal", revised).hash,
+  );
+});
+
+async function afterOverflow(reload: boolean) {
+  const h = fixture();
+  h.start();
+  await h.settle("goal");
+  h.append("oversized", "x".repeat(13 * 1024));
+  await h.settle("oversized");
+  if (reload) {
+    const saved = h.monitor.checkpoint();
+    h.monitor.turnOff();
+    await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  }
+  h.append("extra", "Explain the preceding work.");
+  await h.settle("extra");
+  const context = h.extract.mock.calls.find(
+    ([input]) => input.latest.id === "extra",
+  )?.[0].earlier;
+  h.monitor.stop();
+  return context;
+}
+it("uses identical earlier context after an oversized predecessor with or without reload", async () => {
+  expect(await afterOverflow(true)).toEqual(await afterOverflow(false));
+});
+
+it("resumes an accepted gate after overflow using exactly the original extraction context", async () => {
+  const h = fixture();
+  h.start();
+  await h.settle("goal");
+  const oversized = "x".repeat(13 * 1024);
+  h.append("oversized", oversized);
+  await h.settle("oversized");
+  h.extract.mockImplementationOnce(() => new Promise<never>(() => {}));
+  const latest = "Explain the preceding work.";
+  h.append("extra", latest);
+  await vi.advanceTimersByTimeAsync(5);
+  expect(h.monitor.state.pending?.phase).toBe("extract");
+  const before = h.extract.mock.calls.find(
+    ([input]) => input.latest.id === "extra",
+  )?.[0].earlier;
+  const saved = h.monitor.checkpoint();
+  h.monitor.stop();
+  const restored = fixture([
+    branchEntry("goal", "Implement parser, add regression, and validate it."),
+    branchEntry("oversized", oversized, "assistant"),
+    branchEntry("extra", latest, "assistant"),
+  ]);
+  await restored.monitor.restore(
+    "/nonexistent-hybrid-test",
+    saved,
+    false,
+    restored.reader,
+  );
+  await restored.settle("extra");
+  expect(restored.requests.some((request) => "gate" in request.questions)).toBe(
+    false,
+  );
+  expect(restored.extract.mock.calls[0]?.[0].earlier).toEqual(before);
+});
+
+it.each([10, 70])(
+  "qualifies a held last page within %i historical messages as catching up",
+  async (count) => {
+    const h = fixture(
+      Array.from({ length: count }, (_, i) =>
+        branchEntry(`history-${i}`, `Historical observation ${i}.`),
+      ),
+    );
+    const original = h.fetch.getMockImplementation();
+    if (!original) throw new Error("Missing fetch");
+    const heldId = `history-${count === 10 ? 0 : 64}`;
+    h.fetch.mockImplementation((url, init) => {
+      const request = JSON.parse(String(init?.body));
+      return request.questions.gate && request.state.latest.id === heldId
+        ? new Promise<never>(() => {})
+        : original(url, init);
+    });
+    h.start();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(
+      h.fetch.mock.calls.some(
+        ([, init]) =>
+          JSON.parse(String(init?.body)).state.latest?.id === heldId,
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(h.monitor.presentationSnapshot())).toMatch(
+      /catching up history/i,
+    );
+  },
+);
+
+it("does not rematerialize 1000 unchanged authoritative event payloads on duplicate hooks", async () => {
+  const state = await initial();
+  let reads = 0;
+  const entries: unknown[] = [
+    branchEntry(initialMessage.id, initialMessage.text),
+  ];
+  for (let i = state.events.length; i < 1000; i++) {
+    const source = observation(
+      `event-source-${i}`,
+      `Historical report ${i}.`,
+      "assistant",
+    );
+    state.events.push({
+      id: `event:${i + 1}`,
+      kind: "revise",
+      taskId: "task:1",
+      revision: 1,
+      source: observationRef(source),
+    });
+    entries.push({
+      type: "message",
+      id: source.id,
+      message: {
+        role: source.role,
+        get content() {
+          reads++;
+          return source.text;
+        },
+      },
+    });
+    state.cursor = { id: source.id, hash: source.hash };
+  }
+  const h = fixture([]);
+  h.replace(entries);
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    encodeCheckpoint(state, metadata),
+    false,
+    h.reader,
+  );
+  h.monitor.turnOn("/nonexistent-hybrid-test");
+  h.observe();
+  reads = 0;
+  h.observe();
+  h.observe();
+  h.observe();
+  expect(reads).toBeLessThanOrEqual(12);
+});
+
+it.each(["string", "text-block"])(
+  "authority indexing still detects an in-place %s amendment",
+  async (variant) => {
+    const original = "Implement parser, add regression, and validate it.";
+    const entry = {
+      type: "message",
+      id: "goal",
+      message: {
+        role: "user",
+        content:
+          variant === "string" ? original : [{ type: "text", text: original }],
+      },
+    };
+    const h = fixture([]);
+    h.replace([entry, branchEntry("tail", "Acknowledged.", "assistant")]);
+    h.start();
+    await h.settle("tail");
+    const revised = "Implement the updated parser and validate it.";
+    if (typeof entry.message.content === "string")
+      entry.message.content = revised;
+    else {
+      const block = entry.message.content[0];
+      if (!block) throw new Error("Missing block");
+      block.text = revised;
+    }
+    h.observe();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.monitor.state.tasks[0]?.source.messageHash).toBe(
+      observation("goal", revised).hash,
+    );
+  },
+);

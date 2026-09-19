@@ -212,3 +212,80 @@ it("exposes extraction construction overflow even when the smaller gate request 
   expect(result.scopeUnresolved).toBe(true);
   expect(result.scopeError).toBeTruthy();
 });
+
+it.each(["label", "kind", "completed-label", "completion-event"])(
+  "binds accepted unchanged-gate and completion phases to semantic inputs: %s",
+  async (variant) => {
+    const state = await initial();
+    const latest = observation(
+      "proof-report",
+      "All three requested deliverables are complete.",
+      "assistant",
+    );
+    const saved: HybridState[] = [];
+    await processObservation(
+      state,
+      latest,
+      backend(noPatch(), {
+        gate: "unchanged",
+        complete: "yes",
+        save: (state) => saved.push(structuredClone(state)),
+      }),
+    );
+    const partial = saved.find(
+      (state) =>
+        state.pending?.phase === "complete" &&
+        (variant.startsWith("complet")
+          ? !!state.pending.completedTaskIds.length
+          : !state.pending.completedTaskIds.length),
+    );
+    if (!partial) throw new Error("Missing accepted unchanged journal");
+    const checkpoint = encodeCheckpoint(partial);
+    const task = checkpoint.state.tasks[0];
+    if (!task) throw new Error("Missing task");
+    if (variant === "label" || variant === "completed-label")
+      task.label = "Produce an unrelated report";
+    if (variant === "kind") task.kind = "response";
+    if (variant === "completion-event") {
+      const event = checkpoint.state.events.find(
+        (event) => event.kind === "complete",
+      );
+      if (!event) throw new Error("Missing completion mutation");
+      event.kind = "withdraw";
+    }
+    expect(
+      restoreCheckpoint(checkpoint, "session:test", (id) =>
+        [initialMessage, latest].find((message) => message.id === id),
+      ),
+    ).toBeUndefined();
+  },
+);
+
+it("binds an accepted gate to the canonical earlier context used by its request", async () => {
+  const context = observation(
+    "context-authority",
+    "The parser means the streaming parser.",
+    "assistant",
+  );
+  const latest = observation("context-question", "Explain that parser.");
+  const saved: HybridState[] = [];
+  await processObservation(
+    await initial(),
+    latest,
+    backend(noPatch(), { save: (state) => saved.push(structuredClone(state)) }),
+    [context],
+  );
+  const gated = saved.find((state) => state.pending?.phase === "extract");
+  if (!gated) throw new Error("Missing gate snapshot");
+  const checkpoint = encodeCheckpoint(gated);
+  const amended = observation(
+    context.id,
+    "The parser means the batch parser.",
+    "assistant",
+  );
+  expect(
+    restoreCheckpoint(checkpoint, "session:test", (id) =>
+      [initialMessage, amended, latest].find((message) => message.id === id),
+    ),
+  ).toBeUndefined();
+});

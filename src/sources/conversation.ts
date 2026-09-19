@@ -98,6 +98,8 @@ interface PendingReport {
   evidence: Evidence[];
 }
 
+const MAX_FRESH_CANDIDATES = 512;
+
 const reportWorkIdentity = (ledger: Ledger) =>
   JSON.stringify([
     ledger.sourceId,
@@ -137,17 +139,24 @@ const reportStatesSet = new Set<ReportState>([
 interface DiscoveryWork {
   candidate: Candidate;
   context: CandidateContext;
+  /** Fresh work is a canonical post-baseline user reference, never raw text. */
+  fresh: boolean;
   phase: "selection" | "classification";
   chunks?: Span[][];
   index?: number;
   classes?: Record<string, string>;
+  inFlight?: boolean;
 }
+
+type DiscoveryClass = "historical" | "fresh";
 
 /** Owns bounded evidence/cursors. Scheduler owns only disposable wake-up notifications. */
 export class Conversation {
   trajectory: Trajectory = collectTrajectory([]);
   candidates: Candidate[] = [];
   proposals: Proposal[] = [];
+  /** Classified post-baseline user work awaiting an early-cutover decision. */
+  freshProposals: Proposal[] = [];
   omissions: string[] = [];
   discoveryStatus = "Pending: enable analysis to discover conversation plans";
   reportStatus = "Unknown: no selected conversation source";
@@ -169,7 +178,15 @@ export class Conversation {
   private sourceObservation?: Observation;
   private cursorObservation?: Observation;
   private candidatesPending: Candidate[] = [];
-  private discovery?: DiscoveryWork;
+  /** Exact canonical user candidates survive beyond the chronological window. */
+  private freshCandidates: Candidate[] = [];
+  private historicalDiscovery?: DiscoveryWork;
+  private freshDiscovery?: DiscoveryWork;
+  private observedUserCandidates = new Set<string>();
+  /** First observed branch is history; later canonical user additions are fresh. */
+  private freshBaselineEstablished = false;
+  /** At most two fresh dispatches may pass eligible historical work. */
+  private freshDispatchesSinceHistorical = 0;
   private pending?: PendingReport;
   private narrowedEntryId?: string;
   private initialReportPending = false;
@@ -195,7 +212,12 @@ export class Conversation {
     }));
   }
   hasPendingDiscovery() {
-    return !!this.discovery || this.candidatesPending.length > 0;
+    return (
+      !!this.historicalDiscovery ||
+      !!this.freshDiscovery ||
+      this.candidatesPending.length > 0 ||
+      this.freshCandidates.length > 0
+    );
   }
   /** Lets memory-only presentation distinguish unbound fixtures from live branch loss. */
   hasVisibleObservations() {
@@ -218,13 +240,23 @@ export class Conversation {
     this.narrowedEntryId = entryId;
     this.updateCandidates();
   }
-  update(entries: readonly unknown[]) {
-    if (this.branchEntries !== entries) this.observations = undefined;
+  /**
+   * `fresh` is set only by supported host observation hooks after startup.
+   * Baseline users remain chronological history, never implicit fresh priority.
+   */
+  update(entries: readonly unknown[], fresh = false) {
+    // Pi branch snapshots may retain array identity while appending entries.
+    // Rebuild canonical observations so a fresh exact ref cannot be missed.
+    this.observations = undefined;
     this.branchEntries = entries;
     this.trajectory = collectTrajectory(entries, {
       chronological: true,
       ...(this.discoveryCursor ? { after: this.discoveryCursor } : {}),
     });
+    // Classify post-baseline user work first. `seenCandidates` then keeps its
+    // exact candidate out of historical discovery rather than double billing.
+    this.updateFreshCandidates(fresh || this.freshBaselineEstablished);
+    this.freshBaselineEstablished = true;
     this.updateCandidates();
     this.updateReportTrajectory();
   }
@@ -306,6 +338,38 @@ export class Conversation {
     this.candidatesPending.push(...additions);
     this.discoveryStatus = "Pending: chronological source evaluation";
   }
+
+  /** Capture only newly observed canonical user candidates for bounded priority. */
+  private updateFreshCandidates(fresh: boolean) {
+    const candidates = findCandidates({
+      messages: this.allObservations(),
+      complete: true,
+      omissions: [],
+    }).filter((candidate) => candidate.role === "user");
+    for (const candidate of candidates) {
+      const key = this.candidateKey(candidate);
+      if (this.observedUserCandidates.has(key)) continue;
+      this.observedUserCandidates.add(key);
+      if (!fresh) continue;
+      // Exact refs remain canonical/replayable; historical paging skips only
+      // the same semantic candidate, never a later user entry. Overflow stays
+      // in chronological discovery rather than silently losing a user turn.
+      if (this.freshWorkCount() >= MAX_FRESH_CANDIDATES) {
+        this.note("fresh-queue-cap");
+        continue;
+      }
+      this.seenCandidates.add(key);
+      this.freshCandidates.push(candidate);
+      this.discoveryStatus = "Pending: fresh user source evaluation";
+    }
+  }
+  private freshWorkCount() {
+    return (
+      this.freshCandidates.length +
+      this.freshProposals.length +
+      (this.freshDiscovery ? 1 : 0)
+    );
+  }
   private original(reference: Reference): Observation | undefined {
     const cached = [this.sourceObservation, this.cursorObservation].find(
       (item) => item?.id === reference.id && item.hash === reference.hash,
@@ -365,8 +429,9 @@ export class Conversation {
     const reportOrder = this.orderOf(observation.id, observation.hash);
     if (reportOrder < 0) return true;
     return [
-      ...(this.discovery ? [this.discovery.candidate] : []),
+      ...this.discoveryWorks().map((work) => work.candidate),
       ...this.candidatesPending,
+      ...this.freshCandidates,
     ].some((candidate) => {
       const candidateOrder = this.orderOf(candidate.entryId, candidate.hash);
       return candidateOrder < 0 || candidateOrder <= reportOrder;
@@ -479,30 +544,87 @@ export class Conversation {
         }
     }
     return {
-      discovery:
-        this.discovery?.phase === "selection"
-          ? candidateRequest([this.discovery.candidate], this.discovery.context)
-          : undefined,
+      discovery: (() => {
+        const work = this.nextDiscoveryWork();
+        return work?.phase === "selection"
+          ? candidateRequest([work.candidate], work.context)
+          : undefined;
+      })(),
       report,
       coverage: this.omissions,
       boundary:
         "Future visible user/assistant text on this active branch, and selected task/criteria. Interactive tool answers excluded.",
     };
   }
+  private discoveryWorks() {
+    return [this.historicalDiscovery, this.freshDiscovery].flatMap((work) =>
+      work ? [work] : [],
+    );
+  }
+
+  private setDiscoveryWork(work: DiscoveryWork | undefined) {
+    if (work?.fresh) this.freshDiscovery = work;
+    else this.historicalDiscovery = work;
+  }
+
+  private ensureDiscoveryWork(kind: DiscoveryClass) {
+    const existing =
+      kind === "fresh" ? this.freshDiscovery : this.historicalDiscovery;
+    if (existing) return existing;
+    const candidate =
+      kind === "fresh"
+        ? this.freshCandidates.shift()
+        : this.candidatesPending.shift();
+    if (!candidate) return;
+    const work: DiscoveryWork = {
+      candidate,
+      context: this.applicableUserContext(candidate),
+      fresh: kind === "fresh",
+      phase: "selection",
+    };
+    this.setDiscoveryWork(work);
+    return work;
+  }
+
+  /** Choose without mutating fairness; previews and in-flight wakes are not dispatches. */
+  private nextDiscoveryWork() {
+    const historical = this.historicalDiscovery;
+    const fresh = this.freshDiscovery;
+    if (!historical || !fresh) {
+      this.freshDispatchesSinceHistorical = 0;
+      return fresh ?? historical;
+    }
+    return this.freshDispatchesSinceHistorical >= 2 ? historical : fresh;
+  }
+
+  /** Count only actual requests while both classes are runnable. */
+  private recordDiscoveryDispatch(work: DiscoveryWork) {
+    if (!this.historicalDiscovery || !this.freshDiscovery) {
+      this.freshDispatchesSinceHistorical = 0;
+      return;
+    }
+    if (work.fresh) this.freshDispatchesSinceHistorical++;
+    else this.freshDispatchesSinceHistorical = 0;
+  }
+
+  private finishDiscovery(work: DiscoveryWork) {
+    if (work.fresh) {
+      if (this.freshDiscovery === work) this.freshDiscovery = undefined;
+    } else if (this.historicalDiscovery === work)
+      this.historicalDiscovery = undefined;
+  }
+
+  /** Transport invalidation never discards canonical candidate phase. */
+  releaseDiscoveryFlights() {
+    for (const work of this.discoveryWorks()) work.inFlight = false;
+  }
+
   scheduleDiscovery(enqueue: Enqueue, valid: () => boolean) {
     const generation = this.discoveryGeneration;
-    // One candidate completes selection and classification before later entries.
     const current = () => valid() && generation === this.discoveryGeneration;
-    if (!this.discovery) {
-      const candidate = this.candidatesPending.shift();
-      if (candidate)
-        this.discovery = {
-          candidate,
-          context: this.applicableUserContext(candidate),
-          phase: "selection",
-        };
-    }
-    const work = this.discovery;
+    this.ensureDiscoveryWork("historical");
+    this.ensureDiscoveryWork("fresh");
+    const work = this.nextDiscoveryWork();
     if (!work) {
       if (this.trajectory.hasMore) {
         const last = this.trajectory.messages.at(-1);
@@ -520,24 +642,31 @@ export class Conversation {
           return true;
         }
       }
-      this.discoveryStatus = this.proposals.length
-        ? "Scope observations admitted; no new source evidence"
-        : "Unknown: no actionable plan suggested";
+      this.discoveryStatus =
+        this.proposals.length || this.freshProposals.length
+          ? "Scope observations admitted; no new source evidence"
+          : "Unknown: no actionable plan suggested";
       return;
     }
+    if (work.inFlight) return;
     if (work.phase === "selection") {
       const request = candidateRequest([work.candidate], work.context);
       if (!fits(request)) {
         this.note("candidate-context-overflow");
-        this.discovery = undefined;
+        this.finishDiscovery(work);
         this.settleCandidate(work.candidate);
         this.discoveryStatus =
           "Unknown: source evidence exceeds analysis bounds";
-        return;
+        return true;
       }
-      this.discoveryStatus = "Pending: select chronological source evidence";
+      work.inFlight = true;
+      this.recordDiscoveryDispatch(work);
+      this.discoveryStatus = work.fresh
+        ? "Pending: select fresh user source evidence"
+        : "Pending: select chronological source evidence";
       enqueue("discovery", request, (result) => {
-        if (!current() || this.discovery !== work) return;
+        if (!current() || !this.discoveryWorks().includes(work)) return;
+        work.inFlight = false;
         this.discoveryEvidence = [
           ...this.discoveryEvidence,
           { request, result, at: Date.now() },
@@ -554,10 +683,9 @@ export class Conversation {
           probability < 0.8
         ) {
           this.note("candidate-rejected");
-          this.discovery = undefined;
+          this.finishDiscovery(work);
           this.settleCandidate(work.candidate);
-          this.discoveryStatus =
-            "Pending: evaluate next chronological evidence";
+          this.discoveryStatus = "Pending: evaluate next source evidence";
           return;
         }
         const chunks: Span[][] = [];
@@ -578,7 +706,7 @@ export class Conversation {
               !fits(classificationRequest(work.candidate, [span], work.context))
             ) {
               this.note("classification-overflow");
-              this.discovery = undefined;
+              this.finishDiscovery(work);
               this.settleCandidate(work.candidate);
               this.discoveryStatus =
                 "Unknown: essential task classification exceeds analysis bounds";
@@ -590,7 +718,7 @@ export class Conversation {
         if (spans.length) chunks.push(spans);
         if (!chunks.length) {
           this.note("candidate-rejected");
-          this.discovery = undefined;
+          this.finishDiscovery(work);
           this.settleCandidate(work.candidate);
           return;
         }
@@ -607,26 +735,29 @@ export class Conversation {
     const spans = chunks?.[index ?? -1];
     if (!chunks || index === undefined || !spans) {
       this.note("controller-rejection");
-      this.discovery = undefined;
+      this.finishDiscovery(work);
       this.settleCandidate(work.candidate);
       this.discoveryStatus = "Unknown: discovery transaction rejected";
-      return;
+      return true;
     }
     const request = classificationRequest(work.candidate, spans, work.context);
+    work.inFlight = true;
+    this.recordDiscoveryDispatch(work);
     enqueue("discovery", request, (result) => {
       if (
         !current() ||
-        this.discovery !== work ||
+        !this.discoveryWorks().includes(work) ||
         work.phase !== "classification" ||
         work.index !== index
       )
         return;
+      work.inFlight = false;
       try {
         if (!work.classes) throw new Error("Missing classification state");
         Object.assign(work.classes, classifications(request, result));
       } catch {
         this.note("controller-rejection");
-        this.discovery = undefined;
+        this.finishDiscovery(work);
         this.settleCandidate(work.candidate);
         this.discoveryStatus = "Unknown: task classification rejected";
         return;
@@ -639,16 +770,56 @@ export class Conversation {
       if (work.index < chunks.length) return;
       try {
         if (!work.classes) throw new Error("Missing classification state");
-        this.proposals.push(proposal(work.candidate, work.classes));
+        const next = proposal(work.candidate, work.classes);
+        if (work.fresh) this.freshProposals.push(next);
+        else this.proposals.push(next);
         this.discoveryStatus = "Pending: reconcile selected scope observation";
       } catch {
         this.note("candidate-rejected");
         this.settleCandidate(work.candidate);
-        this.discoveryStatus = "Pending: evaluate next chronological evidence";
+        this.discoveryStatus = "Pending: evaluate next source evidence";
       }
-      this.discovery = undefined;
+      this.finishDiscovery(work);
     });
   }
+  /** Unsafe fresh scope outcomes return to chronological reconciliation. */
+  deferFreshProposal(item: Proposal) {
+    const index = this.freshProposals.indexOf(item);
+    if (index >= 0) this.freshProposals.splice(index, 1);
+    this.proposals.push(item);
+    this.proposals.sort(
+      (left, right) =>
+        this.orderOf(left.candidate.entryId, left.candidate.hash) -
+        this.orderOf(right.candidate.entryId, right.candidate.hash),
+    );
+  }
+
+  /** Commit an explicit fresh replacement boundary; prior work cannot replay. */
+  commitFreshBoundary(candidate: Pick<Candidate, "id" | "entryId" | "hash">) {
+    const reference = { id: candidate.entryId, hash: candidate.hash };
+    this.discoveryGeneration++;
+    this.discoveryCursor = reference;
+    this.semanticDiscoveryCursor = reference;
+    this.candidatesPending = [];
+    this.historicalDiscovery = undefined;
+    this.proposals = [];
+    this.freshProposals = this.freshProposals.filter(
+      (item) =>
+        item.candidate.id !== candidate.id ||
+        item.candidate.hash !== candidate.hash,
+    );
+    // Later fresh turns remain canonical work after the boundary. Their
+    // discarded transport callbacks are retried from current phase/cache.
+    if (
+      this.freshDiscovery?.candidate.id === candidate.id &&
+      this.freshDiscovery.candidate.hash === candidate.hash
+    )
+      this.freshDiscovery = undefined;
+    this.releaseDiscoveryFlights();
+    this.seenCandidates.add(`${candidate.id}:${candidate.hash}`);
+    this.settledCandidates.add(`${candidate.id}:${candidate.hash}`);
+  }
+
   source(item: Proposal): ConversationSource {
     const candidate = item.candidate;
     return {
@@ -1048,7 +1219,10 @@ export class Conversation {
       checkpoint.discoveryCursor ?? checkpoint.cursor;
     this.discoveryCursor = this.semanticDiscoveryCursor;
     this.candidatesPending = [];
-    this.discovery = undefined;
+    this.freshCandidates = [];
+    this.historicalDiscovery = undefined;
+    this.freshDiscovery = undefined;
+    this.freshProposals = [];
     this.proposals = [];
     this.seenCandidates.clear();
     this.settledCandidates.clear();

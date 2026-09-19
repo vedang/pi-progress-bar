@@ -4,7 +4,8 @@ import type { EvaluationRequest, JevGateway, ValidatedResult } from "./gateway";
 interface Job {
   request: EvaluationRequest;
   consentIdentity: string;
-  admit: (result: ValidatedResult) => void;
+  /** `cached` means prior identical runtime request already paid and validated. */
+  admit: (result: ValidatedResult, cached?: boolean) => void;
 }
 
 const identityOf = (job: Job) =>
@@ -19,6 +20,8 @@ const identityOf = (job: Job) =>
  */
 export class AnalysisScheduler {
   private pending = new Map<string, Job>();
+  /** Bounded exact validated-result reuse across semantic purposes. */
+  private completed = new Map<string, ValidatedResult>();
   private running = false;
   private runningPurpose?: string;
   private runningIdentity?: string;
@@ -46,6 +49,7 @@ export class AnalysisScheduler {
   clear() {
     this.generation++;
     this.pending.clear();
+    this.completed.clear();
     this.clearRetry();
     this.scheduled = false;
     this.running = false;
@@ -74,6 +78,19 @@ export class AnalysisScheduler {
     const identity = identityOf(job);
     if (this.runningPurpose === purpose && this.runningIdentity === identity)
       return;
+    const completed = this.completed.get(identity);
+    if (completed) {
+      const generation = this.generation;
+      const purposeGeneration = this.purposeGeneration.get(purpose) ?? 0;
+      queueMicrotask(() => {
+        if (
+          generation === this.generation &&
+          purposeGeneration === (this.purposeGeneration.get(purpose) ?? 0)
+        )
+          job.admit(completed, true);
+      });
+      return;
+    }
     const existing = this.pending.get(purpose);
     if (existing && identityOf(existing) === identity) return;
     this.pending.set(purpose, job);
@@ -123,6 +140,22 @@ export class AnalysisScheduler {
     this.runningPurpose = purpose;
     this.runningIdentity = identity;
     this.state = "running";
+    const settled = () => {
+      if (
+        generation !== this.generation ||
+        purposeGeneration !== (this.purposeGeneration.get(purpose) ?? 0)
+      )
+        return;
+      this.running = false;
+      this.runningPurpose = undefined;
+      this.runningIdentity = undefined;
+      this.changed();
+      if (this.gateway.retryPending) this.armRetry();
+      // Gateway settlement is an event boundary. Start exact pending work now
+      // so bounded fresh-class dispatch is not delayed until another host wake.
+      else if (this.pending.size) this.drain();
+      else this.state = "idle";
+    };
     void this.gateway
       .evaluate(job.request, job.consentIdentity)
       .then((result) => {
@@ -131,24 +164,20 @@ export class AnalysisScheduler {
           purposeGeneration !== (this.purposeGeneration.get(purpose) ?? 0)
         )
           return;
-        if (result) job.admit(result);
-        else if (this.gateway.retryPending && !this.pending.has(purpose))
-          this.pending.set(purpose, job);
-      })
-      .finally(() => {
-        if (
-          generation !== this.generation ||
-          purposeGeneration !== (this.purposeGeneration.get(purpose) ?? 0)
-        )
-          return;
-        this.running = false;
-        this.runningPurpose = undefined;
-        this.runningIdentity = undefined;
-        this.changed();
-        if (this.gateway.retryPending) this.armRetry();
-        else if (this.pending.size) this.requestDrain();
-        else this.state = "idle";
-      });
+        try {
+          if (result) {
+            this.completed.set(identity, result);
+            if (this.completed.size > 200) {
+              const first = this.completed.keys().next().value;
+              if (first) this.completed.delete(first);
+            }
+            job.admit(result);
+          } else if (this.gateway.retryPending && !this.pending.has(purpose))
+            this.pending.set(purpose, job);
+        } finally {
+          settled();
+        }
+      }, settled);
     this.changed();
   }
 

@@ -93,11 +93,14 @@ only canonical source ranges, IDs, enum decisions, and request identities; an un
 accidental or unrecomputed corruption before replay. Requests are at most 24 KiB and 20 questions; responses at most 128 KiB. Discovery carries
 exact source spans, role, and bounded preceding visible user direction. New checkpoints use strict
 schema v4 and require explicit `action` or `response` work kinds for every source span and saved
-task; v3 and malformed shapes rebuild from the active branch rather than migrate. A new user
-request can establish current scope; preceding direction grounds assistant plans without vetoing that
-request. It processes one chronological observation through selection/classification, scope/current
-reconciliation, and then that observation's report cursor; a later goal cannot affect an earlier
-report. Action-task reports remain bounded multi-task batches. Each Jev-classified response task
+task; v3 and malformed shapes rebuild from the active branch rather than migrate. A newly observed
+user candidate keeps its exact ID/hash in a bounded fresh lane outside the normal history window.
+When fresh and historical work both run, no class receives more than two consecutive dispatches.
+Only a complete, single-chunk, high-confidence `new-goal` transaction with all-new relations can
+replace current scope early; all other outcomes return to chronological reconciliation. Preceding
+direction grounds assistant plans without vetoing a new user request. It processes one chronological
+observation through selection/classification, scope/current reconciliation, and then that
+observation's report cursor; a later goal cannot affect an earlier report. Action-task reports remain bounded multi-task batches. Each Jev-classified response task
 uses one small target-local report request with full lifecycle and current-task choices, so an answer
 about unfinished implementation is not confused with completing that implementation; this can add
 one paid request per response task. Uncertain source, identity, scope, or current-task Choices

@@ -17,6 +17,7 @@ import {
   hasGroundedBeadsRecords,
   readBeadsExport,
 } from "../sources/beads";
+import type { Proposal } from "../sources/candidates";
 import {
   Conversation,
   type ConversationCheckpoint,
@@ -146,6 +147,13 @@ interface HealthWork {
   index: number;
   result?: ValidatedResult;
 }
+interface FreshScopeWork {
+  proposal: Proposal;
+  source: ConversationSource;
+  base: Ledger;
+  chunk: ScopeChunk;
+  epoch: number;
+}
 
 /** Excludes display-only Beads enrichment; includes every scope authority field. */
 const sameBeadsEnrichment = (left: Task[], right: Task[]) =>
@@ -251,6 +259,9 @@ export class Monitor {
     { id: string; entryId: string; hash: string }
   >();
   private scopeWork?: ScopeWork;
+  private freshScopeWork?: FreshScopeWork;
+  /** Once an earlier fresh proposal needs chronology, later burst entries do too. */
+  private freshCutoverBlocked = false;
   private healthWork?: HealthWork;
   private beadsExport?: BeadsExport;
   private diagnosticCounts = new Map<string, number>();
@@ -340,7 +351,7 @@ export class Monitor {
   observe(branch: () => readonly unknown[]) {
     this.branch = branch;
     if (!this.enabled) return;
-    this.conversation.update(branch());
+    this.conversation.update(branch(), true);
     if (
       this.retainedTaskCard &&
       !this.retainedCardIsLive(this.retainedTaskCard)
@@ -619,10 +630,12 @@ export class Monitor {
     this.analysis.enqueue(purpose, {
       request,
       consentIdentity: this.runtimeIdentity,
-      admit: (result) => {
-        this.usage.calls++;
-        this.usage.inputTokens += result.usage.input_tokens;
-        this.usage.outputTokens += result.usage.output_tokens;
+      admit: (result, cached) => {
+        if (!cached) {
+          this.usage.calls++;
+          this.usage.inputTokens += result.usage.input_tokens;
+          this.usage.outputTokens += result.usage.output_tokens;
+        }
         admit(result);
         this.requestAnalysis();
       },
@@ -673,6 +686,152 @@ export class Monitor {
     this.scopedCandidates.add(
       `${proposal.candidate.id}:${proposal.candidate.hash}`,
     );
+    this.evidenceIdentity = undefined;
+    this.save();
+    if (this.cwd) void this.refreshBeads(this.cwd);
+  }
+
+  /** Fresh early admission is a single exact all-new/new-goal transaction. */
+  private scheduleFreshScope() {
+    if (this.freshScopeWork) return;
+    const proposal = this.conversation.freshProposals[0];
+    if (!proposal) return;
+    const defer = (code: string) => {
+      this.note(code);
+      this.conversation.deferFreshProposal(proposal);
+      this.freshCutoverBlocked = true;
+      // No-ledger proposals still return to existing chronological adoption.
+      // They cannot cut over, but validated source/task semantics may initialize
+      // scope once their normal ordered path reaches them.
+    };
+    if (proposal.ambiguous || this.freshMustRemainOrdered(proposal)) {
+      defer(proposal.ambiguous ? "ambiguous-discovery" : "fresh-ordered");
+      return;
+    }
+    this.freshCutoverBlocked = false;
+    try {
+      const source = this.conversation.source(proposal);
+      const base = this.ledger
+        ? this.ledger
+        : reconcileLedger(undefined, { ...proposal.snapshot, tasks: [] });
+      const chunks = scopeChunks(base, proposal.snapshot.tasks);
+      if (chunks.length !== 1) {
+        defer("fresh-scope-multichunk");
+        return;
+      }
+      const chunk = chunks[0];
+      if (!chunk) throw new Error("Missing fresh scope chunk");
+      const work: FreshScopeWork = {
+        proposal,
+        source,
+        base,
+        chunk,
+        epoch: this.epoch,
+      };
+      this.freshScopeWork = work;
+      this.enqueueAnalysis("fresh-scope", chunk.request, (result) => {
+        if (
+          !this.enabled ||
+          this.epoch !== work.epoch ||
+          this.freshScopeWork !== work
+        )
+          return;
+        this.freshScopeWork = undefined;
+        const answers = scopeAnswers(
+          work.proposal.snapshot.tasks,
+          result,
+          work.chunk.indexes,
+        );
+        const allNew = work.proposal.snapshot.tasks.every(
+          (_candidate, index) => answers[index] === "new",
+        );
+        if (
+          answers.scope !== "new-goal" ||
+          !allNew ||
+          !scopeTransactionIsAdmissible(
+            work.base,
+            work.proposal.snapshot.tasks,
+            answers,
+          )
+        ) {
+          defer("fresh-scope-veto");
+          return;
+        }
+        const applied = applyScopeRelations(
+          work.base,
+          work.proposal.snapshot.tasks,
+          answers,
+        );
+        // `applyScopeRelations` preserves its base owner for chronological
+        // revisions. A replacement owns a new canonical source and cannot
+        // retain old source/report identity across checkpoint restore.
+        const sourceLedger = reconcileLedger(undefined, work.proposal.snapshot);
+        const next: Ledger = {
+          ...applied,
+          sourceId: sourceLedger.sourceId,
+          kind: sourceLedger.kind,
+          sourceRevision: sourceLedger.sourceRevision,
+          scopeRevision: sourceLedger.scopeRevision,
+          reports: [],
+          reportOrder: 0,
+        };
+        this.commitFreshCutover(work.proposal, work.source, next);
+      });
+    } catch {
+      defer("fresh-scope-overflow");
+    }
+  }
+
+  /** Earlier unsafe fresh work must settle before a later turn can cut over. */
+  private freshMustRemainOrdered(proposal: Proposal) {
+    if (!this.freshCutoverBlocked) return false;
+    const target = this.conversation.observation({
+      id: proposal.candidate.entryId,
+      hash: proposal.candidate.hash,
+    });
+    if (!target || this.scopeUnresolved) return true;
+    const work = this.scopeWork;
+    if (
+      work &&
+      this.conversation.entryIsAtOrBefore(work.entryId, work.entryHash, target)
+    )
+      return true;
+    const ordered = this.nextRunnableScopeProposal()?.proposal;
+    return (
+      !!ordered &&
+      this.conversation.entryIsAtOrBefore(
+        ordered.candidate.entryId,
+        ordered.candidate.hash,
+        target,
+      )
+    );
+  }
+
+  /** Replacement boundary invalidates older disposable authority, not display snapshots. */
+  private commitFreshCutover(
+    proposal: Proposal,
+    source: ConversationSource,
+    ledger: Ledger,
+  ) {
+    this.analysis.discard("discovery");
+    this.analysis.discard("scope");
+    this.analysis.discard("reports");
+    this.analysis.discard("health");
+    this.scopeWork = undefined;
+    this.healthWork = undefined;
+    this.health = undefined;
+    this.healthDeferred = false;
+    this.ledger = this.beadsExport
+      ? { ...ledger, tasks: enrichBeadsTasks(ledger.tasks, this.beadsExport) }
+      : ledger;
+    this.source = source;
+    this.conversation.commitFreshBoundary(proposal.candidate);
+    this.conversation.select(source, true, true);
+    this.scopedCandidates.add(this.proposalId(proposal));
+    this.blockedScopeCandidates.clear();
+    this.blockedScopeSources.clear();
+    this.scopeUnresolved = false;
+    this.scopeUnresolvedOverflow = false;
     this.evidenceIdentity = undefined;
     this.save();
     if (this.cwd) void this.refreshBeads(this.cwd);
@@ -735,6 +894,26 @@ export class Monitor {
     if (
       work &&
       this.conversation.entryIsAtOrBefore(work.entryId, work.entryHash, report)
+    )
+      return true;
+    const freshWork = this.freshScopeWork;
+    if (
+      freshWork &&
+      this.conversation.entryIsAtOrBefore(
+        freshWork.proposal.candidate.entryId,
+        freshWork.proposal.candidate.hash,
+        report,
+      )
+    )
+      return true;
+    if (
+      this.conversation.freshProposals.some((proposal) =>
+        this.conversation.entryIsAtOrBefore(
+          proposal.candidate.entryId,
+          proposal.candidate.hash,
+          report,
+        ),
+      )
     )
       return true;
     if (
@@ -1031,6 +1210,7 @@ export class Monitor {
         () => this.enabled && epoch === this.epoch,
       );
       this.adoptProposal();
+      this.scheduleFreshScope();
       this.scheduleScope();
       const snapshot = this.snapshot();
       if (snapshot?.identity !== this.evidenceIdentity) {
@@ -1077,6 +1257,8 @@ export class Monitor {
 
   private clearRuntime() {
     this.analysis.clear();
+    // OFF/restore aborts Jev transport. Preserve phase for a later ON retry.
+    this.conversation.releaseDiscoveryFlights();
     this.analysisRequested = false;
     this.gateway.pause();
     this.evidence.clearPending();
@@ -1085,6 +1267,7 @@ export class Monitor {
     this.health = undefined;
     this.healthWork = undefined;
     this.scopeWork = undefined;
+    this.freshScopeWork = undefined;
     this.cwd = undefined;
   }
 
@@ -1514,6 +1697,8 @@ export class Monitor {
     this.blockedScopeSources.clear();
     this.scopeUnresolved = false;
     this.scopeUnresolvedOverflow = false;
+    this.freshScopeWork = undefined;
+    this.freshCutoverBlocked = false;
     this.healthDeferred = false;
     this.retainedTaskCard = undefined;
     this.diagnosticCounts.clear();

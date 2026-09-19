@@ -34,3 +34,7 @@
 - Added valid-supported restore clearing latch with settled tasks and no rebilling; renamed absent-boundary test accurately.
 - Main reran format/check/test PASS: 413 unit +15 integration (`u04-review-*` logs). Reviewer blocker resolved by exact requested fix and regression. Main accepts U04; review verdict was BLOCK before correction, not a post-fix reviewer PASS.
 - Remaining host-proof coverage limits explicitly retained: reverse listener ordering, configured custom editor, and actual pi-subagents co-load permutations are not yet real-host proven. Complete during controller/board integration before functional QA handoff; existing receipts prove only their recorded default-editor/transform-before-listener regular/fullscreen cases.
+
+## Continuous execution authority / U05
+- Owner explicitly requests all remaining Beads completed one by one without waiting for further approval. Sequential release, main-owned tests, scoped source delegation, gates/review remain mandatory. Manual feedback is not fabricatable; Q00 awaits actual owner QA.
+- Claimed U05/y3h.6 per-task health/board projection red tests. U06 source writes not released until tests frozen.

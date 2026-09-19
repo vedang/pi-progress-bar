@@ -524,33 +524,36 @@ describe("event-driven host contract", () => {
     await h.event("session_shutdown");
   });
 
-  it("drains finite work beyond the old three-call budget and coalesces duplicate notifications", async () => {
-    vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
-    const { fetcher, requests } = noWorkTransport();
-    const branch = Array.from({ length: 12 }, (_, index) => ({
-      ...entry(`context-${index}`, "user", `Context note number ${index}.`),
-      parentId: index ? `context-${index - 1}` : null,
-    }));
-    const h = await harness(branch);
-    await h.event("session_start");
-    // No periodic interval or synthetic per-cycle calls; allow yielded local work.
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(
-      requests.flatMap(
-        (request) =>
-          request.state?.candidates?.map((candidate) => candidate.entryId) ??
-          [],
-      ),
-    ).toEqual(branch.map((value) => value.id));
-    expect(vi.getTimerCount()).toBe(0);
-    for (const hook of ["context", "turn_end", "agent_settled", "context"])
-      await h.event(hook);
-    await h.command("");
-    await vi.advanceTimersByTimeAsync(600_000);
-    expect(fetcher).toHaveBeenCalledTimes(12);
-    expect(vi.getTimerCount()).toBe(0);
-    await h.event("session_shutdown");
-  });
+  it.each([12, 520])(
+    "drains %i finite observations across budgets/windows and coalesces duplicate notifications",
+    async (count) => {
+      vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
+      const { fetcher, requests } = noWorkTransport();
+      const branch = Array.from({ length: count }, (_, index) => ({
+        ...entry(`context-${index}`, "user", `Context note number ${index}.`),
+        parentId: index ? `context-${index - 1}` : null,
+      }));
+      const h = await harness(branch);
+      await h.event("session_start");
+      // No periodic interval or synthetic per-cycle calls; allow yielded local work.
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(
+        requests.flatMap(
+          (request) =>
+            request.state?.candidates?.map((candidate) => candidate.entryId) ??
+            [],
+        ),
+      ).toEqual(branch.map((value) => value.id));
+      expect(vi.getTimerCount()).toBe(0);
+      for (const hook of ["context", "turn_end", "agent_settled", "context"])
+        await h.event(hook);
+      await h.command("");
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(fetcher).toHaveBeenCalledTimes(count);
+      expect(vi.getTimerCount()).toBe(0);
+      await h.event("session_shutdown");
+    },
+  );
 
   it("has no idle analysis timer or interval control", async () => {
     vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
@@ -572,24 +575,30 @@ describe("event-driven host contract", () => {
     await h.event("session_shutdown");
   });
 
-  it("retries pending 429 work at Retry-After without an interval or fresh event", async () => {
-    vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
-    const { fetcher } = noWorkTransport();
-    fetcher.mockImplementationOnce(
-      async () =>
-        new Response(null, { status: 429, headers: { "Retry-After": "2" } }),
-    );
-    const h = await harness([
-      entry("retry-user", "user", "Context for the work."),
-    ]);
-    await h.event("session_start");
-    await vi.advanceTimersByTimeAsync(0);
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1999);
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(101);
-    expect(fetcher).toHaveBeenCalledTimes(2);
-    expect(vi.getTimerCount()).toBe(0);
-    await h.event("session_shutdown");
-  });
+  it.each([2, 65])(
+    "retries 429 work with Retry-After=%is respecting the longer existing backoff, without a fresh event",
+    async (retrySeconds) => {
+      vi.stubEnv("TYPESAFE_API_KEY", "unit-key");
+      const { fetcher } = noWorkTransport();
+      fetcher.mockImplementationOnce(
+        async () =>
+          new Response(null, {
+            status: 429,
+            headers: { "Retry-After": String(retrySeconds) },
+          }),
+      );
+      const h = await harness([
+        entry("retry-user", "user", "Context for the work."),
+      ]);
+      await h.event("session_start");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(Math.max(60, retrySeconds) * 1000 - 1);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(101);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(0);
+      await h.event("session_shutdown");
+    },
+  );
 });

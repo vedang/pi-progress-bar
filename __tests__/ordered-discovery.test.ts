@@ -132,7 +132,7 @@ describe("chronological grounded discovery", () => {
     vi.spyOn(monitor, "enqueueAnalysis").mockImplementation((purpose) => {
       purposes.push(purpose);
     });
-    monitor.scheduleAnalysis(false);
+    monitor.scheduleAnalysis();
     expect(purposes).toContain("discovery");
     expect(purposes).not.toContain("reports");
     expect(monitor.conversation.cursor?.id).toBe(candidate.entryId);

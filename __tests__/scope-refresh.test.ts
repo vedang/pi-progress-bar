@@ -25,6 +25,7 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   vi.mocked(readBeadsExport).mockResolvedValue({
     complete: false,
     records: new Map(),
@@ -108,7 +109,14 @@ function respond(job: {
   });
 }
 
-describe("scope transactions across background refresh", () => {
+function startRefresh(monitor: Monitor) {
+  // ON is an enrichment boundary; idle clocks are no longer refresh triggers.
+  vi.stubEnv("TYPESAFE_API_KEY", "offline-fixture-key");
+  monitor.enabled = false;
+  monitor.turnOn("/offline-fixture");
+}
+
+describe("scope transactions across event refresh", () => {
   it("preserves last valid Beads enrichment when export is unavailable", async () => {
     const { monitor } = fixture();
     if (!monitor.ledger) throw new Error("Missing ledger");
@@ -120,8 +128,8 @@ describe("scope transactions across background refresh", () => {
     const task = monitor.ledger.tasks[0];
     if (!task) throw new Error("Missing task");
     task.beads = beads;
-    monitor.setInterval(15, "/offline-fixture");
-    await vi.advanceTimersByTimeAsync(15_000);
+    startRefresh(monitor);
+    await vi.advanceTimersByTimeAsync(0);
     expect(monitor.ledger.tasks[0]?.beads).toEqual(beads);
     monitor.stop();
   });
@@ -167,9 +175,9 @@ describe("scope transactions across background refresh", () => {
       ]),
       note: "readable but missing child",
     });
-    monitor.setInterval(15, "/offline-fixture");
+    startRefresh(monitor);
     persist.mockClear();
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(0);
     expect(monitor.ledger.tasks).toEqual(original);
     expect(persist).not.toHaveBeenCalled();
     monitor.stop();
@@ -178,17 +186,20 @@ describe("scope transactions across background refresh", () => {
   it("does not append checkpoint on unchanged or unavailable enrichment refresh", async () => {
     const { monitor, persist } = fixture();
     monitor.conversation.proposals = [];
-    monitor.setInterval(15, "/offline-fixture");
+    startRefresh(monitor);
     persist.mockClear();
+    await vi.advanceTimersByTimeAsync(0);
+    const reads = vi.mocked(readBeadsExport).mock.calls.length;
     await vi.advanceTimersByTimeAsync(45_000);
+    expect(vi.mocked(readBeadsExport)).toHaveBeenCalledTimes(reads);
     expect(persist).not.toHaveBeenCalled();
     monitor.stop();
   });
-  it("admits a valid scope result after timer-driven unavailable Beads refresh", async () => {
+  it("admits a valid scope result after lifecycle-driven unavailable Beads refresh", async () => {
     const { monitor, jobs } = fixture();
     const readsBefore = vi.mocked(readBeadsExport).mock.calls.length;
-    monitor.setInterval(15, "/offline-fixture");
-    await vi.advanceTimersByTimeAsync(15_000);
+    startRefresh(monitor);
+    await vi.advanceTimersByTimeAsync(0);
     expect(vi.mocked(readBeadsExport).mock.calls.length).toBeGreaterThan(
       readsBefore,
     );
@@ -205,7 +216,7 @@ describe("scope transactions across background refresh", () => {
 
   it("preserves fresh display metadata while admitting semantically unchanged work", () => {
     const { monitor, jobs } = fixture();
-    monitor.scheduleAnalysis(false);
+    monitor.scheduleAnalysis();
     const pending = jobs[0];
     if (!pending || !monitor.ledger) throw new Error("Missing scope work");
     const beads = { id: "proj-123", title: "Fresh export", conflict: false };
@@ -221,7 +232,7 @@ describe("scope transactions across background refresh", () => {
 
   it("rejects an answer from a previous lifecycle generation", () => {
     const { monitor, jobs } = fixture();
-    monitor.scheduleAnalysis(false);
+    monitor.scheduleAnalysis();
     const pending = jobs[0];
     if (!pending) throw new Error("Missing scope work");
     monitor.epoch++;
@@ -232,7 +243,7 @@ describe("scope transactions across background refresh", () => {
 
   it("rejects an answer when task state changes during evaluation", () => {
     const { monitor, jobs } = fixture();
-    monitor.scheduleAnalysis(false);
+    monitor.scheduleAnalysis();
     const pending = jobs[0];
     if (!pending || !monitor.ledger) throw new Error("Missing scope work");
     monitor.ledger = {
@@ -247,7 +258,7 @@ describe("scope transactions across background refresh", () => {
 
   it("rejects an answer after a genuine scope revision change", () => {
     const { monitor, jobs } = fixture();
-    monitor.scheduleAnalysis(false);
+    monitor.scheduleAnalysis();
     const pending = jobs[0];
     if (!pending || !monitor.ledger) throw new Error("Missing scope work");
     monitor.ledger = { ...monitor.ledger, scopeRevision: "changed:2" };

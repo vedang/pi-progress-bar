@@ -369,3 +369,21 @@ it("does not admit an implementation assessment after its code evidence changes 
     "appears complete",
   );
 });
+
+it("asks implementation applicability before treating absent evidence as insufficient", async () => {
+  const h = fixture();
+  h.start();
+  await h.settle("goal");
+  const question = h.requests.find(
+    (request) => "criterion:0" in request.questions,
+  )?.questions["criterion:0"];
+  expect(question?.instructions).toContain(
+    "First determine whether this task requires",
+  );
+  expect(question?.instructions).toContain(
+    "not-needed even without passive evidence",
+  );
+  expect(question?.instructions).toContain(
+    "Only when implementation is required",
+  );
+});

@@ -1,5 +1,6 @@
 import { vi } from "vitest";
 import type { EvaluationRequest } from "../../src/analysis/gateway";
+import type { ObservationRole } from "../../src/core/hybrid-state";
 import { Monitor, type MonitorOptions } from "../../src/core/monitor";
 import { addPatch, noPatch, observation } from "./hybrid";
 import { userMessageQa } from "./user-message-qa";
@@ -7,13 +8,18 @@ import { userMessageQa } from "./user-message-qa";
 export const branchEntry = (
   id: string,
   text: string,
-  role: "user" | "assistant" = "user",
-) => ({
-  type: "message",
-  id,
-  parentId: null,
-  message: { role, content: text },
-});
+  role: ObservationRole = "user",
+) => {
+  // This helper models ordinary Pi messages; intercom tests use custom_message.
+  if (role === "intercom")
+    throw new Error("Use an intercom custom_message fixture");
+  return {
+    type: "message",
+    id,
+    parentId: null,
+    message: { role, content: text },
+  };
+};
 export function jevReply(request: EvaluationRequest) {
   const state = request.state as {
     latest?: { id?: string };

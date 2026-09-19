@@ -38,3 +38,10 @@
 ## Continuous execution authority / U05
 - Owner explicitly requests all remaining Beads completed one by one without waiting for further approval. Sequential release, main-owned tests, scoped source delegation, gates/review remain mandatory. Manual feedback is not fabricatable; Q00 awaits actual owner QA.
 - Claimed U05/y3h.6 per-task health/board projection red tests. U06 source writes not released until tests frozen.
+
+## Orchestration watchdog
+- Requested 10-minute cadence; valid integer interval =600 seconds /600000 milliseconds.
+- Exact master discovered via intercom list/status: `01a0ba83-70b3-7204-9103-c3ee115c18d5`, short `01a0ba83`.
+- No background sessions before launch. Spawned fresh Pi outside repository at `/Users/vedang/.pi/agent`, background dispatch session `orchestration-watchdog-01a0ba83`, autoExitOnQuiet=false, quiet/update/grace=600000ms.
+- Timer read-only: sends READY then sleeps600 and sends TICK; no repository inspection/writes/delegation. Master retains all decisions and checks intercom, jj state, sole-writer ownership, exact immediate-parent gates and validation on ticks.
+- Launch running; READY routing verification pending. Cleanup on orchestration completion or master-ID replacement: `/orchestration-watchdog-stop orchestration-watchdog-01a0ba83`.

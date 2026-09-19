@@ -221,6 +221,85 @@ function runtime(
 }
 
 describe("fresh-session ordered production controller", () => {
+  it("admits a fresh explicitly replacing goal without an established ledger", async () => {
+    const history: Entry[] = Array.from({ length: 40 }, (_, i) => ({
+      type: "message",
+      id: `no-ledger-${i}`,
+      parentId: i ? `no-ledger-${i - 1}` : null,
+      message: { role: "assistant", content: "An unrelated explanatory note." },
+    }));
+    const r = runtime(history, verdict, true);
+    try {
+      await vi.advanceTimersByTimeAsync(1);
+      expect(r.monitor.ledger).toBeUndefined();
+      r.append(
+        "replacement",
+        "Read the advisory plan instead of all earlier work.",
+      );
+      const before = r.requests.length;
+      r.observe();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(
+        r.requests
+          .slice(before, before + 3)
+          .some(
+            (request) =>
+              request.questions.source &&
+              (request.state as TestState).candidates?.[0]?.entryId ===
+                "replacement",
+          ),
+      ).toBe(true);
+      expect(
+        r.monitor.ledger?.tasks
+          .filter((task) => task.included)
+          .map((task) => task.ref.entryId),
+      ).toEqual(["replacement"]);
+      expect(
+        r.monitor.ledger?.tasks.some((task) => task.status === "done"),
+      ).toBe(false);
+      expect(r.requests.some((request) => request.questions.scope)).toBe(true);
+    } finally {
+      r.monitor.stop();
+    }
+  });
+
+  it("does not jump history for a fresh scope requiring multiple chunks", async () => {
+    const r = runtime(replayEntries(1), verdict, true);
+    try {
+      await r.settle("old-goal");
+      for (let i = 0; i < 40; i++)
+        r.append(
+          `multi-history-${i}`,
+          "An unrelated explanatory note.",
+          "assistant",
+        );
+      r.append(
+        "replacement",
+        Array.from(
+          { length: 27 },
+          (_, i) => `${i + 1}. Implement new feature ${i + 1}`,
+        ).join("\n"),
+      );
+      r.observe();
+      await vi.advanceTimersByTimeAsync(180);
+      expect(
+        r.requests.some(
+          (request) =>
+            (request.state as TestState).candidate?.entryId === "replacement",
+        ),
+      ).toBe(true);
+      expect(
+        r.monitor.ledger?.tasks
+          .filter((task) => task.included)
+          .map((task) => task.ref.entryId),
+      ).toEqual(["old-goal"]);
+      expect(r.checkpoints.at(-1)?.conversation?.discoveryCursor?.id).not.toBe(
+        "replacement",
+      );
+    } finally {
+      r.monitor.stop();
+    }
+  });
   it.each([40, 520])(
     "admits a Jev-confirmed fresh replacement without replaying %i older messages first",
     async (padding) => {
@@ -327,7 +406,7 @@ describe("fresh-session ordered production controller", () => {
     }
   });
 
-  it.each(["continue", "ambiguous", "low-confidence"])(
+  it.each(["continue", "ambiguous", "low-confidence", "same", "revised"])(
     "does not cut over history on a fresh %s scope result",
     async (outcome) => {
       const r = runtime(
@@ -339,7 +418,29 @@ describe("fresh-session ordered production controller", () => {
             (request.state as TestState).candidates?.[0]?.ref?.entryId ===
               "replacement"
           ) {
-            const choice = outcome === "low-confidence" ? "new-goal" : outcome;
+            const choice = ["low-confidence", "same", "revised"].includes(
+              outcome,
+            )
+              ? "new-goal"
+              : outcome;
+            if (outcome === "same" || outcome === "revised") {
+              const taskId = (request.state as TestState).goal?.[0]?.id;
+              for (const [id, question] of Object.entries(request.questions)) {
+                const relation = `${outcome}:${taskId}`;
+                if (Object.hasOwn(question.criteria, relation))
+                  result.answers[id] = {
+                    type: "choice",
+                    choice: relation,
+                    confidence: 1,
+                    probabilities: Object.fromEntries(
+                      Object.keys(question.criteria).map((key) => [
+                        key,
+                        key === relation ? 1 : 0,
+                      ]),
+                    ),
+                  };
+              }
+            }
             result.answers.scope = {
               type: "choice",
               choice,

@@ -1,159 +1,100 @@
 # pi-progress-bar
 
-Automatic, passive reported-progress and current-task health widget for Pi. Uses TypeSafe Jev
-`jev-1.13.0` for semantic judgments; code owns task IDs, state transitions, counting, provenance,
-and every display label. V7 stuck/drift/meaningful-progress signals are not implemented.
+A passive progress and task-health widget for Pi. **Jev gates scope and judges completion; your selected Pi model extracts grounded tasks.** Code owns IDs, lifecycle, bounds and counting. It never executes your tasks or controls the agent.
 
-## Install and run
+## Install
 
-Requirements: Node.js >=22.19.0, Pi tested at
-`@earendil-works/pi-coding-agent` 0.84.2, and a nonblank `TYPESAFE_API_KEY`.
+Requires Node.js >=22.19.0, a configured selected Pi model, and `TYPESAFE_API_KEY`. Host integration is tested with Pi **0.84.2** (pi-ai0.84.4) and **0.85.1**.
 
 ```sh
-export TYPESAFE_API_KEY='...'
+pi install git:github.com/vedang/pi-progress-bar
+# Or use a local checkout:
 pi install /absolute/path/to/pi-progress-bar.root
-# or try without installing:
-pi -e /absolute/path/to/pi-progress-bar.root
 ```
 
-Monitoring starts automatically for each new session. Missing, blank, or rejected credentials emit
-one error and leave monitoring OFF; there is no local-only fallback. Reload restores current-session
-controls. New sessions default ON. Analysis is event-driven from canonical Pi branch observations,
-not a periodic poller.
-
-## Commands
+Provide `TYPESAFE_API_KEY` through your environment; keep it out of tracked configuration. Installing with the key enables automatic monitoring and paid provider calls. The selected model uses **Pi-managed authentication**, not a second key copied into this extension. After updating an installed package, reload/restart Pi to load the new code.
 
 ```text
-/progress                         show state and usage
-/progress on                      start/resume automatic catch-up
-/progress off                     abort work, stop collection/network, hide widget
+/progress       Show state, separate provider usage, diagnostics and help
+/progress on    Enable or resume monitoring
+/progress off   Cancel monitoring and hide the widget
 ```
 
-No source picker, consent dialog, manual checklist/current-task control, details inspector,
-enable/pause/resume aliases, or compatibility commands exist.
+New sessions default ON. Missing/rejected Jev credentials leave the monitor OFF. A temporarily unavailable selected model holds its pending phase until an explicit model selection, OFF/ON, or reload; it does not silently switch providers. The agent itself continues working.
 
-## What it reports
+## How progress works
 
-- **Reported progress:** completed / active automatically discovered tasks. Explicit conversation
-  reports own done/reopen/cancel state; cancelled work leaves the active denominator and can re-enter
-  when explicitly reopened. Percentage is never effort, ETA, or correctness.
-- **Task card:** Jev-selected current work is authoritative for analysis. When that selection is
-  unknown, the widget can show a deterministic **Selected task (current unknown)** reference. When
-  an assessed task completes or replacement assessment is pending, it keeps a clearly labelled
-  **Last task • retained last assessed as-of ...** card. This is display continuity only: it never
-  sets `currentTaskId`, changes reported completion, or supplies an evidence link. At assessment
-  time its five display labels are copied as immutable presentation values, so later evidence or
-  health objects cannot relabel a retained card. Cards are memory-only and disappear when their
-  original task span is unavailable on the active branch.
-- **Requirements:** task-local Jev clarity score rendered with local labels (`unknown`, `unclear`,
-  `partly clear`, `mostly clear`, or `clear`). It measures whether supplied requirements are usable,
-  not implementation quality.
-- **Acceptance:** task-local Jev judgment of observable success conditions (`explicit`, `partial`,
-  `not-found-in-context`, or `unknown`). It does not claim tests exist or pass.
-- **New red test:** whether a new failing regression would be useful for this task (`Needed`,
-  `Not needed`, or `Unknown`), distinct from whether any test was observed.
-- **Red evidence:** task-linked provenance: `Reported red` is an explicit agent assertion;
-  `Observed red` is bounded runner evidence; contradiction and unknown remain distinct.
-- **Implementation:** per-criterion Jev Choices aggregate locally to `appears complete`, `partial`,
-  `contradicted`, or `unverified`. This is evidence assessment, not proof of arbitrary correctness.
-  `unknown` and `unverified` mean supplied evidence was insufficient, not failure; a reported-done
-  task can therefore remain unverified.
-- **Beads:** exact issue IDs already present in admitted tasks may be enriched from the conventional
-  workspace `.beads/issues.jsonl`. Export status can show disagreement but never changes reported
-  completion or imports the backlog.
+1. Read whole visible user/assistant messages from the **active canonical branch**, in chronological order.
+2. Ask pinned `jev-1.13.0` whether task scope changed. Only confidently **unchanged** skips extraction. Gate confidence must be >=0.5 and selected probability >=0.8; uncertainty remains distinct from a confident negative.
+3. When needed, ask the **currently selected Pi model** for a strict grounded task patch. New tasks can be action or response deliverables. A new question after completed work can create a new response task, even on the same topic. User approvals and other people's work are not assistant tasks.
+4. Independently ask Jev about each included task. Completion of an earlier task is **not** a prerequisite for completing later tasks. Newly extracted tasks can be assessed in the same observation. Done tasks receive a separate withdrawal judgment.
 
-- **Last Jev call:** widget and bare `/progress` show the last actual HTTP dispatch for this
-  monitoring runtime, as local date/time and age, or `Never`. It updates before every dispatched
-  fetch, including failure/timeout, but not on redraws, cached unchanged input, missing credentials,
-  or retry-backoff. It is memory-only and resets for a fresh runtime.
+Reported fraction = done / included tasks. It is not effort, ETA, code correctness or an execution lock. Semantic judgments can miss work or abstain; a finite test suite is not an accuracy guarantee.
 
-Substantive user directives, questions, explanation/status/plan requests and corrections are all
-supplied to Jev as possible work using exact source spans. Jev classifies a task as an **action**
-deliverable or a **response** deliverable; code never guesses that kind from wording. Jev also
-decides whether each is new, revised, same, context, or ambiguous. Approvals/clarifications can
-remain linked context; quoted examples, reports, hypotheticals and empty turns do not fabricate
-work. Assistant plans remain eligible only with applicable user grounding.
+Task IDs are code-generated. Wording edits preserve completion; changed requirements increment the task revision and reopen its work. Explicit withdrawal reopens only the affected completed task. Archiving removes a task from the denominator without completing it; restoring preserves its identity/history.
 
-Unknown current task, ambiguous scope, missing originals, stale evidence, unsupported formats, or
-overflow remain unknown/stale rather than guessed. `/progress` and the widget show a local
-progress state (`Catching up history`, `Scope unresolved`, `Current task unknown`, `No new
-evidence`, or transport/controller failure) plus capped aggregate reason-code counts. Bare
-`/progress` also shows current service error/backoff wording when present. These diagnostics contain
-neither conversation text nor credentials.
+## Reading the widget
 
-## Runtime bounds and privacy
+The task card has five separate signals, in order:
 
-The extension reads only finalized visible user/assistant entries from
-`ctx.sessionManager.getBranch()`. It excludes siblings/children, system/thinking/private content,
-summaries as authority, generic tool bodies, and its own checkpoints. Discovery catches up through
-chronological windows of at most 512 entries / 256 KiB, committing a hash/offset cursor; retained
-source references are rehydrated only from the live active branch, including after a reload beyond
-one discovery window. Exact original offsets are preserved. Partial scope/report journals retain
-only canonical source ranges, IDs, enum decisions, and request identities; an unkeyed digest detects
-accidental or unrecomputed corruption before replay. Requests are at most 24 KiB and 20 questions; responses at most 128 KiB. Discovery carries
-exact source spans, role, and bounded preceding visible user direction. New checkpoints use strict
-schema v4 and require explicit `action` or `response` work kinds for every source span and saved
-task; v3, obsolete polling fields (including `interval`), and malformed shapes rebuild from the
-active branch rather than migrate. A newly observed user candidate keeps its exact ID/hash in a
-bounded fresh lane outside the normal history window. Large append batches begin at their first
-exact reference and continue through the same replayable cursor; newest fresh user refs may queue
-for priority without dropping earlier append work. Settled discovery state retires behind its bounded
-visible window, while unresolved scope work retains only its exact canonical references.
-When fresh and historical work both run, no class receives more than two consecutive dispatches.
-Only a complete, single-chunk, high-confidence `new-goal` transaction with all-new relations can
-replace current scope early; oversized original entries return to chronological reconciliation so a
-same-entry remainder cannot be discarded. Preceding direction is source-chronological: later fresh
-users never ground an earlier paged assistant plan, and it does not veto a new user request. It processes one chronological
-observation through selection/classification, scope/current reconciliation, and then that
-observation's report cursor; a later goal cannot affect an earlier report. Action-task reports remain bounded multi-task batches. Each Jev-classified response task
-uses one small target-local report request with full lifecycle and current-task choices, so an answer
-about unfinished implementation is not confused with completing that implementation; this can add
-one paid request per response task. Uncertain source, identity, scope, or current-task Choices
-abstain instead of mutating state. One request is in flight. Relevant canonical branch and tool
-observations coalesce into finite local catch-up, yielding between bounded dispatches; idle redraws,
-clocks, and unchanged snapshots dispatch nothing. Transient failures use bounded exponential
-backoff, Retry-After, three-attempt bursts, and five-minute cooldown/probe behavior with one
-pending-work retry wakeup. There is no lifetime request wall.
+| Field | Meaning |
+|---|---|
+| Requirements | Clarity of supplied requirements, not code quality |
+| Acceptance | Whether observable success conditions are supplied |
+| New red test | Whether a new failing regression test would be useful |
+| Red evidence | Reported failing-test evidence, not automatically verified execution |
+| Implementation | Supplied criterion evidence: appears complete, partial, contradicted or unverified |
 
-Installing with a key automatically sends bounded relevant conversation/task/evidence excerpts to
-`https://api.typesafe.ai/v1/systemone`; this may incur TypeSafe charges. Event-driven catch-up can
-dispatch more promptly than former cadence-based analysis, so it is not free and users should
-expect charges for each bounded semantic transition. Original-delivery live validation used 16
-requests. Separate completed repair-validation snapshot used 134 attempts
-(162,554 input and 29,207 output tokens, including two failed runs).
-Retained-task/conversational-work validation used 395 attempts (415,360 input and
-70,355 output tokens), including failed/interrupted runs and diagnostic probes.
-The final full suite passed 15/15 with 53 requests (56,701 input / 9,580 output tokens);
-No probabilistic accuracy guarantee is implied. User has authorized broader
-paid evaluation, but live runs remain explicitly finite and manual. Credentials, raw remote responses, retained card text and last-dispatch timestamps are never
-checkpointed. Checkpoints are trusted writable local session state: journal
-digests detect accidental or unrecomputed corruption, not deliberate edits that recompute them.
-Runtime has no simulated model or provider fallback.
+`Unknown` and `unverified` mean insufficient evidence, not failure. These health fields never establish reported completion.
 
-## Supported passive evidence
+**Focus is display/health selection only.** It does not assign tools or execution to a task. Unlinked tool output cannot establish Observed red or completion. Exact admitted Beads IDs may receive read-only export metadata; Beads status never imports backlog or changes task completion.
 
-Live main-session Pi `tool_execution_start/end` pairs are bound by `toolCallId`, tool name, and
-order. Current support is intentionally narrow:
+Completed or replaced tasks retain a coherent **retained / as-of / replacement pending** card until a new assessment is admitted. The label and all five fields are copied together. Assessment time is separate from **actual Jev and extraction dispatch time**, including failed attempts. Redraws do not change these facts or initiate requests. Trusted theme colors are preserved; untrusted text controls are sanitized before styling.
 
-- `bash`: recognized test-runner commands plus assertion-failure output for Observed red; a nonzero
-  exit, crash, missing dependency, or filename alone is insufficient. Passing output is retained as
-  bounded test evidence.
-- `edit` / `write`: successful bounded path-level code-change facts and revision aging.
-- Conversation assertions can establish Reported red through Jev without observed execution.
+Unresolved/previous scope has no misleading current percentage. Bare `/progress` exposes safe, capped diagnostic counts; the normal widget does not dump raw diagnostic codes. The full debugger modal and wider UI redesign are **not implemented**.
 
-Unsupported runners/results remain unknown. The extension never executes commands, tests, `br`/`bd`,
-reads arbitrary source files, injects agent messages, replaces tools, mutates issues, or monitors
-child/sibling sessions.
+## Limits and costs
 
-## Development
+| Boundary | Limit |
+|---|---|
+| Included / total tasks | 20 / 200 |
+| Immutable mutation events / checkpoint | 1,000 / 512KiB |
+| Generated label | 240 characters |
+| Canonical page | 64 messages / 256KiB |
+| Latest whole message | 12KiB |
+| Earlier context | At most 2 messages / 4KiB |
+| Jev request | 24KiB / 20 questions |
+| Jev response / deadline | 128KiB / 10 seconds |
+| Extraction input / output text | 24KiB / 32KiB |
+| Extraction output tokens / owned deadline | 2,048 / 60 seconds |
+| Patch operations | 6 additions; 12 each revisions, archives and restores |
+
+Catch-up is chronological, not a fresh-message priority lane. Large history can therefore delay the newest request. Oversized messages are not partially interpreted. Capacity limits reject further mutation rather than evict accepted obligations. There is no automatic context compaction or unlimited-history promise.
+
+One controlled analysis flight is active across semantic and optional health work. New semantic evidence takes priority over stale optional health. Accepted gate/patch/completion phases are checkpointed so eligible retries resume unfinished work rather than rebilling accepted phases. Jev transient failures use pending-only backoff/Retry-After; idle time and redraws never poll. No extraction repair loop or hidden model retry is used.
+
+Each visible observation may incur a Jev gate plus completion/health requests. Extraction also incurs your selected provider's charges. Tool-only/thinking-only/blank messages do not trigger semantic analysis. `/progress off` stops extension analysis, not the main agent.
+
+## Privacy and storage
+
+Bounded conversation/task excerpts go to **TypeSafe** (`https://api.typesafe.ai/v1/systemone`) and, when extraction is needed, to **your selected Pi model provider**. This is not local-only processing.
+
+Strict **v5** checkpoints persist bounded generated task labels, IDs/revisions, source hashes/ranges, assessment scalars, immutable mutation events, pending-phase journals, usage, dispatch timestamps and retained health-card metadata. They do **not** persist full source messages, prompts, provider envelopes, reasoning, tool bodies or credentials. Source references must resolve against the active branch. Checkpoints are trusted writable local state, not cryptographic protection against deliberate tampering.
+
+Old v4 checkpoints are rejected and rebuilt from canonical history—**no migration**. Canonical source amendments invalidate stale derived references and trigger bounded reconciliation. v5 intentionally supersedes the old reference-only/no-generated-label privacy contract.
+
+The extension does not run commands/tests, mutate Beads, inject conversation messages, replace tools, follow child/sibling sessions, or send advisory nudges.
+
+## Development and evidence
 
 ```sh
 bun install --frozen-lockfile
 make format
 make check
 make test
-npm pack --dry-run
+npm pack --dry-run --json
 ```
 
-Automated tests are offline and use injected schema-valid transport responses. Real-Jev validation
-is a separate bounded release gate.
+Default tests are offline. Actual-host tests use a faux provider and synthetic in-memory credentials, exercising canonical events and real selected-model/auth dispatch. Separate paid replay is explicitly capped and opt-in: see [live QA instructions](__tests__/live/README.md).
+
+[Hybrid acceptance evidence](docs/design/hybrid-acceptance.md) records exact tested cases, failures and limitations. [Presentation handoff](docs/design/hybrid-presentation.md) documents the read-only UI/debugger seam. Historical design documents describe older releases; [PRODUCT.md](PRODUCT.md) governs the current hybrid contract.

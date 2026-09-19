@@ -1,0 +1,65 @@
+# Hybrid acceptance evidence
+
+## Status
+
+Runtime freeze: **`d7c703b2`**. Main independently passed format, TypeScript, Biome, Knip, **171 unit +8 integration tests**, plus **8 integration tests on global Pi0.85.1**. Local host is Pi0.84.2/pi-ai0.84.4. Package dry-run passed. **Independent full-batch review and publication remain pending**; these results do not close H5 or earlier82j acceptance.
+
+## Production-path paid runs
+
+No threshold changes, fixture-specific branches, fabricated answers, hidden retries or discarded failed attempts. CI caps32Jev/8model; remaining caps64/16; orgtok cap16/4. Each row is one explicit frozen run.
+
+| Revision / group | Jev / model | Jev input / output | Model input / output | Reported model cost | Outcome |
+|---|---:|---:|---:|---:|---|
+| `2ec748b0` CI | 3 /1 | 3,868 /328 | 378 /137 | $0.01063 | Failed: inspection+diagnosis merged into2 initial tasks |
+| `339503f4` CI | 18 /6 | 40,547 /2,678 | 4,667 /670 | $0.08017 | Failed:3 initial tasks expanded to6 implementation substeps; final2/6 |
+| `339503f4` remaining | 19 /4 | 24,602 /1,862 | 1,835 /310 | $0.03385 | Passed all listed cases |
+| `d7c703b2` CI | 17 /6 | 30,866 /2,031 | 5,021 /215 | $0.06096 | Passed:3 stable IDs; final3/3, no unresolved scope |
+| `d7c703b2` remaining | 19 /3 | 24,602 /1,865 | 1,529 /238 | $0.02719 | Passed all listed cases |
+| `d7c703b2` orgtok | 10 /3 | 19,150 /993 | 3,338 /165 | $0.04163 | Passed:0/2→2/2→2/3→3/3; no user-approval tasks |
+
+Total listed: **86Jev /23model calls**, **143,635 /9,757 Jev tokens**, **16,768 /1,735 model tokens**, **$0.25443 reported model cost**, zero reported model cache-read tokens. Jev charges are not included in the cost column. Earlier exploration, completion experiments and orgtok debugging are separate, not hidden in this total.
+
+### What was demonstrated
+
+- Exact six-message CI trace: three separate inspect/diagnose/fix deliverables; no extra implementation substeps; final3/3 (required floor2/3). Inspection completion was recognized only in the final summary, a visible semantic delay.
+- Reading-only request containing a path: admitted and completed without treating it as an edit request.
+- Substantive question and delivered answer.
+- Parallel tasks: later two completed while first remained open; withdrawal reopened only its target and preserved the unrelated completed task.
+- Settled OFF/ON/reload: no further paid requests.
+- Orgtok **only first two user messages and corresponding responses**: new blocker question admitted after earlier work completed, then completed by its answer; no approvals or third-party work added. No later orgtok work was inspected or replayed.
+
+The orgtok initial review request now decomposes into review and reporting tasks, hence final3/3 rather than the earlier2/2. This is explicit user-request decomposition, not fabricated extra obligations. IDs remain stable after each admission.
+
+### Retained local artifacts
+
+Under `.agents/plans/20260919T130925--redesign-pragmatic-hybrid-progress__planning/`:
+
+- `hybrid-ci-1789814326694-a4fa9dbc-b8d1-42bd-9e5b-2a9fe5de58c1.jsonl` — first failure.
+- `hybrid-ci-1789814644461-51909306-6dd4-4766-8703-7d1e81245974.jsonl` — extra-substep failure.
+- `hybrid-remaining-1789814962820-4e650417-7eaa-4f4a-8e56-5b36f02f2e3f.jsonl` — earlier remaining pass.
+- `hybrid-ci-1789815157480-188d9289-2f2f-4326-a9c4-66670071e949.jsonl` — final CI pass.
+- `hybrid-remaining-1789815223386-c2ea52c1-1907-420c-816a-ab6d3a35372a.jsonl` — final remaining pass.
+
+Orgtok task directory `20260919T155100--repair-orgtok-session-regressions__active/pipeline-1789815251137.jsonl` holds final regression evidence. Earlier actor-boundary failure and zero-call model-catalogue preflight failure remain preserved there. These ignored local records are not distributed package contents.
+
+## Safety coverage disposition
+
+The pre-hybrid tests were explicitly archived, not counted as passing. New suites replace the following safety intents:
+
+| Earlier obligation | Current coverage / disposition |
+|---|---|
+| Post-cutover/513-append/byte-window loss | `hybrid-bounds`, canonical chronological paging; no early cutover |
+| No-ledger veto and future direction leaking backward | `hybrid-lifecycle`, `hybrid-bounds`; source-chronological bounded context |
+| Unbounded settled caches / full historical payload reads | `hybrid-bounds`; metadata-only scans distinguished from payload reads |
+| Accepted partial work rebilled after OFF/reload | `hybrid-chunk-resume`, `hybrid-checkpoint`, `hybrid-retry` |
+| Abort/late provider result and canonical amendment races | `hybrid-retry`, `hybrid-bounds`, `hybrid-lifecycle` |
+| Malformed checkpoint / obsolete interval | Strict v5 `hybrid-checkpoint`; v4 rejected, no migration |
+| Health/Beads/card and publication parity | `hybrid-parity`, `hybrid-beads`, `hybrid-view` |
+| Real host authority and selected-model authentication | `host-events.integration`, `selected-model-host.integration` on both supported hosts |
+| Response admission, actor ownership and ANSI fragments | `hybrid-orgtok`, `hybrid-view`, first-two-turn paid replay |
+
+Old fresh-message next-cycle latency, span-only/Jev-only labels and memory-only card/timestamp persistence are intentionally superseded. Chronological backlog latency and bounded v5 derived persistence are the approved replacements. Full review must independently verify this disposition against **`afdbee79..final`**, not just recent prompt edits.
+
+## Limits of the evidence
+
+Finite single-run semantics are not a reliability guarantee. Jev may confidently miss work or abstain; generated task grouping is probabilistic. No further gate-ablation study is required for this pragmatic delivery. Whole-message/page/state limits can prevent admission; history catch-up is chronological. Provider availability, long histories, broader model families and unsupported tool/Beads formats are not universally proven. Full debugger/redesign/advisory work is excluded.

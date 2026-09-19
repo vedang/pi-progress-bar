@@ -1,8 +1,8 @@
 # Progress monitor — review packet
 
-**Current implementation target: automatic plan-v2 replacement plus V4–V6, Beads epic `pi-progress-barroot-pyp` (children `.1`–`.8`).** Issue bodies are self-contained for cross-machine execution; detailed plans remain ignored. [PRODUCT.md](../../PRODUCT.md) summarizes the corrected contract: default ON, required real Jev, only on/off/interval, automatic evolving tasks, and deterministic labels. V7 is deferred.
+**Current contract: pragmatic hybrid progress, Beads epic `pi-progress-barroot-xkg`.** [PRODUCT.md](../../PRODUCT.md) governs scope; [runtime README](../../README.md) documents the implementation. Read [hybrid acceptance evidence](hybrid-acceptance.md) and [presentation handoff](hybrid-presentation.md) first. Independent full-batch acceptance/publication remains pending until H5 closes.
 
-**Historical design packet below:** its manual source/Apply/consent/inspector affordances and selected Beads-source workflow are superseded. Retain its useful signal semantics and evidence distinctions, not its obsolete UX. The [runtime README](../../README.md) still documents the previous implemented version until the replacement ships. Existing deterministic/load tests do not establish new behavior or live semantic accuracy; the previous independent review timed out.
+**Historical design packet below:** manual source/Apply/consent/inspector affordances, interval polling, selected Beads-source workflow and span-only/Jev-only task labels are superseded. Retain useful signal semantics and evidence distinctions, not obsolete UX. Historical experimental results are not current release acceptance.
 
 ## Read in this order
 

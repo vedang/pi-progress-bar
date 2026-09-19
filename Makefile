@@ -41,7 +41,7 @@ test-integration:
 	./node_modules/.bin/vitest run --config vitest.config.integration.ts
 
 .PHONY: test-live
-test-live: ## Paid Jev production replay (requires PROGRESS_LIVE=1 and TYPESAFE_API_KEY)
+test-live: ## Paid hybrid replay (explicit group, revision, artifact dir and provider credentials required)
 	./node_modules/.bin/vitest run --config vitest.config.live.ts
 
 .PHONY: test

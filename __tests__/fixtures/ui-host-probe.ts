@@ -9,6 +9,7 @@ import {
   matchesKey,
   type TUI,
 } from "@earendil-works/pi-tui";
+import { createUiHost } from "../../src/ui/host";
 
 /** Opt-in, static actual-host probe. No monitor, provider or session writes. */
 export default function uiHostProbe(pi: ExtensionAPI) {
@@ -21,29 +22,26 @@ export default function uiHostProbe(pi: ExtensionAPI) {
     if (ctx.mode !== "tui") throw new Error("Probe requires TUI mode");
     type FocusTui = TUI & { getFocusedComponent(): Component | null };
     const captured: { host?: FocusTui; editor?: Component | null } = {};
-    ctx.ui.setWidget(
-      "progress-host-probe",
-      (tui) => {
-        if (
-          !("getFocusedComponent" in tui) ||
-          typeof tui.getFocusedComponent !== "function"
-        )
-          throw new Error("Host does not expose focus identity");
-        const host = tui as FocusTui;
-        const editor = host.getFocusedComponent();
-        captured.host = host;
-        captured.editor = editor;
-        record({
-          event: "capture",
-          canonicalEditor: editor instanceof CustomEditor,
-          customFactory: ctx.ui.getEditorComponent() !== undefined,
-          overlay: tui.hasOverlay(),
-          ownedOverlay: typeof tui.showOverlay === "function",
-        });
-        return { render: () => ["UX host probe"], invalidate() {} };
-      },
-      { placement: "belowEditor" },
-    );
+    const uiHost = createUiHost(ctx);
+    uiHost.attach((tui) => {
+      if (
+        !("getFocusedComponent" in tui) ||
+        typeof tui.getFocusedComponent !== "function"
+      )
+        throw new Error("Host does not expose focus identity");
+      const host = tui as FocusTui;
+      const editor = host.getFocusedComponent();
+      captured.host = host;
+      captured.editor = editor;
+      record({
+        event: "capture",
+        canonicalEditor: editor instanceof CustomEditor,
+        customFactory: ctx.ui.getEditorComponent() !== undefined,
+        overlay: tui.hasOverlay(),
+        ownedOverlay: typeof tui.showOverlay === "function",
+      });
+      return { render: () => ["UX host probe"], invalidate() {} };
+    });
     const { host, editor } = captured;
     if (!host || !(editor instanceof CustomEditor)) {
       record({ event: "failed", reason: "No canonical editor identity" });
@@ -59,10 +57,10 @@ export default function uiHostProbe(pi: ExtensionAPI) {
       render: () => ["Other extension"],
       invalidate() {},
     };
-    const first = tui.showOverlay(board, { width: "94%", maxHeight: "80%" });
+    const first = uiHost.openOverlay(board, { width: "94%", maxHeight: "80%" });
     const second = tui.showOverlay(sibling);
-    first.hide();
-    first.hide();
+    first.close();
+    first.close();
     record({
       event: "ownership",
       siblingFocused: second.isFocused(),
@@ -78,24 +76,21 @@ export default function uiHostProbe(pi: ExtensionAPI) {
     const transform = ctx.ui.onTerminalInput((data) =>
       data === "~" ? { data: "\x1b[C" } : undefined,
     );
-    const input = ctx.ui.onTerminalInput((data) => {
+    const input = uiHost.onInput((data) => {
       if (matchesKey(data, "f10")) {
         record({ event: "done" });
         ctx.shutdown();
         return { consume: true };
       }
       if (!matchesKey(data, "right") || isKeyRelease(data)) return;
-      const allowed =
-        !tui.hasOverlay() &&
-        !ctx.ui.getEditorComponent() &&
-        tui.getFocusedComponent() === editor &&
-        ctx.ui.getEditorText() === "";
+      const allowed = uiHost.canActivate(data);
       record({ event: "right", allowed, editorText: ctx.ui.getEditorText() });
       return allowed ? { consume: true } : undefined;
     });
     unsubscribe = () => {
       input();
       transform();
+      uiHost.dispose();
     };
     record({ event: "ready" });
   });

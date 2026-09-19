@@ -3,30 +3,15 @@ import {
   type ExtensionContext,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import type { Component, OverlayOptions, TUI } from "@earendil-works/pi-tui";
+import type { Component, TUI } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
+import { createUiHost, type UiHost } from "../src/ui/host";
 
 type Listener = (
   data: string,
 ) => { consume?: boolean; data?: string } | undefined;
-type OwnedOverlay = { close(): void; isFocused(): boolean };
-type Host = {
-  attach(factory: (tui: TUI, theme: Theme) => Component): void;
-  canActivate(data: string): boolean;
-  onInput(listener: Listener): () => void;
-  openOverlay(
-    component: Component & { dispose?(): void },
-    options?: OverlayOptions,
-  ): OwnedOverlay;
-  requestRender(): void;
-  dispose(): void;
-};
-
-async function create(ctx: ExtensionContext): Promise<Host> {
-  // Dynamic path keeps the red-test commit type-checkable before U02 adds source.
-  const path = "../src/ui/host";
-  const module = await import(path);
-  return module.createUiHost(ctx);
+async function create(ctx: ExtensionContext): Promise<UiHost> {
+  return createUiHost(ctx);
 }
 
 function fixture() {

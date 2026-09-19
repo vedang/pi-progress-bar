@@ -18,7 +18,7 @@ const widgetName = "pi-progress-bar";
 type FocusTui = TUI & { getFocusedComponent(): Component | null };
 type DisposableComponent = Component & { dispose?(): void };
 
-export interface OwnedOverlay {
+interface OwnedOverlay {
   close(): void;
   isFocused(): boolean;
 }

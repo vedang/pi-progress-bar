@@ -53,8 +53,28 @@ export interface ScopePatch {
   unresolved: boolean;
 }
 
-export interface GroundedAdd extends AddOperation {
+interface GroundedAdd extends AddOperation {
   source: SourceRef;
+}
+
+interface GroundedRevise extends ReviseOperation {
+  source: SourceRef;
+}
+
+interface GroundedArchive extends ArchiveOperation {
+  source: SourceRef;
+}
+
+interface GroundedRestore extends RestoreOperation {
+  source: SourceRef;
+}
+
+export interface GroundedPatch {
+  add: GroundedAdd[];
+  revise: GroundedRevise[];
+  archive: GroundedArchive[];
+  restore: GroundedRestore[];
+  unresolved: boolean;
 }
 
 export interface ExtractionInput {
@@ -270,26 +290,20 @@ export function groundPatch(
   patch: ScopePatch,
   latest: Observation,
   existingTaskIds: ReadonlySet<string>,
-): GroundedAdd[] {
-  for (const operation of [
-    ...patch.revise,
-    ...patch.archive,
-    ...patch.restore,
-  ]) {
+): GroundedPatch {
+  const source = <T extends { id: string; quote: string }>(operation: T) => {
     if (!existingTaskIds.has(operation.id))
       throw new Error("Extraction target does not exist");
-    exactQuoteSource(operation.quote, latest);
-  }
-  return patch.add.map((operation) => ({
-    ...operation,
-    source: exactQuoteSource(operation.quote, latest),
-  }));
-}
-
-export function hasDeferredLifecycleOperations(patch: ScopePatch) {
-  return (
-    patch.revise.length > 0 ||
-    patch.archive.length > 0 ||
-    patch.restore.length > 0
-  );
+    return { ...operation, source: exactQuoteSource(operation.quote, latest) };
+  };
+  return {
+    add: patch.add.map((operation) => ({
+      ...operation,
+      source: exactQuoteSource(operation.quote, latest),
+    })),
+    revise: patch.revise.map(source),
+    archive: patch.archive.map(source),
+    restore: patch.restore.map(source),
+    unresolved: patch.unresolved,
+  };
 }

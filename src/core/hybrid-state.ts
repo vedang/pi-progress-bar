@@ -1,7 +1,7 @@
 export type ObservationRole = "user" | "assistant";
 export type TaskKind = "action" | "response";
 export type TaskBasis = "explicit" | "derived";
-type TaskStatus = "not-started" | "done";
+type TaskStatus = "not-started" | "reopened" | "done";
 type AssessmentReason =
   | "accepted"
   | "semantic-unknown"
@@ -46,11 +46,39 @@ export interface HybridTask {
   latestAssessment?: Assessment;
 }
 
+type MutationEventKind =
+  | "create"
+  | "revise"
+  | "archive"
+  | "restore"
+  | "complete"
+  | "withdraw";
+
+/** Immutable accepted mutation evidence; assessment-only updates add none. */
+export interface MutationEvent {
+  id: string;
+  kind: MutationEventKind;
+  taskId: string;
+  revision: number;
+  source: ObservationRef;
+}
+
+export interface PendingObservation {
+  observation: ObservationRef;
+  phase: "extract" | "complete";
+  completedTaskIds: string[];
+  completionHashes: string[];
+  gateHash?: string;
+  patchHash?: string;
+}
+
 export interface HybridState {
   sourceId: string;
   tasks: HybridTask[];
+  events: MutationEvent[];
   nextTaskId: number;
   cursor?: { id: string; hash: string };
+  pending?: PendingObservation;
   focusTaskId?: string;
   scopeAssessment?: Assessment;
   scopeError?: string;
@@ -63,6 +91,7 @@ export function emptyState(sourceId: string): HybridState {
   return {
     sourceId,
     tasks: [],
+    events: [],
     nextTaskId: 1,
     scopeUnresolved: false,
   };
@@ -92,7 +121,21 @@ export function copyState(state: HybridState): HybridState {
           }
         : {}),
     })),
+    events: state.events.map((event) => ({
+      ...event,
+      source: { ...event.source },
+    })),
     ...(state.cursor ? { cursor: { ...state.cursor } } : {}),
+    ...(state.pending
+      ? {
+          pending: {
+            ...state.pending,
+            observation: { ...state.pending.observation },
+            completedTaskIds: [...state.pending.completedTaskIds],
+            completionHashes: [...state.pending.completionHashes],
+          },
+        }
+      : {}),
     ...(state.scopeAssessment
       ? {
           scopeAssessment: {

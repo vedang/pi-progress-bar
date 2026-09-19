@@ -12,7 +12,7 @@ import {
   type Observation,
 } from "../../src/core/hybrid-state";
 
-export const digest = (text: string) =>
+const digest = (text: string) =>
   createHash("sha256").update(text).digest("hex");
 export const observation = (
   id: string,

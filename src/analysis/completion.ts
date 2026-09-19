@@ -49,8 +49,7 @@ export function completionRequest(
       const settled = task.status === "done";
       const criteria: Record<string, string | null> = settled
         ? {
-            withdrawn:
-              "Actual latest evidence contradicts or withdraws this exact task's previous completion.",
+            yes: "Actual latest evidence contradicts or withdraws this exact task's previous completion.",
             no: "No actual withdrawal or contradiction of this task's previous completion.",
             uncertain:
               "Possible contrary evidence has unclear reference or scope; preserve status but expose uncertainty.",
@@ -62,7 +61,7 @@ export function completionRequest(
               "An apparent completion claim cannot be reliably attributed to this task or its complete requested outcome.",
           };
       return [
-        `complete:${task.id}`,
+        `${settled ? "withdraw" : "complete"}:${task.id}`,
         {
           type: "choice" as const,
           instructions: settled
@@ -98,7 +97,10 @@ export function completionDecisions(
   tasks: readonly HybridTask[],
 ): CompletionDecision[] {
   return tasks.map((task) => {
-    const answer = result.answers[`complete:${task.id}`];
+    const answer =
+      result.answers[
+        `${task.status === "done" ? "withdraw" : "complete"}:${task.id}`
+      ];
     const rawChoice = answer?.type === "choice" ? answer.choice : "invalid";
     const confidence = answer?.type === "choice" ? answer.confidence : 0;
     const probability =
@@ -107,8 +109,7 @@ export function completionDecisions(
         : 0;
     const thresholdAccepted =
       confidence >= MIN_CONFIDENCE && probability >= MIN_PROBABILITY;
-    const acceptedCompletion =
-      task.status === "done" ? rawChoice === "withdrawn" : rawChoice === "yes";
+    const acceptedCompletion = rawChoice === "yes";
     const reason = thresholdAccepted
       ? rawChoice === "uncertain"
         ? "semantic-unknown"
@@ -119,7 +120,7 @@ export function completionDecisions(
       status:
         thresholdAccepted && acceptedCompletion
           ? task.status === "done"
-            ? "not-started"
+            ? "reopened"
             : "done"
           : task.status,
       assessment: {

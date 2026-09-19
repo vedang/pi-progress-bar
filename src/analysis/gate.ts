@@ -1,3 +1,4 @@
+import { normalizedChoiceAssessment } from "../core/hybrid-proof";
 import {
   type Assessment,
   type HybridState,
@@ -12,8 +13,7 @@ import {
   type ValidatedResult,
 } from "./gateway";
 
-const MIN_CONFIDENCE = 0.5;
-const MIN_PROBABILITY = 0.8;
+const GATE_CHOICES = new Set(["changed", "unchanged", "uncertain"]);
 
 /** Gate evidence overflow is unresolved scope, not an accepted gate outcome. */
 export class GateRequestOverflowError extends Error {
@@ -89,26 +89,30 @@ export function gateResult(
   const confidence = answer?.type === "choice" ? answer.confidence : 0;
   const probability =
     answer?.type === "choice" ? (answer.probabilities[answer.choice] ?? 0) : 0;
-  const thresholdAccepted =
-    confidence >= MIN_CONFIDENCE && probability >= MIN_PROBABILITY;
-  const reason = thresholdAccepted
-    ? rawChoice === "uncertain"
-      ? "semantic-unknown"
-      : "accepted"
-    : "threshold-abstention";
-  const assessment: Assessment = {
+  const assessment = normalizedChoiceAssessment(
     rawChoice,
     confidence,
     probability,
-    reason,
-    source: observationRef(observation),
-  };
-  if (!thresholdAccepted || rawChoice === "uncertain")
+    observationRef(observation),
+    GATE_CHOICES,
+  );
+  // Provider shape is validated before here; phase-invalid choices still retain
+  // an honest non-accepted assessment for live scope handling, never replay.
+  if (!assessment)
+    return {
+      decision: "extract",
+      assessment: {
+        rawChoice: "invalid",
+        confidence,
+        probability,
+        reason: "threshold-abstention",
+        source: observationRef(observation),
+      },
+    };
+  if (assessment.reason !== "accepted" || assessment.rawChoice === "uncertain")
     return { decision: "extract", assessment };
-  if (rawChoice === "changed") return { decision: "changed", assessment };
-  if (rawChoice === "unchanged") return { decision: "unchanged", assessment };
   return {
-    decision: "extract",
-    assessment: { ...assessment, reason: "semantic-unknown" },
+    decision: assessment.rawChoice === "changed" ? "changed" : "unchanged",
+    assessment,
   };
 }

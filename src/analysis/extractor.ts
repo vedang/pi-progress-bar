@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-
 import type {
   HybridState,
   Observation,
@@ -7,13 +6,13 @@ import type {
   TaskBasis,
   TaskKind,
 } from "../core/hybrid-state";
+import { taskLabelIsValid } from "../core/hybrid-state";
 
 const MAX_EXTRACTION_INPUT_BYTES = 24 * 1024;
 const MAX_EXTRACTION_TEXT_BYTES = 32 * 1024;
 const MAX_LATEST_MESSAGE_BYTES = 12 * 1024;
 const MAX_EARLIER_CONTEXT_BYTES = 4 * 1024;
 const MAX_EARLIER_MESSAGES = 2;
-const MAX_LABEL_CHARACTERS = 240;
 const MAX_ADDS = 6;
 const MAX_REVISES = 12;
 const MAX_ARCHIVES = 12;
@@ -109,10 +108,7 @@ const exactKeys = (value: Record<string, unknown>, keys: string[]) =>
   Object.keys(value).length === keys.length &&
   keys.every((key) => Object.hasOwn(value, key));
 
-const labelIsValid = (label: unknown): label is string =>
-  typeof label === "string" &&
-  !!label.trim() &&
-  Array.from(label).length <= MAX_LABEL_CHARACTERS;
+const labelIsValid = taskLabelIsValid;
 
 const idIsValid = (id: unknown): id is string =>
   typeof id === "string" && /^task:[1-9]\d*$/.test(id);
@@ -311,7 +307,7 @@ export function extractionInput(
 
 function exactQuoteSource(quote: string, latest: Observation): SourceRef {
   const start = latest.text.indexOf(quote);
-  if (start < 0 || latest.text.indexOf(quote, start + quote.length) >= 0)
+  if (start < 0 || latest.text.indexOf(quote, start + 1) >= 0)
     throw new Error("Quote must occur exactly once in latest message");
   return {
     entryId: latest.id,

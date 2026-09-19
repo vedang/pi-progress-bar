@@ -125,11 +125,25 @@ const diagnosticLabels: Record<string, string> = {
 class RetryableJevError extends RetryableProviderError {}
 
 const copyUsage = (usage: ProviderUsage): ProviderUsage => ({ ...usage });
-const validUsage = (usage: ProviderUsage) => ({
-  calls: usage.calls,
-  inputTokens: usage.inputTokens,
-  outputTokens: usage.outputTokens,
-});
+const safeUsageValue = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const validUsage = (usage: ProviderUsage) => {
+  if (
+    !safeUsageValue(usage.calls) ||
+    !safeUsageValue(usage.inputTokens) ||
+    !safeUsageValue(usage.outputTokens)
+  )
+    throw new Error("Invalid provider usage");
+  return { ...usage };
+};
+/** Never form an unsafe intermediate while preserving monotonic lifetime usage. */
+const saturatingAdd = (current: number, delta: number) => {
+  if (!safeUsageValue(current) || !safeUsageValue(delta))
+    throw new RetryableProviderError();
+  return delta > Number.MAX_SAFE_INTEGER - current
+    ? Number.MAX_SAFE_INTEGER
+    : current + delta;
+};
 const copyCard = (card: RetainedCard): RetainedCard => ({
   ...card,
   health: { ...card.health },
@@ -1183,8 +1197,16 @@ export class Monitor {
   /** Saturating metadata bounds every dispatch and usage persistence boundary. */
   private capacityMetadata(card = this.card): MonitorCheckpointMetadata {
     const maximum = Number.MAX_SAFE_INTEGER;
+    const maximumCard = card
+      ? {
+          ...copyCard(card),
+          retained: false,
+          replacementPending: false,
+          assessedAt: maximum,
+        }
+      : undefined;
     return {
-      enabled: this.enabled,
+      enabled: false,
       usage: {
         jev: {
           calls: maximum,
@@ -1199,29 +1221,36 @@ export class Monitor {
       },
       lastJevCallAt: maximum,
       lastExtractionCallAt: maximum,
-      ...(card ? { card: copyCard(card) } : {}),
+      ...(maximumCard ? { card: maximumCard } : {}),
     };
   }
 
+  private openFocus(state: HybridState) {
+    return state.tasks.find(
+      (task) =>
+        task.id === state.focusTaskId &&
+        task.included &&
+        task.status !== "done",
+    );
+  }
+
+  /** One card projection keeps persistence, display and admission truthful. */
   private retainedCardFor(state: HybridState) {
     const card = this.card;
     if (!card) return;
-    const task = state.tasks.find((item) => item.id === card.taskId);
+    const focus = this.openFocus(state);
     if (
-      card.retained ||
-      !task ||
-      task.status === "done" ||
-      state.focusTaskId !== card.taskId ||
-      task.revision !== card.revision ||
-      task.label !== card.label
+      !card.retained &&
+      focus?.id === card.taskId &&
+      focus.revision === card.revision &&
+      focus.label === card.label
     )
-      return {
-        ...copyCard(card),
-        ...(card.retained && card.replacementPending && task?.status === "done"
-          ? { replacementPending: false }
-          : { retained: true }),
-      };
-    return copyCard(card);
+      return copyCard(card);
+    return {
+      ...copyCard(card),
+      retained: true,
+      replacementPending: !!focus,
+    };
   }
 
   /** All named persisted phase boundaries use strict encoded checkpoint bytes. */
@@ -1230,20 +1259,40 @@ export class Monitor {
     candidate: HybridState,
     card = this.retainedCardFor(candidate),
     schemaBytes = 0,
+    requests = 1,
   ): CapacityEnvelope {
     const current = this.metadata();
-    const dispatch = this.capacityMetadata(card);
-    const limit = { ...candidate, capacity: "limit" as const };
+    const oldCard = this.retainedCardFor(this.state);
+    const dispatch = this.capacityMetadata(oldCard);
+    const accepted = this.capacityMetadata(
+      card ?? this.retainedCardFor(candidate),
+    );
+    const currentLimit = { ...this.state, capacity: "limit" as const };
+    const candidateLimit = { ...candidate, capacity: "limit" as const };
     const boundaries = {
       current: checkpointBytes(this.state, current),
-      [`${phase}-timestamp`]: checkpointBytes(candidate, dispatch),
-      [`${phase}-usage`]: checkpointBytes(candidate, dispatch),
-      [`${phase}-accepted`]: checkpointBytes(candidate, dispatch),
-      [`${phase}-limit-marker`]: checkpointBytes(limit, dispatch),
+      [`${phase}-current`]: checkpointBytes(this.state, dispatch),
+      [`${phase}-timestamp`]: checkpointBytes(this.state, dispatch),
+      [`${phase}-usage`]: checkpointBytes(this.state, dispatch),
+      ...Object.fromEntries(
+        Array.from({ length: requests }, (_, index) => [
+          `${phase}-request-${index + 1}-timestamp`,
+          checkpointBytes(this.state, dispatch),
+        ]),
+      ),
+      [`${phase}-accepted`]: checkpointBytes(candidate, accepted),
+      [`${phase}-limit-marker`]: Math.max(
+        checkpointBytes(currentLimit, dispatch),
+        checkpointBytes(candidateLimit, accepted),
+      ),
     };
     return {
       boundaries,
-      maximum: Math.max(...Object.values(boundaries)) + schemaBytes,
+      maximum: Math.max(
+        ...Object.entries(boundaries).map(([name, value]) =>
+          name.endsWith("accepted") ? value + schemaBytes : value,
+        ),
+      ),
     };
   }
 
@@ -1254,7 +1303,7 @@ export class Monitor {
       const envelope = this.capacityEnvelope(
         plan.phase,
         plan.candidate,
-        undefined,
+        this.retainedCardFor(plan.candidate),
         plan.schemaBytes,
       );
       if (envelope.maximum <= MAX_CHECKPOINT_BYTES) return true;
@@ -1284,7 +1333,7 @@ export class Monitor {
   }
 
   /** Whole health batch admission precedes its first Jev request. */
-  private admitHealth(task: HybridTask) {
+  private admitHealth(task: HybridTask, requests: number) {
     if (this.state.capacity === "limit") return false;
     try {
       if (
@@ -1292,7 +1341,10 @@ export class Monitor {
           "health",
           this.state,
           this.maximumHealthCard(task),
-        ).maximum <= MAX_CHECKPOINT_BYTES
+          0,
+          requests,
+        ).maximum <= MAX_CHECKPOINT_BYTES &&
+        requests > 0
       )
         return true;
     } catch {
@@ -1342,34 +1394,8 @@ export class Monitor {
   }
 
   private retainCardBeforeReplacement(next: HybridState) {
-    const card = this.card;
-    if (!card) return;
-    const task = next.tasks.find((item) => item.id === card.taskId);
-    if (card.retained) {
-      if (card.replacementPending && task?.status === "done")
-        this.card = { ...copyCard(card), replacementPending: false };
-      return;
-    }
-    const completed = task?.status === "done";
-    if (
-      !task ||
-      completed ||
-      next.focusTaskId !== card.taskId ||
-      task.revision !== card.revision ||
-      task.label !== card.label
-    ) {
-      const replacement = next.tasks.find(
-        (candidate) =>
-          candidate.id === next.focusTaskId &&
-          candidate.included &&
-          candidate.status !== "done",
-      );
-      this.card = {
-        ...copyCard(card),
-        retained: true,
-        replacementPending: !!replacement,
-      };
-    }
+    const projected = this.retainedCardFor(next);
+    if (projected) this.card = projected;
   }
 
   private recordJevDispatch(at: number) {
@@ -1398,9 +1424,15 @@ export class Monitor {
       if (this.gateway.retryPending) throw new RetryableJevError();
       throw new RetryableProviderError();
     }
-    this.usage.jev.calls++;
-    this.usage.jev.inputTokens += result.usage.input_tokens;
-    this.usage.jev.outputTokens += result.usage.output_tokens;
+    this.usage.jev.calls = saturatingAdd(this.usage.jev.calls, 1);
+    this.usage.jev.inputTokens = saturatingAdd(
+      this.usage.jev.inputTokens,
+      result.usage.input_tokens,
+    );
+    this.usage.jev.outputTokens = saturatingAdd(
+      this.usage.jev.outputTokens,
+      result.usage.output_tokens,
+    );
     this.save();
     this.publish();
     return result;
@@ -1421,9 +1453,23 @@ export class Monitor {
       );
       if (!this.enabled || epoch !== this.epoch || controller.signal.aborted)
         throw new RetryableProviderError();
-      this.usage.extraction.calls++;
-      this.usage.extraction.inputTokens += result.usage.inputTokens;
-      this.usage.extraction.outputTokens += result.usage.outputTokens;
+      if (
+        !safeUsageValue(result.usage.inputTokens) ||
+        !safeUsageValue(result.usage.outputTokens)
+      )
+        throw new RetryableProviderError();
+      this.usage.extraction.calls = saturatingAdd(
+        this.usage.extraction.calls,
+        1,
+      );
+      this.usage.extraction.inputTokens = saturatingAdd(
+        this.usage.extraction.inputTokens,
+        result.usage.inputTokens,
+      );
+      this.usage.extraction.outputTokens = saturatingAdd(
+        this.usage.extraction.outputTokens,
+        result.usage.outputTokens,
+      );
       this.save();
       this.publish();
       return result.text;
@@ -1532,7 +1578,7 @@ export class Monitor {
     if (!task) return;
     const snapshot = this.projectedHealth(task, work.observation, pass);
     if (!snapshot || this.cardIsCurrent(task, snapshot.identity)) return;
-    if (!this.admitHealth(task)) return;
+    if (!this.admitHealth(task, snapshot.requests.length)) return;
     let combined: ValidatedResult | undefined;
     for (const request of snapshot.requests) {
       const result = await this.evaluateJev(request, epoch);
@@ -1541,10 +1587,14 @@ export class Monitor {
         model: result.model,
         answers: { ...(combined?.answers ?? {}), ...result.answers },
         usage: {
-          input_tokens:
-            (combined?.usage.input_tokens ?? 0) + result.usage.input_tokens,
-          output_tokens:
-            (combined?.usage.output_tokens ?? 0) + result.usage.output_tokens,
+          input_tokens: saturatingAdd(
+            combined?.usage.input_tokens ?? 0,
+            result.usage.input_tokens,
+          ),
+          output_tokens: saturatingAdd(
+            combined?.usage.output_tokens ?? 0,
+            result.usage.output_tokens,
+          ),
         },
       };
     }

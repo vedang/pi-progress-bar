@@ -1,3 +1,4 @@
+import { normalizedChoiceAssessment } from "../core/hybrid-proof";
 import {
   type Assessment,
   type HybridTask,
@@ -12,8 +13,7 @@ import {
   type ValidatedResult,
 } from "./gateway";
 
-const MIN_CONFIDENCE = 0.5;
-const MIN_PROBABILITY = 0.8;
+const COMPLETION_CHOICES = new Set(["yes", "no", "uncertain"]);
 const MAX_QUESTIONS = 20;
 const FOCUS_SPECIAL_CHOICES = ["none", "concurrent", "uncertain"] as const;
 
@@ -139,24 +139,27 @@ export function completionRequest(
 function assessmentFromChoice(
   answer: ValidatedResult["answers"][string] | undefined,
   observation: Observation,
+  choices: ReadonlySet<string>,
 ): Assessment {
   const rawChoice = answer?.type === "choice" ? answer.choice : "invalid";
   const confidence = answer?.type === "choice" ? answer.confidence : 0;
   const probability =
     answer?.type === "choice" ? (answer.probabilities[answer.choice] ?? 0) : 0;
-  const thresholdAccepted =
-    confidence >= MIN_CONFIDENCE && probability >= MIN_PROBABILITY;
-  return {
-    rawChoice,
-    confidence,
-    probability,
-    reason: thresholdAccepted
-      ? rawChoice === "uncertain"
-        ? "semantic-unknown"
-        : "accepted"
-      : "threshold-abstention",
-    source: observationRef(observation),
-  };
+  return (
+    normalizedChoiceAssessment(
+      rawChoice,
+      confidence,
+      probability,
+      observationRef(observation),
+      choices,
+    ) ?? {
+      rawChoice: "invalid",
+      confidence,
+      probability,
+      reason: "threshold-abstention",
+      source: observationRef(observation),
+    }
+  );
 }
 
 export function completionDecisions(
@@ -170,6 +173,7 @@ export function completionDecisions(
         `${task.status === "done" ? "withdraw" : "complete"}:${task.id}`
       ],
       observation,
+      COMPLETION_CHOICES,
     );
     return {
       taskId: task.id,
@@ -190,18 +194,11 @@ export function focusAssessment(
   observation: Observation,
   candidates: readonly HybridTask[],
 ): Assessment {
-  const assessment = assessmentFromChoice(result.answers.focus, observation);
   const allowed = new Set([
     ...candidates.map((candidate) => candidate.id),
     ...FOCUS_SPECIAL_CHOICES,
   ]);
-  if (!allowed.has(assessment.rawChoice))
-    return {
-      ...assessment,
-      rawChoice: "invalid",
-      reason: "threshold-abstention",
-    };
-  return assessment;
+  return assessmentFromChoice(result.answers.focus, observation, allowed);
 }
 
 export const focusSpecialChoices = new Set<string>(FOCUS_SPECIAL_CHOICES);

@@ -3,7 +3,16 @@ export type ObservationRole = "user" | "assistant" | "intercom";
 export type TaskKind = "action" | "response";
 export type TaskBasis = "explicit" | "derived";
 export type TaskStatus = "not-started" | "reopened" | "done";
-type AssessmentReason =
+
+/** One persisted task-label domain shared by extraction and checkpoint validation. */
+const MAX_TASK_LABEL_CODE_POINTS = 240;
+export const taskLabelIsValid = (value: unknown): value is string =>
+  typeof value === "string" &&
+  !!value.trim() &&
+  Array.from(value).length <= MAX_TASK_LABEL_CODE_POINTS &&
+  !/[\p{Cc}\p{Cf}]/u.test(value);
+
+export type AssessmentReason =
   | "accepted"
   | "semantic-unknown"
   | "threshold-abstention";

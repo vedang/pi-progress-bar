@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 
 import type {
   Assessment,
+  AssessmentReason,
   Cursor,
   HybridState,
+  ObservationRef,
   Presence,
   ReplayCore,
 } from "./hybrid-state";
@@ -37,6 +39,43 @@ export const requestHash = (request: unknown) => proofHash(request);
 
 export const sameJson = (left: unknown, right: unknown) =>
   JSON.stringify(left) === JSON.stringify(right);
+
+const MIN_CONFIDENCE = 0.5;
+const MIN_PROBABILITY = 0.8;
+
+/**
+ * Production choice normalization reused during strict journal replay. Invalid
+ * phase choices are not durable outcomes; threshold and uncertain reasons are
+ * derived, never trusted from a checkpoint.
+ */
+export function normalizedChoiceAssessment(
+  rawChoice: unknown,
+  confidence: unknown,
+  probability: unknown,
+  source: ObservationRef,
+  choices: ReadonlySet<string>,
+): Assessment | undefined {
+  if (
+    typeof rawChoice !== "string" ||
+    !choices.has(rawChoice) ||
+    typeof confidence !== "number" ||
+    !Number.isFinite(confidence) ||
+    confidence < 0 ||
+    confidence > 1 ||
+    typeof probability !== "number" ||
+    !Number.isFinite(probability) ||
+    probability < 0 ||
+    probability > 1
+  )
+    return;
+  const reason: AssessmentReason =
+    confidence < MIN_CONFIDENCE || probability < MIN_PROBABILITY
+      ? "threshold-abstention"
+      : rawChoice === "uncertain"
+        ? "semantic-unknown"
+        : "accepted";
+  return { rawChoice, confidence, probability, reason, source };
+}
 
 /** Gate semantics shared by live mutation and checkpoint replay. */
 export const gateDecision = (assessment: Assessment) => {

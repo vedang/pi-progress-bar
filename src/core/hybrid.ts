@@ -43,14 +43,17 @@ import {
   type PendingBlock,
   type PendingObservation,
   type ScopeFailure,
-  type SourceRef,
 } from "./hybrid-state";
 
 const MAX_ACTIVE_TASKS = 20;
 const MAX_TOTAL_TASKS = 200;
 const MAX_EVENTS = 1000;
 const MAX_LATEST_MESSAGE_BYTES = 12 * 1024;
-const MAX_SCHEMA_LABEL = "\ud800".repeat(240);
+const MAX_SCHEMA_LABEL_BYTES = 2 + 6 * 240;
+const MAX_SAFE_JSON_INTEGER_BYTES = 16;
+const MAX_UNIT_JSON_BYTES = 24;
+const MAX_HASH_JSON_BYTES = 66;
+const MAX_BOOLEAN_JSON_BYTES = 5;
 
 type AdmissionPhase = "gate" | "extraction" | "completion";
 
@@ -180,6 +183,24 @@ function validateLifecyclePatch(state: HybridState, patch: NormalizedPatch) {
   }
   if (state.tasks.length + patch.add.length > MAX_TOTAL_TASKS)
     throw new ScopeRejection("capacity", "Task ledger exceeds 200 total tasks");
+  if (state.nextTaskId > Number.MAX_SAFE_INTEGER - patch.add.length)
+    throw new ScopeRejection(
+      "capacity",
+      "Task ID capacity exceeds safe integer",
+    );
+  if (
+    [...patch.revise, ...patch.restore].some((operation) => {
+      const current = task(operation.id);
+      return (
+        operation.requirementsChanged &&
+        current.revision === Number.MAX_SAFE_INTEGER
+      );
+    })
+  )
+    throw new ScopeRejection(
+      "capacity",
+      "Task revision capacity exceeds safe integer",
+    );
   const active =
     state.tasks.filter((task) => task.included).length +
     patch.add.length -
@@ -574,68 +595,117 @@ function admissionAllowed(providers: HybridProviders, plan: AdmissionPlan) {
   return typeof providers.admit === "function" && providers.admit(plan);
 }
 
-function maximumAssessment(observation: Observation): Assessment {
-  return {
-    rawChoice: "yes",
-    confidence: 0.30000000000000004,
-    probability: 0.30000000000000004,
-    reason: "accepted",
-    source: observationRef(observation),
-  };
+/** Serializer algebra for upper-bound occurrence accounting. */
+const jsonBytes = (value: string) => Buffer.byteLength(JSON.stringify(value));
+const digits = (value: number) => Buffer.byteLength(String(value));
+const fieldBytes = (key: string, value: number) =>
+  1 + jsonBytes(key) + 1 + value;
+const objectBytes = (fields: readonly [string, number][]) =>
+  2 + fields.reduce((total, [key, value]) => total + fieldBytes(key, value), 0);
+const arrayBytes = (values: readonly number[]) =>
+  2 + values.reduce((total, value) => total + 1 + value, 0);
+const longest = (values: readonly number[]) => Math.max(0, ...values);
+const MAX_REASON_JSON_BYTES = longest(
+  ["accepted", "semantic-unknown", "threshold-abstention"].map(jsonBytes),
+);
+
+/** Exact observation-derived maximum for a source span produced this phase. */
+function sourceSchemaBytes(observation: Observation) {
+  const offset = digits(Math.max(1, observation.text.length));
+  return objectBytes([
+    ["entryId", jsonBytes(observation.id)],
+    ["messageHash", MAX_HASH_JSON_BYTES],
+    ["role", jsonBytes(observation.role)],
+    ["start", offset],
+    ["end", offset],
+    ["quoteHash", MAX_HASH_JSON_BYTES],
+  ]);
 }
 
-/** A legal accepted completion outcome with an event and long threshold decimals. */
-function maximumCompletionAssessment(observation: Observation): Assessment {
-  return {
-    rawChoice: "yes",
-    confidence: 0.5000000000000001,
-    probability: 0.8000000000000002,
-    reason: "accepted",
-    source: observationRef(observation),
-  };
+function observationRefSchemaBytes(observation: Observation) {
+  return objectBytes([
+    ["entryId", jsonBytes(observation.id)],
+    ["messageHash", MAX_HASH_JSON_BYTES],
+    ["role", jsonBytes(observation.role)],
+  ]);
 }
 
-function longestJsonString(values: readonly string[]) {
-  const first = values[0];
-  if (!first) throw new Error("Missing bounded focus choice");
-  return values.reduce((longest, value) =>
-    Buffer.byteLength(JSON.stringify(value)) >
-    Buffer.byteLength(JSON.stringify(longest))
-      ? value
-      : longest,
+function assessmentSchemaBytes(
+  observation: Observation,
+  rawChoiceBytes: number,
+) {
+  return objectBytes([
+    ["rawChoice", rawChoiceBytes],
+    ["confidence", MAX_UNIT_JSON_BYTES],
+    ["probability", MAX_UNIT_JSON_BYTES],
+    ["reason", MAX_REASON_JSON_BYTES],
+    ["source", observationRefSchemaBytes(observation)],
+  ]);
+}
+
+function taskSchemaBytes(idBytes: number, sourceBytes: number, assessment = 0) {
+  return objectBytes([
+    ["id", idBytes],
+    ["label", MAX_SCHEMA_LABEL_BYTES],
+    ["kind", jsonBytes("response")],
+    ["basis", jsonBytes("explicit")],
+    ["status", jsonBytes("not-started")],
+    ["included", MAX_BOOLEAN_JSON_BYTES],
+    ["revision", MAX_SAFE_JSON_INTEGER_BYTES],
+    ["source", sourceBytes],
+    ...(assessment
+      ? [["latestAssessment", assessment] as [string, number]]
+      : []),
+  ]);
+}
+
+function eventSchemaBytes(
+  idBytes: number,
+  taskIdBytes: number,
+  observation: Observation,
+) {
+  return objectBytes([
+    ["id", idBytes],
+    ["kind", jsonBytes("withdraw")],
+    ["taskId", taskIdBytes],
+    ["revision", MAX_SAFE_JSON_INTEGER_BYTES],
+    ["source", observationRefSchemaBytes(observation)],
+  ]);
+}
+
+function largestTaskIdBytes(tasks: readonly HybridTask[], nextTaskId: number) {
+  return longest([
+    jsonBytes(`task:${nextTaskId}`),
+    ...tasks.map((task) => jsonBytes(task.id)),
+  ]);
+}
+
+function largestEventIdBytes(state: HybridState) {
+  return jsonBytes(
+    `event:${Math.min(Number.MAX_SAFE_INTEGER, state.events.length + 42)}`,
   );
 }
 
-/**
- * Supplement only scalar encodings impossible to put in a valid candidate:
- * JS shortest decimal output has a 24-byte legal unit exemplar:
- * `0.0000010000000000000002` (17 significant digits plus `0.` and five
- * leading zeros); scientific-form unit values are shorter. The record itself
- * carries the largest legal task/special choice and reason.
- */
-function assessmentSchemaBytes(
-  assessment: Assessment,
-  largestRawChoice: string,
-) {
-  const upper = {
-    ...assessment,
-    rawChoice: largestRawChoice,
-    confidence: 0.0000010000000000000002,
-    probability: 0.0000010000000000000002,
-    reason: "threshold-abstention",
-  };
-  const actual = Buffer.byteLength(JSON.stringify(assessment));
-  const upperBytes = Buffer.byteLength(JSON.stringify(upper));
-  return Math.max(0, upperBytes - actual);
+function presenceSchemaBytes(valueBytes: number) {
+  return objectBytes([
+    ["present", MAX_BOOLEAN_JSON_BYTES],
+    ["value", valueBytes],
+  ]);
 }
 
-function maximumSource(observation: Observation): SourceRef {
-  return {
-    ...observationRef(observation),
-    start: 0,
-    end: Math.max(1, observation.text.length),
-    quoteHash: observation.hash,
-  };
+function fixedBlockSchemaBytes() {
+  return (
+    fieldBytes("scopeFailure", jsonBytes("capacity")) +
+    fieldBytes(
+      "scopeError",
+      jsonBytes("Task mutation event capacity exceeds 1000"),
+    ) +
+    fieldBytes(
+      "completionError",
+      jsonBytes("Completion request exceeds 24KiB"),
+    ) +
+    fieldBytes("block", presenceSchemaBytes(jsonBytes("completion-build")))
+  );
 }
 
 function gateAdmissionPlan(
@@ -644,56 +714,155 @@ function gateAdmissionPlan(
   context: readonly Observation[],
   request: EvaluationRequest,
 ): AdmissionPlan {
-  const assessment = {
-    ...maximumAssessment(observation),
-    rawChoice: "unchanged",
-    reason: "semantic-unknown" as const,
+  const rawChoice = longest(
+    ["changed", "unchanged", "uncertain"].map(jsonBytes),
+  );
+  const assessment = assessmentSchemaBytes(observation, rawChoice);
+  const cursor = objectBytes([
+    ["id", jsonBytes(observation.id)],
+    ["hash", MAX_HASH_JSON_BYTES],
+    ["role", jsonBytes(observation.role)],
+  ]);
+  // Base remains exact current state. Two independent persisted assessment
+  // copies and all phase-final/block fields are counted without a sampled one.
+  return {
+    phase: "gate",
+    candidate: copyState(state),
+    request,
+    schemaBytes:
+      2 * assessment +
+      fieldBytes("cursor", cursor) +
+      fixedBlockSchemaBytes() +
+      fieldBytes(
+        "pending",
+        objectBytes([
+          ["observation", observationRefSchemaBytes(observation)],
+          ["phase", jsonBytes("extract")],
+          ["block", presenceSchemaBytes(jsonBytes("completion-build"))],
+          [
+            "journal",
+            objectBytes([
+              [
+                "gate",
+                objectBytes([
+                  ["originHash", MAX_HASH_JSON_BYTES],
+                  ["requestHash", MAX_HASH_JSON_BYTES],
+                  [
+                    "context",
+                    arrayBytes(context.map(observationRefSchemaBytes)),
+                  ],
+                  ["assessment", assessment],
+                  ["priorScopeAssessment", presenceSchemaBytes(assessment)],
+                ]),
+              ],
+              ["completions", arrayBytes([])],
+            ]),
+          ],
+        ]),
+      ),
   };
-  const record: GateRecord = {
-    originHash: originHash(state),
-    requestHash: requestHash(request),
-    context: context.map(observationRef),
-    assessment,
-    priorScopeAssessment: optionalPresence(state.scopeAssessment),
-  };
-  const candidate = {
-    ...applyGate(state, assessment),
-    pending: pending(observation, "extract", record),
-  };
-  return { phase: "gate", candidate, request, schemaBytes: 0 };
 }
 
-function maximumPatch(state: HybridState, observation: Observation) {
-  const source = maximumSource(observation);
-  const additions = Math.min(
+function patchSchemaBytes(state: HybridState, observation: Observation) {
+  const active = state.tasks.filter((task) => task.included);
+  const archived = state.tasks.filter((task) => !task.included);
+  const adds = Math.min(
     6,
     MAX_TOTAL_TASKS - state.tasks.length,
-    MAX_ACTIVE_TASKS - state.tasks.filter((task) => task.included).length,
+    Math.max(MAX_ACTIVE_TASKS - active.length, Math.min(active.length, 6)),
+    Number.MAX_SAFE_INTEGER - state.nextTaskId,
   );
-  return {
-    add: Array.from({ length: additions }, (_, index) => ({
-      // Parser forbids same kind/label additions. Preserve 240 code points
-      // while making every maximum-schema addition lifecycle-legal.
-      label: `${MAX_SCHEMA_LABEL.slice(0, -1)}${index}`,
-      kind: "action" as const,
-      basis: "explicit" as const,
-      source,
-    })),
-    // A revise repeats both new and undo labels/source, so it upper-bounds
-    // archive/restore choices for each currently mutable task.
-    revise: state.tasks
-      .filter((task) => task.included)
-      .slice(0, 12)
-      .map((task) => ({
-        id: task.id,
-        label: MAX_SCHEMA_LABEL,
-        requirementsChanged: true,
-        source,
-      })),
-    archive: [],
-    restore: [],
-    unresolved: false,
-  } satisfies NormalizedPatch;
+  const revises = Math.min(12, active.length);
+  const archives = Math.min(12, active.length);
+  const restores = Math.min(12, archived.length);
+  const source = sourceSchemaBytes(observation);
+  const id = largestTaskIdBytes(state.tasks, state.nextTaskId + adds);
+  const eventId = largestEventIdBytes(state);
+  const event = eventSchemaBytes(eventId, id, observation);
+  const add = objectBytes([
+    ["label", MAX_SCHEMA_LABEL_BYTES],
+    ["kind", jsonBytes("response")],
+    ["basis", jsonBytes("explicit")],
+    ["source", source],
+  ]);
+  const revise = objectBytes([
+    ["id", id],
+    ["label", MAX_SCHEMA_LABEL_BYTES],
+    ["requirementsChanged", MAX_BOOLEAN_JSON_BYTES],
+    ["source", source],
+  ]);
+  const archive = objectBytes([
+    ["id", id],
+    ["source", source],
+  ]);
+  const restore = revise;
+  const reviseUndo = objectBytes([
+    ["index", MAX_SAFE_JSON_INTEGER_BYTES],
+    ["label", MAX_SCHEMA_LABEL_BYTES],
+    ["status", jsonBytes("not-started")],
+    ["revision", MAX_SAFE_JSON_INTEGER_BYTES],
+    ["source", source],
+  ]);
+  const archiveUndo = objectBytes([
+    ["index", MAX_SAFE_JSON_INTEGER_BYTES],
+    ["included", MAX_BOOLEAN_JSON_BYTES],
+  ]);
+  const restoreUndo = objectBytes([
+    ["index", MAX_SAFE_JSON_INTEGER_BYTES],
+    ["label", MAX_SCHEMA_LABEL_BYTES],
+    ["status", jsonBytes("not-started")],
+    ["included", MAX_BOOLEAN_JSON_BYTES],
+    ["revision", MAX_SAFE_JSON_INTEGER_BYTES],
+    ["source", source],
+  ]);
+  const outcome = objectBytes([
+    ["add", arrayBytes(Array.from({ length: adds }, () => add))],
+    ["revise", arrayBytes(Array.from({ length: revises }, () => revise))],
+    ["archive", arrayBytes(Array.from({ length: archives }, () => archive))],
+    ["restore", arrayBytes(Array.from({ length: restores }, () => restore))],
+    ["unresolved", MAX_BOOLEAN_JSON_BYTES],
+  ]);
+  const undo = objectBytes([
+    ["revise", arrayBytes(Array.from({ length: revises }, () => reviseUndo))],
+    [
+      "archive",
+      arrayBytes(Array.from({ length: archives }, () => archiveUndo)),
+    ],
+    [
+      "restore",
+      arrayBytes(Array.from({ length: restores }, () => restoreUndo)),
+    ],
+    ["nextTaskId", MAX_SAFE_JSON_INTEGER_BYTES],
+    ["focusTaskId", presenceSchemaBytes(id)],
+    ["scopeUnresolved", MAX_BOOLEAN_JSON_BYTES],
+    ["eventLength", MAX_SAFE_JSON_INTEGER_BYTES],
+  ]);
+  const record = objectBytes([
+    ["requestHash", MAX_HASH_JSON_BYTES],
+    ["outcome", outcome],
+    ["undo", undo],
+  ]);
+  // Operations are independently summed on purpose. Their overlap is a
+  // conservative occurrence bound, not a lifecycle outcome search.
+  return (
+    fieldBytes("patch", record) +
+    adds * (1 + taskSchemaBytes(id, source)) +
+    (revises + restores) * taskSchemaBytes(id, source) +
+    archives * fieldBytes("included", MAX_BOOLEAN_JSON_BYTES) +
+    (adds + revises + archives + restores) * (1 + event) +
+    fieldBytes("nextTaskId", MAX_SAFE_JSON_INTEGER_BYTES) +
+    fieldBytes(
+      "cursor",
+      objectBytes([
+        ["id", jsonBytes(observation.id)],
+        ["hash", MAX_HASH_JSON_BYTES],
+        ["role", jsonBytes(observation.role)],
+      ]),
+    ) +
+    fieldBytes("phase", jsonBytes("complete")) +
+    fieldBytes("scopeUnresolved", MAX_BOOLEAN_JSON_BYTES) +
+    fixedBlockSchemaBytes()
+  );
 }
 
 function extractionAdmissionPlan(
@@ -701,32 +870,12 @@ function extractionAdmissionPlan(
   observation: Observation,
   input: ExtractionInput,
 ): AdmissionPlan {
-  try {
-    const outcome = maximumPatch(state, observation);
-    const undo = patchUndo(state, outcome);
-    const patched = applyPatch(state, outcome);
-    const candidate = {
-      ...patched,
-      pending: pending(
-        observation,
-        "complete",
-        state.pending?.journal.gate ??
-          (() => {
-            throw new Error("Accepted gate journal is required");
-          })(),
-        { requestHash: requestHash(input), outcome, undo },
-      ),
-    };
-    return { phase: "extraction", candidate, request: input, schemaBytes: 0 };
-  } catch {
-    // A legal maximum that already violates a structural cap cannot be paid.
-    return {
-      phase: "extraction",
-      candidate: copyState(state),
-      request: input,
-      schemaBytes: Number.POSITIVE_INFINITY,
-    };
-  }
+  return {
+    phase: "extraction",
+    candidate: copyState(state),
+    request: input,
+    schemaBytes: patchSchemaBytes(state, observation),
+  };
 }
 
 function completionAdmissionPlan(
@@ -736,63 +885,106 @@ function completionAdmissionPlan(
   focusCandidates: readonly HybridTask[],
   request: EvaluationRequest,
 ): AdmissionPlan {
-  const assessments = chunk.map(() => maximumCompletionAssessment(observation));
-  const undo = completionUndo(state, chunk);
-  const completed = applyCompletionRecord(
-    state,
-    chunk.map((task) => task.id),
-    assessments,
-  );
   const journal = state.pending?.journal;
   if (!journal) throw new Error("Accepted gate journal is required");
-  const focus = focusCandidates.length
+  // Candidate is one ordinary valid phase shape only. It is not a maximum;
+  // schemaBytes below independently bounds every legal persisted occurrence.
+  const baseAssessment: Assessment = {
+    rawChoice: "uncertain",
+    confidence: 0,
+    probability: 0,
+    reason: "threshold-abstention",
+    source: observationRef(observation),
+  };
+  const baseFocus = focusCandidates.length
     ? {
         assessment: {
-          ...maximumCompletionAssessment(observation),
-          rawChoice: longestJsonString(
-            focusCandidates.map((candidate) => candidate.id),
-          ),
+          ...baseAssessment,
+          rawChoice: "none",
         },
         priorFocusTaskId: optionalPresence(state.focusTaskId),
       }
     : undefined;
-  const committed = focus
-    ? applyFocusRecord(completed, focusCandidates, focus.assessment)
+  const completed = applyCompletionRecord(
+    state,
+    chunk.map((task) => task.id),
+    chunk.map(() => baseAssessment),
+  );
+  const candidate = baseFocus
+    ? applyFocusRecord(completed, focusCandidates, baseFocus.assessment)
     : completed;
-  const record: CompletionRecord = {
+  const baseRecord: CompletionRecord = {
     requestHash: requestHash(request),
     chunkIds: chunk.map((task) => task.id),
-    assessments,
-    ...(focus ? { focus } : {}),
-    undo,
+    assessments: chunk.map(() => baseAssessment),
+    ...(baseFocus ? { focus: baseFocus } : {}),
+    undo: completionUndo(state, chunk),
   };
+  const taskId = largestTaskIdBytes(state.tasks, state.nextTaskId);
+  const assessment = assessmentSchemaBytes(
+    observation,
+    longest(["yes", "no", "uncertain"].map(jsonBytes)),
+  );
+  const event = eventSchemaBytes(
+    largestEventIdBytes(state),
+    taskId,
+    observation,
+  );
+  const undo = objectBytes([
+    ["status", jsonBytes("not-started")],
+    ["latestAssessment", presenceSchemaBytes(assessment)],
+  ]);
+  const focusChoice = longest([
+    ...focusCandidates.map((task) => jsonBytes(task.id)),
+    ...["none", "concurrent", "uncertain"].map(jsonBytes),
+  ]);
+  const focus = focusCandidates.length
+    ? objectBytes([
+        ["assessment", assessmentSchemaBytes(observation, focusChoice)],
+        ["priorFocusTaskId", presenceSchemaBytes(taskId)],
+      ])
+    : 0;
+  const record = objectBytes([
+    ["requestHash", MAX_HASH_JSON_BYTES],
+    ["chunkIds", arrayBytes(chunk.map((task) => jsonBytes(task.id)))],
+    ["assessments", arrayBytes(chunk.map(() => assessment))],
+    ...(focus ? [["focus", focus] as [string, number]] : []),
+    [
+      "undo",
+      objectBytes([
+        ["tasks", arrayBytes(chunk.map(() => undo))],
+        ["eventLength", MAX_SAFE_JSON_INTEGER_BYTES],
+      ]),
+    ],
+  ]);
   return {
     phase: "completion",
     candidate: {
-      ...committed,
+      ...candidate,
       pending: pending(observation, "complete", journal.gate, journal.patch, [
         ...journal.completions,
-        record,
+        baseRecord,
       ]),
     },
     request,
     schemaBytes:
-      assessments.reduce(
-        (total, assessment) =>
-          total + assessmentSchemaBytes(assessment, "uncertain"),
-        0,
+      // One record and one task latestAssessment per task, plus every possible
+      // event. Focus selection and top-level focus presence are independent.
+      fieldBytes("completions", 1 + record) +
+      chunk.length *
+        (taskSchemaBytes(taskId, sourceSchemaBytes(observation), assessment) +
+          1 +
+          event) +
+      (focus ? fieldBytes("focusTaskId", taskId) : 0) +
+      fieldBytes(
+        "cursor",
+        objectBytes([
+          ["id", jsonBytes(observation.id)],
+          ["hash", MAX_HASH_JSON_BYTES],
+          ["role", jsonBytes(observation.role)],
+        ]),
       ) +
-      (focus
-        ? assessmentSchemaBytes(
-            focus.assessment,
-            longestJsonString([
-              ...focusCandidates.map((candidate) => candidate.id),
-              "none",
-              "concurrent",
-              "uncertain",
-            ]),
-          )
-        : 0),
+      fixedBlockSchemaBytes(),
   };
 }
 
@@ -1008,7 +1200,9 @@ export async function processObservation(
           ),
         )
       )
-        return blockPending(next, "completion-build", "capacity", true);
+        // Keep accepted prefixes byte-identical when near-capacity admission
+        // declines a later chunk; `capacity` is durable typed presentation.
+        return capacityLimited(next);
       const result = await providers.evaluate(request);
       const decisions = completionDecisions(result, observation, chunk);
       const assessments = decisions.map((decision) => decision.assessment);

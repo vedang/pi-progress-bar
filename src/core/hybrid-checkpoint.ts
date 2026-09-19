@@ -14,6 +14,7 @@ import {
 } from "./hybrid";
 import {
   gateDecision,
+  normalizedChoiceAssessment,
   optionalPresence,
   originHash,
   replayCore,
@@ -38,13 +39,13 @@ import {
   type Presence,
   type SourceRef,
   type TaskStatus,
+  taskLabelIsValid,
 } from "./hybrid-state";
 
 const VERSION = 6;
 const MAX_TASKS = 200;
 const MAX_ACTIVE_TASKS = 20;
 const MAX_EVENTS = 1000;
-const MAX_LABEL_CHARACTERS = 240;
 export const MAX_CHECKPOINT_BYTES = 512 * 1024;
 const MAX_COMPLETIONS = 20;
 const focusSpecialChoices = new Set(["none", "concurrent", "uncertain"]);
@@ -112,11 +113,7 @@ const positiveInteger = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) >= 1;
 const nonNegativeInteger = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) >= 0;
-const safeLabel = (value: unknown) =>
-  typeof value === "string" &&
-  !!value.trim() &&
-  Array.from(value).length <= MAX_LABEL_CHARACTERS &&
-  !/[\p{Cc}\p{Cf}]/u.test(value);
+const safeLabel = taskLabelIsValid;
 const safeHealthLabel = (value: unknown) =>
   typeof value === "string" &&
   value.length <= 128 &&
@@ -790,18 +787,28 @@ function journalReferencesResolve(
       ),
     ]),
   ];
-  if (pending.journal.patch) {
-    const { outcome, undo } = pending.journal.patch;
-    refs.push(
-      ...outcome.add.map((operation) => operation.source),
-      ...outcome.revise.map((operation) => operation.source),
-      ...outcome.archive.map((operation) => operation.source),
-      ...outcome.restore.map((operation) => operation.source),
-      ...undo.revise.map((operation) => operation.source),
-      ...undo.restore.map((operation) => operation.source),
-    );
-  }
-  return refs.every((reference) => canonicalObservation(reference, resolve));
+  if (!refs.every((reference) => canonicalObservation(reference, resolve)))
+    return false;
+  const patch = pending.journal.patch;
+  if (!patch) return true;
+  const outcomeSources = [
+    ...patch.outcome.add.map((operation) => operation.source),
+    ...patch.outcome.revise.map((operation) => operation.source),
+    ...patch.outcome.archive.map((operation) => operation.source),
+    ...patch.outcome.restore.map((operation) => operation.source),
+  ];
+  // Patch output is grounded only in pending latest source. Undo fields are
+  // historical sources but still require their exact stored span to resolve.
+  return (
+    outcomeSources.every(
+      (source) =>
+        sameRef(source, pending.observation) &&
+        canonicalSource(source, resolve),
+    ) &&
+    [...patch.undo.revise, ...patch.undo.restore].every((operation) =>
+      canonicalSource(operation.source, resolve),
+    )
+  );
 }
 
 function referencesResolve(
@@ -824,7 +831,16 @@ function referencesResolve(
     return false;
   if (
     state.scopeAssessment &&
-    !canonicalObservation(state.scopeAssessment.source, resolve)
+    (!canonicalObservation(state.scopeAssessment.source, resolve) ||
+      !matchesNormalizedAssessment(state.scopeAssessment, GATE_CHOICES))
+  )
+    return false;
+  if (
+    state.tasks.some(
+      (task) =>
+        task.latestAssessment &&
+        !matchesNormalizedAssessment(task.latestAssessment, COMPLETION_CHOICES),
+    )
   )
     return false;
   if (
@@ -1054,6 +1070,23 @@ function sameContext(
   );
 }
 
+const GATE_CHOICES = new Set(["changed", "unchanged", "uncertain"]);
+const COMPLETION_CHOICES = new Set(["yes", "no", "uncertain"]);
+
+function matchesNormalizedAssessment(
+  assessment: Assessment,
+  choices: ReadonlySet<string>,
+) {
+  const normalized = normalizedChoiceAssessment(
+    assessment.rawChoice,
+    assessment.confidence,
+    assessment.probability,
+    assessment.source,
+    choices,
+  );
+  return !!normalized && sameJson(normalized, assessment);
+}
+
 function replayPending(
   finalState: HybridState,
   resolve: (entryId: string) => Observation | undefined,
@@ -1079,7 +1112,16 @@ function replayPending(
   if (originHash(state) !== gate.originHash) return false;
   const gateRequestValue = gateRequest(state, latest, context);
   if (requestHash(gateRequestValue) !== gate.requestHash) return false;
-  if (!sameRef(gate.assessment.source, pending.observation)) return false;
+  if (
+    !sameRef(gate.assessment.source, pending.observation) ||
+    !matchesNormalizedAssessment(gate.assessment, GATE_CHOICES) ||
+    (gate.priorScopeAssessment.present &&
+      !matchesNormalizedAssessment(
+        gate.priorScopeAssessment.value,
+        GATE_CHOICES,
+      ))
+  )
+    return false;
   let replayed = applyGate(state, gate.assessment);
   const decision = gateDecision(gate.assessment);
   const patch = pending.journal.patch;
@@ -1162,8 +1204,10 @@ function replayPending(
     )
       return false;
     if (
-      !completion.assessments.every((assessment) =>
-        sameRef(assessment.source, pending.observation),
+      !completion.assessments.every(
+        (assessment) =>
+          sameRef(assessment.source, pending.observation) &&
+          matchesNormalizedAssessment(assessment, COMPLETION_CHOICES),
       )
     )
       return false;
@@ -1176,7 +1220,7 @@ function replayPending(
         ...focusSpecialChoices,
       ]);
       if (
-        !allowed.has(focus.assessment.rawChoice) ||
+        !matchesNormalizedAssessment(focus.assessment, allowed) ||
         !sameRef(focus.assessment.source, pending.observation) ||
         !sameJson(
           optionalPresence(replayed.focusTaskId),

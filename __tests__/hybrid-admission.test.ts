@@ -89,3 +89,21 @@ it("preserves an accepted completion prefix when the next chunk is denied", asyn
   expect(resumed.tasks).toEqual(persisted.tasks);
   expect(resumed.events).toEqual(persisted.events);
 });
+
+it("never dispatches when an untyped caller omits required admission authority", async () => {
+  const state = await initial();
+  const providers = backend();
+  const { admit: _admit, ...withoutAdmission } = providers;
+  try {
+    await Reflect.apply(processObservation, undefined, [
+      state,
+      observation("no-admission", "Report work."),
+      withoutAdmission,
+    ]);
+  } catch {
+    // Either explicit rejection or a bounded local denied result is safe;
+    // calling the provider without an admission decision is not.
+  }
+  expect(providers.evaluate).not.toHaveBeenCalled();
+  expect(providers.extract).not.toHaveBeenCalled();
+});

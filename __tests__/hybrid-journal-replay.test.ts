@@ -215,3 +215,38 @@ it("stores normalized outcomes and undo, not redundant projection/hash/event ali
   expect(JSON.stringify(journal)).not.toContain('"quote":');
   expect(restore(encodeCheckpoint(c.completed), c.messages)).toBeDefined();
 });
+
+it.each(["gate", "patch", "completion"])(
+  "rebuilds the actual %s request instead of treating requestHash as opaque",
+  async (phase) => {
+    const c = await capture(true);
+    const state =
+      phase === "gate" ? c.gate : phase === "patch" ? c.patched : c.completed;
+    const checkpoint = encodeCheckpoint(state);
+    const journal = record(checkpoint.state);
+    expect(restore(checkpoint, c.messages)).toBeDefined();
+    const request =
+      phase === "completion"
+        ? first(journal.completions)
+        : object(journal[phase]);
+    request.requestHash = "f".repeat(64);
+    expect(restore(checkpoint, c.messages)).toBeUndefined();
+  },
+);
+
+it("has no hidden runtime compatibility aliases on pending transactions", async () => {
+  const c = await capture();
+  record(c.completed);
+  for (const field of [
+    "completedTaskIds",
+    "completionHashes",
+    "gateHash",
+    "patchHash",
+    "proofs",
+  ]) {
+    expect(c.completed.pending).not.toHaveProperty(field);
+    expect(
+      Object.getOwnPropertyDescriptor(c.completed.pending, field),
+    ).toBeUndefined();
+  }
+});

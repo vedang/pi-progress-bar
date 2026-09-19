@@ -335,6 +335,7 @@ export class Monitor {
     this.precedingContext = [];
     this.queued = [];
     this.healthObservation = undefined;
+    this.blockedPending = undefined;
     this.beads.clear();
     this.beadsGeneration++;
     this.evidence.reset();
@@ -601,16 +602,35 @@ export class Monitor {
     this.publish();
   }
 
+  /** Drop stale derived evidence before replaying a canonically amended branch. */
+  private resetForCanonicalAmendment() {
+    const sourceId = this.state.sourceId;
+    this.epoch++;
+    this.extractionController?.abort();
+    this.cancelHealth();
+    this.healthObservation = undefined;
+    this.waitingForWake = false;
+    this.clearRetry();
+    this.gateway.pause();
+    this.resetState(sourceId);
+    this.activity = "Idle";
+    if (this.enabled) this.gateway.enable(this.identity());
+    this.save();
+    this.publish();
+  }
+
   /** Read one bounded chronological page; header scans never access payload text. */
   private loadPage(after?: { id: string; hash: string }) {
     const entries = this.reader?.() ?? [];
     const headers = canonicalHeaders(entries);
-    const afterIndex = after
-      ? headers.findIndex((header) => header.id === after.id)
-      : -1;
-    if (after && afterIndex < 0) {
-      this.page = [];
-      return;
+    let afterIndex = -1;
+    if (after) {
+      const index = headers.findIndex((header) => header.id === after.id);
+      const current =
+        index < 0 ? undefined : canonicalObservation(headers[index]);
+      if (!current || current.hash !== after.hash) {
+        this.resetForCanonicalAmendment();
+      } else afterIndex = index;
     }
     const page: Observation[] = [];
     let bytes = 0;
@@ -633,10 +653,8 @@ export class Monitor {
     this.page = page;
   }
 
-  /** Resolve one canonical ref without retaining or materializing whole history. */
+  /** Resolve one current canonical ref without retaining or materializing history. */
   private resolveObservation(entryId: string): Observation | undefined {
-    const cached = this.page.find((item) => item.id === entryId);
-    if (cached) return cached;
     const header = canonicalHeaders(this.reader?.() ?? []).find(
       (item) => item.id === entryId,
     );
@@ -659,12 +677,17 @@ export class Monitor {
         return;
       }
       const current = this.resolveObservation(pending.entryId);
-      this.queued =
-        current &&
-        current.hash === pending.messageHash &&
-        current.role === pending.role
-          ? [current]
-          : [];
+      if (
+        !current ||
+        current.hash !== pending.messageHash ||
+        current.role !== pending.role
+      ) {
+        this.resetForCanonicalAmendment();
+        this.loadPage();
+        this.queued = [...this.page];
+        return;
+      }
+      this.queued = [current];
       return;
     }
     const cursor = this.state.cursor;
@@ -758,7 +781,7 @@ export class Monitor {
         }
         return;
       }
-      if (next.completionError) {
+      if (next.completionError || next.scopeError?.includes("capacity")) {
         this.blockedPending = { id: observation.id, hash: observation.hash };
         this.note("capacity-exhausted");
       }

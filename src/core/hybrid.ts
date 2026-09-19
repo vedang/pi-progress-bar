@@ -488,17 +488,9 @@ export async function processObservation(
 
   if (next.pending?.phase === "extract") {
     next = await applyScopePatch(next, observation, providers, preceding);
-    if (next.scopeError?.includes("capacity"))
-      return {
-        ...next,
-        pending: pending(observation, "complete", [], {
-          completionHashes: [],
-          ...(next.pending?.gateHash
-            ? { gateHash: next.pending.gateHash }
-            : {}),
-        }),
-        completionError: next.scopeError,
-      };
+    // Capacity rejection has not applied the extracted patch. Keep the accepted
+    // gate journal in extract phase so restore can retry without cursor commit.
+    if (next.scopeError?.includes("capacity")) return next;
     next = {
       ...next,
       pending: pending(observation, "complete", [], {

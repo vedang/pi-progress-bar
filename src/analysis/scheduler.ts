@@ -80,15 +80,7 @@ export class AnalysisScheduler {
       return;
     const completed = this.completed.get(identity);
     if (completed) {
-      const generation = this.generation;
-      const purposeGeneration = this.purposeGeneration.get(purpose) ?? 0;
-      queueMicrotask(() => {
-        if (
-          generation === this.generation &&
-          purposeGeneration === (this.purposeGeneration.get(purpose) ?? 0)
-        )
-          job.admit(completed, true);
-      });
+      this.deliverCached(purpose, job, completed);
       return;
     }
     const existing = this.pending.get(purpose);
@@ -134,6 +126,13 @@ export class AnalysisScheduler {
     const [purpose, job] = entry;
     const identity = identityOf(job);
     this.pending.delete(purpose);
+    const completed = this.completed.get(identity);
+    if (completed) {
+      this.deliverCached(purpose, job, completed);
+      if (this.pending.size) this.requestDrain();
+      else this.state = "idle";
+      return;
+    }
     const generation = this.generation;
     const purposeGeneration = this.purposeGeneration.get(purpose) ?? 0;
     this.running = true;
@@ -157,7 +156,9 @@ export class AnalysisScheduler {
       else this.state = "idle";
     };
     void this.gateway
-      .evaluate(job.request, job.consentIdentity)
+      // Scheduler owns exact result reuse. Evicted identities may re-evaluate
+      // rather than being silently suppressed by direct gateway dedupe.
+      .evaluate(job.request, job.consentIdentity, true)
       .then((result) => {
         if (
           generation !== this.generation ||
@@ -179,6 +180,22 @@ export class AnalysisScheduler {
         }
       }, settled);
     this.changed();
+  }
+
+  /** Exact completed identity is scheduler-owned and may satisfy every purpose. */
+  private deliverCached(purpose: string, job: Job, result: ValidatedResult) {
+    const generation = this.generation;
+    const purposeGeneration = this.purposeGeneration.get(purpose) ?? 0;
+    queueMicrotask(() => {
+      if (
+        generation !== this.generation ||
+        purposeGeneration !== (this.purposeGeneration.get(purpose) ?? 0)
+      )
+        return;
+      job.admit(result, true);
+      this.changed();
+      this.requestDrain();
+    });
   }
 
   private armRetry() {

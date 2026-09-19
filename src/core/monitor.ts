@@ -636,8 +636,12 @@ export class Monitor {
           this.usage.inputTokens += result.usage.input_tokens;
           this.usage.outputTokens += result.usage.output_tokens;
         }
-        admit(result);
-        this.requestAnalysis();
+        try {
+          admit(result);
+        } finally {
+          this.conversation.releaseObservationCache();
+          this.requestAnalysis();
+        }
       },
     });
   }
@@ -658,6 +662,7 @@ export class Monitor {
       break;
     }
     if (!proposal) return;
+    if (!this.conversation.canInitializeFrom(proposal.candidate)) return;
     if (supersedesUnresolved) {
       // Earlier ambiguity remains rejected evidence. A later clear source is
       // a fresh denominator, not an inferred resolution of that ambiguity.
@@ -825,12 +830,33 @@ export class Monitor {
       ? { ...ledger, tasks: enrichBeadsTasks(ledger.tasks, this.beadsExport) }
       : ledger;
     this.source = source;
+    const boundary = this.conversation.observation({
+      id: proposal.candidate.entryId,
+      hash: proposal.candidate.hash,
+    });
     this.conversation.commitFreshBoundary(proposal.candidate);
     this.conversation.select(source, true, true);
+    const laterProposalIds = new Set(
+      this.conversation.proposals.map((item) => this.proposalId(item)),
+    );
+    this.scopedCandidates = new Set(
+      [...this.scopedCandidates].filter((id) => laterProposalIds.has(id)),
+    );
     this.scopedCandidates.add(this.proposalId(proposal));
-    this.blockedScopeCandidates.clear();
-    this.blockedScopeSources.clear();
-    this.scopeUnresolved = false;
+    const laterBlocked = new Map(
+      [...this.blockedScopeSources].filter(
+        ([, blocked]) =>
+          !!boundary &&
+          !this.conversation.entryIsAtOrBefore(
+            blocked.entryId,
+            blocked.hash,
+            boundary,
+          ),
+      ),
+    );
+    this.blockedScopeSources = laterBlocked;
+    this.blockedScopeCandidates = new Set(laterBlocked.keys());
+    this.scopeUnresolved = this.blockedScopeCandidates.size > 0;
     this.scopeUnresolvedOverflow = false;
     this.evidenceIdentity = undefined;
     this.save();
@@ -1252,6 +1278,7 @@ export class Monitor {
       this.changed();
     } finally {
       this.scheduling = false;
+      this.conversation.releaseObservationCache();
     }
   }
 
@@ -1266,7 +1293,8 @@ export class Monitor {
     this.evidenceIdentity = undefined;
     this.health = undefined;
     this.healthWork = undefined;
-    this.scopeWork = undefined;
+    // Accepted scope chunks are a durable transaction. Keep them across OFF
+    // and permanent service pause; ON rebinds epoch and resumes next chunk.
     this.freshScopeWork = undefined;
     this.cwd = undefined;
   }
@@ -1320,6 +1348,7 @@ export class Monitor {
     this.enabled = false;
     this.epoch++;
     this.clearRuntime();
+    this.scopeWork = undefined;
   }
 
   /** Optional display enrichment; coalesce lifecycle/observation reads only. */
@@ -1692,6 +1721,7 @@ export class Monitor {
     this.clearRuntime();
     this.epoch++;
     this.conversation = new Conversation();
+    this.scopeWork = undefined;
     this.scopedCandidates.clear();
     this.blockedScopeCandidates.clear();
     this.blockedScopeSources.clear();
@@ -1716,6 +1746,7 @@ export class Monitor {
         // Obsolete v3 and malformed v4 checkpoints rebuild; no migration.
         if (cp.version === 4) {
           if (
+            Object.hasOwn(cp, "interval") ||
             typeof cp.enabled !== "boolean" ||
             !Array.isArray(cp.mappings) ||
             cp.mappings.length > 200 ||

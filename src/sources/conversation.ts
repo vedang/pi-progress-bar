@@ -171,8 +171,14 @@ export class Conversation {
   /** Persisted independently from raw pagination so queued scope never disappears. */
   private semanticDiscoveryCursor?: Reference;
   private seenCandidates = new Set<string>();
+  /** Discovery completion authorizes ordered initial adoption, not scope commit. */
+  private discoverySettledCandidates = new Set<string>();
   private settledCandidates = new Set<string>();
   private branchEntries: readonly unknown[] = [];
+  /** Bounded append detection avoids rereading immutable branch history. */
+  private branchEntryCount = 0;
+  private branchTailId?: string;
+  private loadedDiscoveryCursor?: Reference;
   private observations?: Observation[];
   private reportTrajectory?: Trajectory;
   private sourceObservation?: Observation;
@@ -182,11 +188,14 @@ export class Conversation {
   private freshCandidates: Candidate[] = [];
   private historicalDiscovery?: DiscoveryWork;
   private freshDiscovery?: DiscoveryWork;
-  private observedUserCandidates = new Set<string>();
   /** First observed branch is history; later canonical user additions are fresh. */
   private freshBaselineEstablished = false;
   /** At most two fresh dispatches may pass eligible historical work. */
   private freshDispatchesSinceHistorical = 0;
+  /** Bounded predecessor journal avoids rehydrating full branch for fresh work. */
+  private recentUserDirections: { id: string; text: string }[] = [];
+  private recentUserEntryId?: string;
+  private candidateContexts = new Map<string, CandidateContext>();
   private pending?: PendingReport;
   private narrowedEntryId?: string;
   private initialReportPending = false;
@@ -221,7 +230,13 @@ export class Conversation {
   }
   /** Lets memory-only presentation distinguish unbound fixtures from live branch loss. */
   hasVisibleObservations() {
-    return this.allObservations().length > 0;
+    const visible = this.allObservations().length > 0;
+    this.observations = undefined;
+    return visible;
+  }
+  /** Full-original cache is valid only inside one controller transaction. */
+  releaseObservationCache() {
+    this.observations = undefined;
   }
   isCatchingUp() {
     return !!this.trajectory.hasMore;
@@ -238,39 +253,112 @@ export class Conversation {
         "Entry unavailable in bounded active-branch history; original visible user/assistant text required",
       );
     this.narrowedEntryId = entryId;
-    this.updateCandidates();
+    this.updateCandidates(
+      findCandidates({
+        ...this.trajectory,
+        messages: this.trajectory.messages.filter((m) => m.id === entryId),
+      }),
+    );
   }
   /**
    * `fresh` is set only by supported host observation hooks after startup.
    * Baseline users remain chronological history, never implicit fresh priority.
    */
   update(entries: readonly unknown[], fresh = false) {
-    // Pi branch snapshots may retain array identity while appending entries.
-    // Rebuild canonical observations so a fresh exact ref cannot be missed.
+    const appendStart = this.appendStart(entries);
+    const cursorChanged = !this.sameReference(
+      this.loadedDiscoveryCursor,
+      this.discoveryCursor,
+    );
     this.observations = undefined;
-    this.branchEntries = entries;
+    this.bindBranch(entries);
+    if (appendStart !== undefined && !cursorChanged) {
+      if (appendStart < entries.length) {
+        // Only newly appended entries receive payload reads. Their parent may
+        // precede this bounded slice; candidate extraction stays exact.
+        // Fresh priority inspects newest bounded appended refs first. Earlier
+        // overflow stays replayable through chronological discovery windows.
+        const tailStart = Math.max(
+          appendStart,
+          entries.length - MAX_FRESH_CANDIDATES,
+        );
+        const appended = collectTrajectory(entries.slice(tailStart), {
+          chronological: true,
+        });
+        this.updateCandidates(
+          findCandidates(appended),
+          fresh || this.freshBaselineEstablished,
+          true,
+        );
+      }
+      this.freshBaselineEstablished = true;
+      this.updateReportTrajectory();
+      return;
+    }
+    // Unknown branch replacement/reload is a conservative new baseline, not
+    // implicit fresh priority. Normal discovery remains bounded by trajectory.
     this.trajectory = collectTrajectory(entries, {
       chronological: true,
       ...(this.discoveryCursor ? { after: this.discoveryCursor } : {}),
     });
-    // Classify post-baseline user work first. `seenCandidates` then keeps its
-    // exact candidate out of historical discovery rather than double billing.
-    this.updateFreshCandidates(fresh || this.freshBaselineEstablished);
+    this.loadedDiscoveryCursor = this.discoveryCursor && {
+      ...this.discoveryCursor,
+    };
+    this.updateCandidates(
+      findCandidates(
+        this.narrowedEntryId
+          ? {
+              ...this.trajectory,
+              messages: this.trajectory.messages.filter(
+                (m) => m.id === this.narrowedEntryId,
+              ),
+            }
+          : this.trajectory,
+      ),
+      appendStart !== undefined && (fresh || this.freshBaselineEstablished),
+    );
     this.freshBaselineEstablished = true;
-    this.updateCandidates();
     this.updateReportTrajectory();
+  }
+  private sameReference(left?: Reference, right?: Reference) {
+    return (
+      left?.id === right?.id &&
+      left?.hash === right?.hash &&
+      left?.offset === right?.offset
+    );
+  }
+  private entryId(entry: unknown) {
+    return entry &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      typeof (entry as { id?: unknown }).id === "string"
+      ? (entry as { id: string }).id
+      : undefined;
+  }
+  private appendStart(entries: readonly unknown[]) {
+    if (!this.branchEntryCount) return;
+    if (entries.length < this.branchEntryCount) return;
+    const boundary = this.entryId(entries[this.branchEntryCount - 1]);
+    if (boundary !== this.branchTailId) return;
+    return this.branchEntryCount;
+  }
+  private bindBranch(entries: readonly unknown[]) {
+    this.branchEntries = entries;
+    this.branchEntryCount = entries.length;
+    this.branchTailId = this.entryId(entries.at(-1));
   }
   private candidateKey(candidate: Pick<Candidate, "id" | "hash">) {
     return `${candidate.id}:${candidate.hash}`;
   }
   /** Only ordinary-sized originals can safely anchor an incremental checkpoint. */
   private referenceForCandidate(candidate: Candidate): Reference | undefined {
-    const observation = this.trajectory.messages.find(
-      (item) =>
-        item.id === candidate.entryId &&
-        item.hash === candidate.hash &&
-        item.offset === undefined,
-    );
+    const observation =
+      this.trajectory.messages.find(
+        (item) =>
+          item.id === candidate.entryId &&
+          item.hash === candidate.hash &&
+          item.offset === undefined,
+      ) ?? this.original({ id: candidate.entryId, hash: candidate.hash });
     return observation && Buffer.byteLength(observation.text) <= 16 * 1024
       ? { id: candidate.entryId, hash: candidate.hash }
       : undefined;
@@ -309,6 +397,7 @@ export class Conversation {
       this.semanticDiscoveryCursor = reference;
   }
   private settleCandidate(candidate: Pick<Candidate, "id" | "hash">) {
+    this.discoverySettledCandidates.add(this.candidateKey(candidate));
     this.settledCandidates.add(this.candidateKey(candidate));
     this.advanceSemanticCursor();
   }
@@ -316,52 +405,73 @@ export class Conversation {
   commitScope(candidate: Pick<Candidate, "id" | "hash">) {
     this.settleCandidate(candidate);
   }
-  private updateCandidates() {
-    this.candidates = findCandidates(
-      this.narrowedEntryId
-        ? {
-            ...this.trajectory,
-            messages: this.trajectory.messages.filter(
-              (m) => m.id === this.narrowedEntryId,
-            ),
-          }
-        : this.trajectory,
+  /** Initial scope cannot leap unresolved earlier discovery without cutover proof. */
+  canInitializeFrom(candidate: Pick<Candidate, "id" | "entryId" | "hash">) {
+    const targetOrder = this.orderOf(candidate.entryId, candidate.hash);
+    if (targetOrder < 0) return false;
+    const targetLoaded = this.trajectory.messages.some(
+      (item) => item.id === candidate.entryId && item.hash === candidate.hash,
     );
-    this.omissions = [...this.trajectory.omissions];
-    const additions = this.candidates.filter((candidate) => {
-      const key = this.candidateKey(candidate);
-      if (this.seenCandidates.has(key)) return false;
-      this.seenCandidates.add(key);
-      return true;
+    // A deferred fresh veto beyond current chronological page cannot invent
+    // initial scope while earlier unseen history remains.
+    if (this.trajectory.hasMore && !targetLoaded) return false;
+    return this.candidates.every((prior) => {
+      const order = this.orderOf(prior.entryId, prior.hash);
+      return (
+        order < 0 ||
+        order >= targetOrder ||
+        this.discoverySettledCandidates.has(this.candidateKey(prior))
+      );
     });
-    if (!additions.length) return;
-    this.candidatesPending.push(...additions);
-    this.discoveryStatus = "Pending: chronological source evaluation";
   }
-
-  /** Capture only newly observed canonical user candidates for bounded priority. */
-  private updateFreshCandidates(fresh: boolean) {
-    const candidates = findCandidates({
-      messages: this.allObservations(),
-      complete: true,
-      omissions: [],
-    }).filter((candidate) => candidate.role === "user");
+  /** Route only current bounded candidates; append events never rescan history. */
+  private updateCandidates(
+    candidates: Candidate[],
+    fresh = false,
+    append = false,
+  ) {
+    this.candidates = append ? [...this.candidates, ...candidates] : candidates;
+    this.omissions = [...this.trajectory.omissions];
+    let historical = false;
+    let freshAdded = false;
     for (const candidate of candidates) {
       const key = this.candidateKey(candidate);
-      if (this.observedUserCandidates.has(key)) continue;
-      this.observedUserCandidates.add(key);
-      if (!fresh) continue;
-      // Exact refs remain canonical/replayable; historical paging skips only
-      // the same semantic candidate, never a later user entry. Overflow stays
-      // in chronological discovery rather than silently losing a user turn.
-      if (this.freshWorkCount() >= MAX_FRESH_CANDIDATES) {
-        this.note("fresh-queue-cap");
-        continue;
+      if (!this.candidateContexts.has(key))
+        this.candidateContexts.set(key, {
+          precedingUserMessages: this.recentUserDirections.map((item) => ({
+            ...item,
+          })),
+        });
+      if (
+        candidate.role === "user" &&
+        candidate.entryId !== this.recentUserEntryId
+      ) {
+        this.recentUserDirections.push({
+          id: candidate.entryId,
+          text: candidate.text,
+        });
+        this.recentUserDirections = this.recentUserDirections.slice(-2);
+        this.recentUserEntryId = candidate.entryId;
       }
+      if (this.seenCandidates.has(key)) continue;
       this.seenCandidates.add(key);
-      this.freshCandidates.push(candidate);
-      this.discoveryStatus = "Pending: fresh user source evaluation";
+      if (fresh && candidate.role === "user") {
+        // Exact refs stay replayable. Capacity overflow becomes chronological
+        // work, never a silently forgotten fresh turn.
+        if (this.freshWorkCount() < MAX_FRESH_CANDIDATES) {
+          this.freshCandidates.push(candidate);
+          freshAdded = true;
+          continue;
+        }
+        this.note("fresh-queue-cap");
+      }
+      this.candidatesPending.push(candidate);
+      historical = true;
     }
+    if (freshAdded)
+      this.discoveryStatus = "Pending: fresh user source evaluation";
+    else if (historical)
+      this.discoveryStatus = "Pending: chronological source evaluation";
   }
   private freshWorkCount() {
     return (
@@ -578,7 +688,9 @@ export class Conversation {
     if (!candidate) return;
     const work: DiscoveryWork = {
       candidate,
-      context: this.applicableUserContext(candidate),
+      context:
+        this.candidateContexts.get(this.candidateKey(candidate)) ??
+        this.applicableUserContext(candidate),
       fresh: kind === "fresh",
       phase: "selection",
     };
@@ -619,6 +731,27 @@ export class Conversation {
     for (const work of this.discoveryWorks()) work.inFlight = false;
   }
 
+  /** Raw page advance retires settled bookkeeping; semantic work remains exact. */
+  private pruneDiscoveryBookkeeping() {
+    const keep = new Set<string>([
+      ...this.candidatesPending.map((item) => this.candidateKey(item)),
+      ...this.discoveryWorks().map((work) => this.candidateKey(work.candidate)),
+      ...this.proposals.map((item) => this.candidateKey(item.candidate)),
+      ...this.freshProposals.map((item) => this.candidateKey(item.candidate)),
+      ...this.freshCandidates.map((item) => this.candidateKey(item)),
+    ]);
+    this.seenCandidates = keep;
+    this.candidateContexts = new Map(
+      [...this.candidateContexts].filter(([key]) => keep.has(key)),
+    );
+    this.discoverySettledCandidates = new Set(
+      [...this.discoverySettledCandidates].filter((key) => keep.has(key)),
+    );
+    this.settledCandidates = new Set(
+      [...this.settledCandidates].filter((key) => keep.has(key)),
+    );
+  }
+
   scheduleDiscovery(enqueue: Enqueue, valid: () => boolean) {
     const generation = this.discoveryGeneration;
     const current = () => valid() && generation === this.discoveryGeneration;
@@ -635,6 +768,7 @@ export class Conversation {
             ...(last.offset === undefined ? {} : { offset: last.offset }),
           };
           this.discoveryGeneration++;
+          this.pruneDiscoveryBookkeeping();
           this.discoveryStatus =
             "Pending: advancing chronological conversation catch-up";
           // Cursor advanced without a Jev result. Caller must yield one
@@ -771,6 +905,7 @@ export class Conversation {
       try {
         if (!work.classes) throw new Error("Missing classification state");
         const next = proposal(work.candidate, work.classes);
+        this.discoverySettledCandidates.add(this.candidateKey(work.candidate));
         if (work.fresh) this.freshProposals.push(next);
         else this.proposals.push(next);
         this.discoveryStatus = "Pending: reconcile selected scope observation";
@@ -794,30 +929,63 @@ export class Conversation {
     );
   }
 
-  /** Commit an explicit fresh replacement boundary; prior work cannot replay. */
+  /** Commit fresh boundary, retaining only canonical work strictly after it. */
   commitFreshBoundary(candidate: Pick<Candidate, "id" | "entryId" | "hash">) {
     const reference = { id: candidate.entryId, hash: candidate.hash };
+    const boundary = this.orderOf(reference.id, reference.hash);
+    const after = (item: Pick<Candidate, "entryId" | "hash">) =>
+      boundary >= 0 && this.orderOf(item.entryId, item.hash) > boundary;
+    const key = (item: Pick<Candidate, "id" | "hash">) =>
+      this.candidateKey(item);
     this.discoveryGeneration++;
     this.discoveryCursor = reference;
     this.semanticDiscoveryCursor = reference;
-    this.candidatesPending = [];
-    this.historicalDiscovery = undefined;
-    this.proposals = [];
-    this.freshProposals = this.freshProposals.filter(
-      (item) =>
-        item.candidate.id !== candidate.id ||
-        item.candidate.hash !== candidate.hash,
-    );
-    // Later fresh turns remain canonical work after the boundary. Their
-    // discarded transport callbacks are retried from current phase/cache.
-    if (
-      this.freshDiscovery?.candidate.id === candidate.id &&
-      this.freshDiscovery.candidate.hash === candidate.hash
-    )
+
+    // `seenCandidates` is admission bookkeeping, never authority to discard
+    // visible post-boundary assistant or fresh-overflow work.
+    this.candidates = this.candidates.filter(after);
+    this.candidatesPending = this.candidatesPending.filter(after);
+    if (this.historicalDiscovery && !after(this.historicalDiscovery.candidate))
+      this.historicalDiscovery = undefined;
+    if (this.freshDiscovery && !after(this.freshDiscovery.candidate))
       this.freshDiscovery = undefined;
+    this.proposals = this.proposals.filter((item) => after(item.candidate));
+    this.freshProposals = this.freshProposals.filter((item) =>
+      after(item.candidate),
+    );
+    this.freshCandidates = this.freshCandidates.filter(after);
+
+    const represented = new Set<string>([
+      ...this.candidatesPending.map(key),
+      ...this.discoveryWorks().map((work) => key(work.candidate)),
+      ...this.proposals.map((item) => key(item.candidate)),
+      ...this.freshProposals.map((item) => key(item.candidate)),
+      ...this.freshCandidates.map(key),
+    ]);
+    const discoverySettled = new Set(
+      this.candidates
+        .filter((item) => this.discoverySettledCandidates.has(key(item)))
+        .map(key),
+    );
+    const settled = new Set(
+      this.candidates
+        .filter((item) => this.settledCandidates.has(key(item)))
+        .map(key),
+    );
+    for (const item of this.candidates)
+      if (!represented.has(key(item)) && !settled.has(key(item))) {
+        this.candidatesPending.push(item);
+        represented.add(key(item));
+      }
+    this.discoverySettledCandidates = discoverySettled;
+    this.settledCandidates = settled;
+    this.seenCandidates = new Set([...represented, ...discoverySettled]);
+    this.candidateContexts = new Map(
+      [...this.candidateContexts].filter(([key]) =>
+        this.seenCandidates.has(key),
+      ),
+    );
     this.releaseDiscoveryFlights();
-    this.seenCandidates.add(`${candidate.id}:${candidate.hash}`);
-    this.settledCandidates.add(`${candidate.id}:${candidate.hash}`);
   }
 
   source(item: Proposal): ConversationSource {
@@ -1225,6 +1393,10 @@ export class Conversation {
     this.freshProposals = [];
     this.proposals = [];
     this.seenCandidates.clear();
+    this.candidateContexts.clear();
+    this.recentUserDirections = [];
+    this.recentUserEntryId = undefined;
+    this.discoverySettledCandidates.clear();
     this.settledCandidates.clear();
     this.initialReportPending = checkpoint.initialReportPending === true;
     this.asOf =

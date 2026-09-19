@@ -181,7 +181,8 @@ export class JevGateway {
   private paused = true;
   private generation = 0;
   private failures = 0;
-  private seen = new Set<string>();
+  /** Direct gateway callers suppress only a bounded recent identity set. */
+  private seen = new Map<string, true>();
   private nextAttempt = -Infinity;
   private retryAfter = -Infinity;
   private flight?: { controller: AbortController; cancel: () => void };
@@ -220,6 +221,7 @@ export class JevGateway {
   async evaluate(
     request: EvaluationRequest,
     identity: string,
+    allowDuplicate = false,
   ): Promise<ValidatedResult | undefined> {
     if (this.paused || identity !== this.identity) return;
     if (this.flight) return;
@@ -258,7 +260,7 @@ export class JevGateway {
       .update(identity)
       .update(body)
       .digest("hex");
-    if (this.seen.has(hash)) return;
+    if (!allowDuplicate && this.seen.has(hash)) return;
     let key: string | undefined;
     try {
       key = this.options.getApiKey()?.trim();
@@ -344,7 +346,11 @@ export class JevGateway {
       const result = await Promise.race([work(), timeout, cancelled]);
       if (generation !== this.generation) return;
       if (result) {
-        this.seen.add(hash);
+        this.seen.set(hash, true);
+        if (this.seen.size > 200) {
+          const first = this.seen.keys().next().value;
+          if (first) this.seen.delete(first);
+        }
         this.failures = 0;
         this.nextAttempt = -Infinity;
         this.retryAfter = -Infinity;

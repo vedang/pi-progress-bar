@@ -321,6 +321,46 @@ describe("task source provenance", () => {
     );
   });
 
+  it.each(["amend", "remove"])(
+    "invalidates a retained card when its health-only report is %s",
+    async (change) => {
+      const h = fixture();
+      h.start();
+      await h.settle("goal");
+      h.append(
+        "health-only-report",
+        "Parser requirements and acceptance are explicit.",
+      );
+      await h.settle("health-only-report");
+      h.focus("task:2");
+      for (const id of ["switch-b", "later-b", "latest-b"]) {
+        h.append(id, "Now working on regression task B.");
+        await h.settle(id);
+      }
+      expect(task(h.monitor, "task:1").health.acceptance).toBe("explicit");
+      const before = structuredClone(h.monitor.state);
+      const calls = h.fetch.mock.calls.length;
+      const entries = h.reader().flatMap((entry) => {
+        if ((entry as { id?: string }).id !== "health-only-report")
+          return [entry];
+        return change === "remove"
+          ? []
+          : [
+              branchEntry(
+                "health-only-report",
+                "Previous parser report was mistaken.",
+                "assistant",
+              ),
+            ];
+      });
+      h.replace(entries);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(task(h.monitor, "task:1").health).toEqual(unassessed);
+      expect(h.monitor.state).toEqual(before);
+      expect(h.fetch).toHaveBeenCalledTimes(calls);
+    },
+  );
+
   it("canonical amendment does not leak prior-source assessment into rebuilt tasks", async () => {
     const h = fixture();
     h.start();

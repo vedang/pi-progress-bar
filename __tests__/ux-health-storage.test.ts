@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { MAX_CHECKPOINT_BYTES } from "../src/core/hybrid-checkpoint";
+import { observation } from "./fixtures/hybrid";
 import { monitorHarness } from "./fixtures/hybrid-monitor";
 
 const running: ReturnType<typeof monitorHarness>[] = [];
@@ -144,6 +145,62 @@ it("denies optional health at full-map byte edge without setting semantic capaci
   h.append("after-denial", "Parser work is continuing.");
   await h.settle("after-denial");
   expect(h.monitor.state.capacity).toBe("clear");
+});
+
+it("preflights the actual long triggering observation ID before any optional dispatch", async () => {
+  const h = fixture();
+  h.start();
+  await h.settle("goal");
+  const longId = `report-${"x".repeat(8000)}`;
+  const report = observation(longId, "Parser work continues.", "assistant");
+  // Establish canonical semantic work without assessing its optional card yet.
+  const admission = vi
+    .spyOn(
+      h.monitor as unknown as { admitHealth: (...args: unknown[]) => boolean },
+      "admitHealth",
+    )
+    .mockReturnValue(false);
+  h.append(report.id, report.text);
+  await h.settle(report.id);
+  admission.mockRestore();
+  h.monitor.state.scopeError = "";
+  h.monitor.state.scopeError = "p".repeat(
+    MAX_CHECKPOINT_BYTES - bytes(h.monitor.checkpoint()) - 4096,
+  );
+  const before = structuredClone(h.monitor.state);
+  const calls = h.fetch.mock.calls.length;
+  Reflect.apply(Reflect.get(h.monitor, "scheduleHealth"), h.monitor, [report]);
+  h.observe();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.fetch).toHaveBeenCalledTimes(calls);
+  expect(h.monitor.state).toEqual(before);
+  expect(h.monitor.state.capacity).toBe("clear");
+  expect(() => h.monitor.checkpoint()).not.toThrow();
+  expect(
+    h.save.mock.calls.every(([saved]) => bytes(saved) <= MAX_CHECKPOINT_BYTES),
+  ).toBe(true);
+});
+
+it("rejects strict-v7 provenance-free legacy current-card storage without replay", async () => {
+  const h = fixture();
+  h.start();
+  await h.settle("goal");
+  const saved = h.monitor.checkpoint() as {
+    version: number;
+    monitor: Record<string, unknown>;
+  };
+  saved.monitor.card = h.monitor.presentationSnapshot().card;
+  delete saved.monitor.healthCards;
+  const calls = h.fetch.mock.calls.length;
+  const saves = h.save.mock.calls.length;
+  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.enabled).toBe(false);
+  expect(h.monitor.presentationSnapshot().service.code).toBe(
+    "saved-state-corrupt",
+  );
+  expect(h.fetch).toHaveBeenCalledTimes(calls);
+  expect(h.save).toHaveBeenCalledTimes(saves);
 });
 
 it("optional provider failure never prevents later canonical completion", async () => {

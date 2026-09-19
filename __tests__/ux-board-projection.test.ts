@@ -233,6 +233,50 @@ describe("passive retained task board", () => {
 });
 
 describe("task source provenance", () => {
+  it("labels old same-task health replacement-pending while a newer report is being assessed", async () => {
+    const h = fixture();
+    h.start();
+    await h.settle("goal");
+    const before = task(h.monitor, "task:1").health;
+    const transport = h.fetch.getMockImplementation();
+    if (!transport) throw new Error("Missing transport");
+    h.fetch.mockImplementation(async (url, init) => {
+      const request = JSON.parse(String(init?.body));
+      if (request.questions.clarity) return new Promise<Response>(() => {});
+      return transport(url, init);
+    });
+    h.append(
+      "new-report",
+      "Parser work has changed; reassess current implementation.",
+    );
+    await h.settle("new-report");
+    expect(task(h.monitor, "task:1").health).toEqual(before);
+    expect(task(h.monitor, "task:1").provenance.state).toBe(
+      "replacement-pending",
+    );
+  });
+
+  it("does not label an assessment current after its code/evidence identity changes", async () => {
+    const h = fixture();
+    h.start();
+    await h.settle("goal");
+    const calls = h.fetch.mock.calls.length;
+    h.monitor.observeToolStart("edit-after-health", "edit", {
+      path: "src/parser.ts",
+    });
+    h.monitor.observeToolEnd(
+      "edit-after-health",
+      "edit",
+      {
+        content: [{ type: "text", text: "Successfully edited src/parser.ts" }],
+      },
+      false,
+    );
+    expect(h.monitor.evidence.codeRevision()).toBeGreaterThan(0);
+    expect(task(h.monitor, "task:1").provenance.state).not.toBe("current");
+    expect(h.fetch).toHaveBeenCalledTimes(calls);
+  });
+
   it("same-label cosmetic revise cannot reuse stale health while replacement is unavailable", async () => {
     const h = fixture();
     h.start();
@@ -360,6 +404,33 @@ describe("truthful display status", () => {
     expect(board(h.monitor).currentTask?.status).not.toBe("DONE");
     await h.settle("new-work");
     expect(board(h.monitor).currentTask?.status).not.toBe("DONE");
+  });
+
+  it("reload never resurrects an idle DONE invalidated by newer work", async () => {
+    const h = fixture();
+    h.start();
+    await h.settle("goal");
+    h.focus("none");
+    h.complete(["task:1", "task:2", "task:3"]);
+    h.append("finished", "All three requested tasks are complete.");
+    await h.settle("finished");
+    h.append("new-work", "Investigate another parser boundary.", "user");
+    await h.settle("new-work");
+    expect(board(h.monitor).currentTask).toBeUndefined();
+    const checkpoint = h.monitor.checkpoint();
+    h.monitor.stop();
+    const fresh = monitorHarness(h.reader());
+    running.push(fresh);
+    await fresh.monitor.restore(
+      "/nonexistent-hybrid-test",
+      checkpoint,
+      false,
+      fresh.reader,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(board(fresh.monitor).currentTask).toBeUndefined();
+    expect(fresh.fetch).not.toHaveBeenCalled();
+    expect(fresh.extract).not.toHaveBeenCalled();
   });
 
   it("withdraws INPROG immediately while newer semantic work is unresolved", async () => {

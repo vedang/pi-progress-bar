@@ -2,9 +2,11 @@
 
 ## Status
 
-Runtime freeze: **`d780df28`**. Main independently passed format, TypeScript, Biome, Knip, **327 unit +12 integration tests** and package dry-run. **12 global-host integration tests** passed at `e6e03191`; the final change only increases the numeric serialization admission bound from23 to24 bytes. Local host is Pi0.84.2/pi-ai0.84.4; global host is Pi0.85.1. **Independent cumulative review and publication remain pending**; these results alone do not close H5 or earlier82j acceptance.
+Runtime freeze: **`124ee557`**. Main independently passed format, TypeScript, Biome, Knip, **347 unit +12 integration tests**, **12 global-host integration tests**, and package dry-run. Local host is Pi0.84.2/pi-ai0.84.4; global host is Pi0.85.1. **Independent cumulative review and publication remain pending**; these results alone do not close H5 or earlier82j acceptance.
 
 ### Latest repair evidence
+
+Cumulative review of `d780df28` blocked publication despite passing tests. Main `aa3e8a3c` reproduced18 failures; `124ee557` fixes conservative operation/copy admission, current-card health intermediates, saturated usage and label domains, normalized checkpoint outcomes/canonical journal spans, retained replacement-pending state, and overlapping quote grounding. All18 regressions pass, alongside two new completion-envelope guards. **Independent rereview is still required.** Logs `fourth-main-*.log` and reports are retained in the latest task directory. No new paid run was performed for these local invariant repairs; earlier semantic evidence below is labeled with its actual source revision.
 
 The strict v6 runtime adds canonical intercom intake and independent current-activity focus, with no first-open fallback or tool ownership. Accepted phases use reconstructed request replay and phase-specific capacity admission. The full review must independently dispose earlier blockers; test totals do not substitute for this.
 

@@ -97,10 +97,9 @@ interface RetainedTaskCard {
   assessedAt: number;
 }
 export interface Checkpoint {
-  /** v3 requires explicit work kinds in source and task references. */
-  version: 3;
+  /** v4 removes polling controls; older checkpoint shapes rebuild safely. */
+  version: 4;
   enabled: boolean;
-  interval: number;
   source?: ConversationSource;
   conversation?: ConversationCheckpoint;
   sourceRevision?: string;
@@ -122,10 +121,6 @@ export interface Checkpoint {
   nextTaskId: number;
   usage: { calls: number; inputTokens: number; outputTokens: number };
 }
-
-const DEFAULT_INTERVAL_SECONDS = 15;
-const validInterval = (seconds: number) =>
-  Number.isSafeInteger(seconds) && seconds >= 5 && seconds <= 86_400;
 
 interface ScopeWork {
   proposalId: string;
@@ -231,7 +226,6 @@ const statusValues = new Set<ReportState>([
 export class Monitor {
   ledger?: Ledger;
   source?: ConversationSource;
-  interval = DEFAULT_INTERVAL_SECONDS;
   enabled = false;
   activity = "Idle";
   error?: string;
@@ -242,11 +236,13 @@ export class Monitor {
   readonly evidence = new EvidenceStore();
   readonly gateway: JevGateway;
   readonly analysis: AnalysisScheduler;
-  private timer?: ReturnType<typeof setInterval>;
   private branch?: () => readonly unknown[];
   private runtimeIdentity?: string;
+  private cwd?: string;
+  private beadsRefresh?: Promise<void>;
   private evidenceIdentity?: string;
   private scheduling = false;
+  private analysisRequested = false;
   private scopedCandidates = new Set<string>();
   private blockedScopeCandidates = new Set<string>();
   /** Original-only refs let unresolved UI truth survive reload without text. */
@@ -276,7 +272,6 @@ export class Monitor {
     });
     this.analysis = new AnalysisScheduler(this.gateway, () => {
       this.changed();
-      if (this.enabled) queueMicrotask(() => this.scheduleAnalysis(false));
     });
   }
 
@@ -341,16 +336,18 @@ export class Monitor {
       : "none";
   }
 
+  /** Observe only canonical active-branch entries from supported host hooks. */
   observe(branch: () => readonly unknown[]) {
     this.branch = branch;
-    if (this.enabled) {
-      this.conversation.update(branch());
-      if (
-        this.retainedTaskCard &&
-        !this.retainedCardIsLive(this.retainedTaskCard)
-      )
-        this.retainedTaskCard = undefined;
-    }
+    if (!this.enabled) return;
+    this.conversation.update(branch());
+    if (
+      this.retainedTaskCard &&
+      !this.retainedCardIsLive(this.retainedTaskCard)
+    )
+      this.retainedTaskCard = undefined;
+    if (this.cwd) void this.refreshBeads(this.cwd);
+    this.requestAnalysis();
   }
 
   evidenceLink(): EvidenceLink | undefined {
@@ -610,6 +607,7 @@ export class Monitor {
         ? { ...(result as object), isError }
         : { isError };
     this.evidence.finish(callId, toolName, value, Date.now());
+    this.requestAnalysis();
   }
 
   enqueueAnalysis(
@@ -626,6 +624,7 @@ export class Monitor {
         this.usage.inputTokens += result.usage.input_tokens;
         this.usage.outputTokens += result.usage.output_tokens;
         admit(result);
+        this.requestAnalysis();
       },
     });
   }
@@ -676,6 +675,7 @@ export class Monitor {
     );
     this.evidenceIdentity = undefined;
     this.save();
+    if (this.cwd) void this.refreshBeads(this.cwd);
   }
 
   private scopeWorkIsCurrent(work: ScopeWork) {
@@ -954,6 +954,7 @@ export class Monitor {
       this.scopedCandidates.add(work.proposalId);
       this.conversation.commitScope(work.candidate);
       this.save();
+      if (this.cwd) void this.refreshBeads(this.cwd);
     });
   }
 
@@ -1006,7 +1007,18 @@ export class Monitor {
     });
   }
 
-  scheduleAnalysis(startCycle = true) {
+  /** Coalesce host observations; never await transport from an event handler. */
+  requestAnalysis() {
+    if (!this.enabled || this.analysisRequested) return;
+    this.analysisRequested = true;
+    queueMicrotask(() => {
+      this.analysisRequested = false;
+      this.scheduleAnalysis();
+    });
+  }
+
+  /** Select bounded semantic work. Scheduler yields each actual dispatch. */
+  scheduleAnalysis() {
     if (!this.enabled || this.scheduling) return;
     this.scheduling = true;
     try {
@@ -1014,7 +1026,7 @@ export class Monitor {
       const epoch = this.epoch;
       // Discovery stays chronological. Scope/report work only observes a
       // proposal after its selection/classification transaction has committed.
-      this.conversation.scheduleDiscovery(
+      const advancedDiscoveryPage = this.conversation.scheduleDiscovery(
         this.enqueueAnalysis.bind(this),
         () => this.enabled && epoch === this.epoch,
       );
@@ -1053,8 +1065,10 @@ export class Monitor {
             this.scopeBlocksReport(report),
           () => this.save(),
         );
-      if (startCycle) this.analysis.startCycle(3);
-      else this.analysis.tick();
+      this.analysis.requestDrain();
+      // Page advancement is bounded durable controller progress, not polling.
+      // It has no request completion to otherwise wake the next window.
+      if (advancedDiscoveryPage) this.requestAnalysis();
       this.changed();
     } finally {
       this.scheduling = false;
@@ -1063,6 +1077,7 @@ export class Monitor {
 
   private clearRuntime() {
     this.analysis.clear();
+    this.analysisRequested = false;
     this.gateway.pause();
     this.evidence.clearPending();
     this.runtimeIdentity = undefined;
@@ -1070,8 +1085,7 @@ export class Monitor {
     this.health = undefined;
     this.healthWork = undefined;
     this.scopeWork = undefined;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
+    this.cwd = undefined;
   }
 
   private forceOff(message: string) {
@@ -1110,12 +1124,12 @@ export class Monitor {
     // Restored partial scope is source-validated; bind it to new lifecycle.
     if (this.scopeWork) this.scopeWork.epoch = this.epoch;
     this.runtimeIdentity = `runtime:${this.epoch}`;
+    this.cwd = cwd;
     this.gateway.enable(this.runtimeIdentity);
     if (this.branch) this.conversation.update(this.branch());
     void this.refreshBeads(cwd);
-    this.start(cwd);
     this.save();
-    this.scheduleAnalysis();
+    this.requestAnalysis();
     return;
   }
 
@@ -1125,41 +1139,35 @@ export class Monitor {
     this.clearRuntime();
   }
 
-  private async refreshBeads(cwd: string) {
+  /** Optional display enrichment; coalesce lifecycle/observation reads only. */
+  private refreshBeads(cwd: string) {
+    if (this.beadsRefresh) return this.beadsRefresh;
     const epoch = this.epoch;
-    const source = await readBeadsExport(cwd);
-    if (!this.enabled || epoch !== this.epoch || !source.complete) return;
-    if (this.ledger && !hasGroundedBeadsRecords(this.ledger.tasks, source)) {
-      this.note("incomplete-beads-export");
-      return;
-    }
-    this.beadsExport = source;
-    if (!this.ledger) return;
-    const tasks = enrichBeadsTasks(this.ledger.tasks, source);
-    if (sameBeadsEnrichment(this.ledger.tasks, tasks)) return;
-    this.ledger = { ...this.ledger, tasks };
-    this.save();
-    this.changed();
-  }
-
-  private start(cwd: string) {
-    if (!this.enabled) return;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = setInterval(() => {
-      if (this.branch) this.conversation.update(this.branch());
-      void this.refreshBeads(cwd);
-      this.scheduleAnalysis();
-    }, this.interval * 1000);
-    void cwd;
-  }
-
-  setInterval(seconds: number, cwd: string) {
-    if (!validInterval(seconds))
-      throw new Error("Interval must be an integer from 5 to 86400 seconds");
-    this.interval = seconds;
-    if (this.enabled) this.start(cwd);
-    this.save();
-    this.changed();
+    const refresh = (async () => {
+      const source = await readBeadsExport(cwd);
+      if (!this.enabled || epoch !== this.epoch || !source.complete) return;
+      if (this.ledger && !hasGroundedBeadsRecords(this.ledger.tasks, source)) {
+        this.note("incomplete-beads-export");
+        return;
+      }
+      this.beadsExport = source;
+      if (!this.ledger) return;
+      const tasks = enrichBeadsTasks(this.ledger.tasks, source);
+      if (sameBeadsEnrichment(this.ledger.tasks, tasks)) return;
+      this.ledger = { ...this.ledger, tasks };
+      this.save();
+      this.changed();
+    })();
+    this.beadsRefresh = refresh;
+    void refresh.then(
+      () => {
+        if (this.beadsRefresh === refresh) this.beadsRefresh = undefined;
+      },
+      () => {
+        if (this.beadsRefresh === refresh) this.beadsRefresh = undefined;
+      },
+    );
+    return refresh;
   }
 
   private partialScopeCheckpoint(): PartialScopeCheckpoint | undefined {
@@ -1440,9 +1448,8 @@ export class Monitor {
   checkpoint(): Checkpoint {
     const partialScope = this.partialScopeCheckpoint();
     return {
-      version: 3,
+      version: 4,
       enabled: this.enabled,
-      interval: this.interval,
       source: this.source
         ? this.conversation.canonicalSource(this.source)
         : undefined,
@@ -1499,7 +1506,6 @@ export class Monitor {
 
   async restore(cwd: string, data: unknown, preserveControls = false) {
     const wasEnabled = this.enabled;
-    const previousInterval = this.interval;
     this.clearRuntime();
     this.epoch++;
     this.conversation = new Conversation();
@@ -1518,16 +1524,14 @@ export class Monitor {
     this.error = undefined;
     this.activity = "Idle";
     let savedEnabled = true;
-    this.interval = DEFAULT_INTERVAL_SECONDS;
     if (this.branch) this.conversation.update(this.branch());
     try {
       if (data && typeof data === "object") {
         const cp = data as Partial<Checkpoint>;
-        // Old manual checkpoints are intentionally ignored, not migrated.
-        if (cp.version === 3) {
+        // Obsolete v3 and malformed v4 checkpoints rebuild; no migration.
+        if (cp.version === 4) {
           if (
             typeof cp.enabled !== "boolean" ||
-            !validInterval(cp.interval ?? Number.NaN) ||
             !Array.isArray(cp.mappings) ||
             cp.mappings.length > 200 ||
             !Array.isArray(cp.tasks) ||
@@ -1543,7 +1547,6 @@ export class Monitor {
           )
             throw new Error("Invalid automatic checkpoint");
           savedEnabled = cp.enabled;
-          this.interval = cp.interval as number;
           this.usage = { ...cp.usage };
           if (cp.source) {
             const source = this.conversation.canonicalSource(cp.source);
@@ -1714,10 +1717,7 @@ export class Monitor {
       this.error =
         "Saved automatic state was invalid; rebuilding from active history";
     }
-    if (preserveControls) {
-      savedEnabled = wasEnabled;
-      this.interval = previousInterval;
-    }
+    if (preserveControls) savedEnabled = wasEnabled;
     this.enabled = false;
     if (savedEnabled) this.turnOn(cwd);
     else this.changed();

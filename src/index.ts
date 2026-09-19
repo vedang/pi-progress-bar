@@ -46,11 +46,8 @@ export default function progressBar(pi: ExtensionAPI): void {
       ctx.ui.setWidget(widgetName, undefined);
   };
   pi.registerCommand("progress", {
-    description: "Turn automatic progress monitoring on/off or set interval",
-    handler: (args, ctx) => {
-      monitor.observe(() => ctx.sessionManager.getBranch());
-      return command(args, ctx, monitor);
-    },
+    description: "Show or turn automatic progress monitoring on/off",
+    handler: (args, ctx) => command(args, ctx, monitor),
   });
   pi.on("session_start", async (_event, ctx) => {
     await restore(ctx, false);
@@ -63,10 +60,15 @@ export default function progressBar(pi: ExtensionAPI): void {
     context = undefined;
     if (ctx.mode === "tui") ctx.ui.setWidget(widgetName, undefined);
   });
-  pi.on("message_end", (_event, ctx) => {
-    if (!monitor.enabled) return;
-    // Pi may emit before persistence; collect now, settled/timer observations catch originals.
+  // Pinned Pi 0.84.2 proves these hooks see canonical active-branch refs.
+  // message_end is pre-append and never becomes semantic authority.
+  pi.on("context", (_event, ctx) => {
     monitor.observe(() => ctx.sessionManager.getBranch());
+    if (monitor.enabled) paint(ctx, monitor);
+  });
+  pi.on("turn_end", (_event, ctx) => {
+    monitor.observe(() => ctx.sessionManager.getBranch());
+    if (monitor.enabled) paint(ctx, monitor);
   });
   pi.on("agent_start", (_event, ctx) => {
     if (!monitor.enabled) return;
@@ -74,10 +76,9 @@ export default function progressBar(pi: ExtensionAPI): void {
     paint(ctx, monitor);
   });
   pi.on("agent_settled", (_event, ctx) => {
-    if (!monitor.enabled) return;
     monitor.activity = "Idle";
     monitor.observe(() => ctx.sessionManager.getBranch());
-    paint(ctx, monitor);
+    if (monitor.enabled) paint(ctx, monitor);
   });
   pi.on("tool_execution_start", (event, ctx) => {
     if (!monitor.enabled) return;

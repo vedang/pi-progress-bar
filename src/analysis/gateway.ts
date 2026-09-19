@@ -166,6 +166,17 @@ export class JevGateway {
   get lastCallAt() {
     return this.lastDispatchAt;
   }
+  /** Read-only retry boundary for the scheduler's single one-shot wakeup. */
+  get retryDelayMs(): number | undefined {
+    const deadline = Math.max(this.nextAttempt, this.retryAfter);
+    return Number.isFinite(deadline)
+      ? Math.max(0, deadline - this.now())
+      : undefined;
+  }
+  get retryPending() {
+    const delay = this.retryDelayMs;
+    return !this.paused && delay !== undefined && delay > 0;
+  }
   private identity?: string;
   private paused = true;
   private generation = 0;

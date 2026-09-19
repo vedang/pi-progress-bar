@@ -71,7 +71,7 @@ export function paint(ctx: ExtensionContext, monitor: Monitor) {
         ),
         theme.fg(
           "muted",
-          `${monitor.activity} • analysis every ${monitor.interval}s • Last Jev call: ${lastJevCallLabel(monitor.gateway.lastCallAt)} • ${plain(monitor.error ?? gatewayStatusLabel(monitor.gateway.status))}`,
+          `${monitor.activity} • event-driven analysis • Last Jev call: ${lastJevCallLabel(monitor.gateway.lastCallAt)} • ${plain(monitor.error ?? gatewayStatusLabel(monitor.gateway.status))}`,
         ),
         theme.fg(
           "muted",

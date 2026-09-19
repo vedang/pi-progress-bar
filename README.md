@@ -18,15 +18,15 @@ pi -e /absolute/path/to/pi-progress-bar.root
 
 Monitoring starts automatically for each new session. Missing, blank, or rejected credentials emit
 one error and leave monitoring OFF; there is no local-only fallback. Reload restores current-session
-controls. New sessions default ON.
+controls. New sessions default ON. Analysis is event-driven from canonical Pi branch observations,
+not a periodic poller.
 
 ## Commands
 
 ```text
 /progress                         show state and usage
 /progress on                      start/resume automatic catch-up
-/progress off                     abort work, stop collection/network/timer, hide widget
-/progress interval <5-86400>      set analysis-cycle interval in whole seconds
+/progress off                     abort work, stop collection/network, hide widget
 ```
 
 No source picker, consent dialog, manual checklist/current-task control, details inspector,
@@ -64,8 +64,8 @@ enable/pause/resume aliases, or compatibility commands exist.
 
 - **Last Jev call:** widget and bare `/progress` show the last actual HTTP dispatch for this
   monitoring runtime, as local date/time and age, or `Never`. It updates before every dispatched
-  fetch, including failure/timeout, but not on redraws, scheduled ticks, cached unchanged input,
-  missing credentials, or retry-backoff. It is memory-only and resets for a fresh runtime.
+  fetch, including failure/timeout, but not on redraws, cached unchanged input, missing credentials,
+  or retry-backoff. It is memory-only and resets for a fresh runtime.
 
 Substantive user directives, questions, explanation/status/plan requests and corrections are all
 supplied to Jev as possible work using exact source spans. Jev classifies a task as an **action**
@@ -91,25 +91,27 @@ source references are rehydrated only from the live active branch, including aft
 one discovery window. Exact original offsets are preserved. Partial scope/report journals retain
 only canonical source ranges, IDs, enum decisions, and request identities; an unkeyed digest detects
 accidental or unrecomputed corruption before replay. Requests are at most 24 KiB and 20 questions; responses at most 128 KiB. Discovery carries
-exact source spans, role, and bounded preceding visible user direction. New checkpoints use schema
-v3 and require explicit `action` or `response` work kinds for every source span and saved task;
-legacy shapes are rejected rather than migrated. A new user request can
-establish current scope; preceding direction grounds assistant plans without vetoing that request.
-It processes one chronological observation through selection/classification, scope/current reconciliation, and then
-that observation's report cursor; a later goal cannot affect an earlier report. Action-task reports
-remain bounded multi-task batches. Each Jev-classified response task uses one small target-local
-report request with full lifecycle and current-task choices, so an answer about unfinished
-implementation is not confused with completing that implementation; this can add one paid request
-per response task. Uncertain source,
-identity, scope, or current-task Choices abstain instead of mutating state. One request is in flight,
-at most three serial requests start per analysis cycle, default every 15 seconds, with a 10-second
-deadline. Successful unchanged evidence is not resent. Transient failures use bounded
-exponential backoff, Retry-After, three-attempt bursts, and five-minute cooldown/probe behavior.
-There is no lifetime request wall.
+exact source spans, role, and bounded preceding visible user direction. New checkpoints use strict
+schema v4 and require explicit `action` or `response` work kinds for every source span and saved
+task; v3 and malformed shapes rebuild from the active branch rather than migrate. A new user
+request can establish current scope; preceding direction grounds assistant plans without vetoing that
+request. It processes one chronological observation through selection/classification, scope/current
+reconciliation, and then that observation's report cursor; a later goal cannot affect an earlier
+report. Action-task reports remain bounded multi-task batches. Each Jev-classified response task
+uses one small target-local report request with full lifecycle and current-task choices, so an answer
+about unfinished implementation is not confused with completing that implementation; this can add
+one paid request per response task. Uncertain source, identity, scope, or current-task Choices
+abstain instead of mutating state. One request is in flight. Relevant canonical branch and tool
+observations coalesce into finite local catch-up, yielding between bounded dispatches; idle redraws,
+clocks, and unchanged snapshots dispatch nothing. Transient failures use bounded exponential
+backoff, Retry-After, three-attempt bursts, and five-minute cooldown/probe behavior with one
+pending-work retry wakeup. There is no lifetime request wall.
 
 Installing with a key automatically sends bounded relevant conversation/task/evidence excerpts to
-`https://api.typesafe.ai/v1/systemone`; this may incur TypeSafe charges. Original-delivery live
-validation used 16 requests. Separate completed repair-validation snapshot used 134 attempts
+`https://api.typesafe.ai/v1/systemone`; this may incur TypeSafe charges. Event-driven catch-up can
+dispatch more promptly than former cadence-based analysis, so it is not free and users should
+expect charges for each bounded semantic transition. Original-delivery live validation used 16
+requests. Separate completed repair-validation snapshot used 134 attempts
 (162,554 input and 29,207 output tokens, including two failed runs).
 Retained-task/conversational-work validation used 395 attempts (415,360 input and
 70,355 output tokens), including failed/interrupted runs and diagnostic probes.

@@ -515,7 +515,9 @@ export class Conversation {
           this.discoveryGeneration++;
           this.discoveryStatus =
             "Pending: advancing chronological conversation catch-up";
-          return;
+          // Cursor advanced without a Jev result. Caller must yield one
+          // coalesced pass to load the next finite canonical window.
+          return true;
         }
       }
       this.discoveryStatus = this.proposals.length

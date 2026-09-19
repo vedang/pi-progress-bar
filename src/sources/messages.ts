@@ -23,11 +23,11 @@ function visibleText(content: unknown): string | undefined {
   return text.join("");
 }
 
-/** Captured metadata. Role/message accessors are read once when a pass begins. */
+/** Captured metadata. Content remains lazy until one eligible observation needs it. */
 export interface CanonicalHeader {
   id: string;
   role: ObservationRole;
-  content: unknown;
+  contentOwner: Record<string, unknown>;
 }
 
 function canonicalHeader(entry: unknown): CanonicalHeader | undefined {
@@ -36,7 +36,7 @@ function canonicalHeader(entry: unknown): CanonicalHeader | undefined {
   if (typeof id !== "string" || !id) return;
   if (entry.type === "custom_message") {
     if (entry.customType !== "intercom_message") return;
-    return { id, role: "intercom", content: entry.content };
+    return { id, role: "intercom", contentOwner: entry };
   }
   if (entry.type !== "message") return;
   const message = entry.message;
@@ -45,7 +45,7 @@ function canonicalHeader(entry: unknown): CanonicalHeader | undefined {
   if (role !== "user" && role !== "assistant") return;
   const stopReason = message.stopReason;
   if (stopReason === "error" || stopReason === "aborted") return;
-  return { id, role, content: message.content };
+  return { id, role, contentOwner: message };
 }
 
 /** Scan IDs/roles without materializing every historical text payload. */
@@ -60,7 +60,7 @@ function canonicalHeaders(entries: readonly unknown[]): CanonicalHeader[] {
 function canonicalObservation(
   header: CanonicalHeader,
 ): Observation | undefined {
-  const text = visibleText(header.content);
+  const text = visibleText(header.contentOwner.content);
   if (text === undefined || !text.trim()) return;
   return {
     id: header.id,

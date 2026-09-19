@@ -1,0 +1,328 @@
+{
+  "epic": "pi-progress-barroot-y3h",
+  "tasks": [
+    {
+      "key": "U00",
+      "title": "U00: Pin accepted runtime and freeze UX contracts",
+      "section": "A0",
+      "deps": [],
+      "work": "Confirm root cumulative acceptance/publication with runtime owner, then record exact source/host ref and source API inventory. No import of unaccepted runtime. Reconcile focus/intercom and existing schema. Specify host/editor identity proof and direct owned overlay. Capture user-added hints: two DATA rows plus \u2192 to inspect hint, selected exact usage plus enter to see board; do not erase hints to satisfy old two-total-row wording. Record detail confidence >=0.5/probability >=0.8 as approved-plan starting policy requiring bounded evaluation before enablement; no arbitrary threshold lowering.",
+      "accept": "Accepted root/host ref or explicit blocker recorded; source/projection/schema/caps inventory complete; hint contract frozen; reference APIs not treated as dual-host compatibility promise. OPEN/INPROG/DONE text and exact identity/freshness mapping verified, including reachable qualified idle DONE and no stale INPROG; color optional and not sole meaning.",
+      "role": "main-coordinator",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.1"
+    },
+    {
+      "key": "U01",
+      "title": "U01: Prove host input and owned modal contracts",
+      "section": "A0",
+      "deps": [
+        "U00"
+      ],
+      "work": "Main writes deterministic failing host-input tests and static real-host probe. Prove belowEditor factory/TUI capture, known editor identity, pipeline-visible Right, exact showOverlay handle teardown and listener lifecycle. Inspect pi-subagents interaction both load orders and focused fleet state. No provider calls. Stop on missing API; do not loosen identity or replace editor.",
+      "accept": "Recorded probe on pinned host plus deterministic cases for nonempty editor/custom editor/release events/transforming listeners/other overlays/cancelled navigation; no wrong-overlay closure or stranded focus; feasibility blockers settled.",
+      "role": "main-tests",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.2"
+    },
+    {
+      "key": "U02",
+      "title": "U02: Add narrow host adapter and lifecycle primitives",
+      "section": "A0",
+      "deps": [
+        "U01"
+      ],
+      "work": "Implement only proven host adapter in src/ui/host.ts. Capture main editor identity at proven point; define pure activation predicate and exact owned overlay API. No loose duck typing, globally unconditional shortcuts, custom-overlay done/hideOverlay or compatibility wrappers. Own cleanup idempotently.",
+      "accept": "U01 tests green; host API assumptions explicit; input passes through received pipeline data whenever guard fails; exact overlay hide preserves neighboring UI.",
+      "role": "implementation",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.3"
+    },
+    {
+      "key": "U03",
+      "title": "U03: Add task ordering and strict restore red tests",
+      "section": "A1",
+      "deps": [
+        "U02"
+      ],
+      "work": "Main writes failing task-order and restore tests including host-level absent/restored/unsupported/corrupt outcomes, ordinary ON cannot bypass rejected restore, zero persistence/fetch for old checkpoints, stable create/revise/archive/reopen/reload order, exact current-version replay and byte edges.",
+      "accept": "Red failures reproduced on accepted baseline; test ownership handoff lists cases/files/commands; existing passing coverage preserved.",
+      "role": "main-tests",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.4"
+    },
+    {
+      "key": "U04",
+      "title": "U04: Implement stable ordering and no-rebill restore",
+      "section": "A1",
+      "deps": [
+        "U03"
+      ],
+      "work": "Implement A1 reducer/order/proof/checkpoint and monitor/index/commands restore seams. Use durable create order if proven sufficient, otherwise ordinal. Strict schema only when shape requires. Reject old/corrupt without mutation or provider call; expose fresh-session instruction. Include exact undo/hash/capacity. No migration.",
+      "accept": "U03 green; all retained tasks stable newest-first; unsupported/corrupt state preserved and latched blocked; current-version resume no rebilling; no silent fresh reset.",
+      "role": "implementation",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.5"
+    },
+    {
+      "key": "U05",
+      "title": "U05: Add per-task health and board projection reds",
+      "section": "A2",
+      "deps": [
+        "U04"
+      ],
+      "work": "Main tests exact source/observation/request/evidence provenance, same-label cosmetic revise, source amendments, two distinct task cards, missing health, archive/done, full-map byte admission, returned-object mutation and sentinel leakage. Snapshot reads must have zero reads/saves/inference.",
+      "accept": "Reds reproduced for per-task map/projection; byte-edge tests prove denial before fetch and semantic lifecycle unchanged; missing assessment distinct from assessed unknown. OPEN/INPROG/DONE text and exact identity/freshness mapping verified, including reachable qualified idle DONE and no stale INPROG; color optional and not sole meaning.",
+      "role": "main-tests",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.6"
+    },
+    {
+      "key": "U06",
+      "title": "U06: Implement bounded health map and board snapshot",
+      "section": "A2",
+      "deps": [
+        "U05"
+      ],
+      "work": "Implement detached boardSnapshot plus bounded exact-provenance per-task health storage. Preflight whole checkpoint with worst-case additional card and metadata before health call. Optional denial is isolated. Project all retained tasks and safe task transitions; label session counters globally. Do not assess on selection.",
+      "accept": "U05 green; task A never inherits task B health; mismatch all5 Unassessed; maximum tasks/events and byte bounds tested; snapshot calls pure. OPEN/INPROG/DONE text and exact identity/freshness mapping verified, including reachable qualified idle DONE and no stale INPROG; color optional and not sole meaning.",
+      "role": "implementation",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.7"
+    },
+    {
+      "key": "U07",
+      "title": "U07: Add widget and selection controller red tests",
+      "section": "A3",
+      "deps": [
+        "U06"
+      ],
+      "work": "Main adds exact count/fill/token/hint snapshots and controller input/disposal/publication tests. Latest hint edits supersede two-total-row fixture: two data rows plus \u2192 to inspect; selected requested token line plus enter to see board and return hint. Test all normal warning precedence, two task-data rows, width/ANSI/CJK/combining, safe Right/Enter/Left/Esc, typing pass-through and another extension.",
+      "accept": "Requested format and discoverability hints frozen in fixtures; tokens absent unselected; received input not stolen outside guard; stale publications and repeated attachment covered. OPEN/INPROG/DONE text and exact identity/freshness mapping verified, including reachable qualified idle DONE and no stale INPROG; color optional and not sole meaning.",
+      "role": "main-tests",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.8"
+    },
+    {
+      "key": "U08",
+      "title": "U08: Implement below-editor widget and selection",
+      "section": "A3",
+      "deps": [
+        "U07"
+      ],
+      "work": "Implement persistent pure widget/controller from accepted snapshots. Exact Reported fraction/percentage/12cell fill and HH:mm:ss actual dispatch; dynamic accepted message focus initially. Add guarded selection, usage only selected, truthful non-ready statuses, one listener/generation cleanup and command help. Basic readable theme styling allowed; aesthetic experiments deferred.",
+      "accept": "U07 green; no health clutter in widget; exact token arrows/provider casing; no UI inference; hint/footer handling documented at small widths. OPEN/INPROG/DONE text and exact identity/freshness mapping verified, including reachable qualified idle DONE and no stale INPROG; color optional and not sole meaning.",
+      "role": "implementation",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.9"
+    },
+    {
+      "key": "U09",
+      "title": "U09: Add modal board navigation and debugger reds",
+      "section": "A4",
+      "deps": [
+        "U08"
+      ],
+      "work": "Main adds list/detail, newest-first, stable selection, scrolling, task-specific debugger and all5-summary tests. Prove direct owned overlay teardown below sibling overlay, OFF/reload/branch/cancel paths and dimensions120x40/80x24/60x20/40x16. Test global service warning outside debugger and local/global diagnostic distinction.",
+      "accept": "Reds reproduce missing board behavior, every retained task reachable; Summary/provenance never misattributed; UI actions effect-free.",
+      "role": "main-tests",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.10"
+    },
+    {
+      "key": "U10",
+      "title": "U10: Implement bounded task board and local debugger",
+      "section": "A4",
+      "deps": [
+        "U09"
+      ],
+      "work": "Build modal/component/layout and controller wiring. Dense left list (~40%) and structured right (~60%), not full-height; no bv graph/priority extras. Exact handle.hide disposal, ID-stable navigation, page/home/end and pane focus, five health bullets, visible service/provenance, d right-pane only debugger. No standalone debugger command.",
+      "accept": "U09 green; all tasks incl archived/done reachable; no mutable monitor capability enters component; correct focus/overlay ownership and responsive safe-close state.",
+      "role": "implementation",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.11"
+    },
+    {
+      "key": "U11",
+      "title": "U11: Add tool-focus batching privacy and freshness reds",
+      "section": "B",
+      "deps": [
+        "U10"
+      ],
+      "work": "Main proves host finalized tool-call set/start order and writes batch/freshness tests. Test A\u2192B and concurrent A+B, all member accumulation, 4KiB overflow abstention, unknown tool names, allowlist sentinel privacy, exact call counts, semantic preemption, metadata byte admission, pending/stale display, closed/revised task and OFF/reload.",
+      "accept": "Batch boundary host evidence exists; reds pin one call per completed isolated batch, latest queued only, no stale response apply; absence of reliable boundary blocks writer rather than timer guess. OPEN/INPROG/DONE text and exact identity/freshness mapping verified, including reachable qualified idle DONE and no stale INPROG; color optional and not sole meaning.",
+      "role": "main-tests",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.12"
+    },
+    {
+      "key": "U12",
+      "title": "U12: Implement event-driven tool activity focus",
+      "section": "B",
+      "deps": [
+        "U11"
+      ],
+      "work": "Add tool-start display inference with explicit call-set batches, privacy envelopes, session/semantic/source/model/activity generations, singleflight and natural coalescing. Reuse canonical assistant focus, no duplicate message_end analysis. Preflight metadata; no polling. Exclusive/none/concurrent/uncertain outcomes; do not force first/newest or mutate semantic/evidence authority.",
+      "accept": "U11 green; assistant/tool changes update truthful Current Task; no change to statuses/health authority; all calls counted; optional denial isolated. OPEN/INPROG/DONE text and exact identity/freshness mapping verified, including reachable qualified idle DONE and no stale INPROG; color optional and not sole meaning.",
+      "role": "implementation",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.13"
+    },
+    {
+      "key": "U13",
+      "title": "U13: Validate tool focus with bounded real Jev cases",
+      "section": "B",
+      "deps": [
+        "U12"
+      ],
+      "work": "Main runs bounded real-Jev cases for actual assistant/tool patterns, parallel operations, ambiguous same-category shell tools, switching files/tasks and privacy overflow. Save sanitized requests/results/count/latency/abstention. Jev permission exists; selected-model spending not inferred. If minimal metadata fails, report bounded evidence and propose explicit allowlist revision; do not add raw commands silently.",
+      "accept": "Task switch/concurrent/abstain cases validated; request limits and privacy verified; meaningful failures repaired via main reds; no claiming mocked semantic accuracy.",
+      "role": "main-validation",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.14"
+    },
+    {
+      "key": "U14",
+      "title": "U14: Add optional detail isolation and replay reds",
+      "section": "C",
+      "deps": [
+        "U13"
+      ],
+      "work": "Main tests independent structural parsing, optional job durability after mandatory cursor commit, malformed/no detail with valid task, failed validation then next user task, near-capacity isolated denial, exact quotes/source changes and confidence boundaries. Test accepted batch receipt resume without rebilling and all five summary unaffected.",
+      "accept": "Reds pin optional failure cannot block mandatory tracking, stale/confidence-rejected sections absent, accepted details retain exact source provenance.",
+      "role": "main-tests",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.15"
+    },
+    {
+      "key": "U15",
+      "title": "U15: Implement grounded confidence-gated task details",
+      "section": "C",
+      "deps": [
+        "U14"
+      ],
+      "work": "Implement extraction candidates independent from required task operations, bounded optional enrichment jobs, natural Jev candidate batches and exact accepted receipts. Enforce proposed caps120/800/6x240 and starting confidence>=.5/probability>=.8/yes with calibrated gate U16; no arbitrary threshold lowering. Preflight entire jobs/results/usage checkpoint. Extend projection/right pane only for accepted fields; tracked label always visible.",
+      "accept": "U14 green; malformed/failed/over-cap optional details never invalidate structural patch or set semantic capacity; no source leakage, stale results or rebilling; uncertainty sections omitted. Rich-section production gate remains disabled; storage/projection/rendering tested but not user-visible until U16 acceptance.",
+      "role": "implementation",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.16"
+    },
+    {
+      "key": "U16",
+      "title": "U16: Validate rich-detail confidence and provenance",
+      "section": "C",
+      "deps": [
+        "U15"
+      ],
+      "work": "Main evaluates bounded Jev candidate fixtures: clear facts, ambiguous title, inferred acceptance not actually requested, conflicting source, cross-task contamination and uncertainty. Use existing grounded candidate fixtures to avoid unnecessary selected-model calls; obtain separate authority if paid selected-model end-to-end validation needed. Confirm starting policy or record blocker; no silent threshold changes.",
+      "accept": "Accepted rich fields faithful and unknown sections omitted in real cases; clear source-linked failures turned into reds; policy/usage/evaluation artifacts recorded before full functional handoff. Close only after calibrated policy accepted, required reds/fixes complete, production rich sections enabled and U14/U15 plus batch gates green. Any blocker leaves U16 open.",
+      "role": "main-validation",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.17"
+    },
+    {
+      "key": "U17",
+      "title": "U17: Run full UX equivalence host QA and documentation",
+      "section": "D",
+      "deps": [
+        "U16"
+      ],
+      "work": "Main authors/runs full differential lifecycle matrix with same semantic/tool activity UI absent vs exercised. Run make format/check/test/package; static pinned-host QA in all sizes/themes and pi-subagents co-install. Update README/PRODUCT/presentation/future docs including hints, bounds, restore, controls, diagnostics and omitted uncertain details. Preserve existing code gates, no compatibility scope.",
+      "accept": "Identical semantic state/provider bodies/counts/checkpoint/retries/history reads/usage with UI toggles; real-host evidence and docs current; all functional A0-D behaviors complete. OPEN/INPROG/DONE text and exact identity/freshness mapping verified, including reachable qualified idle DONE and no stale INPROG; color optional and not sole meaning.",
+      "role": "main-validation",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.18"
+    },
+    {
+      "key": "U18",
+      "title": "U18: Independently review full functional UX batch",
+      "section": "D",
+      "deps": [
+        "U17"
+      ],
+      "work": "Fresh reviewer inspects whole accepted-base\u2192functional-candidate batch, not one slice: authority, input collisions, exact overlay disposal, provenance, optional isolation, proofs/byte caps, no-rebill, privacy, selected usage, task sort/health/debugger and tests. Main owns any regression tests; fix findings and repeat affected gates before acceptance.",
+      "accept": "No unresolved correctness/safety P1/P2; review findings/evidence/resolutions and exact accepted candidate recorded. Do not close from passing unit tests alone.",
+      "role": "independent-review",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.19"
+    },
+    {
+      "key": "U19",
+      "title": "U19: Freeze full functional build and hand off manual QA",
+      "section": "D",
+      "deps": [
+        "U18"
+      ],
+      "work": "Freeze exact functional revision including A+B+C+docs. Give user load/reload command, fresh-session/unsupported-schema guidance, controls, focused manual checklist and safe rollback constraints. Preserve this build while separate polish commits develop; no replacing user QA copy in place. Mark polish tickets ready only after handoff receipt. Current repair handoff82j.6 is separate and not a substitute.",
+      "accept": "User receives stable named functional build and checklist; all planned behaviors included; evidence/ref/limitations recorded. Beautification can begin without waiting for user manual QA completion. OPEN/INPROG/DONE text and exact identity/freshness mapping verified, including reachable qualified idle DONE and no stale INPROG; color optional and not sole meaning.",
+      "role": "main-coordinator",
+      "priority": 1,
+      "id": "pi-progress-barroot-y3h.20"
+    },
+    {
+      "key": "P00",
+      "title": "P00: Compare theme-aware progress beautification options",
+      "section": "",
+      "deps": [
+        "U19"
+      ],
+      "work": "During user QA of frozen functional build, inspect pinned Pi theme/render capabilities and compare static bar variants, spacing, typography/selection contrast and restrained accent palette. Review user goal beautiful progress bar. Demonstrate colors and optional motion concepts with static offline fixtures; choose simplest strong design. No external deps, hardcoded brand colors, gradients implying certainty, emoji/font requirement or fullscreen change. Preserve exact count and five-field board truth; Unicode blocks are not ASCII. Document plain fallback and dark/light/monochrome.",
+      "accept": "Source-grounded design choice and before/after fixtures documented; accessible color-not-only encoding, responsive display width, no changes to functional semantics; animation feasibility separate P02. Pinned revision, exact existing source/test paths, offline fixture command, screenshots and design decision stored before P01 release.",
+      "role": "design",
+      "priority": 2,
+      "id": "pi-progress-barroot-y3h.21"
+    },
+    {
+      "key": "P01",
+      "title": "P01: Add accessible theme-aware visual polish",
+      "section": "",
+      "deps": [
+        "P00"
+      ],
+      "work": "Main writes failing visual/theme fixtures first; worker then applies chosen accent colors, filled/unfilled bar contrast, typography/spacing, pane selection/headers and hints. Theme colors not hardcoded. Count/raw ratio unchanged; no model-confidence/health success encoding. Preserve unselected/selected token rules and board provenance/warnings. Keep user functional-QA revision untouched; changes in later jj commits.",
+      "accept": "Light/dark/monochrome + CJK/combining/narrow fixtures and actual-host screenshots pass; no color-only meaning or readability regression; differential semantics and format/check/test remain green. OPEN/INPROG/DONE text and exact identity/freshness mapping verified, including reachable qualified idle DONE and no stale INPROG; color optional and not sole meaning. P00 exact seams used, theme/status tests and screenshot matrix captured; targeted and format/check/test evidence linked.",
+      "role": "main-tests-then-implementation",
+      "priority": 2,
+      "id": "pi-progress-barroot-y3h.22"
+    },
+    {
+      "key": "P02",
+      "title": "P02: Prove optional motion without false progress",
+      "section": "",
+      "deps": [
+        "P01"
+      ],
+      "work": "Investigate bounded UI-only animation on pinned host. Main tests first. Preferred motion is subtle focus/selection transition or separately labeled activity indicator; NEVER animate fractional fill between reported counts, invent progress, pulse health, or use motion as evidence of agent activity. Static default; explicit animation opt-in and reduced-motion/off control, document scope/storage. Redraw timer only for active opt-in effect; no polling monitor/provider/history, no persisted animation phase. Pause/stop hidden/OFF/disposed/inactive generation; cap frames/frequency/duration and measure CPU/render impact; no input lag. If safe smooth motion unsupported, record evidence and ship polished static design rather than force it.",
+      "accept": "Either bounded optional animation passes timer disposal/fake-clock/call-equivalence/input-latency/theme QA, or evidence-backed no-motion decision accepted; both preserve truthful instantaneous progress and zero hidden work. No claim animation implemented if declined. Concrete timer/preference/test seams and measured motion decision recorded, targeted/batch gates passed or evidence-backed static outcome accepted.",
+      "role": "main-tests-then-implementation",
+      "priority": 2,
+      "id": "pi-progress-barroot-y3h.23"
+    },
+    {
+      "key": "P03",
+      "title": "P03: Review polish and publish separate polished candidate",
+      "section": "",
+      "deps": [
+        "P02"
+      ],
+      "work": "Independent review full polish batch; main gates and real-host QA verify accessibility, honest fill, selected usage, redraw lifecycle and unchanged inference. Publish separate exact polished candidate/reload instructions, leaving frozen functional build available. Report static/motion choice and any redraw performance tradeoffs. Do not require user manual QA completion to finish isolated polish validation.",
+      "accept": "Polish review/gates accepted, separate revision identified; no inference/checkpoint delta from styling/animation; reduced-motion/static route verified; user can choose candidate safely. Review, resolution, gate logs, host evidence and dual-revision handoff are present and source-grounded; user QA build preserved.",
+      "role": "main-validation",
+      "priority": 2,
+      "id": "pi-progress-barroot-y3h.24"
+    },
+    {
+      "key": "Q00",
+      "title": "Q00: Reconcile manual UX feedback and final acceptance",
+      "section": "",
+      "deps": [
+        "P03"
+      ],
+      "work": "Collect user manual testing feedback for original functional and optional polished candidates. Wait for actual user results; do not invent approval. Every defect gets a scoped linked bug/main-owned failing test, repaired in own change with affected/full gates and review as needed. User feedback can be collected from U19 onward while polish proceeds; this ticket is final convergence, not permission to delay bug capture. Any blocker of mandatory UX prevents epic completion.",
+      "accept": "Actual manual-QA outcome recorded; discovered blockers resolved or explicitly owner-deferred; chosen final revision and limitations documented, tasks synced, clean jj change. No automatic remote push/installation beyond owner authority.",
+      "role": "main-coordinator",
+      "priority": 2,
+      "id": "pi-progress-barroot-y3h.25"
+    }
+  ]
+}

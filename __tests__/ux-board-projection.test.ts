@@ -4,49 +4,8 @@ import type { Monitor } from "../src/core/monitor";
 import { noPatch } from "./fixtures/hybrid";
 import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
 
-// Frozen U05 public projection contract; static production types replace this
-// temporary test contract once U06 supplies boardSnapshot().
-interface BoardTask {
-  taskId: string;
-  label: string;
-  revision: number;
-  kind: string;
-  included: boolean;
-  status: "OPEN" | "INPROG" | "DONE" | "ARCHIVED";
-  health: {
-    requirements: string;
-    acceptance: string;
-    newRedTest: string;
-    redEvidence: string;
-    implementation: string;
-  };
-  provenance: {
-    state:
-      | "unassessed"
-      | "current"
-      | "retained"
-      | "stale"
-      | "replacement-pending";
-    assessedAt?: number;
-    role?: string;
-  };
-  transitions: { kind: string }[];
-}
-interface Board {
-  tasks: BoardTask[];
-  currentTask?: {
-    taskId: string;
-    status: "OPEN" | "INPROG" | "DONE";
-    qualifier?: string;
-  };
-  service: { code: string; label: string };
-}
-function board(monitor: Monitor): Board {
-  const fn = Reflect.get(monitor, "boardSnapshot");
-  expect(fn, "boardSnapshot must be detached and passive").toBeTypeOf(
-    "function",
-  );
-  return Reflect.apply(fn, monitor, []);
+function board(monitor: Monitor) {
+  return monitor.boardSnapshot();
 }
 function task(monitor: Monitor, id: string) {
   const found = board(monitor).tasks.find((item) => item.taskId === id);

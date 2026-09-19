@@ -52,7 +52,7 @@ describe("strict hybrid v6 checkpoint", () => {
     expect(state.tasks[0]?.label).toBe("Implement parser");
     expect(JSON.stringify(checkpoint)).not.toContain("consumer mutation");
   });
-  it.each([1, 2, 3, 4, 5, 7])(
+  it.each([1, 2, 3, 4, 5, 6, 8])(
     "rejects obsolete or unknown checkpoint version %i",
     async (version) => {
       const checkpoint = { ...encodeCheckpoint(await initial()), version };

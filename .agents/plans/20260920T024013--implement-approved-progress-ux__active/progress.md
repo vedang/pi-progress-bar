@@ -55,3 +55,9 @@
 - Durable healthCards array keyed by unique taskId, one card per retained task; provenance requires exact taskSource, triggering observation, hashed snapshot/request/evidence identities and codeRevision; no raw request retention. Full map preflight before optional calls; optional denial/failure cannot block semantics.
 - Verified targeted initial 22 reds/9 passes; after schema pin updates full unit26reds/409pass, integration1red/14pass. Format/check PASS. Logs `u05-{format,check,red,unit-red,integration-red}.log`.
 - U05 acceptance is reproduced reds, not green feature delivery. U06 sole source writer may implement only this slice; main owns all further test/config edits.
+
+## U06 source-complete; review gate
+- Worker source `901aa031` (change yymlmwuxwyrskzkvyltxxlzlxtslvmps) implements strict v7 healthCards, isolated health transport/admission, pure board projection and display-status freshness. Three source files only.
+- Main fixed missed obsolete-version matrix (reject6/8, accept7), replaced temporary board test types/reflection with direct production boardSnapshot API.
+- Independent main format/check/test PASS:436unit+15integration; `u06-{format,check,test}.log`.
+- U06 still in_progress pending full U05/U06 review. Main inspection flags scrutiny: source-vs-triggering-observation ID byte envelope; stale report/evidence health falsely current on unchanged focused task; restored idle-DONE identity derived from most recent card rather than exact recorded display; persisted old card fallback paths despite no-compat policy. Reviewer must distinguish real defects and provide exact repro seam.

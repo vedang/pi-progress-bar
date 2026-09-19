@@ -10,6 +10,7 @@ import {
   emptyState,
   type HybridState,
   type Observation,
+  type ObservationRole,
 } from "../../src/core/hybrid-state";
 
 const digest = (text: string) =>
@@ -17,7 +18,7 @@ const digest = (text: string) =>
 export const observation = (
   id: string,
   text: string,
-  role: "user" | "assistant" = "user",
+  role: ObservationRole = "user",
 ): Observation => ({ id, text, role, hash: digest(text) });
 export const noPatch = (): ScopePatch => ({
   add: [],

@@ -584,6 +584,49 @@ function maximumAssessment(observation: Observation): Assessment {
   };
 }
 
+/** A legal accepted completion outcome with an event and long threshold decimals. */
+function maximumCompletionAssessment(observation: Observation): Assessment {
+  return {
+    rawChoice: "yes",
+    confidence: 0.5000000000000001,
+    probability: 0.8000000000000002,
+    reason: "accepted",
+    source: observationRef(observation),
+  };
+}
+
+function longestJsonString(values: readonly string[]) {
+  const first = values[0];
+  if (!first) throw new Error("Missing bounded focus choice");
+  return values.reduce((longest, value) =>
+    Buffer.byteLength(JSON.stringify(value)) >
+    Buffer.byteLength(JSON.stringify(longest))
+      ? value
+      : longest,
+  );
+}
+
+/**
+ * Supplement only scalar encodings impossible to put in a valid candidate:
+ * JSON's largest finite-number spelling bounds every legal unit number.
+ * The record itself carries the largest legal task/special choice and reason.
+ */
+function assessmentSchemaBytes(
+  assessment: Assessment,
+  largestRawChoice: string,
+) {
+  const upper = {
+    ...assessment,
+    rawChoice: largestRawChoice,
+    confidence: Number.MAX_VALUE,
+    probability: Number.MAX_VALUE,
+    reason: "threshold-abstention",
+  };
+  const actual = Buffer.byteLength(JSON.stringify(assessment));
+  const upperBytes = Buffer.byteLength(JSON.stringify(upper));
+  return Math.max(0, upperBytes - actual);
+}
+
 function maximumSource(observation: Observation): SourceRef {
   return {
     ...observationRef(observation),
@@ -691,7 +734,7 @@ function completionAdmissionPlan(
   focusCandidates: readonly HybridTask[],
   request: EvaluationRequest,
 ): AdmissionPlan {
-  const assessments = chunk.map(() => maximumAssessment(observation));
+  const assessments = chunk.map(() => maximumCompletionAssessment(observation));
   const undo = completionUndo(state, chunk);
   const completed = applyCompletionRecord(
     state,
@@ -703,8 +746,10 @@ function completionAdmissionPlan(
   const focus = focusCandidates.length
     ? {
         assessment: {
-          ...maximumAssessment(observation),
-          rawChoice: focusCandidates.at(-1)?.id ?? "invalid",
+          ...maximumCompletionAssessment(observation),
+          rawChoice: longestJsonString(
+            focusCandidates.map((candidate) => candidate.id),
+          ),
         },
         priorFocusTaskId: optionalPresence(state.focusTaskId),
       }
@@ -729,7 +774,23 @@ function completionAdmissionPlan(
       ]),
     },
     request,
-    schemaBytes: 0,
+    schemaBytes:
+      assessments.reduce(
+        (total, assessment) =>
+          total + assessmentSchemaBytes(assessment, "uncertain"),
+        0,
+      ) +
+      (focus
+        ? assessmentSchemaBytes(
+            focus.assessment,
+            longestJsonString([
+              ...focusCandidates.map((candidate) => candidate.id),
+              "none",
+              "concurrent",
+              "uncertain",
+            ]),
+          )
+        : 0),
   };
 }
 

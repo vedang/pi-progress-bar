@@ -495,6 +495,94 @@ it("permanent provider failure settles an incomplete authority barrier and leave
   expect(f.h.monitor.state.pending).toBeUndefined();
 });
 
+it("cross-branch restore discards old active references but preserves target accepted journal", async () => {
+  const target = await pendingFixture();
+  target.h.monitor.stop();
+  const f = await heldActive();
+  const branch = [
+    target.entry,
+    branchEntry(target.latest.id, target.latest.text, target.latest.role),
+  ];
+  // Change only the reader: observing first would cancel A before restore and
+  // miss the synchronous target-validation race.
+  f.h.reader.mockImplementation(() => branch);
+  f.h.save.mockClear();
+  f.h.requests.length = 0;
+  await f.h.monitor.restore(
+    cwd,
+    encodeCheckpoint(target.state, target.metadata),
+    true,
+    f.h.reader,
+  );
+  expect(JSON.stringify(f.h.monitor.state.pending?.journal)).toBe(
+    JSON.stringify(target.state.pending?.journal),
+  );
+  expect(f.h.monitor.state.tasks).toEqual(target.state.tasks);
+  for (const [saved] of f.h.save.mock.calls) {
+    expect(saved).toMatchObject({
+      state: { pending: { journal: target.state.pending?.journal } },
+    });
+    expect(JSON.stringify(saved)).not.toContain('"active"');
+  }
+  f.release();
+  await f.h.settle("target");
+  expect(f.h.requests.some((request) => "gate" in request.questions)).toBe(
+    false,
+  );
+  branch.push(branchEntry("branch-b-suffix", "Continue branch B work."));
+  f.h.observe();
+  await f.h.settle("branch-b-suffix");
+  expect(f.h.monitor.debugSnapshot().processing).toBe("idle");
+  for (const [saved] of f.h.save.mock.calls)
+    expect(JSON.stringify(saved)).not.toContain('"active"');
+});
+
+it.each(["synchronous", "microtask"])(
+  "provider waiter rechecks a newer same-owner barrier (%s replacement)",
+  async (timing) => {
+    const f = await heldActive();
+    f.h.replace([f.entry, ...blanks(), f.active]);
+    const owner = Reflect.get(f.h.monitor, "activeObservation") as {
+      barrier?: { promise: Promise<void> };
+    };
+    const first = owner.barrier;
+    expect(first).toBeDefined();
+    f.release();
+    for (let step = 0; step < 20; step++) await Promise.resolve();
+    const calls = f.h.monitor.presentationSnapshot().usage.jev.calls;
+    f.h.save.mockClear();
+    // Complete B1 synchronously; don't let its queued waiter run before B2
+    // exists. Neither owner nor epoch changes between these two barriers.
+    for (let step = 0; step < 20 && owner.barrier === first; step++)
+      f.h.observe();
+    expect(owner.barrier).toBeUndefined();
+    // Also cover replacement after the helper wakes but before its caller's
+    // continuation: the final barrier check must be adjacent to admission.
+    if (timing === "microtask") await Promise.resolve();
+    f.h.replace([
+      f.entry,
+      branchEntry("inserted", "Changed preceding instruction."),
+      ...blanks(400),
+      f.active,
+    ]);
+    expect(Reflect.get(f.h.monitor, "activeObservation")).toBe(owner);
+    expect(owner.barrier).toBeDefined();
+    expect(owner.barrier).not.toBe(first);
+    for (let step = 0; step < 20; step++) await Promise.resolve();
+    expect(f.h.monitor.presentationSnapshot().usage.jev.calls).toBe(calls);
+    expect(f.h.save).not.toHaveBeenCalled();
+    expect(f.h.monitor.state.pending).toBeUndefined();
+    expect(f.h.monitor.state.cursor?.id).toBe("goal");
+    await f.h.settle("active");
+    const gates = f.h.requests.filter(
+      (request) =>
+        "gate" in request.questions &&
+        (request.state as { latest?: { id?: string } }).latest?.id === "active",
+    );
+    expect(gates).toHaveLength(2);
+  },
+);
+
 it("terminal negative tail and later settled suffix clear catch-up and leave no idle scan", async () => {
   const { h, entry } = await fixture();
   h.replace([entry, ...blanks(1000)]);

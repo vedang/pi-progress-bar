@@ -124,16 +124,6 @@ export async function readBeadsExport(cwd: string): Promise<BeadsExport> {
   }
 }
 
-/** A readable file is still incomplete when it drops current grounded records. */
-export function hasGroundedBeadsRecords(
-  tasks: readonly Task[],
-  source: BeadsExport,
-): boolean {
-  return tasks.every(
-    (task) => !task.beads || source.records.has(task.beads.id),
-  );
-}
-
 export function enrichBeadsTasks(tasks: Task[], source: BeadsExport): Task[] {
   const grounded = tasks.map((task) => {
     const { beads: _stale, ...plain } = task;

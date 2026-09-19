@@ -19,9 +19,35 @@ const MAX_EVENTS = 1000;
 const MAX_LABEL_CHARACTERS = 240;
 const MAX_BYTES = 512 * 1024;
 
+export interface MonitorCheckpointMetadata {
+  enabled: boolean;
+  usage: {
+    jev: { calls: number; inputTokens: number; outputTokens: number };
+    extraction: { calls: number; inputTokens: number; outputTokens: number };
+  };
+  lastJevCallAt?: number;
+  lastExtractionCallAt?: number;
+  card?: {
+    taskId: string;
+    revision: number;
+    label: string;
+    retained: boolean;
+    replacementPending: boolean;
+    assessedAt: number;
+    health: {
+      requirements: string;
+      acceptance: string;
+      newRedTest: string;
+      redEvidence: string;
+      implementation: string;
+    };
+  };
+}
+
 interface Checkpoint {
   version: typeof VERSION;
   state: HybridState;
+  monitor?: MonitorCheckpointMetadata;
 }
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -54,6 +80,17 @@ const unit = (value: unknown): value is number =>
   value <= 1;
 const positiveInteger = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) >= 1;
+const nonNegativeInteger = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && (value as number) >= 0;
+const safeLabel = (value: unknown) =>
+  typeof value === "string" &&
+  !!value.trim() &&
+  Array.from(value).length <= MAX_LABEL_CHARACTERS &&
+  !/[\p{Cc}\p{Cf}]/u.test(value);
+const safeHealthLabel = (value: unknown) =>
+  typeof value === "string" &&
+  value.length <= 128 &&
+  !/[\p{Cc}\p{Cf}]/u.test(value);
 
 function validObservationRef(value: unknown): value is ObservationRef {
   return (
@@ -293,6 +330,78 @@ function validState(value: unknown): value is HybridState {
   return true;
 }
 
+function validMonitorMetadata(
+  value: unknown,
+  state: HybridState,
+): value is MonitorCheckpointMetadata {
+  if (
+    !record(value) ||
+    !exactKeys(
+      value,
+      ["enabled", "usage"],
+      ["lastJevCallAt", "lastExtractionCallAt", "card"],
+    ) ||
+    typeof value.enabled !== "boolean" ||
+    !record(value.usage) ||
+    !exactKeys(value.usage, ["jev", "extraction"]) ||
+    ![value.usage.jev, value.usage.extraction].every(
+      (usage) =>
+        record(usage) &&
+        exactKeys(usage, ["calls", "inputTokens", "outputTokens"]) &&
+        nonNegativeInteger(usage.calls) &&
+        nonNegativeInteger(usage.inputTokens) &&
+        nonNegativeInteger(usage.outputTokens),
+    ) ||
+    (Object.hasOwn(value, "lastJevCallAt") &&
+      !nonNegativeInteger(value.lastJevCallAt)) ||
+    (Object.hasOwn(value, "lastExtractionCallAt") &&
+      !nonNegativeInteger(value.lastExtractionCallAt))
+  )
+    return false;
+  if (!Object.hasOwn(value, "card")) return true;
+  const card = value.card;
+  if (
+    !record(card) ||
+    !exactKeys(card, [
+      "taskId",
+      "revision",
+      "label",
+      "retained",
+      "replacementPending",
+      "assessedAt",
+      "health",
+    ]) ||
+    !taskIdIsValid(card.taskId) ||
+    !positiveInteger(card.revision) ||
+    !safeLabel(card.label) ||
+    typeof card.retained !== "boolean" ||
+    typeof card.replacementPending !== "boolean" ||
+    !nonNegativeInteger(card.assessedAt) ||
+    !record(card.health) ||
+    !exactKeys(card.health, [
+      "requirements",
+      "acceptance",
+      "newRedTest",
+      "redEvidence",
+      "implementation",
+    ]) ||
+    !Object.values(card.health).every(safeHealthLabel)
+  )
+    return false;
+  return state.tasks.some((task) => task.id === card.taskId);
+}
+
+function validCheckpoint(value: unknown): value is Checkpoint {
+  return (
+    record(value) &&
+    exactKeys(value, ["version", "state"], ["monitor"]) &&
+    value.version === VERSION &&
+    validState(value.state) &&
+    (!Object.hasOwn(value, "monitor") ||
+      validMonitorMetadata(value.monitor, value.state))
+  );
+}
+
 function canonicalObservation(
   reference: ObservationRef,
   resolve: (entryId: string) => Observation | undefined,
@@ -371,15 +480,27 @@ function checkpointState(state: HybridState): HybridState {
 }
 
 /** Encode only bounded derived state; source text and provider envelopes never persist. */
-export function encodeCheckpoint(state: HybridState): Checkpoint {
+export function encodeCheckpoint(
+  state: HybridState,
+  monitor?: MonitorCheckpointMetadata,
+): Checkpoint {
   if (!validState(state)) throw new Error("Invalid hybrid checkpoint state");
   const checkpoint: Checkpoint = {
     version: VERSION,
     state: checkpointState(state),
+    ...(monitor ? { monitor } : {}),
   };
-  if (!validState(checkpoint.state) || byteLength(checkpoint) > MAX_BYTES)
+  if (!validCheckpoint(checkpoint) || byteLength(checkpoint) > MAX_BYTES)
     throw new Error("Hybrid checkpoint exceeds v5 bounds");
   return JSON.parse(JSON.stringify(checkpoint)) as Checkpoint;
+}
+
+/** Read only validated monitor-owned metadata; unknown checkpoint fields fail closed. */
+export function monitorCheckpointMetadata(
+  data: unknown,
+): MonitorCheckpointMetadata | undefined {
+  if (!validCheckpoint(data) || !data.monitor) return;
+  return JSON.parse(JSON.stringify(data.monitor)) as MonitorCheckpointMetadata;
 }
 
 /** Fail closed on malformed storage or references absent from canonical active history. */
@@ -390,11 +511,8 @@ export function restoreCheckpoint(
 ): HybridState | undefined {
   try {
     if (
-      !record(data) ||
-      !exactKeys(data, ["version", "state"]) ||
-      data.version !== VERSION ||
+      !validCheckpoint(data) ||
       byteLength(data) > MAX_BYTES ||
-      !validState(data.state) ||
       data.state.sourceId !== sourceId ||
       !referencesResolve(data.state, resolve)
     )

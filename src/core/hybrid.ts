@@ -24,6 +24,14 @@ const MAX_ACTIVE_TASKS = 20;
 const MAX_TOTAL_TASKS = 200;
 const MAX_LATEST_MESSAGE_BYTES = 12 * 1024;
 
+/** Transport failed before a semantic result; retain accepted journal for explicit wake. */
+export class RetryableProviderError extends Error {
+  constructor() {
+    super("Provider transport unavailable");
+    this.name = "RetryableProviderError";
+  }
+}
+
 export interface HybridProviders {
   evaluate(request: EvaluationRequest): Promise<ValidatedResult>;
   extract(input: ReturnType<typeof extractionInput>): Promise<string>;
@@ -288,6 +296,7 @@ async function applyScopePatch(
           : {}),
     };
   } catch (error) {
+    if (error instanceof RetryableProviderError) throw error;
     return {
       ...state,
       scopeError:
@@ -393,6 +402,7 @@ async function applyCompletion(
     }
     return next;
   } catch (error) {
+    if (error instanceof RetryableProviderError) throw error;
     return {
       ...next,
       completionError:
@@ -450,6 +460,7 @@ export async function processObservation(
         };
         saveAccepted(next, providers);
       } catch (error) {
+        if (error instanceof RetryableProviderError) throw error;
         next = {
           ...next,
           pending: pending(observation, "complete"),

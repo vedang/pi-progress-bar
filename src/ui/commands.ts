@@ -1,25 +1,30 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { Monitor } from "../core/monitor";
-import { lastJevCallLabel } from "./freshness";
 
-const COMMANDS = `How to use:
+const commands = `How to use:
   /progress                         Show this help and current state
   /progress on                      Start or resume automatic monitoring
   /progress off                     Stop monitoring and hide the widget`;
 
-const help = (monitor: Monitor) => `Automatic progress monitor
+const help = (monitor: Monitor) => {
+  const view = monitor.presentationSnapshot();
+  const debug = monitor.debugSnapshot();
+  const notices = debug.diagnostics.length
+    ? debug.diagnostics
+        .map((item) => `${item.label}: ${item.count}`)
+        .join(" • ")
+    : "none";
+  return `Automatic progress monitor
 
-State: ${monitor.enabled ? "ON" : "OFF"}
-Analysis: event-driven observation and finite catch-up
-Jev usage: ${monitor.usage.calls} calls • ${monitor.usage.inputTokens} input tokens • ${monitor.usage.outputTokens} output tokens
-Last Jev call: ${lastJevCallLabel(monitor.gateway.lastCallAt)}
-Progress: ${monitor.progressState()}
-Service: ${monitor.error ? `${monitor.error} • ${monitor.gateway.status}` : monitor.gateway.status}
-Diagnostics: ${monitor.diagnosticSummary()}
+State: ${view.enabled ? "ON" : "OFF"}
+Progress: ${view.progress.done}/${view.progress.total} (${view.progress.kind})
+Service: ${view.service.label}
+Jev usage: ${view.usage.jev.calls} calls • ${view.usage.jev.inputTokens} input tokens • ${view.usage.jev.outputTokens} output tokens
+Extraction usage: ${view.usage.extraction.calls} calls • ${view.usage.extraction.inputTokens} input tokens • ${view.usage.extraction.outputTokens} output tokens
+Diagnostics: ${notices}
 
-${COMMANDS}
-
-Monitoring starts automatically when TYPESAFE_API_KEY is available.`;
+${commands}`;
+};
 
 /** Deliberately small control surface: monitoring is automatic, never configured here. */
 export async function command(
@@ -43,7 +48,7 @@ export async function command(
       if (error && ctx.hasUI) ctx.ui.notify(error, "error");
       return;
     }
-    throw new Error(`Unknown progress command.\n\n${COMMANDS}`);
+    throw new Error(`Unknown progress command.\n\n${commands}`);
   } catch (error) {
     if (ctx.hasUI)
       ctx.ui.notify(

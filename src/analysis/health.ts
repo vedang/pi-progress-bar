@@ -1,11 +1,6 @@
 import type { Ledger } from "../core/types";
 import type { PassiveEvidence } from "../sources/evidence";
-import {
-  type EvaluationRequest,
-  MAX_REQUEST_BYTES,
-  MODEL,
-  type ValidatedResult,
-} from "./gateway";
+import { type EvaluationRequest, MAX_REQUEST_BYTES, MODEL } from "./gateway";
 
 /** v1 rubric: independent questions share one bounded task-local state. */
 const questions: EvaluationRequest["questions"] = {
@@ -70,12 +65,6 @@ export interface HealthSnapshot {
   requests: EvaluationRequest[];
   implementationEvidenceComplete: boolean;
 }
-export interface HealthResult {
-  snapshot: HealthSnapshot;
-  result: ValidatedResult;
-  evaluatedAt: number;
-}
-
 const requestFits = (request: EvaluationRequest) =>
   Object.keys(request.questions).length <= 20 &&
   Buffer.byteLength(JSON.stringify(request)) <= MAX_REQUEST_BYTES;

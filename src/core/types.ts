@@ -1,4 +1,4 @@
-export type WorkKind = "action" | "response";
+type WorkKind = "action" | "response";
 export type ReportState =
   | "done"
   | "reopened"
@@ -7,14 +7,14 @@ export type ReportState =
   | "cancelled"
   | "unknown"
   | "conflict";
-export interface SourceRef {
+interface SourceRef {
   sourceId: string;
   entryId?: string;
   start: number;
   end: number;
   provenance: "file-marker" | "user" | "assistant" | "interactive-user";
 }
-export interface SourceTask {
+interface SourceTask {
   text: string;
   /** Jev-derived deliverable kind; non-persisted adapters may default absent values to action. */
   workKind?: WorkKind;

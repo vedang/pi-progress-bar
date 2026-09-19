@@ -2,9 +2,7 @@ import {
   type ExtensionContext,
   truncateToVisualLines,
 } from "@earendil-works/pi-coding-agent";
-import { countReported } from "../core/ledger";
-import type { Monitor, PresentationTaskCard } from "../core/monitor";
-import { gatewayStatusLabel, lastJevCallLabel } from "./freshness";
+import type { PresentationSnapshot } from "../core/monitor";
 
 export const widgetName = "pi-progress-bar";
 const plain = (text: string) => text.replace(/[\p{Cc}\p{Cf}]/gu, " ");
@@ -23,65 +21,70 @@ export function clarityLabel(score: unknown): string {
   return "clear";
 }
 
-function signals(card: PresentationTaskCard | undefined): string[] {
-  const assessment = card?.assessment;
-  return [
-    `Requirements: ${assessment?.requirements ?? "unknown"}`,
-    `Acceptance: ${assessment?.acceptance ?? "unknown"}`,
-    `New red test: ${assessment?.newRedTest ?? "Unknown"}`,
-    `Red evidence: ${assessment?.redEvidence ?? "Unknown"}`,
-    `Implementation: ${assessment?.implementation ?? "unverified"}`,
-  ];
-}
+const clipVisualLine = (line: string, width: number) => {
+  const visualLines = truncateToVisualLines(
+    plain(line),
+    1000,
+    width,
+    0,
+  ).visualLines;
+  return visualLines.length ? [visualLines[0] ?? ""] : [""];
+};
 
-export function paint(ctx: ExtensionContext, monitor: Monitor) {
-  if (ctx.mode !== "tui" || !monitor.enabled) return;
+/** Render copied presentation data only; no monitor or branch capability enters UI. */
+export function paint(ctx: ExtensionContext, view: PresentationSnapshot) {
+  if (ctx.mode !== "tui" || !view.enabled) return;
   ctx.ui.setWidget(widgetName, (_tui, theme) => ({
     render(width) {
       if (width < 2) return [""];
-      const count = countReported(monitor.ledger);
-      const unresolvedScope = monitor.scopeIsUnresolved();
-      const label = monitor.ledger
-        ? unresolvedScope
-          ? `Reported ${count.done}/${count.total} • historical; scope unresolved`
-          : `Reported ${count.done}/${count.total}${count.percent === null ? " • unknown percentage" : ` • ${count.percent}%`}${monitor.ledger.stale ? " • stale" : ""}`
-        : `Progress: ${monitor.progressState()}`;
-      const filled = Math.floor((count.percent ?? 0) / 10);
-      const bar =
-        unresolvedScope || count.percent === null
-          ? ""
-          : `[${"#".repeat(filled)}${"-".repeat(10 - filled)}] `;
-      const card = monitor.taskCard();
-      const task = card?.task;
-      const taskLabel = card?.current
-        ? "Task"
-        : card?.selected
-          ? "Selected task (current unknown)"
-          : "Last task";
-      const retained = card?.retained
-        ? ` • retained last assessed${card.assessedAt ? ` as-of ${new Date(card.assessedAt).toISOString()}` : ""}${card.replacementPending ? " • replacement assessment pending" : ""}`
-        : card?.current && !card.assessment
-          ? " • assessment pending"
-          : "";
+      const { progress, card } = view;
+      const current = progress.kind === "current";
+      const percent =
+        current && progress.total
+          ? Math.floor((progress.done * 100) / progress.total)
+          : undefined;
+      const filled = Math.floor((percent ?? 0) / 10);
+      const progressLine = current
+        ? `${percent === undefined ? "" : `[${"#".repeat(filled)}${"-".repeat(10 - filled)}] `}Reported ${progress.done}/${progress.total}${percent === undefined ? "" : ` • ${percent}%`}`
+        : progress.kind === "previous"
+          ? `Reported previous ${progress.done}/${progress.total}`
+          : "Progress: no current tasks";
+      const provenance = card
+        ? [
+            `Task assessment: ${card.retained ? "retained" : "current"}`,
+            `As-of: ${new Date(card.assessedAt).toISOString()}`,
+            ...(card.replacementPending
+              ? ["Replacement assessment pending"]
+              : []),
+          ]
+        : [];
+      const health = card
+        ? [
+            `Requirements: ${card.health.requirements}`,
+            `Acceptance: ${card.health.acceptance}`,
+            `New red test: ${card.health.newRedTest}`,
+            `Red evidence: ${card.health.redEvidence}`,
+            `Implementation: ${card.health.implementation}`,
+          ]
+        : [
+            "Requirements: unknown",
+            "Acceptance: unknown",
+            "New red test: Unknown",
+            "Red evidence: Unknown",
+            "Implementation: unverified",
+          ];
       const lines = [
-        theme.fg("accent", bar + label),
+        theme.fg("accent", progressLine),
+        ...provenance.map((line) => theme.fg("muted", line)),
+        ...(card ? [theme.fg("muted", `Task: ${card.label}`)] : []),
+        theme.fg("muted", `${view.activity} • ${view.service.label}`),
         theme.fg(
           "muted",
-          `${taskLabel}: ${plain(task?.text ?? "unknown").slice(0, 160)}${retained}${task?.beads ? ` • Beads ${plain(task.beads.id)}${task.beads.conflict ? " (export disagreement)" : ""}` : ""}`,
+          `Jev ${view.usage.jev.inputTokens}/${view.usage.jev.outputTokens} tokens • extraction ${view.usage.extraction.inputTokens}/${view.usage.extraction.outputTokens} tokens`,
         ),
-        theme.fg(
-          "muted",
-          `${monitor.activity} • event-driven analysis • Last Jev call: ${lastJevCallLabel(monitor.gateway.lastCallAt)} • ${plain(monitor.error ?? gatewayStatusLabel(monitor.gateway.status))}`,
-        ),
-        theme.fg(
-          "muted",
-          `Progress state: ${monitor.progressState()} • diagnostics: ${monitor.diagnosticSummary()}`,
-        ),
-        ...signals(card).map((line) => theme.fg("muted", plain(line))),
+        ...health.map((line) => theme.fg("muted", line)),
       ];
-      return lines.flatMap(
-        (line) => truncateToVisualLines(line, 2, width, 0).visualLines,
-      );
+      return lines.flatMap((line) => clipVisualLine(line, width));
     },
     invalidate() {},
   }));

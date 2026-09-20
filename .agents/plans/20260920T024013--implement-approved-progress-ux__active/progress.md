@@ -87,3 +87,9 @@
 - Main reproduced all3 with new tests (`u06-third-review-red.log`:3failed/33passed), format/check PASS. Core-only candidate fits exact-edge reserve while health map blocks it; restored-open→all-done optional preflight fits without selector but overflows with it; held completion after cosmetic source revise exposes stale widget health despite board Unassessed.
 - Main updated old private admitHealth test call to exact triggering Observation, removing any need for worker's numeric fallback branch. No compatibility layer requested.
 - Repair scope remains U06 only; no later ticket released. Preserve provider budgets: no paid/live calls in this stage.
+
+## U06 third repair main verification
+- Source worker1f0248db returned4619cf24 / lrkwopqvmmlrvrqulullotpryvulmxsx; exact parent9dc77e85, monitor.ts only. Fresh handoff7f2934c9 clean.
+- Main independently format/check/test PASS451unit+15integration (`u06-third-repair-*`). All3 latest genuine boundary reds resolved.
+- Mandatory capacity fallback evicts all optional health rather than speculative partial packing. Prospective idle selector preflight/rollback included; intermediate source commits filter map before callback. Numeric admitHealth fallback removed.
+- Resumed cumulative reviewer via same protocol: ae2c1b04. Source frozen4619cf24; U06 remains open, laterBeads not released.

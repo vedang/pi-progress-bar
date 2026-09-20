@@ -240,6 +240,49 @@ it("rejects strict-v7 provenance-free legacy current-card storage without replay
   expect(h.save).toHaveBeenCalledTimes(saves);
 });
 
+it("preflights existing larger health during dispatch before accepting a smaller replacement", async () => {
+  const h = fixture();
+  h.start();
+  await h.settle("goal");
+  const long = observation(
+    `old-report-${"x".repeat(8000)}`,
+    "Parser work continues.",
+    "assistant",
+  );
+  h.append(long.id, long.text);
+  await h.settle(long.id);
+  expect(records(h)[0]?.provenance.observation.entryId).toBe(long.id);
+  const admission = vi
+    .spyOn(
+      h.monitor as unknown as { admitHealth: (...args: unknown[]) => boolean },
+      "admitHealth",
+    )
+    .mockReturnValue(false);
+  const short = observation(
+    "short-report",
+    "Parser work updated.",
+    "assistant",
+  );
+  h.append(short.id, short.text);
+  await h.settle(short.id);
+  admission.mockRestore();
+  h.monitor.state.scopeError = "";
+  h.monitor.state.scopeError = "p".repeat(
+    MAX_CHECKPOINT_BYTES - bytes(h.monitor.checkpoint()) - 2,
+  );
+  expect(bytes(h.monitor.checkpoint())).toBe(MAX_CHECKPOINT_BYTES - 2);
+  const before = structuredClone(h.monitor.state);
+  const calls = h.fetch.mock.calls.length;
+  Reflect.apply(Reflect.get(h.monitor, "scheduleHealth"), h.monitor, [short]);
+  h.observe();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.fetch).toHaveBeenCalledTimes(calls);
+  expect(h.monitor.state).toEqual(before);
+  expect(h.monitor.state.capacity).toBe("clear");
+  expect(records(h)[0]?.provenance.observation.entryId).toBe(long.id);
+  expect(() => h.monitor.checkpoint()).not.toThrow();
+});
+
 it("evicts optional health when mandatory core work fits only without the map", async () => {
   const h = fixture();
   h.start();

@@ -93,3 +93,9 @@
 - Main independently format/check/test PASS451unit+15integration (`u06-third-repair-*`). All3 latest genuine boundary reds resolved.
 - Mandatory capacity fallback evicts all optional health rather than speculative partial packing. Prospective idle selector preflight/rollback included; intermediate source commits filter map before callback. Numeric admitHealth fallback removed.
 - Resumed cumulative reviewer via same protocol: ae2c1b04. Source frozen4619cf24; U06 remains open, laterBeads not released.
+
+## U06 replacement-boundary correction
+- Reviewer ae2c1b04 confirmed prior repairs but BLOCK1P1: smaller replacement map/prospective selector was incorrectly substituted into pre-result dispatch accounting.
+- Main reproduced exact long-old-report→short-new-report byte-edge regression (`u06-replacement-red.log`:1failed13passed).
+- Main narrow correction splits dispatch map from candidate map; actual current metadata/current selector retained for current/request/current-limit accounting; prospective candidate used only for accepted/candidate-limit. Core-only fallback explicitly proves the empty post-eviction dispatch map.
+- Main format/check/test PASS452unit+15integration (`u06-replacement-*`). U06 source remains acceptance-gated, no later tickets released.

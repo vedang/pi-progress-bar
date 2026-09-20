@@ -2032,21 +2032,18 @@ export class Monitor {
     requests = 1,
     healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
     prospectiveIdleDoneTaskId?: string,
+    dispatchHealthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
   ): CapacityEnvelope {
     const selector =
       prospectiveIdleDoneTaskId ?? this.prospectiveIdleDoneTaskIdFor(candidate);
-    const current = this.metadata(
-      this.enabled,
-      healthCards,
-      this.state,
-      selector,
-    );
+    // Dispatch persists existing facts and selector until the result commits.
+    // Core-only admission explicitly substitutes its pre-dispatch eviction map.
+    const current = this.metadata();
     const oldCard = this.retainedCardFor(this.state);
     const dispatch = this.capacityMetadata(
       oldCard,
-      healthCards,
+      dispatchHealthCards,
       this.state,
-      selector,
     );
     const accepted = this.capacityMetadata(
       card ?? this.retainedCardFor(candidate),
@@ -2129,6 +2126,8 @@ export class Monitor {
         undefined,
         plan.schemaBytes,
         1,
+        new Map(),
+        undefined,
         new Map(),
       );
       if (coreOnly.maximum <= MAX_CHECKPOINT_BYTES) {

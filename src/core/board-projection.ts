@@ -191,7 +191,10 @@ export function projectBoard(input: {
       )
     : undefined;
   const retainedDone =
-    !input.unsettled && allDone && input.lastDisplayedTaskId
+    !input.unsettled &&
+    !input.activitySupersedesSemantic &&
+    allDone &&
+    input.lastDisplayedTaskId
       ? tasks.find(
           (task) =>
             task.taskId === input.lastDisplayedTaskId && task.status === "DONE",

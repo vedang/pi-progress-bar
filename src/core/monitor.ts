@@ -82,7 +82,7 @@ export interface MonitorOptions {
     signal: AbortSignal,
     onDispatch?: (at: number) => void,
   ) => Promise<SelectedModelResult>;
-  /** Runtime-only U15 gate. Production explicitly remains false. */
+  /** Runtime-only grounded-detail gate; production enables it and tests may disable it. */
   richDetailsEnabled?: boolean;
 }
 
@@ -471,7 +471,9 @@ export class Monitor {
     this.nextActivityToken++;
     this.activityFocus = undefined;
     if (result.kind !== "changed" || !result.calls?.length) {
-      this.activitySupersedesSemantic = result.kind === "overflow";
+      // Empty observed starts restore semantic/fallback display. Every malformed
+      // boundary remains newer-but-uncertain work and must hide stale INPROG/DONE.
+      this.activitySupersedesSemantic = result.kind !== "empty";
       this.publish();
       return;
     }
@@ -1314,16 +1316,32 @@ export class Monitor {
   }
 
   private rebuildDetailValues(pass?: CanonicalPass) {
-    this.detailValues.clear();
-    if (!this.options.richDetailsEnabled) return;
-    const resolve = (entryId: string) =>
-      pass
-        ? this.resolveObservation(pass, entryId)
-        : this.cachedObservation(entryId);
-    for (const record of this.taskDetails.values()) {
-      const values = materializeTaskDetails(record, resolve);
-      if (values) this.detailValues.set(record.taskId, values);
+    if (!this.options.richDetailsEnabled) {
+      this.detailValues.clear();
+      return;
     }
+    // A getter must never reopen canonical history. Keep a previously validated
+    // detached value across ordinary commits; a supplied CanonicalPass is the
+    // only authority that may replace or drop it.
+    const retained = new Map(
+      [...this.detailValues].filter(([taskId]) => {
+        const record = this.taskDetails.get(taskId);
+        const task = this.state.tasks.find((item) => item.id === taskId);
+        return !!record && !!task && detailRecordMatchesTask(record, task);
+      }),
+    );
+    if (!pass) {
+      this.detailValues = retained;
+      return;
+    }
+    const values = new Map<string, MaterializedTaskDetails>();
+    for (const record of this.taskDetails.values()) {
+      const detail = materializeTaskDetails(record, (entryId) =>
+        this.resolveObservation(pass, entryId),
+      );
+      if (detail) values.set(record.taskId, detail);
+    }
+    this.detailValues = values;
   }
 
   private detailsForState(state: HybridState) {
@@ -1360,12 +1378,15 @@ export class Monitor {
     const accepted = [...this.taskDetails.values()].filter((record) =>
       this.detailRecordMatchesCanonical(record, pass),
     );
-    if (accepted.length === this.taskDetails.size) return false;
-    this.taskDetails = new Map(
-      accepted.map((record) => [record.taskId, copyDetailRecord(record)]),
-    );
+    const changed = accepted.length !== this.taskDetails.size;
+    if (changed)
+      this.taskDetails = new Map(
+        accepted.map((record) => [record.taskId, copyDetailRecord(record)]),
+      );
+    // Revalidate/materialize at a canonical mutation boundary even when every
+    // durable record remains accepted. Ordinary later commits retain this copy.
     this.rebuildDetailValues(pass);
-    return true;
+    return changed;
   }
 
   private reconcileHealthCards(pass: CanonicalPass) {
@@ -1851,6 +1872,7 @@ export class Monitor {
       this.enabled = true;
       this.gateway.enable(this.identity());
       this.healthGateway.enable(this.identity());
+      this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
       // Rebuild from current canonical branch after discarding stale semantics.
       this.requeue(this.beginCanonicalPass(), true);
@@ -2383,33 +2405,36 @@ export class Monitor {
   private maximumDetailRecord(record: TaskDetailRecord): TaskDetailRecord {
     const uncovered = uncoveredDetailKeys(record);
     if (!uncovered.length) return copyDetailRecord(record);
+    // Every remaining key can require its own request/receipt. Model the
+    // longest legal normalized assessment, not a short accepted yes/1 shape.
+    const maximumAssessment = (key: (typeof uncovered)[number]) => {
+      const candidate = record.candidates.find((item) => item.key === key);
+      if (!candidate) throw new Error("Missing detail candidate");
+      const source = candidate.source;
+      return {
+        rawChoice: "uncertain",
+        // JSON keeps decimal notation at this magnitude, making this a longer
+        // legal unit scalar than ordinary 0.1/1 response values.
+        confidence: 0.0000012345678901234567,
+        probability: 0.0000012345678901234567,
+        reason: "threshold-abstention" as const,
+        source: {
+          entryId: source.entryId,
+          messageHash: source.messageHash,
+          role: source.role,
+        },
+      };
+    };
     return {
       ...copyDetailRecord(record),
       receipts: [
         ...record.receipts,
-        {
+        ...uncovered.map((key) => ({
           requestHash: "f".repeat(64),
-          candidateKeys: uncovered,
-          assessments: uncovered.map((key) => {
-            const candidate = record.candidates.find(
-              (item) => item.key === key,
-            );
-            if (!candidate) throw new Error("Missing detail candidate");
-            const source = candidate.source;
-            return {
-              rawChoice: "yes",
-              confidence: 1,
-              probability: 1,
-              reason: "accepted" as const,
-              source: {
-                entryId: source.entryId,
-                messageHash: source.messageHash,
-                role: source.role,
-              },
-            };
-          }),
+          candidateKeys: [key],
+          assessments: [maximumAssessment(key)],
           validatedAt: Number.MAX_SAFE_INTEGER,
-        },
+        })),
       ],
     };
   }
@@ -2466,10 +2491,17 @@ export class Monitor {
         flight.epoch !== this.epoch
       )
         return;
-      const keys = uncoveredDetailKeys(current);
-      const request = taskDetailRequest(current, keys, (entryId) =>
-        this.resolveObservation(pass, entryId),
-      );
+      const remaining = uncoveredDetailKeys(current);
+      let keys = remaining;
+      let request: EvaluationRequest | undefined;
+      // A valid task may need several bounded receipts. Preserve candidate order
+      // and select the largest nonempty prefix that fits without truncating text.
+      while (keys.length && !request) {
+        request = taskDetailRequest(current, keys, (entryId) =>
+          this.resolveObservation(pass, entryId),
+        );
+        if (!request) keys = keys.slice(0, -1);
+      }
       if (
         !request ||
         !isDetailRequest(request) ||
@@ -2502,23 +2534,44 @@ export class Monitor {
         ...copyDetailRecord(current),
         receipts: [...current.receipts, receipt],
       };
-      const previous = this.taskDetails;
-      this.taskDetails = new Map(previous);
+      const previousDetails = this.taskDetails;
+      const previousValues = this.detailValues;
+      const previousInputTokens = this.usage.jev.inputTokens;
+      const previousOutputTokens = this.usage.jev.outputTokens;
+      this.taskDetails = new Map(previousDetails);
       this.taskDetails.set(updated.taskId, updated);
+      this.rebuildDetailValues(pass);
       this.usage.jev.inputTokens = saturatingAdd(
-        this.usage.jev.inputTokens,
+        previousInputTokens,
         result.usage.input_tokens,
       );
       this.usage.jev.outputTokens = saturatingAdd(
-        this.usage.jev.outputTokens,
+        previousOutputTokens,
         result.usage.output_tokens,
       );
       try {
-        this.commit(this.state);
+        // This optional transaction has no semantic state change. Persist the
+        // receipt and accepted tokens as one checkpoint or retain neither.
+        encodeCheckpoint(
+          this.state,
+          this.metadata(false, this.healthCards, this.state),
+        );
+        const checkpoint = encodeCheckpoint(
+          this.state,
+          this.metadata(this.enabled, this.healthCards, this.state),
+        );
+        this.persist(checkpoint);
         this.parkedDetails.delete(updated.taskId);
+        this.refreshBeads();
+        this.publish();
       } catch {
-        this.taskDetails = previous;
+        this.taskDetails = previousDetails;
+        this.detailValues = previousValues;
+        this.usage.jev.inputTokens = previousInputTokens;
+        this.usage.jev.outputTokens = previousOutputTokens;
         this.parkedDetails.add(updated.taskId);
+        this.note("saved-state-rejected");
+        this.publish();
       }
     } catch {
       // Optional details never influence semantic retry/wait/capacity state.

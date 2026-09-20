@@ -147,3 +147,8 @@
 - Main make format/check/test PASS531unit+17integration (`u10-{format,check,test}.log`).
 - Main independently repeated four Pi0.85.1 controller probes PASS. Expanded offline actual-host static board matrix to16PASS:120x40/80x24/60x20/40x16 × regular/fullscreen × transformer before/after. Proven bounded rows/columns, five Summary labels when usable, explicit size notice at40x16, exact Esc close, nonempty/customeditor refusal, shutdown. `run-board-geometries.py`, `board-*.jsonl/.ansi`, `u10-geometries-proof.log`.
 - These are real-host static UI proofs, not full live-monitor/manual acceptance. pi-subagents co-load remains U17. U10 stays in_progress pending cumulative U09/U10 review; later source unreleased.
+
+## U10 required detail reachability blocker
+- Cumulative reviewer0b78fca0 BLOCK1P1: static right-pane clipping permanently hides valid long labels/health/provenance at supported60x20 geometry. Only debugger body was scrollable; width safety != content reachability.
+- Main reproduced2red20pass with debugger OFF/ON at56-column overlay/20screenrows: step detail scroll through all rows; five Summary labels and service stay pinned, complete207-char label words, longest valid health values, role/time and full service instruction must be reachable. Existing531 tests retained.
+- Main format/check PASS; `u10-wrap-red.log` is the failing receipt. Source held until this test commit; U10 open, U11 unreleased. Repair must wrap safe whole text and compute scroll bounds from rendered rows, not hide fields in clipped static rows or weaken supported dimensions.

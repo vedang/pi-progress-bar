@@ -372,3 +372,61 @@ it("resets task-local scroll when a publication removes the inspected task", asy
   expect(h.board.viewState().detailOffset).toBe(0);
   expect(h.text()).toContain("transition-1-0");
 });
+
+it.each([false, true])(
+  "keeps complete required details reachable at 56x20 (debugger=%s)",
+  async (debuggerOpen) => {
+    const view = tasks(1);
+    const task = view.board.tasks[0];
+    if (!task) throw new Error("Missing task");
+    const words = Array.from(
+      { length: 26 },
+      (_, i) => `label${String(i).padStart(2, "0")}`,
+    );
+    task.label = words.join(" ");
+    task.health.acceptance = "not-found-in-context";
+    task.health.implementation = "appears complete";
+    task.provenance = {
+      state: "retained",
+      role: "assistant",
+      assessedAt: Date.parse("2026-09-20T10:03:12Z"),
+    };
+    view.board.service = view.presentation.service = {
+      code: "saved-state-corrupt",
+      label: "Saved progress state is corrupt; start a fresh session",
+    };
+    const h = await fixture(view, 20);
+    h.text(56);
+    if (debuggerOpen) h.board.handleInput("d");
+    h.board.handleInput(keys.right);
+    const frames: string[] = [];
+    for (let i = 0; i < 180; i++) {
+      const lines = h.board.render(56).map(stripVTControlCharacters);
+      expect(lines.length).toBeLessThanOrEqual(16);
+      for (const line of lines)
+        expect(visibleWidth(line)).toBeLessThanOrEqual(56);
+      // Left pane is 22 columns plus one gap at this exact geometry; ASCII fixture.
+      const right = lines.slice(0, -1).map((line) => line.slice(23));
+      const frame = right.join("\n");
+      for (const label of summary) expect(frame).toContain(label);
+      expect(frame).toContain("Service:");
+      frames.push(frame.replace(/\s+/g, ""));
+      h.board.handleInput(keys.down);
+    }
+    for (const value of [
+      ...words,
+      "not-found-in-context",
+      "appears complete",
+      "retained",
+      "assistant",
+      "10:03:12",
+      "start a fresh session",
+    ])
+      expect(
+        frames.some((frame) => frame.includes(value.replace(/\s+/g, ""))),
+        `Unreachable detail: ${value}`,
+      ).toBe(true);
+    h.board.handleInput(keys.home);
+    expect(h.board.viewState().detailOffset).toBe(0);
+  },
+);

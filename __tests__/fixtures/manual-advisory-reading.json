@@ -95,9 +95,9 @@
       "outputTokens": 255
     }
   },
-  "expectedCompletedTaskIds": ["task:1", "task:2"],
+  "expectedCompletedTaskIds": [],
   "expectedFinalReported": {
-    "done": 2,
+    "done": 0,
     "total": 2
   }
 }

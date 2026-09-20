@@ -13,15 +13,15 @@ import {
   parseExtraction,
 } from "../analysis/extractor";
 import {
-  bindTaskDetailOffers,
-  type TaskDetailRecord,
-} from "../analysis/task-details";
-import {
   GateRequestOverflowError,
   gateRequest,
   gateResult,
 } from "../analysis/gate";
 import type { EvaluationRequest, ValidatedResult } from "../analysis/gateway";
+import {
+  bindTaskDetailOffers,
+  type TaskDetailRecord,
+} from "../analysis/task-details";
 import {
   absent,
   completionStatus,

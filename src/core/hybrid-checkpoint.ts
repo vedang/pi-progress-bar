@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
+import { completionRequest } from "../analysis/completion";
+import { extractionInput } from "../analysis/extractor";
+import { gateRequest } from "../analysis/gate";
 import type {
   DetailBatchReceipt,
   DetailCandidate,
   DetailKey,
   TaskDetailRecord,
 } from "../analysis/task-details";
-import { completionRequest } from "../analysis/completion";
-import { extractionInput } from "../analysis/extractor";
-import { gateRequest } from "../analysis/gate";
 import {
   acceptedCompletionIds,
   applyCompletionRecord,
@@ -767,10 +767,10 @@ function validTaskDetailRecord(value: unknown): value is TaskDetailRecord {
   const keys = candidates.map((candidate) => candidate.key);
   if (
     new Set(keys).size !== keys.length ||
-    keys.some(
-      (key, index) =>
-        index && detailOrder(key) <= detailOrder(keys[index - 1]!),
-    )
+    keys.some((key, index) => {
+      const previous = keys[index - 1];
+      return !!previous && detailOrder(key) <= detailOrder(previous);
+    })
   )
     return false;
   const prefix = receipts.flatMap((receipt) => receipt.candidateKeys);

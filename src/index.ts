@@ -46,6 +46,7 @@ export default function progressBar(pi: ExtensionAPI): void {
         if (!context) throw new Error("No active Pi context");
         return context;
       }),
+      richDetailsEnabled: false,
     },
   );
   const checkpoint = (ctx: ExtensionContext) =>

@@ -17,14 +17,30 @@ import {
 import { type HealthSnapshot, healthSnapshot } from "../analysis/health";
 import { implementationFromResult } from "../analysis/implementation";
 import {
+  detailQuestionKeys,
+  detailReceipt,
+  detailRecordMatchesTask,
+  isDetailRequest,
+  type MaterializedTaskDetails,
+  materializeTaskDetails,
+  type TaskDetailRecord,
+  taskDetailRequest,
+  uncoveredDetailKeys,
+} from "../analysis/task-details";
+import {
   type BeadsPresentation,
   beadsPresentation,
   readBeadsExport,
 } from "../sources/beads";
 import { EvidenceStore, redEvidenceLabel } from "../sources/evidence";
 import { type CanonicalFrontier, CanonicalPass } from "../sources/messages";
-import { type BoardSnapshot, projectBoard } from "./board-projection";
 import {
+  type BoardDetailRecord,
+  type BoardSnapshot,
+  projectBoard,
+} from "./board-projection";
+import {
+  type AcceptedSaveOptions,
   type AdmissionPlan,
   DurabilityCapacityError,
   processObservation,
@@ -41,6 +57,7 @@ import {
   monitorCheckpointMetadata,
   restoreCheckpoint,
 } from "./hybrid-checkpoint";
+import { requestHash } from "./hybrid-proof";
 import {
   copyState,
   emptyState,
@@ -65,6 +82,8 @@ export interface MonitorOptions {
     signal: AbortSignal,
     onDispatch?: (at: number) => void,
   ) => Promise<SelectedModelResult>;
+  /** Runtime-only U15 gate. Production explicitly remains false. */
+  richDetailsEnabled?: boolean;
 }
 
 interface ProviderUsage {
@@ -201,6 +220,7 @@ const diagnosticLabels: Record<string, string> = {
   "unresolved-overflow": "Progress input exceeds safe limit",
   "capacity-exhausted": "Progress state capacity reached",
   "health-capacity-skipped": "Optional task health skipped at capacity",
+  "detail-capacity-skipped": "Optional task details skipped at capacity",
 };
 
 class RetryableJevError extends RetryableProviderError {}
@@ -231,6 +251,8 @@ const copyCard = (card: RetainedCard): RetainedCard => ({
   ...card,
   health: { ...card.health },
 });
+const copyDetailRecord = (record: TaskDetailRecord): TaskDetailRecord =>
+  structuredClone(record);
 const copyHealthCard = (card: HealthCard): HealthCard => ({
   ...card,
   health: { ...card.health },
@@ -302,6 +324,8 @@ export class Monitor {
   private readonly healthGateway: JevGateway;
   /** Optional display-only tool activity never shares semantic transport authority. */
   private readonly activityGateway: JevGateway;
+  /** Optional grounded details never share semantic/health retry state. */
+  private readonly detailGateway: JevGateway;
   readonly evidence = new EvidenceStore();
   readonly usage = {
     jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
@@ -335,6 +359,14 @@ export class Monitor {
   private extractionController?: AbortController;
   private healthObservation?: HealthWork;
   private healthFlight?: { epoch: number; token: number; taskId: string };
+  private detailFlight?: { epoch: number; token: number; taskId: string };
+  private nextDetailToken = 0;
+  /** Durable optional task records; never part of semantic state. */
+  private taskDetails = new Map<string, TaskDetailRecord>();
+  /** Detached canonical text materialized only on update, never at board read. */
+  private detailValues = new Map<string, MaterializedTaskDetails>();
+  /** Optional transport failures park until a named semantic/control wake. */
+  private parkedDetails = new Set<string>();
   private nextHealthToken = 0;
   private activityDeclaration?: ActivityDeclaration;
   private activityFlight?: ActivityBatch;
@@ -388,6 +420,12 @@ export class Monitor {
       onDispatch: (at) => this.recordJevDispatch(at),
       // Activity is optional display enrichment; it never disables core tracking.
       onPermanentError: () => this.note("jev-unavailable"),
+    });
+    this.detailGateway = new JevGateway({
+      fetch: (url, init) => globalThis.fetch(url, init),
+      getApiKey: () => process.env.TYPESAFE_API_KEY,
+      onDispatch: (at) => this.recordJevDispatch(at),
+      onPermanentError: () => this.note("detail-capacity-skipped"),
     });
   }
 
@@ -555,10 +593,12 @@ export class Monitor {
       this.gateway.pause();
       this.healthGateway.pause();
       this.activityGateway.pause();
+      this.detailGateway.pause();
       this.clearActivity(false);
       this.gateway.enable(this.identity());
       this.healthGateway.enable(this.identity());
       this.activityGateway.enable(this.identity());
+      this.detailGateway.enable(this.identity());
       this.waitingForWake = false;
       this.requeue(pass);
       this.drain();
@@ -690,6 +730,7 @@ export class Monitor {
     this.gateway.pause();
     this.healthGateway.pause();
     this.activityGateway.pause();
+    this.detailGateway.pause();
     this.clearActivity(false);
     this.evidence.clearPending();
   }
@@ -848,6 +889,7 @@ export class Monitor {
     this.gateway.enable(this.identity());
     this.healthGateway.enable(this.identity());
     this.activityGateway.enable(this.identity());
+    this.detailGateway.enable(this.identity());
     this.requeue(pass, true);
     if (this.queued.length) this.idleDoneInvalidated = true;
     this.save();
@@ -950,6 +992,23 @@ export class Monitor {
           copyHealthCard(card),
         ]),
       ),
+      taskDetails: new Map(
+        [...this.detailValues].flatMap(([taskId, details]) => {
+          const record = this.taskDetails.get(taskId);
+          return record
+            ? [
+                [
+                  taskId,
+                  {
+                    revision: record.revision,
+                    label: record.label,
+                    details: structuredClone(details),
+                  } satisfies BoardDetailRecord,
+                ] as const,
+              ]
+            : [];
+        }),
+      ),
       service: this.service(),
       unsettled:
         !!this.controlWork ||
@@ -1014,6 +1073,11 @@ export class Monitor {
     this.state = emptyState(sourceId);
     this.card = undefined;
     this.healthCards.clear();
+    this.taskDetails.clear();
+    this.detailValues.clear();
+    this.parkedDetails.clear();
+    this.detailFlight = undefined;
+    this.detailGateway.invalidate();
     this.currentHealthTaskId = undefined;
     this.lastDisplayedTaskId = undefined;
     this.idleDoneInvalidated = false;
@@ -1082,6 +1146,7 @@ export class Monitor {
     healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
     state: HybridState = this.state,
     prospectiveIdleDoneTaskId?: string,
+    taskDetails: ReadonlyMap<string, TaskDetailRecord> = this.taskDetails,
   ): MonitorCheckpointMetadata {
     const idleDoneTaskId = this.idleDoneTaskIdFor(
       state,
@@ -1100,6 +1165,9 @@ export class Monitor {
       ...(idleDoneTaskId ? { idleDoneTaskId } : {}),
       ...(healthCards.size
         ? { healthCards: [...healthCards.values()].map(copyHealthCard) }
+        : {}),
+      ...(this.options.richDetailsEnabled && taskDetails.size
+        ? { taskDetails: [...taskDetails.values()].map(copyDetailRecord) }
         : {}),
     };
   }
@@ -1175,6 +1243,16 @@ export class Monitor {
     // Stored card digests prove safe retention, not live freshness after reload.
     this.currentHealthTaskId = undefined;
     this.cardHealthIdentity = undefined;
+    const details = this.options.richDetailsEnabled
+      ? ((metadata?.taskDetails ?? []) as TaskDetailRecord[])
+      : [];
+    this.taskDetails = new Map(
+      details
+        .filter((detail) => this.detailRecordMatchesCanonical(detail, pass))
+        .map((detail) => [detail.taskId, copyDetailRecord(detail)]),
+    );
+    this.parkedDetails.clear();
+    this.rebuildDetailValues(pass);
     this.lastDisplayedTaskId = metadata?.idleDoneTaskId;
     this.idleDoneInvalidated = !this.lastDisplayedTaskId;
     this.syncPresentationCard();
@@ -1207,6 +1285,58 @@ export class Monitor {
     );
   }
 
+  private cachedObservation(entryId: string) {
+    return [...this.page, ...this.settledContext].find(
+      (observation) => observation.id === entryId,
+    );
+  }
+
+  private detailRecordMatchesCanonical(
+    record: TaskDetailRecord,
+    pass?: CanonicalPass,
+  ) {
+    const task = this.state.tasks.find((item) => item.id === record.taskId);
+    if (!task || !detailRecordMatchesTask(record, task)) return false;
+    const resolve = (entryId: string) =>
+      pass
+        ? this.resolveObservation(pass, entryId)
+        : this.cachedObservation(entryId);
+    if (
+      !record.candidates.every(
+        (candidate) => !!taskDetailRequest(record, [candidate.key], resolve),
+      )
+    )
+      return false;
+    return record.receipts.every((receipt) => {
+      const request = taskDetailRequest(record, receipt.candidateKeys, resolve);
+      return !!request && receipt.requestHash === requestHash(request);
+    });
+  }
+
+  private rebuildDetailValues(pass?: CanonicalPass) {
+    this.detailValues.clear();
+    if (!this.options.richDetailsEnabled) return;
+    const resolve = (entryId: string) =>
+      pass
+        ? this.resolveObservation(pass, entryId)
+        : this.cachedObservation(entryId);
+    for (const record of this.taskDetails.values()) {
+      const values = materializeTaskDetails(record, resolve);
+      if (values) this.detailValues.set(record.taskId, values);
+    }
+  }
+
+  private detailsForState(state: HybridState) {
+    return new Map(
+      [...this.taskDetails.values()]
+        .filter((record) => {
+          const task = state.tasks.find((item) => item.id === record.taskId);
+          return !!task && detailRecordMatchesTask(record, task);
+        })
+        .map((record) => [record.taskId, copyDetailRecord(record)]),
+    );
+  }
+
   /** Candidate semantic commits must not publish facts for replaced task sources. */
   private healthCardsForState(state: HybridState) {
     return new Map(
@@ -1226,6 +1356,18 @@ export class Monitor {
   }
 
   /** Drop only optional facts whose exact source/report refs changed or vanished. */
+  private reconcileTaskDetails(pass: CanonicalPass) {
+    const accepted = [...this.taskDetails.values()].filter((record) =>
+      this.detailRecordMatchesCanonical(record, pass),
+    );
+    if (accepted.length === this.taskDetails.size) return false;
+    this.taskDetails = new Map(
+      accepted.map((record) => [record.taskId, copyDetailRecord(record)]),
+    );
+    this.rebuildDetailValues(pass);
+    return true;
+  }
+
   private reconcileHealthCards(pass: CanonicalPass) {
     const accepted = [...this.healthCards.values()].filter((card) =>
       this.healthCardMatchesCanonical(card, pass),
@@ -1709,6 +1851,7 @@ export class Monitor {
       this.enabled = true;
       this.gateway.enable(this.identity());
       this.healthGateway.enable(this.identity());
+      this.detailGateway.enable(this.identity());
       // Rebuild from current canonical branch after discarding stale semantics.
       this.requeue(this.beginCanonicalPass(), true);
       this.drain();
@@ -2038,6 +2181,17 @@ export class Monitor {
       void this.processOne(active);
       return;
     }
+    const detail = this.nextDetailWork();
+    if (detail && !this.detailFlight) {
+      const flight = {
+        epoch: this.epoch,
+        token: ++this.nextDetailToken,
+        taskId: detail.taskId,
+      };
+      this.detailFlight = flight;
+      void this.processDetails(detail, flight);
+      return;
+    }
     const healthWork = this.healthObservation;
     if (!healthWork || this.healthFlight) return;
     this.healthObservation = undefined;
@@ -2083,7 +2237,7 @@ export class Monitor {
           admit: (plan) => this.admit(plan),
           evaluate: (request) => this.evaluateJev(request, epoch, active),
           extract: (input) => this.extract(input, epoch, active),
-          save: (state) => this.commit(state),
+          save: (state, options) => this.commit(state, options),
         },
         requestContext,
       );
@@ -2124,6 +2278,10 @@ export class Monitor {
           this.retryObservation = undefined;
         // Cursor progression, including overflow, owns bounded context parity.
         this.rememberPreceding(requestContext, observation);
+        // A named committed cursor wake permits parked optional jobs. It occurs
+        // before `finally` drains, never while semantic `processing` is true.
+        this.parkedDetails.clear();
+        this.rebuildDetailValues();
         if (
           this.catchupTarget?.id === observation.id &&
           this.catchupTarget.hash === observation.hash
@@ -2193,10 +2351,180 @@ export class Monitor {
         else if (authority === "incomplete") this.scheduleCanonicalWake();
         else {
           this.reconcileHealthCards(pass);
+          this.reconcileTaskDetails(pass);
           this.requeue(pass);
         }
         this.publish();
       }
+      this.drain();
+    }
+  }
+
+  private nextDetailWork() {
+    if (
+      !this.options.richDetailsEnabled ||
+      !this.enabled ||
+      this.processing ||
+      this.queued.length ||
+      this.state.pending ||
+      !this.state.cursor
+    )
+      return;
+    return [...this.taskDetails.values()].find(
+      (record) =>
+        !this.parkedDetails.has(record.taskId) &&
+        uncoveredDetailKeys(record).length > 0 &&
+        !!this.state.tasks.find((task) =>
+          detailRecordMatchesTask(record, task),
+        ),
+    );
+  }
+
+  private maximumDetailRecord(record: TaskDetailRecord): TaskDetailRecord {
+    const uncovered = uncoveredDetailKeys(record);
+    if (!uncovered.length) return copyDetailRecord(record);
+    return {
+      ...copyDetailRecord(record),
+      receipts: [
+        ...record.receipts,
+        {
+          requestHash: "f".repeat(64),
+          candidateKeys: uncovered,
+          assessments: uncovered.map((key) => {
+            const candidate = record.candidates.find(
+              (item) => item.key === key,
+            );
+            if (!candidate) throw new Error("Missing detail candidate");
+            const source = candidate.source;
+            return {
+              rawChoice: "yes",
+              confidence: 1,
+              probability: 1,
+              reason: "accepted" as const,
+              source: {
+                entryId: source.entryId,
+                messageHash: source.messageHash,
+                role: source.role,
+              },
+            };
+          }),
+          validatedAt: Number.MAX_SAFE_INTEGER,
+        },
+      ],
+    };
+  }
+
+  /** Optional detail admission never changes semantic capacity or wait state. */
+  private admitDetails(record: TaskDetailRecord) {
+    if (!this.options.richDetailsEnabled || this.state.capacity === "limit")
+      return false;
+    const candidate = new Map(this.taskDetails);
+    candidate.set(record.taskId, this.maximumDetailRecord(record));
+    try {
+      const metadata = this.capacityMetadata(
+        this.card,
+        this.healthCards,
+        this.state,
+        undefined,
+        candidate,
+      );
+      if (checkpointBytes(this.state, metadata) <= MAX_CHECKPOINT_BYTES)
+        return true;
+    } catch {
+      // Optional records need a full exact storage proof before dispatch.
+    }
+    this.note("detail-capacity-skipped");
+    this.publish();
+    return false;
+  }
+
+  private async processDetails(
+    record: TaskDetailRecord,
+    flight: { epoch: number; token: number; taskId: string },
+  ) {
+    try {
+      const pass = this.beginCanonicalPass();
+      const authority = this.reconcileAuthority(pass);
+      if (authority === "amended") {
+        this.resetForCanonicalAmendment();
+        return;
+      }
+      if (authority === "incomplete") {
+        this.parkedDetails.add(record.taskId);
+        this.scheduleCanonicalWake();
+        return;
+      }
+      this.reconcileTaskDetails(pass);
+      const current = this.taskDetails.get(record.taskId);
+      const task = this.state.tasks.find((item) => item.id === record.taskId);
+      if (
+        !current ||
+        !task ||
+        !detailRecordMatchesTask(current, task) ||
+        this.detailFlight !== flight ||
+        !this.enabled ||
+        flight.epoch !== this.epoch
+      )
+        return;
+      const keys = uncoveredDetailKeys(current);
+      const request = taskDetailRequest(current, keys, (entryId) =>
+        this.resolveObservation(pass, entryId),
+      );
+      if (
+        !request ||
+        !isDetailRequest(request) ||
+        detailQuestionKeys(request).length !== keys.length ||
+        !this.admitDetails(current)
+      ) {
+        this.parkedDetails.add(current.taskId);
+        return;
+      }
+      const result = await this.detailGateway.evaluate(
+        request,
+        this.identity(),
+        true,
+      );
+      if (
+        !result ||
+        this.detailFlight !== flight ||
+        !this.enabled ||
+        flight.epoch !== this.epoch
+      ) {
+        this.parkedDetails.add(current.taskId);
+        return;
+      }
+      const receipt = detailReceipt(current, request, result, Date.now());
+      if (!receipt) {
+        this.parkedDetails.add(current.taskId);
+        return;
+      }
+      const updated: TaskDetailRecord = {
+        ...copyDetailRecord(current),
+        receipts: [...current.receipts, receipt],
+      };
+      const previous = this.taskDetails;
+      this.taskDetails = new Map(previous);
+      this.taskDetails.set(updated.taskId, updated);
+      this.usage.jev.inputTokens = saturatingAdd(
+        this.usage.jev.inputTokens,
+        result.usage.input_tokens,
+      );
+      this.usage.jev.outputTokens = saturatingAdd(
+        this.usage.jev.outputTokens,
+        result.usage.output_tokens,
+      );
+      try {
+        this.commit(this.state);
+        this.parkedDetails.delete(updated.taskId);
+      } catch {
+        this.taskDetails = previous;
+        this.parkedDetails.add(updated.taskId);
+      }
+    } catch {
+      // Optional details never influence semantic retry/wait/capacity state.
+      this.parkedDetails.add(record.taskId);
+    } finally {
+      if (this.detailFlight === flight) this.detailFlight = undefined;
       this.drain();
     }
   }
@@ -2264,11 +2592,17 @@ export class Monitor {
     healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
     state: HybridState = this.state,
     prospectiveIdleDoneTaskId?: string,
+    taskDetails: ReadonlyMap<string, TaskDetailRecord> = this.taskDetails,
   ): MonitorCheckpointMetadata {
     const maximum = Number.MAX_SAFE_INTEGER;
     // Existing cards are durable facts. The supplied candidate map already
     // contains the exact prospective replacement/new card.
     const maximumHealthCards = [...healthCards.values()].map(copyHealthCard);
+    const maximumTaskDetails = this.options.richDetailsEnabled
+      ? [...taskDetails.values()].map((record) =>
+          this.maximumDetailRecord(record),
+        )
+      : [];
     const idleDoneTaskId = this.idleDoneTaskIdFor(
       state,
       prospectiveIdleDoneTaskId,
@@ -2291,6 +2625,7 @@ export class Monitor {
       lastExtractionCallAt: maximum,
       ...(idleDoneTaskId ? { idleDoneTaskId } : {}),
       ...(maximumHealthCards.length ? { healthCards: maximumHealthCards } : {}),
+      ...(maximumTaskDetails.length ? { taskDetails: maximumTaskDetails } : {}),
     };
   }
 
@@ -2332,23 +2667,35 @@ export class Monitor {
     healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
     prospectiveIdleDoneTaskId?: string,
     dispatchHealthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
+    taskDetails: ReadonlyMap<string, TaskDetailRecord> = this.taskDetails,
+    dispatchTaskDetails: ReadonlyMap<string, TaskDetailRecord> = this
+      .taskDetails,
   ): CapacityEnvelope {
     const selector =
       prospectiveIdleDoneTaskId ?? this.prospectiveIdleDoneTaskIdFor(candidate);
     // Dispatch persists existing facts and selector until the result commits.
     // Core-only admission explicitly substitutes its pre-dispatch eviction map.
-    const current = this.metadata();
+    const current = this.metadata(
+      this.enabled,
+      this.healthCards,
+      this.state,
+      undefined,
+      this.taskDetails,
+    );
     const oldCard = this.retainedCardFor(this.state);
     const dispatch = this.capacityMetadata(
       oldCard,
       dispatchHealthCards,
       this.state,
+      undefined,
+      dispatchTaskDetails,
     );
     const accepted = this.capacityMetadata(
       card ?? this.retainedCardFor(candidate),
       healthCards,
       candidate,
       selector,
+      taskDetails,
     );
     const currentLimit = { ...this.state, capacity: "limit" as const };
     const candidateLimit = { ...candidate, capacity: "limit" as const };
@@ -2383,11 +2730,19 @@ export class Monitor {
   private evictOptionalHealth() {
     const hadOptional =
       this.healthCards.size > 0 ||
+      this.taskDetails.size > 0 ||
       !!this.card ||
       !!this.currentHealthTaskId ||
       !!this.healthObservation ||
       !!this.healthFlight;
     this.healthCards.clear();
+    this.taskDetails.clear();
+    this.detailValues.clear();
+    this.parkedDetails.clear();
+    if (this.detailFlight) {
+      this.detailFlight = undefined;
+      this.detailGateway.invalidate();
+    }
     this.currentHealthTaskId = undefined;
     this.cardHealthIdentity = undefined;
     this.card = undefined;
@@ -2427,6 +2782,8 @@ export class Monitor {
         1,
         new Map(),
         undefined,
+        new Map(),
+        new Map(),
         new Map(),
       );
       if (coreOnly.maximum <= MAX_CHECKPOINT_BYTES) {
@@ -2528,16 +2885,30 @@ export class Monitor {
     this.publish();
   }
 
-  private commit(state: HybridState) {
+  private commit(state: HybridState, options?: AcceptedSaveOptions) {
     const previous = {
       card: this.card ? copyCard(this.card) : undefined,
       healthCards: this.healthCards,
+      taskDetails: this.taskDetails,
+      detailValues: this.detailValues,
       currentHealthTaskId: this.currentHealthTaskId,
       cardHealthIdentity: this.cardHealthIdentity,
       lastDisplayedTaskId: this.lastDisplayedTaskId,
       idleDoneInvalidated: this.idleDoneInvalidated,
     };
     const candidateCards = this.healthCardsForState(state);
+    let candidateDetails = this.detailsForState(state);
+    if (this.options.richDetailsEnabled) {
+      for (const offer of options?.detailOffers ?? []) {
+        const task = state.tasks.find((item) => item.id === offer.taskId);
+        if (
+          task &&
+          !offer.receipts.length &&
+          detailRecordMatchesTask(offer, task)
+        )
+          candidateDetails.set(offer.taskId, copyDetailRecord(offer));
+      }
+    }
     const admittedCompletion = state.events
       .slice(this.state.events.length)
       .some((event) => event.kind === "complete");
@@ -2554,6 +2925,7 @@ export class Monitor {
     )
       this.idleDoneInvalidated = false;
     this.healthCards = candidateCards;
+    this.taskDetails = candidateDetails;
     if (
       !this.currentHealthTaskId ||
       !candidateCards.has(this.currentHealthTaskId)
@@ -2567,22 +2939,80 @@ export class Monitor {
     let checkpoint: unknown;
     try {
       // No new semantic state may fit only while ON: OFF control is durable.
-      encodeCheckpoint(state, this.metadata(false, candidateCards, state));
+      encodeCheckpoint(
+        state,
+        this.metadata(
+          false,
+          candidateCards,
+          state,
+          undefined,
+          candidateDetails,
+        ),
+      );
       checkpoint = encodeCheckpoint(
         state,
-        this.metadata(this.enabled, candidateCards, state),
+        this.metadata(
+          this.enabled,
+          candidateCards,
+          state,
+          undefined,
+          candidateDetails,
+        ),
       );
     } catch {
-      this.card = previous.card;
-      this.healthCards = previous.healthCards;
-      this.currentHealthTaskId = previous.currentHealthTaskId;
-      this.cardHealthIdentity = previous.cardHealthIdentity;
-      this.lastDisplayedTaskId = previous.lastDisplayedTaskId;
-      this.idleDoneInvalidated = previous.idleDoneInvalidated;
-      this.rejectCapacity();
-      throw new DurabilityCapacityError();
+      // Offers are optional. Persist the accepted semantic patch without them.
+      if (options?.detailOffers?.length) {
+        candidateDetails = this.detailsForState(state);
+        this.taskDetails = candidateDetails;
+        try {
+          encodeCheckpoint(
+            state,
+            this.metadata(
+              false,
+              candidateCards,
+              state,
+              undefined,
+              candidateDetails,
+            ),
+          );
+          checkpoint = encodeCheckpoint(
+            state,
+            this.metadata(
+              this.enabled,
+              candidateCards,
+              state,
+              undefined,
+              candidateDetails,
+            ),
+          );
+          this.note("detail-capacity-skipped");
+        } catch {
+          this.card = previous.card;
+          this.healthCards = previous.healthCards;
+          this.taskDetails = previous.taskDetails;
+          this.detailValues = previous.detailValues;
+          this.currentHealthTaskId = previous.currentHealthTaskId;
+          this.cardHealthIdentity = previous.cardHealthIdentity;
+          this.lastDisplayedTaskId = previous.lastDisplayedTaskId;
+          this.idleDoneInvalidated = previous.idleDoneInvalidated;
+          this.rejectCapacity();
+          throw new DurabilityCapacityError();
+        }
+      } else {
+        this.card = previous.card;
+        this.healthCards = previous.healthCards;
+        this.taskDetails = previous.taskDetails;
+        this.detailValues = previous.detailValues;
+        this.currentHealthTaskId = previous.currentHealthTaskId;
+        this.cardHealthIdentity = previous.cardHealthIdentity;
+        this.lastDisplayedTaskId = previous.lastDisplayedTaskId;
+        this.idleDoneInvalidated = previous.idleDoneInvalidated;
+        this.rejectCapacity();
+        throw new DurabilityCapacityError();
+      }
     }
     this.state = copyState(state);
+    this.rebuildDetailValues();
     try {
       this.persist(checkpoint);
     } catch {

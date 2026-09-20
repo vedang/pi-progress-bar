@@ -21,6 +21,22 @@ interface BoardHealth {
   implementation: string;
 }
 
+interface BoardDetailValue {
+  text: string;
+  provenance: {
+    role: string;
+    validatedAt: number;
+    confidence: number;
+    probability: number;
+  };
+}
+
+interface BoardTaskDetails {
+  title?: BoardDetailValue;
+  description?: BoardDetailValue;
+  acceptanceCriteria?: BoardDetailValue[];
+}
+
 interface BoardTask {
   taskId: string;
   label: string;
@@ -36,6 +52,15 @@ interface BoardTask {
   };
   /** Safe lifecycle names only; source payloads never enter presentation. */
   transitions: { kind: string }[];
+  /** Optional display payload; callers must tolerate its disabled omission. */
+  // biome-ignore lint/suspicious/noExplicitAny: dynamic disabled/absent board field is test-facing.
+  details?: any;
+}
+
+export interface BoardDetailRecord {
+  revision: number;
+  label: string;
+  details: BoardTaskDetails;
 }
 
 export interface BoardSnapshot {
@@ -82,6 +107,7 @@ const statusFor = (
 export function projectBoard(input: {
   state: HybridState;
   healthCards: ReadonlyMap<string, HealthCard>;
+  taskDetails?: ReadonlyMap<string, BoardDetailRecord>;
   service: { code: string; label: string };
   unsettled: boolean;
   /** Live proof exists only in this monitor epoch; restored cards stay retained. */
@@ -111,6 +137,13 @@ export function projectBoard(input: {
     const sourceMatches = !!card && sameSource(task, card);
     const status = statusFor(task, focusedTaskId);
     const health = sourceMatches ? { ...card.health } : unassessed();
+    const detailRecord = input.taskDetails?.get(task.id);
+    const details =
+      detailRecord &&
+      detailRecord.revision === task.revision &&
+      detailRecord.label === task.label
+        ? structuredClone(detailRecord.details)
+        : undefined;
     const provenance = !card
       ? { state: "unassessed" as const }
       : !sourceMatches
@@ -144,6 +177,7 @@ export function projectBoard(input: {
       transitions: (transitions.get(task.id) ?? []).map((item) => ({
         ...item,
       })),
+      ...(details ? { details } : {}),
     };
   });
   const allDone =

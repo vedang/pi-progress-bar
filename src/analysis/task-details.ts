@@ -1,6 +1,4 @@
 import { createHash } from "node:crypto";
-import type { GroundedDetailDraft } from "./extractor";
-import type { EvaluationRequest, ValidatedResult } from "./gateway";
 import { normalizedChoiceAssessment, requestHash } from "../core/hybrid-proof";
 import type {
   Assessment,
@@ -10,6 +8,8 @@ import type {
   ObservationRef,
   SourceRef,
 } from "../core/hybrid-state";
+import { exactQuoteSource, type GroundedDetailDraft } from "./extractor";
+import type { EvaluationRequest, ValidatedResult } from "./gateway";
 
 export type DetailKey =
   | "title"
@@ -130,10 +130,20 @@ const resolvedQuote = (
     candidate.source.start,
     candidate.source.end,
   );
-  return createHash("sha256").update(quote).digest("hex") ===
+  if (
+    createHash("sha256").update(quote).digest("hex") !==
     candidate.source.quoteHash
-    ? quote
-    : undefined;
+  )
+    return;
+  try {
+    const exact = exactQuoteSource(quote, observation);
+    return exact.start === candidate.source.start &&
+      exact.end === candidate.source.end
+      ? quote
+      : undefined;
+  } catch {
+    return;
+  }
 };
 
 /** Build one bounded task-local Jev request from canonical spans only. */
@@ -208,14 +218,19 @@ export function detailReceipt(
     record.candidates.find((candidate) => candidate.key === key),
   );
   if (candidates.some((candidate) => !candidate)) return;
-  const assessments = candidates.map((candidate, index) => {
+  const safeCandidates = candidates as DetailCandidate[];
+  const assessments = safeCandidates.map((candidate, index) => {
     const answer = result.answers[`detail:${keys[index]}`];
     return answer?.type === "choice"
       ? normalizedChoiceAssessment(
           answer.choice,
           answer.confidence,
           answer.probabilities[answer.choice],
-          candidate!.source as ObservationRef,
+          {
+            entryId: candidate.source.entryId,
+            messageHash: candidate.source.messageHash,
+            role: candidate.source.role,
+          } satisfies ObservationRef,
           detailChoices,
         )
       : undefined;
@@ -229,7 +244,7 @@ export function detailReceipt(
   };
 }
 
-export interface MaterializedDetailValue {
+interface MaterializedDetailValue {
   text: string;
   provenance: {
     role: Observation["role"];

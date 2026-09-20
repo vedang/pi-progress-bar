@@ -333,6 +333,21 @@ class TaskBoard implements BoardComponent {
           ]),
       ...this.wrapLines(`Task: ${task.label}`, width),
       ...this.wrapLines(`Assessment: ${this.provenance(task)}`, width),
+      ...(task.details?.title
+        ? this.wrapLines(`Task Title: ${task.details.title.text}`, width)
+        : []),
+      ...(task.details?.description
+        ? this.wrapLines(`Description: ${task.details.description.text}`, width)
+        : []),
+      ...(task.details?.acceptanceCriteria?.length
+        ? [
+            ...this.wrapLines("Acceptance Criteria:", width),
+            ...task.details.acceptanceCriteria.flatMap(
+              (value: { text: string }) =>
+                this.wrapLines(`• ${value.text}`, width),
+            ),
+          ]
+        : []),
     ];
     if (!this.debugger) return { pinned, body };
     return {

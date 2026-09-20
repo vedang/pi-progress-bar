@@ -485,3 +485,26 @@ it("wraps spacing-mark graphemes atomically at narrow pane boundaries", async ()
   expect(right.some((line) => line.trimStart().startsWith("ा"))).toBe(false);
   for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(56);
 });
+
+it.each([113, 56])(
+  "renders each Summary field once at width %i, with diagnostics hidden",
+  async (width) => {
+    const h = await fixture(tasks(1), width === 56 ? 20 : 40);
+    const text = h.text(width);
+    for (const label of [...summary, "Service", "Summary"])
+      expect(
+        text.match(new RegExp(`${label}:`, "g")) ?? [],
+        `${label} must appear once`,
+      ).toHaveLength(1);
+    expect(text).not.toContain("Identity:");
+    expect(text).not.toContain("Debugger: off");
+  },
+);
+it("does not duplicate Summary when task debugger is enabled", async () => {
+  const h = await fixture(tasks(1));
+  h.board.handleInput("d");
+  const text = h.text();
+  for (const label of [...summary, "Service", "Summary"])
+    expect(text.match(new RegExp(`${label}:`, "g")) ?? []).toHaveLength(1);
+  expect(text).toContain("transition-0-0");
+});

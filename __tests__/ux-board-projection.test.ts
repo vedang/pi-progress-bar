@@ -459,7 +459,7 @@ describe("truthful display status", () => {
   });
 
   it.each(["none", "uncertain", "concurrent"])(
-    "never invents current task for %s focus",
+    "shows an OPEN provisional selection, not inferred activity, for %s focus",
     async (focus) => {
       const h = fixture();
       h.start();
@@ -470,7 +470,10 @@ describe("truthful display status", () => {
         "Activity is paused or spread across multiple tasks.",
       );
       await h.settle("ambiguous");
-      expect(board(h.monitor).currentTask).toBeUndefined();
+      expect(board(h.monitor).currentTask).toMatchObject({
+        status: "OPEN",
+        qualifier: "Selected · awaiting activity",
+      });
       expect(board(h.monitor).tasks.every((t) => t.status === "OPEN")).toBe(
         true,
       );

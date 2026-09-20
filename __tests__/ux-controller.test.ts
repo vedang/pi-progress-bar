@@ -13,12 +13,17 @@ async function fixture(deferred = false) {
   let factory: Parameters<UiHost["attach"]>[0] | undefined;
   let listener: TerminalInputHandler | undefined;
   let safe = true;
+  let overlayOpen = false;
+  let overlayFocused = false;
+  let overlay: (Component & { dispose?(): void }) | undefined;
+  const closeOverlay = vi.fn();
   const theme = {
     fg: (_: string, text: string) => text,
     bold: (text: string) => text,
+    bg: (_: string, text: string) => text,
   } as Theme;
   const materialize = () => {
-    component = factory?.({} as TUI, theme);
+    component = factory?.({ terminal: { rows: 40 } } as TUI, theme);
   };
   const stop = vi.fn();
   const host = {
@@ -26,18 +31,38 @@ async function fixture(deferred = false) {
       factory = fn;
       if (!deferred) materialize();
     }),
-    canActivate: vi.fn((data: string) => safe && data === "\u001b[C"),
+    canActivate: vi.fn(
+      (data: string) => safe && !overlayOpen && data === "\u001b[C",
+    ),
     onInput: vi.fn((fn: TerminalInputHandler) => {
       listener = fn;
       return stop;
     }),
     requestRender: vi.fn(),
     dispose: vi.fn(),
-    openOverlay: vi.fn(),
+    openOverlay: vi.fn((next: Component & { dispose?(): void }) => {
+      overlay = next;
+      overlayOpen = overlayFocused = true;
+      let closed = false;
+      return {
+        isFocused: () => !closed && overlayFocused,
+        close: () => {
+          if (closed) return;
+          closed = true;
+          overlayOpen = overlayFocused = false;
+          closeOverlay();
+          next.dispose?.();
+        },
+      };
+    }),
   } as unknown as UiHost;
-  const openBoard = vi.fn();
+  const openBoard = vi.mocked(host.openOverlay);
   const view = uxView();
-  const controller = createUiController(host, view, openBoard);
+  // U10 removes the inert callback seam; static two-argument call after implementation.
+  const controller = Reflect.apply(createUiController, undefined, [
+    host,
+    view,
+  ]) as ReturnType<typeof createUiController>;
   const input = (data: string) => listener?.(data);
   const text = () => component?.render(160).join("\n") ?? "";
   return {
@@ -49,6 +74,13 @@ async function fixture(deferred = false) {
     openBoard,
     stop,
     materialize,
+    closeOverlay,
+    board: () => overlay,
+    boardText: () => overlay?.render(113).join("\n") ?? "",
+    blurOverlay: () => {
+      overlayFocused = false;
+    },
+
     unsafe: () => {
       safe = false;
     },
@@ -159,3 +191,60 @@ it("OFF tears down owned widget/input and cannot be reversed by a stale update",
   h.input("\u001b[C");
   expect(h.openBoard).not.toHaveBeenCalled();
 });
+
+it("opens a bounded centered board with one-cell margins, not a full-screen replacement", async () => {
+  const h = await fixture();
+  h.input("\u001b[C");
+  h.input("\r");
+  expect(h.openBoard).toHaveBeenCalledTimes(1);
+  expect(h.openBoard.mock.calls[0]?.[1]).toMatchObject({
+    width: "94%",
+    maxHeight: "80%",
+    anchor: "center",
+    margin: 1,
+  });
+  expect(h.boardText()).toContain("Requirements");
+  expect(h.boardText()).toContain("Handle escaped delimiters in parser");
+});
+it("refreshes the existing board from publications and supports repeated owned open/close", async () => {
+  const h = await fixture();
+  for (let i = 0; i < 3; i++) {
+    h.input("\u001b[C");
+    h.input("\r");
+    const view = uxView();
+    const task = view.board.tasks[0];
+    if (task) task.health.requirements = `Published health ${i}`;
+    h.controller.update(view);
+    expect(h.boardText()).toContain(`Published health ${i}`);
+    h.board()?.handleInput?.("\u001b");
+    expect(h.closeOverlay).toHaveBeenCalledTimes(i + 1);
+  }
+  expect(h.host.attach).toHaveBeenCalledTimes(1);
+  expect(h.host.onInput).toHaveBeenCalledTimes(1);
+  expect(h.openBoard).toHaveBeenCalledTimes(3);
+});
+it.each(["dispose", "OFF"])(
+  "%s closes only owned board even beneath a sibling and fences stale input",
+  async (reason) => {
+    const h = await fixture();
+    h.input("\u001b[C");
+    h.input("\r");
+    const old = h.board();
+    expect(old).toBeDefined();
+    h.blurOverlay();
+    old?.handleInput?.("\u001b");
+    expect(h.closeOverlay).not.toHaveBeenCalled();
+    if (reason === "OFF") {
+      const off = uxView();
+      off.presentation.enabled = false;
+      h.controller.update(off);
+    } else h.controller.dispose();
+    expect(h.closeOverlay).toHaveBeenCalledTimes(1);
+    expect(h.host.dispose).toHaveBeenCalledTimes(1);
+    old?.handleInput?.("\u001b");
+    h.controller.dispose();
+    h.controller.update(uxView());
+    expect(h.closeOverlay).toHaveBeenCalledTimes(1);
+    expect(h.openBoard).toHaveBeenCalledTimes(1);
+  },
+);

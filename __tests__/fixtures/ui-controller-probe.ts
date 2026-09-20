@@ -51,13 +51,25 @@ export default function probe(pi: ExtensionAPI) {
             });
           return result;
         }),
-      openOverlay: (view, options) => base.openOverlay(view, options),
+      openOverlay: (view, options) => {
+        const owned = base.openOverlay(view, options);
+        record({ event: "board-request", options, lines: view.render(75) });
+        return {
+          isFocused: () => owned.isFocused(),
+          close: () => {
+            owned.close();
+            record({ event: "board-closed" });
+          },
+        };
+      },
       requestRender: () => base.requestRender(),
       dispose: () => base.dispose(),
     };
-    const controller = createUiController(host, uxView(), () =>
-      record({ event: "board-request" }),
-    );
+    // U10 removes the inert callback seam; use static call after implementation.
+    const controller = Reflect.apply(createUiController, undefined, [
+      host,
+      uxView(),
+    ]) as ReturnType<typeof createUiController>;
     if (!transformedFirst) stopTransform = transform();
     const stop = ctx.ui.onTerminalInput((data) => {
       if (matchesKey(data, "f7")) {

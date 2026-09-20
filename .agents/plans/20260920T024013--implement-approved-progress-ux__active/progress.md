@@ -131,3 +131,11 @@
 ## U08 accepted / U09 released
 - Cumulative reviewer25321518 OK/noissues through40750dba. Main507unit17integration+format/check and four actualhost controller cases PASS; accepted report u07-u08-accepted-review.md.
 - Closed U08/y3h.9. Next U09/y3h.10 main bounded-modal navigation/debugger red tests; source U10 held until frozen tests.
+
+## U09 frozen board contracts
+- Read-only scout0bc2d14b handoff retained as u09-board-contract-recon.md; no source changes.
+- Main ux-board.test.ts freezes createBoard(WidgetSnapshot,{theme,screenRows,isFocused,onClose,requestRender}) component.update/handleInput/dispose/viewState. Detached snapshots include explicit global usage for debugger; no monitor capability.
+- 0/1/200 tasks, exact current-ID default, every task reachable, page/home/end clamps, stable insert/delete neighbor, duplicate-label health/provenance isolation, archived/done live changes, independent detail scroll, pinned5field Summary plus service with debugger, all requested sizes/notice/Esc, resize recovery, detached input/state, stale/focus/release fencing, VT/Unicode/themes, zero monitor state/read/save/provider/timer deltas.
+- Controller tests now demand real owned overlay instead of callback. Freeze94%width/80%height/center/margin1, refresh/reopen, OFF/dispose under sibling focus. Existing host exact-handle and index lifecycle tests retained. Production static API imports will replace temporary reflection after implementation.
+- Layout contract clarification: board.render(width) receives ALREADY bounded overlay width; do not apply94% twice. screenRows is terminal rows; rendered rows <=floor(.8*rows) and rows-2. 40x16 may use explicit size notice with Esc; do not drop health dimensions silently. d toggles debugger from either board pane, never replaces Summary; arrows/tab change panes and independent scrolling. No q alias required.
+- Gates format/check PASS. Full unit24red/506pass (`u09-unit-red.log`), integration17PASS. Reds are missing module/owned board behavior, not types. Actual-host fixture/script updated for real modal Esc before nonempty-editor test; new host proof is pending U10 and not claimed.

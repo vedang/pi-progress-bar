@@ -7,7 +7,11 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import { type BoardLayout, layoutBoard } from "./layout";
-import { sanitizeTerminalText, type WidgetSnapshot } from "./widget";
+import {
+  lifecycleTone,
+  sanitizeTerminalText,
+  type WidgetSnapshot,
+} from "./widget";
 
 type BoardTask = WidgetSnapshot["board"]["tasks"][number];
 
@@ -264,15 +268,9 @@ class TaskBoard implements BoardComponent {
       `Tasks ${this.tasks().length} retained`,
       ...this.tasks()
         .slice(this.listOffset, this.listOffset + leftRows)
-        .map((item) => {
-          const selected = item.taskId === task.taskId;
-          return this.formatLine(
-            `${selected ? ">" : " "} ${item.status.padEnd(8)} ${item.label}`,
-            layout.leftWidth,
-            selected ? "accent" : "muted",
-            selected,
-          );
-        }),
+        .map((item) =>
+          this.taskLine(item, layout.leftWidth, item.taskId === task.taskId),
+        ),
     ];
     const detail = this.detailLines(task, layout);
     return this.compose(left, detail, layout);
@@ -437,14 +435,32 @@ class TaskBoard implements BoardComponent {
     text: string,
     width: number,
     tone: "accent" | "muted" | "dim" | "warning" = "muted",
-    selected = false,
   ): string {
     return this.styleLine(
       truncateToWidth(sanitizeTerminalText(text), Math.max(1, width)),
       width,
       tone,
-      selected,
     );
+  }
+
+  /** Style lifecycle token separately from its untrusted task label. */
+  private taskLine(task: BoardTask, width: number, selected: boolean): string {
+    const columns = Math.max(1, width);
+    const status = sanitizeTerminalText(task.status);
+    const prefix = `${selected ? ">" : " "} `;
+    const padding = " ".repeat(Math.max(0, 8 - status.length));
+    const safe = truncateToWidth(
+      `${prefix}${status}${padding} ${sanitizeTerminalText(task.label)}`,
+      columns,
+    );
+    const statusStart = Math.min(prefix.length, safe.length);
+    const statusEnd = Math.min(statusStart + status.length, safe.length);
+    const surroundingTone = selected ? "accent" : "muted";
+    const styled = `${this.options.theme.fg(surroundingTone, safe.slice(0, statusStart))}${this.options.theme.fg(lifecycleTone(status), safe.slice(statusStart, statusEnd))}${this.options.theme.fg(surroundingTone, safe.slice(statusEnd))}`;
+    const colored = selected
+      ? this.options.theme.bg("selectedBg", styled)
+      : styled;
+    return visibleWidth(colored) <= columns ? colored : safe;
   }
 
   private wrapLines(
@@ -475,14 +491,8 @@ class TaskBoard implements BoardComponent {
     safe: string,
     width: number,
     tone: "accent" | "muted" | "dim" | "warning" = "muted",
-    selected = false,
   ): string {
-    const colored = selected
-      ? this.options.theme.bg(
-          "selectedBg",
-          this.options.theme.fg("accent", safe),
-        )
-      : this.options.theme.fg(tone, safe);
+    const colored = this.options.theme.fg(tone, safe);
     return visibleWidth(colored) <= width ? colored : safe;
   }
 

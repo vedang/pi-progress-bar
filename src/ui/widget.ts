@@ -51,6 +51,13 @@ const compact = (value: number) => {
   return `${(Math.round(value / 100) / 10).toFixed(1)}K`;
 };
 
+/** Lifecycle, not health, owns task-status color. */
+export const lifecycleTone = (status: string): "accent" | "muted" | "dim" => {
+  if (status === "INPROG") return "accent";
+  if (status === "DONE" || status === "ARCHIVED") return "dim";
+  return "muted";
+};
+
 /** Wrap sanitized text without padding; replace one too-wide glyph at tiny widths. */
 const wrap = (text: string, width: number) => {
   if (width < 1) return [""];
@@ -58,8 +65,10 @@ const wrap = (text: string, width: number) => {
   if (!safe) return [""];
   const lines: string[] = [];
   let line = "";
-  for (const point of Array.from(safe)) {
-    const glyph = visibleWidth(point) > width ? "?" : point;
+  for (const { segment } of new Intl.Segmenter(undefined, {
+    granularity: "grapheme",
+  }).segment(safe)) {
+    const glyph = visibleWidth(segment) > width ? "?" : segment;
     if (line && visibleWidth(line + glyph) > width) {
       lines.push(line);
       line = "";
@@ -123,11 +132,54 @@ const warning = (snapshot: WidgetSnapshot, width: number) => {
 
 const currentTask = (board: BoardSnapshot) => {
   const current = board.currentTask;
-  if (!current) return "Current Task: not identified";
+  if (!current) return { text: "Current Task: not identified" };
+  const status = sanitizeTerminalText(current.status);
   const task = board.tasks.find((item) => item.taskId === current.taskId);
-  if (!task) return `Current Task: (${current.status}) not identified`;
-  const qualifier = current.qualifier ? ` · ${current.qualifier}` : "";
-  return `Current Task: (${current.status}) ${task.label}${qualifier}`;
+  if (!task)
+    return { text: `Current Task: (${status}) not identified`, status };
+  const qualifier = current.qualifier
+    ? ` · ${sanitizeTerminalText(current.qualifier)}`
+    : "";
+  return {
+    text: `Current Task: (${status}) ${sanitizeTerminalText(task.label)}${qualifier}`,
+    status,
+  };
+};
+
+type WidgetLine = {
+  text: string;
+  tone?: "hint" | "warning";
+  status?: string;
+  bar?: { filled: string; empty: string };
+};
+
+const styleStatus = (text: string, status: string, theme: Theme) => {
+  const marker = `(${status})`;
+  const markerStart = text.indexOf(marker);
+  if (markerStart < 0) return text;
+  const statusStart = markerStart + 1;
+  return `${text.slice(0, statusStart)}${theme.fg(lifecycleTone(status), status)}${text.slice(statusStart + status.length)}`;
+};
+
+const styleBar = (
+  text: string,
+  bar: NonNullable<WidgetLine["bar"]>,
+  theme: Theme,
+) => {
+  const cells = `${bar.filled}${bar.empty}`;
+  const start = text.indexOf(cells);
+  if (start < 0) return text;
+  const end = start + cells.length;
+  const filled = bar.filled ? theme.fg("accent", bar.filled) : "";
+  const empty = bar.empty ? theme.fg("dim", bar.empty) : "";
+  return `${text.slice(0, start)}${filled}${empty}${text.slice(end)}`;
+};
+
+const styleWidgetLine = (line: WidgetLine, text: string, theme: Theme) => {
+  if (line.tone === "hint") return theme.fg("dim", text);
+  if (line.tone === "warning") return theme.fg("warning", text);
+  if (line.bar) return styleBar(text, line.bar, theme);
+  return line.status ? styleStatus(text, line.status, theme) : text;
 };
 
 const usage = (snapshot: WidgetSnapshot) => {
@@ -148,47 +200,64 @@ export function renderWidget(
   const columns = Math.max(1, Math.floor(width));
   const { presentation } = snapshot;
   const issue = warning(snapshot, columns);
-  const header = issue
-    ? issue
+  const header: WidgetLine = issue
+    ? { text: issue, tone: "warning" }
     : presentation.progress.kind === "current" &&
         presentation.progress.total > 0
       ? (() => {
           const { done, total } = presentation.progress;
           const percent = Math.floor((done * 100) / total);
           const filled = Math.floor((done * 12) / total);
+          const bar = {
+            filled: "█".repeat(filled),
+            empty: "░".repeat(12 - filled),
+          };
           const clock = `Jev ${time(presentation.lastJevCallAt)}`;
           const counts = `Reported ${done}/${total}`;
-          const full = `${counts} · ${percent}%  ${"█".repeat(filled)}${"░".repeat(12 - filled)}  ${clock}`;
-          if (visibleWidth(full) <= columns) return full;
+          const full = `${counts} · ${percent}%  ${bar.filled}${bar.empty}  ${clock}`;
+          if (visibleWidth(full) <= columns) return { text: full, bar };
           const noBar = `${counts} · ${percent}%  ${clock}`;
-          return visibleWidth(noBar) <= columns ? noBar : `${counts}  ${clock}`;
+          return {
+            text:
+              visibleWidth(noBar) <= columns ? noBar : `${counts}  ${clock}`,
+          };
         })()
       : presentation.progress.kind === "previous"
-        ? `Reported previous ${presentation.progress.done}/${presentation.progress.total}`
-        : "Progress: no current tasks";
-  const lines = [
+        ? {
+            text: `Reported previous ${presentation.progress.done}/${presentation.progress.total}`,
+          }
+        : { text: "Progress: no current tasks" };
+  const task = currentTask(snapshot.board);
+  const lines: WidgetLine[] = [
     header,
-    currentTask(snapshot.board),
+    task,
     ...(selected
       ? [
-          usage(snapshot),
-          "enter to see board",
+          { text: usage(snapshot) },
+          { text: "enter to see board", tone: "hint" as const },
           ...(columns >= visibleWidth("Enter: task board · Left/Esc: back")
-            ? ["Enter: task board · Left/Esc: back"]
+            ? [
+                {
+                  text: "Enter: task board · Left/Esc: back",
+                  tone: "hint" as const,
+                },
+              ]
             : columns >= visibleWidth("Left/Esc: back")
-              ? ["Left/Esc: back"]
+              ? [{ text: "Left/Esc: back", tone: "hint" as const }]
               : []),
         ]
-      : ["→ to inspect"]),
+      : [{ text: "→ to inspect", tone: "hint" as const }]),
   ];
-  return lines.flatMap((line, index) =>
-    (selected && index === 2
-      ? wrap(line, columns)
-      : [truncateToWidth(sanitizeTerminalText(line), columns)]
-    ).map((part) => {
-      const colored = theme.fg("muted", part);
+  return lines.flatMap((line, index) => {
+    const safe = sanitizeTerminalText(line.text);
+    const parts =
+      selected && index === 2
+        ? wrap(safe, columns)
+        : [truncateToWidth(safe, columns)];
+    return parts.map((part) => {
+      const colored = styleWidgetLine(line, part, theme);
       // Host themes are trusted; ensure an unexpected formatter never widens rows.
       return visibleWidth(colored) <= columns ? colored : part;
-    }),
-  );
+    });
+  });
 }

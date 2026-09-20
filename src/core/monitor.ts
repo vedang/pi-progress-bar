@@ -106,6 +106,12 @@ interface ActivityDeclaration {
   starts: Map<string, ActivityCall>;
 }
 
+interface ActivityFocus {
+  id: string;
+  label: string;
+  revision: number;
+}
+
 interface ContextTarget {
   id: string;
   includeTarget: boolean;
@@ -335,7 +341,7 @@ export class Monitor {
   private activityQueued?: ActivityBatch;
   private nextActivityToken = 0;
   /** Runtime-only activity can supersede semantic display, never semantic authority. */
-  private activityFocusTaskId?: string;
+  private activityFocus?: ActivityFocus;
   private activitySupersedesSemantic = false;
   /** Runtime-only projection derived from exact task-local cards. */
   private card?: RetainedCard;
@@ -397,7 +403,7 @@ export class Monitor {
     if (!provisional) return;
     const batch = this.newActivityBatch(provisional.calls);
     this.activityDeclaration = { batch, provisional, starts: new Map() };
-    this.activityFocusTaskId = undefined;
+    this.activityFocus = undefined;
     this.activitySupersedesSemantic = true;
     this.publish();
     if (provisional.kind === "ready") this.scheduleActivity(batch);
@@ -425,7 +431,7 @@ export class Monitor {
     if (result.kind === "unchanged") return;
     // Later evidence supersedes provisional response before an optional correction.
     this.nextActivityToken++;
-    this.activityFocusTaskId = undefined;
+    this.activityFocus = undefined;
     if (result.kind !== "changed" || !result.calls?.length) {
       this.activitySupersedesSemantic = result.kind === "overflow";
       this.publish();
@@ -958,7 +964,7 @@ export class Monitor {
       lastDisplayedTaskId: this.idleDoneInvalidated
         ? undefined
         : this.lastDisplayedTaskId,
-      activityFocusTaskId: this.activityFocusTaskId,
+      activityFocusTaskId: this.currentActivityFocusTaskId(),
       activitySupersedesSemantic: this.activitySupersedesSemantic,
     });
   }
@@ -1842,7 +1848,7 @@ export class Monitor {
     this.nextActivityToken++;
     this.activityDeclaration = undefined;
     this.activityQueued = undefined;
-    this.activityFocusTaskId = undefined;
+    this.activityFocus = undefined;
     this.activitySupersedesSemantic = false;
     if (cancel) this.activityGateway.invalidate();
     this.activityFlight = undefined;
@@ -1859,6 +1865,34 @@ export class Monitor {
     } catch {
       return false;
     }
+  }
+
+  /** Canonical tracking must finish before optional activity can spend a request. */
+  private hasCanonicalWork() {
+    return (
+      !!this.controlWork ||
+      this.processing ||
+      !!this.activeObservation ||
+      this.queued.length > 0 ||
+      this.waitingForWake ||
+      !!this.retryTimer
+    );
+  }
+
+  /** Exact runtime identity avoids stale INPROG after close/revision/source edits. */
+  private currentActivityFocusTaskId() {
+    const focus = this.activityFocus;
+    const task = focus
+      ? this.state.tasks.find(
+          (candidate) =>
+            candidate.id === focus.id &&
+            candidate.label === focus.label &&
+            candidate.revision === focus.revision &&
+            candidate.included &&
+            candidate.status !== "done",
+        )
+      : undefined;
+    return task?.id;
   }
 
   private activityCandidates() {
@@ -1885,9 +1919,19 @@ export class Monitor {
       this.activityQueued = batch;
       return;
     }
+    // Canonical admission/completion owns this epoch. Optional activity is
+    // obsolete here rather than paid, queued, or retried behind semantic work.
+    if (this.hasCanonicalWork()) {
+      if (this.activityBatchCurrent(batch)) {
+        this.activityFocus = undefined;
+        this.activitySupersedesSemantic = false;
+        this.publish();
+      }
+      return;
+    }
     if (!this.admitActivity()) {
       if (this.activityBatchCurrent(batch)) {
-        this.activityFocusTaskId = undefined;
+        this.activityFocus = undefined;
         this.activitySupersedesSemantic = false;
         this.publish();
       }
@@ -1947,13 +1991,15 @@ export class Monitor {
               task.status !== "done",
           )
         : undefined;
-      this.activityFocusTaskId = current?.id;
+      this.activityFocus = current
+        ? { id: current.id, label: current.label, revision: current.revision }
+        : undefined;
       // An accepted abstention or threshold abstention still supersedes stale INPROG.
       this.activitySupersedesSemantic = true;
       this.publish();
     } catch {
       if (this.activityBatchCurrent(batch)) {
-        this.activityFocusTaskId = undefined;
+        this.activityFocus = undefined;
         this.activitySupersedesSemantic = false;
         this.note("jev-unavailable");
         this.publish();

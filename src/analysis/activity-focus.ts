@@ -138,11 +138,8 @@ export function reconcileStartedTools(
   finalMessage: unknown,
   cwd: string,
 ): ActivityReconciliation {
-  if (provisional.kind !== "ready") return { kind: provisional.kind };
   const final = callsFromMessage(finalMessage, cwd);
   if (final === undefined) return { kind: "boundary-uncertain" };
-  if (!final.length) return { kind: "empty" };
-  if (!envelopeFits(final)) return { kind: "overflow" };
   const finalIds = new Set(final.map((call) => call.callId));
   if (
     finalIds.size !== final.length ||
@@ -154,7 +151,10 @@ export function reconcileStartedTools(
     return started ? [{ callId: declared.callId, member: started.member }] : [];
   });
   if (!actual.length) return { kind: "empty" };
+  // Final declarations may contain unstarted calls. Only safe, actual starts are
+  // activity evidence and therefore the only members subject to the 4KiB limit.
   if (!envelopeFits(actual)) return { kind: "overflow" };
+  if (provisional.kind !== "ready") return { kind: "changed", calls: actual };
   return sameCalls(provisional.calls, actual)
     ? { kind: "unchanged" }
     : { kind: "changed", calls: actual };

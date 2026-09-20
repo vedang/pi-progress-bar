@@ -1,0 +1,157 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Pi Progress Bar \u00b7 Core inference pipeline",
+    "locale": "en",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "semantic",
+      "label": "Observe and decide scope"
+    },
+    {
+      "id": "scope",
+      "label": "Conditional selected-model call"
+    },
+    {
+      "id": "commit",
+      "label": "Judge status and publish"
+    }
+  ],
+  "mainPath": [
+    "observe",
+    "scan",
+    "gate",
+    "complete"
+  ],
+  "nodes": [
+    {
+      "id": "observe",
+      "lane": "semantic",
+      "col": 0,
+      "type": "external",
+      "label": "Pi events",
+      "sublabel": "context / turn_end / settled",
+      "width": 210
+    },
+    {
+      "id": "scan",
+      "lane": "semantic",
+      "col": 1,
+      "type": "backend",
+      "label": "Canonical scan",
+      "sublabel": "bounded user + assistant text",
+      "width": 210
+    },
+    {
+      "id": "gate",
+      "lane": "semantic",
+      "col": 2,
+      "type": "cloud",
+      "label": "Jev \u00b7 scope gate",
+      "sublabel": "one choice: scope changed?",
+      "width": 210
+    },
+    {
+      "id": "complete",
+      "lane": "commit",
+      "col": 2,
+      "type": "cloud",
+      "label": "Jev \u00b7 task status",
+      "sublabel": "complete / withdraw + focus",
+      "width": 210,
+      "yOffset": 80
+    },
+    {
+      "id": "publish",
+      "lane": "commit",
+      "col": 1,
+      "type": "database",
+      "label": "Accept + checkpoint",
+      "sublabel": "save phases, then cursor",
+      "width": 210
+    },
+    {
+      "id": "display",
+      "lane": "commit",
+      "col": 0,
+      "type": "frontend",
+      "label": "Widget + board",
+      "sublabel": "done / total + task cards",
+      "width": 210
+    },
+    {
+      "id": "extract",
+      "lane": "scope",
+      "col": 2,
+      "type": "external",
+      "label": "Extraction call",
+      "sublabel": "add / revise / archive / restore",
+      "tag": "Pi selected model",
+      "width": 210
+    }
+  ],
+  "edges": [
+    {
+      "from": "observe",
+      "to": "scan",
+      "label": "read active branch"
+    },
+    {
+      "from": "scan",
+      "to": "gate",
+      "label": "admitted observation"
+    },
+    {
+      "from": "gate",
+      "to": "complete",
+      "label": "accepted unchanged"
+    },
+    {
+      "from": "gate",
+      "to": "extract",
+      "label": "changed / abstain",
+      "role": "branch"
+    },
+    {
+      "from": "extract",
+      "to": "complete",
+      "label": "grounded patch",
+      "role": "branch",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "complete",
+      "to": "publish",
+      "label": "accepted judgments",
+      "role": "return"
+    },
+    {
+      "from": "publish",
+      "to": "display",
+      "label": "snapshots",
+      "role": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Same path for both roles",
+      "items": [
+        "User and assistant text both get scope + status judgments.",
+        "Gate confidence < 0.5 or chosen probability < 0.8: extract."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Calls are conditional",
+      "items": [
+        "No tasks: skip status call. Invalid patch: stop before status.",
+        "Exact saved phases resume without paying again. UI adds no calls."
+      ]
+    }
+  ]
+}

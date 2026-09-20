@@ -1,0 +1,33 @@
+{
+  "schema_version":2,
+  "diagram_type":"workflow",
+  "meta":{"title":"Pi Progress Bar · Additional Jev calls","locale":"en","quality_profile":"showcase"},
+  "lanes":[
+    {"id":"activity","label":"Tool focus · ephemeral display"},
+    {"id":"details","label":"Grounded details · optional saved quotes"},
+    {"id":"health","label":"Task health · optional saved card"}
+  ],
+  "nodes":[
+    {"id":"declaration","lane":"activity","col":0,"type":"messagebus","label":"Tool declaration","sublabel":"message_end; changed turn_end","width":230},
+    {"id":"activityCall","lane":"activity","col":1,"type":"cloud","label":"Jev · activityFocus","sublabel":"safe batch + all open tasks","width":220},
+    {"id":"focusResult","lane":"activity","col":2,"type":"frontend","label":"Display focus","sublabel":"one task or abstention","width":210},
+    {"id":"offers","lane":"details","col":0,"type":"database","label":"Extraction offers","sublabel":"exact title / description / criteria","width":230},
+    {"id":"detailCall","lane":"details","col":1,"type":"cloud","label":"Jev · detail fields","sublabel":"uncovered quote candidates","width":220},
+    {"id":"detailResult","lane":"details","col":2,"type":"frontend","label":"Board details","sublabel":"accepted quotes only","width":210},
+    {"id":"report","lane":"health","col":0,"type":"database","label":"Settled observation","sublabel":"focus + report + passive facts","width":230},
+    {"id":"healthCall","lane":"health","col":1,"type":"cloud","label":"Jev · health rubric","sublabel":"core + criterion batches","width":220},
+    {"id":"healthResult","lane":"health","col":2,"type":"frontend","label":"Five health signals","sublabel":"not task completion authority","width":210}
+  ],
+  "edges":[
+    {"from":"declaration","to":"activityCall","label":"core idle"},
+    {"from":"activityCall","to":"focusResult","label":"current batch"},
+    {"from":"offers","to":"detailCall","label":"core settled"},
+    {"from":"detailCall","to":"detailResult","label":"save valid receipt"},
+    {"from":"report","to":"healthCall","label":"eligible focus"},
+    {"from":"healthCall","to":"healthResult","label":"all batches settle"}
+  ],
+  "cards":[
+    {"dot":"violet","title":"No new Extraction here","items":["Provisional tool batch may call once; changed observed list may call again.","Health and quote validation use separate Jev gateways; failures stay optional."]},
+    {"dot":"amber","title":"Not one global serialized queue","items":["Canonical observations get drain priority; detail selection precedes health.","Each gateway has one flight. Separate optional flights may overlap."]}
+  ]
+}

@@ -110,4 +110,4 @@ npm pack --dry-run --json
 
 Default tests are offline. Actual-host tests use a faux provider and synthetic in-memory credentials, exercising canonical events and real selected-model/auth dispatch. Separate paid replay is explicitly capped and opt-in: see [live QA instructions](__tests__/live/README.md).
 
-[Hybrid acceptance evidence](docs/design/hybrid-acceptance.md) records exact tested cases, failures and limitations. [Presentation handoff](docs/design/hybrid-presentation.md) documents the read-only UI/debugger seam. Historical design documents describe older releases; [PRODUCT.md](PRODUCT.md) governs the current hybrid contract.
+[Local UX candidate acceptance](docs/design/ux-acceptance.md) records the reviewed revision, QA results, load command and manual checklist. [Historical hybrid acceptance evidence](docs/design/hybrid-acceptance.md) records earlier tested cases, failures and limitations. [Presentation handoff](docs/design/hybrid-presentation.md) documents the read-only UI/debugger seam. Historical design documents describe older releases; [PRODUCT.md](PRODUCT.md) governs the current hybrid contract.

@@ -303,11 +303,11 @@ class TaskBoard implements BoardComponent {
     const pinned = [
       this.formatLine(`Service: ${this.snapshot.board.service.label}`, width),
       this.formatLine("Summary:", width),
-      this.formatLine("• Requirements:", width),
-      this.formatLine("• Acceptance:", width),
-      this.formatLine("• New red test:", width),
-      this.formatLine("• Red evidence:", width),
-      this.formatLine("• Implementation:", width),
+      this.formatLine(`• Requirements: ${health.requirements}`, width),
+      this.formatLine(`• Acceptance: ${health.acceptance}`, width),
+      this.formatLine(`• New red test: ${health.newRedTest}`, width),
+      this.formatLine(`• Red evidence: ${health.redEvidence}`, width),
+      this.formatLine(`• Implementation: ${health.implementation}`, width),
     ];
     const body = [
       ...this.wrapLines(`Task: ${task.label}`, width),

@@ -152,3 +152,8 @@
 - Cumulative reviewer0b78fca0 BLOCK1P1: static right-pane clipping permanently hides valid long labels/health/provenance at supported60x20 geometry. Only debugger body was scrollable; width safety != content reachability.
 - Main reproduced2red20pass with debugger OFF/ON at56-column overlay/20screenrows: step detail scroll through all rows; five Summary labels and service stay pinned, complete207-char label words, longest valid health values, role/time and full service instruction must be reachable. Existing531 tests retained.
 - Main format/check PASS; `u10-wrap-red.log` is the failing receipt. Source held until this test commit; U10 open, U11 unreleased. Repair must wrap safe whole text and compute scroll bounds from rendered rows, not hide fields in clipped static rows or weaken supported dimensions.
+
+## U10 detail repair main verification
+- Worker0a43456e (full change uzktnsnvpwzkysswvsnknxouxrsxmsrs) only board.ts: complete wrapped normal details, shared rendered-row scroll accounting, debugger-independent full value reachability; both frozen reachability reds green.
+- Main caught regression in repair: pinned Summary showed bare labels without values even at wide dimensions. Added failing test1red22pass (`u10-summary-values-red.log`) and restored bounded pinned value previews; full text remains wrapped/reachable in normal body at narrow widths.
+- Main format/check/test PASS534unit+17integration (`u10-wrap-{format,check,test}.log`). Repeated actual Pi0.85.1 geometry/input matrix16PASS (`u10-wrap-host-proof.log`). No paid calls. U10 remains open pending cumulative rereview; U11 held.

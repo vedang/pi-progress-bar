@@ -430,3 +430,29 @@ it.each([false, true])(
     expect(h.board.viewState().detailOffset).toBe(0);
   },
 );
+
+it("keeps health values, not just empty Summary labels, pinned while details scroll", async () => {
+  const view = tasks(1);
+  const task = view.board.tasks[0];
+  if (!task) throw new Error("Missing task");
+  task.health = {
+    requirements: "clear",
+    acceptance: "explicit",
+    newRedTest: "not-needed",
+    redEvidence: "not-found-in-context",
+    implementation: "appears complete",
+  };
+  const h = await fixture(view);
+  h.board.handleInput("d");
+  h.board.handleInput(keys.right);
+  h.board.handleInput(keys.end);
+  const text = h.text();
+  for (const [label, value] of [
+    ["Requirements", "clear"],
+    ["Acceptance", "explicit"],
+    ["New red test", "not-needed"],
+    ["Red evidence", "not-found-in-context"],
+    ["Implementation", "appears complete"],
+  ])
+    expect(text).toContain(`${label}: ${value}`);
+});

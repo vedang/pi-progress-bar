@@ -4,7 +4,7 @@ A passive progress and task-health widget for Pi. **Jev gates scope and judges c
 
 ## Install
 
-Requires Node.js >=22.19.0, a configured selected Pi model, and `TYPESAFE_API_KEY`. Host integration is tested with Pi **0.84.2** (pi-ai0.84.4) and **0.85.1**.
+Requires Node.js >=22.19.0, a configured selected Pi model, and `TYPESAFE_API_KEY`. This local UI candidate is validated against Pi **0.85.1**. The older development dependency is not a dual-host support promise.
 
 ```sh
 pi install git:github.com/vedang/pi-progress-bar
@@ -28,7 +28,7 @@ New sessions default ON. Missing/rejected Jev credentials leave the monitor OFF.
 2. Ask pinned `jev-1.13.0` whether task scope changed. Only confidently **unchanged** skips extraction. Gate confidence must be >=0.5 and selected probability >=0.8; uncertainty remains distinct from a confident negative.
 3. When needed, ask the **currently selected Pi model** for a strict grounded task patch. New tasks can be action or response deliverables. A new question after completed work can create a new response task, even on the same topic. User approvals and other people's work are not assistant tasks.
 4. Independently ask Jev about each included task. Completion of an earlier task is **not** a prerequisite for completing later tasks. Newly extracted tasks can be assessed in the same observation. Done tasks receive a separate withdrawal judgment.
-5. The first completion batch also selects current activity from **all open tasks**. Present activity or an immediate explicit commitment may select one task; no-match, concurrency or uncertainty clears focus rather than guessing. Requests, quotes, distant intent and tool use alone do not select focus. Focus controls display/health, never task completion or tool ownership. All-done health can remain as an explicitly retained card.
+5. The first completion batch also selects current activity from **all open tasks**. Present activity or an immediate explicit commitment may select one task; no-match, concurrency or uncertainty clears focus rather than guessing. This semantic selector does not treat requests, quoted intent or raw tool bodies as present activity; the separate safe-metadata tool selector is described below. Focus controls display/health, never task completion or tool ownership. All-done health can remain as an explicitly retained card.
 
 See the [Jev batching audit](docs/design/jev-batching.md) for call boundaries and durability constraints.
 
@@ -38,7 +38,11 @@ Task IDs are code-generated. Wording edits preserve completion; changed requirem
 
 ## Reading the widget
 
-The task card has five separate signals, in order:
+The below-editor widget shows the literal reported fraction, a 12-cell bar, last Jev dispatch time, and a named current task when eligible work exists. An initial selection is qualified **OPEN**, not invented activity. Accepted exclusive focus is **INPROG**; only accepted completion yields **DONE**. Archived tasks remain **ARCHIVED** in the board.
+
+With an empty default editor, **Right** selects the widget and reveals separate provider call/token usage; **Enter** opens the centered task board. **Left/Escape** returns selection. The board shows newest-created tasks first, with independent list/detail scrolling: arrows/PgUp/PgDn navigate, Left/Right/Tab select a pane, **d** toggles task-local diagnostics, and **Escape** closes it. Selection is local and does not edit tasks or trigger analysis. Custom editors and focused overlays retain their input ownership.
+
+The board's single-copy Summary has five separate signals, in order:
 
 | Field | Meaning |
 |---|---|
@@ -56,7 +60,9 @@ Red evidence derives **Not needed** from new-red-test applicability when no actu
 
 Completed or replaced tasks retain a coherent **retained / as-of / replacement pending** card until a new assessment is admitted. The label and all five fields are copied together. Assessment time is separate from **actual Jev and extraction dispatch time**, including failed attempts. Redraws do not change these facts or initiate requests. Trusted theme colors are preserved; untrusted text controls are sanitized before styling.
 
-Unresolved/previous scope has no misleading current percentage. Bare `/progress` exposes safe, capped diagnostic counts; the normal widget does not dump raw diagnostic codes. The full debugger modal and wider UI redesign are **not implemented**.
+Unresolved/previous scope has no misleading current percentage. Bare `/progress` exposes safe, capped diagnostic counts; the normal widget does not dump raw diagnostic codes. The task-local debugger is available only inside the board; there is no separate `/progress debugger` command. Styling is static and theme-aware; no animation, polling, or interpolated progress is used.
+
+Optional **Task Title**, **Description**, and **Acceptance Criteria** appear only for unique exact canonical quotes independently accepted by Jev at confidence >=0.5 and probability >=0.8. Inferred, ambiguous, rejected, stale, or cross-task fields are omitted—not filled with placeholders. The tracked task label always remains. Optional detail failure or storage denial never blocks mandatory task tracking.
 
 ## Limits and costs
 
@@ -73,20 +79,22 @@ Unresolved/previous scope has no misleading current percentage. Bare `/progress`
 | Extraction input / output text | 24KiB / 32KiB |
 | Extraction output tokens / owned deadline | 2,048 / 60 seconds |
 | Patch operations | 6 additions; 12 each revisions, archives and restores |
+| Safe tool-focus envelope | 4KiB, all-or-nothing |
+| Optional quoted details | Title 120; description 800; up to 6 criteria of 240 Unicode scalars each |
 
 Catch-up is chronological, not a fresh-message priority lane. Large history can therefore delay the newest request. Oversized messages are not partially interpreted. Capacity limits reject further mutation rather than evict accepted obligations. There is no automatic context compaction or unlimited-history promise.
 
-One controlled analysis flight is active across semantic and optional health work. New semantic evidence takes priority over stale optional health. Accepted gate/patch/completion phases are checkpointed so eligible retries resume unfinished work rather than rebilling accepted phases. Jev transient failures use pending-only backoff/Retry-After; idle time and redraws never poll. No extraction repair loop or hidden model retry is used.
+Semantic work has priority over optional health, tool-focus, and grounded-detail jobs. Optional jobs use separate bounded gateway state; this is not a single global provider-flight guarantee. New semantic evidence fences stale optional work. Accepted gate/patch/completion phases are checkpointed so eligible retries resume unfinished work rather than rebilling accepted phases. Jev transient failures use pending-only backoff/Retry-After; idle time and redraws never poll. No extraction repair loop or hidden model retry is used.
 
-Each visible observation may incur a Jev gate plus completion/health requests. Extraction also incurs your selected provider's charges. Tool-only/thinking-only/blank messages do not trigger semantic analysis. `/progress off` stops extension analysis, not the main agent.
+Each visible observation may incur a Jev gate plus completion/health requests. Extraction also incurs your selected provider's charges. Tool-only/thinking-only/blank messages do not trigger semantic task analysis. Declared tools can trigger an immediate optional provisional focus judgment; final observed tool membership triggers a correction only when its normalized list changed. Unchanged lists cause no duplicate judgment. Only tool names, safe repository-relative paths and fixed shell categories are sent—never raw commands, arguments, results, errors or runtime call IDs. This ephemeral focus cannot complete tasks or establish evidence. `/progress off` stops extension analysis, not the main agent.
 
 ## Privacy and storage
 
 Bounded conversation/task excerpts go to **TypeSafe** (`https://api.typesafe.ai/v1/systemone`) and, when extraction is needed, to **your selected Pi model provider**. This is not local-only processing.
 
-Strict **v6** checkpoints persist bounded generated task labels, IDs/revisions, source hashes/ranges, assessment scalars, immutable mutation events, pending-phase journals, usage, dispatch timestamps and retained health-card metadata. They do **not** persist full source messages, prompts, provider envelopes, reasoning, tool bodies or credentials. Source references must resolve against the active branch. Checkpoints are trusted writable local state, not cryptographic protection against deliberate tampering.
+Strict **v8** checkpoints persist bounded generated task labels, IDs/revisions, source hashes/ranges, assessment scalars, immutable mutation events, pending-phase journals, usage, dispatch timestamps, task-local health facts and optional detail validation receipts. They do **not** persist full source messages, prompts, provider envelopes, reasoning, tool bodies or credentials. Source references must resolve against the active branch. Checkpoints are trusted writable local state, not cryptographic protection against deliberate tampering.
 
-Older checkpoints, including v5, are rejected and rebuilt from canonical history—**no migration**. Accepted same-version phases resume without rebilling. Every newly committed checkpoint must also fit its OFF representation. An existing v6 checkpoint that fits only while ON is restored **effectively OFF**, preserving accepted work and telemetry; enabling remains blocked rather than discarding data or exceeding the storage limit. Canonical source amendments invalidate stale derived references and trigger bounded reconciliation. v6 includes focus assessments and replay/undo data; generated labels remain bounded derived data, not reference-only storage.
+Older checkpoints, including v7, and corrupt storage leave monitoring **OFF** with a fresh-session warning—**no migration or historical rebuilding/rebilling**. Test this candidate in a fresh session. Accepted same-version phases and saved detail receipts resume without rebilling covered work. Every new checkpoint must also fit its OFF representation. A same-version checkpoint that fits only while ON remains effectively OFF, preserving accepted work and telemetry. Canonical amendments invalidate stale derived references; optional-only detail mismatches drop those details without semantic replay. No local receipt can prevent remote billing if the process dies after provider acceptance but before the receipt is saved.
 
 The extension does not run commands/tests, mutate Beads, inject conversation messages, replace tools, follow child/sibling sessions, or send advisory nudges.
 

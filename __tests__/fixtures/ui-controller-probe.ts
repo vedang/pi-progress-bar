@@ -19,7 +19,18 @@ export default function probe(pi: ExtensionAPI) {
   const record = (data: object) =>
     appendFileSync(output, `${JSON.stringify(data)}\n`);
   let cleanup = () => {};
+  let networkAttempts = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    networkAttempts++;
+    throw new Error("UI probe forbids network");
+  };
   pi.on("session_start", (_event, ctx) => {
+    if (
+      process.env.PROGRESS_UI_COLOAD === "1" &&
+      !pi.getAllTools().some((tool) => tool.name === "subagent")
+    )
+      throw new Error("Expected actual pi-subagents co-load");
     const base = createUiHost(ctx);
     let component: Component | undefined;
     let columns = 80;
@@ -77,7 +88,25 @@ export default function probe(pi: ExtensionAPI) {
       requestRender: () => base.requestRender(),
       dispose: () => base.dispose(),
     };
-    const controller = createUiController(host, uxView());
+    const view = uxView();
+    if (process.env.PROGRESS_UI_RICH === "1") {
+      const task = view.board.tasks[0];
+      if (!task) throw new Error("Missing static probe task");
+      const provenance = {
+        role: "user" as const,
+        validatedAt: 1,
+        confidence: 1,
+        probability: 1,
+      };
+      task.details = {
+        title: { text: "Parser task", provenance },
+        description: { text: "Preserve escaped commas 😀", provenance },
+        acceptanceCriteria: [
+          { text: "Quoted delimiters remain in the field", provenance },
+        ],
+      };
+    }
+    const controller = createUiController(host, view);
     if (!transformedFirst) stopTransform = transform();
     const stop = ctx.ui.onTerminalInput((data) => {
       if (matchesKey(data, "f7")) {
@@ -97,10 +126,17 @@ export default function probe(pi: ExtensionAPI) {
       stopTransform();
       controller.dispose();
     };
-    record({ event: "ready", transformedFirst, materialized: !!component });
+    record({
+      event: "ready",
+      transformedFirst,
+      materialized: !!component,
+      coLoaded: pi.getAllTools().some((tool) => tool.name === "subagent"),
+    });
   });
   pi.on("session_shutdown", () => {
     cleanup();
-    record({ event: "shutdown" });
+    globalThis.fetch = originalFetch;
+    record({ event: "shutdown", networkAttempts });
+    if (networkAttempts) throw new Error("Unexpected UI network work");
   });
 }

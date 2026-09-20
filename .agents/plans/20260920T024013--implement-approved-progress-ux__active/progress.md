@@ -162,3 +162,7 @@
 - Reviewer5322104d blocked2 remaining edge cases: empty-board service omitted overflow and wrapping split spacing combining marks by code point.
 - Main2red23pass (`u10-empty-grapheme-red.log`) reproduced valid retry service at56x20 plus Devanagari spacing-mark boundary. Narrow fixes: empty right pane uses same sanitized wrap helper; wrapper iterates Intl.Segmenter graphemes.
 - Main format/check/test PASS536unit17integration (`u10-edge-*`); repeated actualhost16geometry/input cases PASS (`u10-edge-host-proof.log`). U10 stays open pending rereview. User has provisional manual-test command against development checkout; no manual acceptance claimed and no installed package changed.
+
+## U10 accepted / U11 released
+- Cumulative reviewer c56cfd8d OK/noissues through e3bb845f; accepted report u09-u10-accepted-review.md. Closed U10/y3h.11 with main format/check536unit17integration and16actualPi0.85.1 host cases passing.
+- Provisional manual verification remains available; no user feedback or acceptance inferred. U11/y3h.12 next: main tool-focus freshness contract tests before U12 source.

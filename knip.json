@@ -5,6 +5,7 @@
     "vitest.config.integration.ts",
     "vitest.config.live.ts",
     "__tests__/fixtures/pi-registration-probe.ts",
+    "__tests__/fixtures/advisory-mode-probe.ts",
     "__tests__/fixtures/ui-host-probe.ts",
     "__tests__/fixtures/ui-controller-probe.ts",
     "__tests__/offline-setup.ts"

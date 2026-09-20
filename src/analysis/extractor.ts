@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { DetailCandidate, DetailKey } from "./task-details";
 import type {
   HybridState,
   Observation,
@@ -23,6 +24,18 @@ interface AddOperation {
   kind: TaskKind;
   basis: TaskBasis;
   quote: string;
+}
+
+export interface DetailDraft {
+  operation: "add" | "revise" | "restore";
+  index: number;
+  fields: { key: DetailKey; quote: string }[];
+}
+
+export interface GroundedDetailDraft {
+  operation: DetailDraft["operation"];
+  index: number;
+  candidates: DetailCandidate[];
 }
 
 interface ReviseOperation {
@@ -107,6 +120,13 @@ const record = (value: unknown): value is Record<string, unknown> =>
 const exactKeys = (value: Record<string, unknown>, keys: string[]) =>
   Object.keys(value).length === keys.length &&
   keys.every((key) => Object.hasOwn(value, key));
+const exactKeysWithOptional = (
+  value: Record<string, unknown>,
+  keys: string[],
+  optional: string,
+) =>
+  Object.keys(value).every((key) => keys.includes(key) || key === optional) &&
+  keys.every((key) => Object.hasOwn(value, key));
 
 const labelIsValid = taskLabelIsValid;
 
@@ -126,7 +146,13 @@ function patchArray(
 }
 
 function addOperation(value: Record<string, unknown>): AddOperation {
-  if (!exactKeys(value, ["label", "kind", "basis", "quote"]))
+  if (
+    !exactKeysWithOptional(
+      value,
+      ["label", "kind", "basis", "quote"],
+      "details",
+    )
+  )
     throw new Error("Invalid add operation");
   if (
     !labelIsValid(value.label) ||
@@ -145,7 +171,13 @@ function addOperation(value: Record<string, unknown>): AddOperation {
 }
 
 function reviseOperation(value: Record<string, unknown>): ReviseOperation {
-  if (!exactKeys(value, ["id", "label", "requirementsChanged", "quote"]))
+  if (
+    !exactKeysWithOptional(
+      value,
+      ["id", "label", "requirementsChanged", "quote"],
+      "details",
+    )
+  )
     throw new Error("Invalid revise operation");
   if (
     !idIsValid(value.id) ||
@@ -172,7 +204,13 @@ function archiveOperation(value: Record<string, unknown>): ArchiveOperation {
 }
 
 function restoreOperation(value: Record<string, unknown>): RestoreOperation {
-  if (!exactKeys(value, ["id", "label", "requirementsChanged", "quote"]))
+  if (
+    !exactKeysWithOptional(
+      value,
+      ["id", "label", "requirementsChanged", "quote"],
+      "details",
+    )
+  )
     throw new Error("Invalid restore operation");
   if (
     !idIsValid(value.id) ||
@@ -190,8 +228,56 @@ function restoreOperation(value: Record<string, unknown>): RestoreOperation {
   };
 }
 
+const detailText = (value: unknown, maximum: number): value is string =>
+  typeof value === "string" &&
+  !!value.trim() &&
+  Array.from(value).length <= maximum &&
+  !/[\p{Cc}\p{Cf}]/u.test(value);
+
+const detailField = (
+  value: unknown,
+  key: DetailKey,
+  maximum: number,
+): { key: DetailKey; quote: string } | undefined =>
+  record(value) &&
+  exactKeys(value, ["quote"]) &&
+  detailText(value.quote, maximum)
+    ? { key, quote: value.quote }
+    : undefined;
+
+/** Optional fields are total and cannot poison mandatory patch parsing. */
+const detailDraft = (
+  operation: DetailDraft["operation"],
+  index: number,
+  value: unknown,
+): DetailDraft | undefined => {
+  if (!record(value)) return;
+  const allowed = ["title", "description", "acceptanceCriteria"];
+  if (Object.keys(value).some((key) => !allowed.includes(key))) return;
+  const fields = [
+    detailField(value.title, "title", 120),
+    detailField(value.description, "description", 800),
+  ].flatMap((field) => (field ? [field] : []));
+  if (
+    Array.isArray(value.acceptanceCriteria) &&
+    value.acceptanceCriteria.length <= 6
+  )
+    value.acceptanceCriteria.forEach((item, acceptanceIndex) => {
+      const field = detailField(
+        item,
+        `acceptance:${acceptanceIndex}` as DetailKey,
+        240,
+      );
+      if (field) fields.push(field);
+    });
+  return fields.length ? { operation, index, fields } : undefined;
+};
+
 /** Parse raw model text only. Fences, comments and unknown schema fields reject. */
-export function parsePatch(raw: string): ScopePatch {
+export function parseExtraction(raw: string): {
+  patch: ScopePatch;
+  detailDrafts: DetailDraft[];
+} {
   if (Buffer.byteLength(raw) > MAX_EXTRACTION_TEXT_BYTES)
     throw new Error("Extraction response exceeds 32KiB");
   let parsed: unknown;
@@ -207,11 +293,15 @@ export function parsePatch(raw: string): ScopePatch {
     throw new Error("Invalid extraction patch shape");
   if (typeof parsed.unresolved !== "boolean")
     throw new Error("Invalid unresolved flag");
+  const add = patchArray(parsed, "add", MAX_ADDS);
+  const revise = patchArray(parsed, "revise", MAX_REVISES);
+  const archive = patchArray(parsed, "archive", MAX_ARCHIVES);
+  const restore = patchArray(parsed, "restore", MAX_RESTORES);
   const patch: ScopePatch = {
-    add: patchArray(parsed, "add", MAX_ADDS).map(addOperation),
-    revise: patchArray(parsed, "revise", MAX_REVISES).map(reviseOperation),
-    archive: patchArray(parsed, "archive", MAX_ARCHIVES).map(archiveOperation),
-    restore: patchArray(parsed, "restore", MAX_RESTORES).map(restoreOperation),
+    add: add.map(addOperation),
+    revise: revise.map(reviseOperation),
+    archive: archive.map(archiveOperation),
+    restore: restore.map(restoreOperation),
     unresolved: parsed.unresolved,
   };
   if (
@@ -232,7 +322,25 @@ export function parsePatch(raw: string): ScopePatch {
   const additions = patch.add.map(({ label, kind }) => `${kind}:${label}`);
   if (new Set(additions).size !== additions.length)
     throw new Error("Duplicate extraction addition");
-  return patch;
+  const detailDrafts = [
+    ...add.flatMap((operation, index) => {
+      const draft = detailDraft("add", index, operation.details);
+      return draft ? [draft] : [];
+    }),
+    ...revise.flatMap((operation, index) => {
+      const draft = detailDraft("revise", index, operation.details);
+      return draft ? [draft] : [];
+    }),
+    ...restore.flatMap((operation, index) => {
+      const draft = detailDraft("restore", index, operation.details);
+      return draft ? [draft] : [];
+    }),
+  ];
+  return { patch, detailDrafts };
+}
+
+export function parsePatch(raw: string): ScopePatch {
+  return parseExtraction(raw).patch;
 }
 
 export function boundedEarlier(
@@ -305,7 +413,10 @@ export function extractionInput(
   return input;
 }
 
-function exactQuoteSource(quote: string, latest: Observation): SourceRef {
+export function exactQuoteSource(
+  quote: string,
+  latest: Observation,
+): SourceRef {
   const start = latest.text.indexOf(quote);
   if (start < 0 || latest.text.indexOf(quote, start + 1) >= 0)
     throw new Error("Quote must occur exactly once in latest message");
@@ -317,6 +428,27 @@ function exactQuoteSource(quote: string, latest: Observation): SourceRef {
     end: start + quote.length,
     quoteHash: createHash("sha256").update(quote).digest("hex"),
   };
+}
+
+/** Optional quote failures omit that candidate only; mandatory source remains strict. */
+export function groundDetailDrafts(
+  drafts: readonly DetailDraft[],
+  latest: Observation,
+): GroundedDetailDraft[] {
+  return drafts.flatMap((draft) => {
+    const candidates = draft.fields.flatMap((field) => {
+      try {
+        return [
+          { key: field.key, source: exactQuoteSource(field.quote, latest) },
+        ];
+      } catch {
+        return [];
+      }
+    });
+    return candidates.length
+      ? [{ operation: draft.operation, index: draft.index, candidates }]
+      : [];
+  });
 }
 
 /** Validate every grounded reference before reducer mutation. */

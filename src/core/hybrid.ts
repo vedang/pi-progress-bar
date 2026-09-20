@@ -8,9 +8,14 @@ import {
   type ExtractionInput,
   ExtractionInputOverflowError,
   extractionInput,
+  groundDetailDrafts,
   groundPatch,
-  parsePatch,
+  parseExtraction,
 } from "../analysis/extractor";
+import {
+  bindTaskDetailOffers,
+  type TaskDetailRecord,
+} from "../analysis/task-details";
 import {
   GateRequestOverflowError,
   gateRequest,
@@ -84,13 +89,18 @@ export class DurabilityCapacityError extends Error {
   }
 }
 
+export interface AcceptedSaveOptions {
+  /** Optional task-local records accepted atomically with a semantic patch. */
+  detailOffers?: TaskDetailRecord[];
+}
+
 export interface HybridProviders {
   evaluate(request: EvaluationRequest): Promise<ValidatedResult>;
   extract(input: ReturnType<typeof extractionInput>): Promise<string>;
   /** Required synchronous capacity authority before any provider dispatch. */
   admit?(plan: AdmissionPlan): boolean;
   /** Durably writes immutable snapshots after every accepted transaction phase. */
-  save?(state: HybridState): void;
+  save?(state: HybridState, options?: AcceptedSaveOptions): void;
 }
 
 const validObservation = (observation: Observation) =>
@@ -133,8 +143,15 @@ class ScopeRejection extends Error {
   }
 }
 
-function saveAccepted(state: HybridState, providers: HybridProviders) {
-  providers.save?.(copyState(state));
+function saveAccepted(
+  state: HybridState,
+  providers: HybridProviders,
+  options?: AcceptedSaveOptions,
+) {
+  providers.save?.(
+    copyState(state),
+    options ? structuredClone(options) : undefined,
+  );
 }
 
 function clearTransientErrors(state: HybridState): HybridState {
@@ -1111,9 +1128,10 @@ export async function processObservation(
         )
       )
         return blockPending(next, "event-capacity", "capacity", true);
+      const extraction = parseExtraction(await providers.extract(input));
       const outcome = normalizedPatch(
         groundPatch(
-          parsePatch(await providers.extract(input)),
+          extraction.patch,
           observation,
           new Set(input.tasks.map((task) => task.id)),
         ),
@@ -1125,6 +1143,12 @@ export async function processObservation(
         );
       const undo = patchUndo(next, outcome);
       const patched = applyPatch(next, outcome);
+      const detailOffers = bindTaskDetailOffers(
+        groundDetailDrafts(extraction.detailDrafts, observation),
+        next,
+        outcome,
+        patched,
+      );
       const patch: PatchRecord = {
         requestHash: requestHash(input),
         outcome,
@@ -1139,7 +1163,11 @@ export async function processObservation(
           patch,
         ),
       };
-      saveAccepted(next, providers);
+      saveAccepted(
+        next,
+        providers,
+        detailOffers.length ? { detailOffers } : undefined,
+      );
     } catch (error) {
       if (
         error instanceof RetryableProviderError ||

@@ -1,4 +1,10 @@
 import { createHash } from "node:crypto";
+import type {
+  DetailBatchReceipt,
+  DetailCandidate,
+  DetailKey,
+  TaskDetailRecord,
+} from "../analysis/task-details";
 import { completionRequest } from "../analysis/completion";
 import { extractionInput } from "../analysis/extractor";
 import { gateRequest } from "../analysis/gate";
@@ -42,7 +48,7 @@ import {
   taskLabelIsValid,
 } from "./hybrid-state";
 
-const VERSION = 7;
+const VERSION = 8;
 const MAX_TASKS = 200;
 const MAX_ACTIVE_TASKS = 20;
 const MAX_EVENTS = 1000;
@@ -87,6 +93,9 @@ export interface MonitorCheckpointMetadata {
   idleDoneTaskId?: string;
   /** At most one exact accepted health fact for every retained task. */
   healthCards?: HealthCard[];
+  /** Optional exact source spans and normalized field assessments; never quote text. */
+  /** Validated at storage boundary; public type stays broad for checkpoint readers. */
+  taskDetails?: unknown[];
 }
 
 interface Checkpoint {
@@ -688,6 +697,103 @@ function validState(value: unknown): value is HybridState {
   return true;
 }
 
+const detailKeyIsValid = (value: unknown): value is DetailKey =>
+  value === "title" ||
+  value === "description" ||
+  (typeof value === "string" && /^acceptance:[0-5]$/.test(value));
+const detailOrder = (key: DetailKey) =>
+  key === "title" ? 0 : key === "description" ? 1 : 2 + Number(key.slice(11));
+const detailChoices = new Set(["yes", "no", "uncertain"]);
+
+function validDetailCandidate(value: unknown): value is DetailCandidate {
+  return (
+    record(value) &&
+    exactKeys(value, ["key", "source"]) &&
+    detailKeyIsValid(value.key) &&
+    validSourceRef(value.source)
+  );
+}
+
+function validDetailReceipt(value: unknown): value is DetailBatchReceipt {
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      "requestHash",
+      "candidateKeys",
+      "assessments",
+      "validatedAt",
+    ]) ||
+    !hashIsValid(value.requestHash) ||
+    !Array.isArray(value.candidateKeys) ||
+    value.candidateKeys.length < 1 ||
+    value.candidateKeys.length > 20 ||
+    !value.candidateKeys.every(detailKeyIsValid) ||
+    !Array.isArray(value.assessments) ||
+    value.assessments.length !== value.candidateKeys.length ||
+    !value.assessments.every(validAssessment) ||
+    !nonNegativeInteger(value.validatedAt)
+  )
+    return false;
+  return value.assessments.every((assessment) =>
+    matchesNormalizedAssessment(assessment, detailChoices),
+  );
+}
+
+function validTaskDetailRecord(value: unknown): value is TaskDetailRecord {
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      "taskId",
+      "revision",
+      "label",
+      "taskSource",
+      "candidates",
+      "receipts",
+    ]) ||
+    !taskIdIsValid(value.taskId) ||
+    !positiveInteger(value.revision) ||
+    !safeLabel(value.label) ||
+    !validSourceRef(value.taskSource) ||
+    !Array.isArray(value.candidates) ||
+    value.candidates.length < 1 ||
+    value.candidates.length > 8 ||
+    !value.candidates.every(validDetailCandidate) ||
+    !Array.isArray(value.receipts) ||
+    !value.receipts.every(validDetailReceipt)
+  )
+    return false;
+  const candidates = value.candidates as DetailCandidate[];
+  const receipts = value.receipts as DetailBatchReceipt[];
+  const keys = candidates.map((candidate) => candidate.key);
+  if (
+    new Set(keys).size !== keys.length ||
+    keys.some(
+      (key, index) =>
+        index && detailOrder(key) <= detailOrder(keys[index - 1]!),
+    )
+  )
+    return false;
+  const prefix = receipts.flatMap((receipt) => receipt.candidateKeys);
+  if (
+    prefix.length > keys.length ||
+    prefix.some((key, index) => key !== keys[index])
+  )
+    return false;
+  return receipts.every((receipt) =>
+    receipt.assessments.every((assessment, index) => {
+      const candidate = candidates.find(
+        (item) => item.key === receipt.candidateKeys[index],
+      );
+      return (
+        !!candidate &&
+        assessment.source.entryId === candidate.source.entryId &&
+        assessment.source.messageHash === candidate.source.messageHash &&
+        assessment.source.role === candidate.source.role
+      );
+    }),
+  );
+}
+
 function validMonitorMetadata(
   value: unknown,
   state: HybridState,
@@ -702,6 +808,7 @@ function validMonitorMetadata(
         "lastExtractionCallAt",
         "idleDoneTaskId",
         "healthCards",
+        "taskDetails",
       ],
     ) ||
     typeof value.enabled !== "boolean" ||
@@ -736,6 +843,30 @@ function validMonitorMetadata(
     )
       return false;
   }
+  if (
+    Object.hasOwn(value, "taskDetails") &&
+    (!Array.isArray(value.taskDetails) ||
+      value.taskDetails.length > MAX_TASKS ||
+      !value.taskDetails.every(validTaskDetailRecord) ||
+      new Set(value.taskDetails.map((record) => record.taskId)).size !==
+        value.taskDetails.length ||
+      !value.taskDetails.every((record) => {
+        const task = state.tasks.find((item) => item.id === record.taskId);
+        return (
+          !!task &&
+          task.revision === record.revision &&
+          task.label === record.label &&
+          validSourceRef(record.taskSource) &&
+          task.source.entryId === record.taskSource.entryId &&
+          task.source.messageHash === record.taskSource.messageHash &&
+          task.source.role === record.taskSource.role &&
+          task.source.start === record.taskSource.start &&
+          task.source.end === record.taskSource.end &&
+          task.source.quoteHash === record.taskSource.quoteHash
+        );
+      }))
+  )
+    return false;
   return (
     !Object.hasOwn(value, "idleDoneTaskId") ||
     state.tasks.some(
@@ -961,7 +1092,7 @@ function checkpointState(state: HybridState): HybridState {
   return snapshot;
 }
 
-/** Exact encoded bytes after strict v7 shape validation, before capacity denial. */
+/** Exact encoded bytes after strict v8 shape validation, before capacity denial. */
 export function checkpointBytes(
   state: HybridState,
   monitor?: MonitorCheckpointMetadata,
@@ -983,7 +1114,7 @@ export function encodeCheckpoint(
   monitor?: MonitorCheckpointMetadata,
 ): Checkpoint {
   if (checkpointBytes(state, monitor) > MAX_CHECKPOINT_BYTES)
-    throw new Error("Hybrid checkpoint exceeds v7 bounds");
+    throw new Error("Hybrid checkpoint exceeds v8 bounds");
   return JSON.parse(
     JSON.stringify({
       version: VERSION,

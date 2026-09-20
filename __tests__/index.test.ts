@@ -7,6 +7,11 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import extension from "../src/index";
 import { addPatch, observation } from "./fixtures/hybrid";
 import { branchEntry, jevReply } from "./fixtures/hybrid-monitor";
+import {
+  detailAddExtraction,
+  isDetailRequest,
+  savedDetails,
+} from "./fixtures/task-details";
 
 type Handler = (event: never, ctx: ExtensionContext) => unknown;
 function host() {
@@ -132,6 +137,28 @@ it("uses canonical context rather than preappend message_end, through the host-s
   expect(h.checkpoints.at(-1)).toMatchObject({ version: 8 });
   expect(JSON.stringify(h.checkpoints.at(-1))).toContain("Implement parser");
 });
+it("enables calibrated grounded details on the production extension path", async () => {
+  const h = fixture();
+  const reply = await h.complete();
+  h.complete.mockClear();
+  h.complete.mockResolvedValue({
+    ...reply,
+    content: [{ type: "text", text: JSON.stringify(detailAddExtraction()) }],
+  });
+  await h.emit("session_start");
+  h.setEntries([
+    branchEntry("goal", "Implement parser, add regression, and validate it."),
+  ]);
+  await h.emit("context");
+  await vi.advanceTimersByTimeAsync(500);
+  expect(h.complete).toHaveBeenCalledTimes(1);
+  const requests = vi
+    .mocked(fetch)
+    .mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+  expect(requests.filter(isDetailRequest)).toHaveLength(1);
+  expect(savedDetails(h.checkpoints.at(-1))[0]?.receipts).toHaveLength(1);
+});
+
 it("keeps commands passive and OFF idempotent without enabling debugger commands", async () => {
   const h = fixture();
   await h.emit("session_start");

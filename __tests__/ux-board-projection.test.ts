@@ -278,6 +278,54 @@ describe("task source provenance", () => {
     expect(h.fetch).toHaveBeenCalledTimes(calls);
   });
 
+  it("publishes no old-source widget health at intermediate revised commit before completion settles", async () => {
+    const h = fixture();
+    h.start();
+    await h.settle("goal");
+    h.changed(true);
+    const text = "Parser source restated at an intermediate boundary.";
+    h.extract.mockResolvedValue({
+      text: JSON.stringify({
+        ...noPatch(),
+        revise: [
+          {
+            id: "task:1",
+            label: "Implement parser",
+            requirementsChanged: false,
+            quote: text,
+          },
+        ],
+      }),
+      provider: "offline",
+      model: "fixture",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    const transport = h.fetch.getMockImplementation();
+    if (!transport) throw new Error("Missing transport");
+    let completionHeld = false;
+    h.fetch.mockImplementation(async (url, init) => {
+      const request = JSON.parse(String(init?.body));
+      if (
+        Object.keys(request.questions).some((key) =>
+          key.startsWith("complete:"),
+        )
+      ) {
+        completionHeld = true;
+        return new Promise<Response>(() => {});
+      }
+      return transport(url, init);
+    });
+    h.append("intermediate-revise", text, "user");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(completionHeld).toBe(true);
+    expect(h.monitor.state.tasks[0]?.source.entryId).toBe(
+      "intermediate-revise",
+    );
+    expect(h.monitor.state.pending?.phase).toBe("complete");
+    expect(task(h.monitor, "task:1").health).toEqual(unassessed);
+    expect(h.monitor.presentationSnapshot().card).toBeUndefined();
+  });
+
   it("same-label cosmetic revise cannot reuse stale health while replacement is unavailable", async () => {
     const h = fixture();
     h.start();

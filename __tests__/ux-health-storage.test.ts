@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { MAX_CHECKPOINT_BYTES } from "../src/core/hybrid-checkpoint";
-import { observation } from "./fixtures/hybrid";
+import {
+  checkpointBytes,
+  type HealthCard,
+  MAX_CHECKPOINT_BYTES,
+  type MonitorCheckpointMetadata,
+} from "../src/core/hybrid-checkpoint";
+import { initialMessage, observation } from "./fixtures/hybrid";
 import { monitorHarness } from "./fixtures/hybrid-monitor";
 
 const running: ReturnType<typeof monitorHarness>[] = [];
@@ -128,7 +133,7 @@ it("denies optional health at full-map byte edge without setting semantic capaci
   const admitted = Reflect.apply(
     Reflect.get(h.monitor, "admitHealth"),
     h.monitor,
-    [h.monitor.state.tasks[0], 2],
+    [h.monitor.state.tasks[0], initialMessage, 2],
   );
   expect(admitted).toBe(false);
   expect(h.fetch).toHaveBeenCalledTimes(calls);
@@ -233,6 +238,139 @@ it("rejects strict-v7 provenance-free legacy current-card storage without replay
   );
   expect(h.fetch).toHaveBeenCalledTimes(calls);
   expect(h.save).toHaveBeenCalledTimes(saves);
+});
+
+it("evicts optional health when mandatory core work fits only without the map", async () => {
+  const h = fixture();
+  h.start();
+  await h.settle("goal");
+  expect(records(h)).toHaveLength(1);
+  const candidate = structuredClone(h.monitor.state);
+  candidate.scopeError = "";
+  const coreMetadata = Reflect.apply(
+    Reflect.get(h.monitor, "capacityMetadata"),
+    h.monitor,
+    [undefined, new Map(), candidate],
+  ) as MonitorCheckpointMetadata;
+  candidate.scopeError = "x".repeat(
+    MAX_CHECKPOINT_BYTES - checkpointBytes(candidate, coreMetadata) - 128,
+  );
+  expect(checkpointBytes(candidate, coreMetadata)).toBeLessThan(
+    MAX_CHECKPOINT_BYTES,
+  );
+  const before = structuredClone(h.monitor.state);
+  const calls = h.fetch.mock.calls.length;
+  const admitted = Reflect.apply(Reflect.get(h.monitor, "admit"), h.monitor, [
+    { phase: "gate", candidate, schemaBytes: 0 },
+  ]);
+  expect(admitted).toBe(true);
+  expect(h.monitor.state).toEqual(before);
+  expect(h.monitor.state.capacity).toBe("clear");
+  expect(h.monitor.presentationSnapshot().card).toBeUndefined();
+  expect(h.fetch).toHaveBeenCalledTimes(calls);
+  expect(() => h.monitor.checkpoint()).not.toThrow();
+});
+
+it("preflights prospective idle-DONE selector after restored-open work completes", async () => {
+  const h = fixture();
+  h.start();
+  await h.settle("goal");
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    h.monitor.checkpoint(),
+    false,
+    h.reader,
+  );
+  const transport = h.fetch.getMockImplementation();
+  if (!transport) throw new Error("Missing transport");
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body));
+    const response = await transport(url, init);
+    const body = (await response.json()) as {
+      answers: Record<string, unknown>;
+    };
+    for (const [key, question] of Object.entries(request.questions)) {
+      const choice = key.startsWith("complete:")
+        ? "yes"
+        : key === "focus"
+          ? "none"
+          : undefined;
+      if (!choice) continue;
+      body.answers[key] = {
+        type: "choice",
+        choice,
+        confidence: 1,
+        probabilities: Object.fromEntries(
+          Object.keys((question as { criteria: object }).criteria).map(
+            (key) => [key, key === choice ? 1 : 0],
+          ),
+        ),
+      };
+    }
+    return Response.json(body);
+  });
+  const admission = vi
+    .spyOn(
+      h.monitor as unknown as { admitHealth: (...args: unknown[]) => boolean },
+      "admitHealth",
+    )
+    .mockReturnValue(false);
+  const report = observation(
+    "all-done",
+    "All requested tasks complete.",
+    "assistant",
+  );
+  h.append(report.id, report.text);
+  await h.settle(report.id);
+  admission.mockRestore();
+  expect(h.monitor.state.tasks.every((task) => task.status === "done")).toBe(
+    true,
+  );
+  expect(h.monitor.checkpoint()).not.toHaveProperty("monitor.idleDoneTaskId");
+  const task = h.monitor.state.tasks[0];
+  if (!task) throw new Error("Missing task");
+  const prospective = Reflect.apply(
+    Reflect.get(h.monitor, "maximumHealthCard"),
+    h.monitor,
+    [task, report],
+  ) as HealthCard;
+  const saved = h.monitor.checkpoint() as {
+    monitor: { healthCards: HealthCard[] };
+  };
+  const map = new Map(
+    saved.monitor.healthCards.map((card) => [card.taskId, card]),
+  );
+  map.set(task.id, prospective);
+  const withoutSelector = Reflect.apply(
+    Reflect.get(h.monitor, "capacityMetadata"),
+    h.monitor,
+    [undefined, map, h.monitor.state],
+  ) as MonitorCheckpointMetadata;
+  delete withoutSelector.idleDoneTaskId;
+  h.monitor.state.scopeError = "";
+  h.monitor.state.scopeError = "x".repeat(
+    MAX_CHECKPOINT_BYTES - checkpointBytes(h.monitor.state, withoutSelector),
+  );
+  expect(checkpointBytes(h.monitor.state, withoutSelector)).toBe(
+    MAX_CHECKPOINT_BYTES,
+  );
+  expect(
+    checkpointBytes(h.monitor.state, {
+      ...withoutSelector,
+      idleDoneTaskId: task.id,
+    }),
+  ).toBeGreaterThan(MAX_CHECKPOINT_BYTES);
+  const calls = h.fetch.mock.calls.length;
+  expect(
+    Reflect.apply(Reflect.get(h.monitor, "admitHealth"), h.monitor, [
+      task,
+      report,
+      1,
+    ]),
+  ).toBe(false);
+  expect(h.fetch).toHaveBeenCalledTimes(calls);
+  expect(h.monitor.state.capacity).toBe("clear");
+  expect(() => h.monitor.checkpoint()).not.toThrow();
 });
 
 it("optional provider failure never prevents later canonical completion", async () => {

@@ -81,3 +81,9 @@
 - Main appended assertions to existing regressions and reproduced5 failures/28passes (`u06-second-review-red.log`). For these small exact fixes, main deliberately owns local source correction: clear presentation when no valid fact, publish reconciled optional changes, requeue+invalidate before first enabled save.
 - Two old tests expected provenance-invalid health from revised task sources. Main updated them to require absent widget health / Unassessed board while preserving addition-case valid retained card and reported DONE lifecycle. This follows strict provenance contract, not compatibility preservation.
 - Final format/check/test PASS:448unit+15integration (`u06-second-review-*` gates). U06 remains open pending final cumulative reviewer verdict.
+
+## U06 third-review capacity and publication repairs
+- Reviewer1f1053f1 BLOCK3P1: optional map causes later mandatory capacity block; prospective completed-task idle selector omitted from health envelope; intermediate semantic-source commit publishes invalid old widget card.
+- Main reproduced all3 with new tests (`u06-third-review-red.log`:3failed/33passed), format/check PASS. Core-only candidate fits exact-edge reserve while health map blocks it; restored-open→all-done optional preflight fits without selector but overflows with it; held completion after cosmetic source revise exposes stale widget health despite board Unassessed.
+- Main updated old private admitHealth test call to exact triggering Observation, removing any need for worker's numeric fallback branch. No compatibility layer requested.
+- Repair scope remains U06 only; no later ticket released. Preserve provider budgets: no paid/live calls in this stage.

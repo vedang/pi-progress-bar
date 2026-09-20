@@ -15,6 +15,16 @@ import {
 
 type BoardTask = WidgetSnapshot["board"]["tasks"][number];
 
+type DetailValue = {
+  text: string;
+  provenance?: {
+    role?: unknown;
+    validatedAt?: unknown;
+    confidence?: unknown;
+    probability?: unknown;
+  };
+};
+
 interface BoardViewState {
   selectedId?: string;
   listOffset: number;
@@ -333,18 +343,13 @@ class TaskBoard implements BoardComponent {
           ]),
       ...this.wrapLines(`Task: ${task.label}`, width),
       ...this.wrapLines(`Assessment: ${this.provenance(task)}`, width),
-      ...(task.details?.title
-        ? this.wrapLines(`Task Title: ${task.details.title.text}`, width)
-        : []),
-      ...(task.details?.description
-        ? this.wrapLines(`Description: ${task.details.description.text}`, width)
-        : []),
+      ...this.detailValueLines("Task Title", task.details?.title, width),
+      ...this.detailValueLines("Description", task.details?.description, width),
       ...(task.details?.acceptanceCriteria?.length
         ? [
             ...this.wrapLines("Acceptance Criteria:", width),
-            ...task.details.acceptanceCriteria.flatMap(
-              (value: { text: string }) =>
-                this.wrapLines(`• ${value.text}`, width),
+            ...task.details.acceptanceCriteria.flatMap((value: DetailValue) =>
+              this.detailValueLines("•", value, width),
             ),
           ]
         : []),
@@ -368,6 +373,51 @@ class TaskBoard implements BoardComponent {
           : this.wrapLines("• No task-local transitions", width, "dim")),
       ],
     };
+  }
+
+  private detailValueLines(
+    label: string,
+    value: DetailValue | undefined,
+    width: number,
+  ): string[] {
+    if (!value) return [];
+    const title = label === "•" ? `• ${value.text}` : `${label}: ${value.text}`;
+    return [
+      ...this.wrapLines(title, width),
+      ...this.wrapLines(this.detailProvenance(value), width, "dim"),
+    ];
+  }
+
+  /** Display only bounded detail-validation facts, never raw source metadata. */
+  private detailProvenance(value: DetailValue): string {
+    const provenance = value.provenance;
+    const role =
+      provenance &&
+      typeof provenance.role === "string" &&
+      ["user", "assistant", "intercom"].includes(provenance.role)
+        ? provenance.role
+        : "unknown";
+    const validated =
+      provenance && typeof provenance.validatedAt === "number"
+        ? (time(provenance.validatedAt) ?? "unknown")
+        : "unknown";
+    return [
+      `Source: ${role}`,
+      `Validated: ${validated}`,
+      `Confidence: ${this.percent(provenance?.confidence)}`,
+      `Probability: ${this.percent(provenance?.probability)}`,
+    ].join(" · ");
+  }
+
+  private percent(value: unknown): string {
+    if (
+      typeof value !== "number" ||
+      !Number.isFinite(value) ||
+      value < 0 ||
+      value > 1
+    )
+      return "unknown";
+    return `${Math.round(value * 100)}%`;
   }
 
   private provenance(task: BoardTask): string {

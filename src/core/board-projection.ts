@@ -154,6 +154,14 @@ export function projectBoard(input: {
             task.taskId === input.lastDisplayedTaskId && task.status === "DONE",
         )
       : undefined;
+  // This is display-only selection. It deliberately uses the immutable board
+  // admission order and never writes semantic focus or current health proof.
+  const eligible = tasks.filter(
+    (task) => task.included && task.status === "OPEN",
+  );
+  const provisional =
+    eligible.find((task) => task.taskId === input.lastDisplayedTaskId) ??
+    eligible.at(-1);
   return {
     tasks,
     ...(focused
@@ -166,7 +174,15 @@ export function projectBoard(input: {
               qualifier: "Last reported · idle",
             },
           }
-        : {}),
+        : provisional
+          ? {
+              currentTask: {
+                taskId: provisional.taskId,
+                status: "OPEN" as const,
+                qualifier: "Selected · awaiting activity",
+              },
+            }
+          : {}),
     service: { ...input.service },
   };
 }

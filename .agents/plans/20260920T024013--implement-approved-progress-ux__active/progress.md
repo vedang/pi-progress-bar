@@ -127,3 +127,7 @@
 - Main reproduced11 failures/37passes (`u08-review-red.log`), then narrow fixes: exact Pending and Pending:retry differentiated; known analysis activity separate from genuine failure; Node full VT sanitizer with incomplete OSC-tail removal; code-specific complete short warnings and `!` when no word fits; selected full Enter/Left/Esc controls where fitting, preserving owner's `enter to see board` hint.
 - Tests include held Jev/extraction, full precedence chain, OSC/C1/incomplete CSI+OSC, trusted theme and widths1/2/8/20/40. Main format/check/test PASS507unit+17integration (`u08-review-*`).
 - Repeated actualPi0.85.1 four controller PTY cases PASS after fix (`u08-review-host-proof.log`). No provider calls. U08 acceptance still gated by cumulative rereview.
+
+## U08 accepted / U09 released
+- Cumulative reviewer25321518 OK/noissues through40750dba. Main507unit17integration+format/check and four actualhost controller cases PASS; accepted report u07-u08-accepted-review.md.
+- Closed U08/y3h.9. Next U09/y3h.10 main bounded-modal navigation/debugger red tests; source U10 held until frozen tests.

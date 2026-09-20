@@ -64,7 +64,7 @@ describe("integrated hybrid monitor", () => {
       enabled: true,
       progress: { done: 2, total: 3 },
     });
-    expect(h.monitor.checkpoint()).toMatchObject({ version: 7 });
+    expect(h.monitor.checkpoint()).toMatchObject({ version: 8 });
     expect(
       h.requests.every(
         (request) =>

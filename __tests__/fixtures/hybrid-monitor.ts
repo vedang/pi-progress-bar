@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import type { ExtractionInput } from "../../src/analysis/extractor";
 import type { EvaluationRequest } from "../../src/analysis/gateway";
 import type { ObservationRole } from "../../src/core/hybrid-state";
 import { Monitor, type MonitorOptions } from "../../src/core/monitor";
@@ -72,6 +73,7 @@ export function jevReply(request: EvaluationRequest) {
         if (key === "focus")
           choice =
             keys.find((candidate) => candidate.startsWith("task:")) ?? "none";
+        if (key.startsWith("detail:")) choice = "yes";
         if (key === "acceptance") choice = "explicit";
         if (key === "redApplicability") choice = "not-needed";
         if (key === "redReport") choice = "not-found";
@@ -97,6 +99,10 @@ export function monitorHarness(
   initial: unknown[] = [
     branchEntry("goal", "Implement parser, add regression, and validate it."),
   ],
+  options: {
+    richDetailsEnabled?: boolean;
+    extractionText?: (input: ExtractionInput) => string;
+  } = {},
 ) {
   let entries: unknown[] = [...initial];
   const requests: EvaluationRequest[] = [];
@@ -113,27 +119,31 @@ export function monitorHarness(
       // The fake transport emits its own dispatch, just like the real host adapter.
       onDispatch?.(Date.now());
       return {
-        text: JSON.stringify(
-          input.latest.id === "goal" || input.latest.id === "secret"
-            ? addPatch(
-                observation(
-                  input.latest.id,
-                  input.latest.text,
-                  input.latest.role,
-                ),
-              )
-            : noPatch(),
-        ),
+        text:
+          options.extractionText?.(input) ??
+          JSON.stringify(
+            input.latest.id === "goal" || input.latest.id === "secret"
+              ? addPatch(
+                  observation(
+                    input.latest.id,
+                    input.latest.text,
+                    input.latest.role,
+                  ),
+                )
+              : noPatch(),
+          ),
         provider: "offline",
         model: "fixture",
         usage: { inputTokens: 3, outputTokens: 2 },
       };
     },
   );
-  const monitor = new Monitor(changed, save, {
+  const monitorOptions: MonitorOptions & { richDetailsEnabled?: boolean } = {
     sourceId: () => "session:test",
     extract,
-  });
+    richDetailsEnabled: options.richDetailsEnabled ?? false,
+  };
+  const monitor = new Monitor(changed, save, monitorOptions);
   const reader = vi.fn(() => entries);
   const observe = () => monitor.observe(reader);
   const settle = async (id: string) => {

@@ -508,3 +508,78 @@ it("does not duplicate Summary when task debugger is enabled", async () => {
     expect(text.match(new RegExp(`${label}:`, "g")) ?? []).toHaveLength(1);
   expect(text).toContain("transition-0-0");
 });
+
+it("renders accepted rich sections once without duplicating Summary or replacing tracked Task", async () => {
+  const view = tasks(1);
+  const task = view.board.tasks[0];
+  if (!task) throw new Error("Missing task");
+  const value = (text: string) => ({
+    text,
+    provenance: {
+      role: "user",
+      validatedAt: 1,
+      confidence: 0.5,
+      probability: 0.8,
+    },
+  });
+  Object.assign(task, {
+    details: {
+      title: value("Grounded title"),
+      description: value("Grounded description"),
+      acceptanceCriteria: [value("Explicit condition")],
+    },
+  });
+  const h = await fixture(view, 60);
+  const text = h.text(160);
+  for (const label of [
+    "Task Title",
+    "Description",
+    "Acceptance Criteria",
+    "Summary",
+    "Service",
+    ...summary,
+  ])
+    expect(text.match(new RegExp(`${label}:`, "g")) ?? []).toHaveLength(1);
+  expect(text).toContain(`Task: ${task.label}`);
+  for (const value of [
+    "Grounded title",
+    "Grounded description",
+    "Explicit condition",
+  ])
+    expect(text).toContain(value);
+});
+it("rich Unicode detail tail remains reachable at 56x20 with debugger on or off", async () => {
+  const view = tasks(1);
+  const task = view.board.tasks[0];
+  if (!task) throw new Error("Missing task");
+  const text = `${"काफ़ी 😀 ".repeat(65)}DETAIL-END`;
+  Object.assign(task, {
+    details: {
+      description: {
+        text,
+        provenance: {
+          role: "user",
+          validatedAt: 1,
+          confidence: 1,
+          probability: 1,
+        },
+      },
+    },
+  });
+  const h = await fixture(view, 20);
+  for (const debug of [false, true]) {
+    if (debug) h.board.handleInput("d");
+    h.board.handleInput(keys.right);
+    h.board.handleInput(keys.home);
+    let reached = false;
+    for (let page = 0; page < 80; page++) {
+      const lines = h.board.render(56).map(stripVTControlCharacters);
+      for (const line of lines)
+        expect(visibleWidth(line)).toBeLessThanOrEqual(56);
+      if (lines.join("").replace(/\s+/g, "").includes("DETAIL-END"))
+        reached = true;
+      h.board.handleInput(keys.pageDown);
+    }
+    expect(reached).toBe(true);
+  }
+});

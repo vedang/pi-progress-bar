@@ -157,3 +157,8 @@
 - Worker0a43456e (full change uzktnsnvpwzkysswvsnknxouxrsxmsrs) only board.ts: complete wrapped normal details, shared rendered-row scroll accounting, debugger-independent full value reachability; both frozen reachability reds green.
 - Main caught regression in repair: pinned Summary showed bare labels without values even at wide dimensions. Added failing test1red22pass (`u10-summary-values-red.log`) and restored bounded pinned value previews; full text remains wrapped/reachable in normal body at narrow widths.
 - Main format/check/test PASS534unit+17integration (`u10-wrap-{format,check,test}.log`). Repeated actual Pi0.85.1 geometry/input matrix16PASS (`u10-wrap-host-proof.log`). No paid calls. U10 remains open pending cumulative rereview; U11 held.
+
+## U10 empty-state / grapheme correction
+- Reviewer5322104d blocked2 remaining edge cases: empty-board service omitted overflow and wrapping split spacing combining marks by code point.
+- Main2red23pass (`u10-empty-grapheme-red.log`) reproduced valid retry service at56x20 plus Devanagari spacing-mark boundary. Narrow fixes: empty right pane uses same sanitized wrap helper; wrapper iterates Intl.Segmenter graphemes.
+- Main format/check/test PASS536unit17integration (`u10-edge-*`); repeated actualhost16geometry/input cases PASS (`u10-edge-host-proof.log`). U10 stays open pending rereview. User has provisional manual-test command against development checkout; no manual acceptance claimed and no installed package changed.

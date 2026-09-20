@@ -456,3 +456,32 @@ it("keeps health values, not just empty Summary labels, pinned while details scr
   ])
     expect(text).toContain(`${label}: ${value}`);
 });
+
+it("renders full service text on an empty narrow board", async () => {
+  const view = tasks(0);
+  view.board.service = view.presentation.service = {
+    code: "retry-waiting",
+    label: "Waiting to retry progress analysis",
+  };
+  const h = await fixture(view, 20);
+  const lines = h.board.render(56).map(stripVTControlCharacters);
+  const right = lines
+    .slice(0, -1)
+    .map((line) => line.slice(23))
+    .join("")
+    .replace(/\s+/g, "");
+  expect(right).toContain("Waitingtoretryprogressanalysis");
+  for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(56);
+});
+it("wraps spacing-mark graphemes atomically at narrow pane boundaries", async () => {
+  const view = tasks(1);
+  const task = view.board.tasks[0];
+  if (!task) throw new Error("Missing task");
+  task.label = `${"a".repeat(26)}का`;
+  const h = await fixture(view, 20);
+  const lines = h.board.render(56).map(stripVTControlCharacters);
+  const right = lines.slice(0, -1).map((line) => line.slice(23));
+  expect(right.some((line) => line.includes("का"))).toBe(true);
+  expect(right.some((line) => line.trimStart().startsWith("ा"))).toBe(false);
+  for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(56);
+});

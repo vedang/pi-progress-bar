@@ -247,8 +247,11 @@ class TaskBoard implements BoardComponent {
   private renderEmpty(layout: BoardLayout): string[] {
     const left = ["Tasks 0 retained", "No retained tasks"];
     const right = [
-      "No retained tasks to inspect",
-      `Service: ${this.snapshot.board.service.label}`,
+      ...this.wrapLines("No retained tasks to inspect", layout.rightWidth),
+      ...this.wrapLines(
+        `Service: ${this.snapshot.board.service.label}`,
+        layout.rightWidth,
+      ),
     ];
     return this.compose(left, right, layout);
   }
@@ -455,8 +458,10 @@ class TaskBoard implements BoardComponent {
     if (!safe) return [this.styleLine("", columns, tone)];
     const lines: string[] = [];
     let line = "";
-    for (const point of Array.from(safe)) {
-      const glyph = visibleWidth(point) > columns ? "?" : point;
+    for (const { segment } of new Intl.Segmenter(undefined, {
+      granularity: "grapheme",
+    }).segment(safe)) {
+      const glyph = visibleWidth(segment) > columns ? "?" : segment;
       if (line && visibleWidth(line + glyph) > columns) {
         lines.push(this.styleLine(line, columns, tone));
         line = "";

@@ -563,7 +563,13 @@ describe("truthful display status", () => {
     h.append("pending", "Change task requirements.", "user");
     await vi.advanceTimersByTimeAsync(100);
     expect(task(h.monitor, "task:1").status).toBe("OPEN");
-    expect(board(h.monitor).currentTask).toBeUndefined();
+    expect(board(h.monitor).currentTask).toMatchObject({
+      status: "OPEN",
+      qualifier: "Selected · awaiting activity",
+    });
+    expect(
+      board(h.monitor).tasks.every((item) => item.status !== "INPROG"),
+    ).toBe(true);
   });
 
   it("archives keep distinct lifecycle status, retained health, and task-local transitions", async () => {

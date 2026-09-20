@@ -228,20 +228,26 @@ function restoreOperation(value: Record<string, unknown>): RestoreOperation {
   };
 }
 
-const detailText = (value: unknown, maximum: number): value is string =>
+const detailMaximum = (key: DetailKey) =>
+  key === "title" ? 120 : key === "description" ? 800 : 240;
+
+/** Shared parser/restore guard. Detail quotes are never truncated or normalized. */
+export const detailQuoteIsValid = (
+  key: DetailKey,
+  value: unknown,
+): value is string =>
   typeof value === "string" &&
   !!value.trim() &&
-  Array.from(value).length <= maximum &&
+  Array.from(value).length <= detailMaximum(key) &&
   !/[\p{Cc}\p{Cf}]/u.test(value);
 
 const detailField = (
   value: unknown,
   key: DetailKey,
-  maximum: number,
 ): { key: DetailKey; quote: string } | undefined =>
   record(value) &&
   exactKeys(value, ["quote"]) &&
-  detailText(value.quote, maximum)
+  detailQuoteIsValid(key, value.quote)
     ? { key, quote: value.quote }
     : undefined;
 
@@ -255,8 +261,8 @@ const detailDraft = (
   const allowed = ["title", "description", "acceptanceCriteria"];
   if (Object.keys(value).some((key) => !allowed.includes(key))) return;
   const fields = [
-    detailField(value.title, "title", 120),
-    detailField(value.description, "description", 800),
+    detailField(value.title, "title"),
+    detailField(value.description, "description"),
   ].flatMap((field) => (field ? [field] : []));
   if (
     Array.isArray(value.acceptanceCriteria) &&
@@ -266,7 +272,6 @@ const detailDraft = (
       const field = detailField(
         item,
         `acceptance:${acceptanceIndex}` as DetailKey,
-        240,
       );
       if (field) fields.push(field);
     });

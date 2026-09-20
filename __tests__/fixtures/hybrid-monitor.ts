@@ -138,7 +138,7 @@ export function monitorHarness(
       };
     },
   );
-  const monitorOptions: MonitorOptions & { richDetailsEnabled?: boolean } = {
+  const monitorOptions: MonitorOptions = {
     sourceId: () => "session:test",
     extract,
     richDetailsEnabled: options.richDetailsEnabled ?? false,

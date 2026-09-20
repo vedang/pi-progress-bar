@@ -1,27 +1,10 @@
 import { createHash } from "node:crypto";
-import type { EvaluationRequest } from "../../src/analysis/gateway";
-import type { MonitorCheckpointMetadata } from "../../src/core/hybrid-checkpoint";
-import type {
-  Assessment,
-  HybridTask,
-  Observation,
-  SourceRef,
-} from "../../src/core/hybrid-state";
+import type { TaskDetailRecord as DetailRecord } from "../../src/analysis/task-details";
 
-// Main-owned frozen contract; replace with production imports after source handoff.
-export interface DetailRecord {
-  taskId: string;
-  revision: number;
-  label: string;
-  taskSource: SourceRef;
-  candidates: { key: string; source: SourceRef }[];
-  receipts: {
-    requestHash: string;
-    candidateKeys: string[];
-    assessments: Assessment[];
-    validatedAt: number;
-  }[];
-}
+export type { TaskDetailRecord as DetailRecord } from "../../src/analysis/task-details";
+
+import type { MonitorCheckpointMetadata } from "../../src/core/hybrid-checkpoint";
+import type { HybridTask, Observation } from "../../src/core/hybrid-state";
 export const required = <T>(value: T | undefined): T => {
   if (value === undefined) throw new Error("Missing required fixture");
   return value;
@@ -85,8 +68,7 @@ export function detailMetadata(
     taskDetails: structuredClone(records),
   };
 }
-export const isDetailRequest = (request: EvaluationRequest) =>
-  Object.keys(request.questions).some((key) => key.startsWith("detail:"));
+export { isDetailRequest } from "../../src/analysis/task-details";
 export function savedDetails(checkpoint: unknown): DetailRecord[] {
   return (
     (checkpoint as { monitor?: { taskDetails?: DetailRecord[] } }).monitor

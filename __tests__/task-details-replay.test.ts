@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { taskDetailRequest } from "../src/analysis/task-details";
 import { processObservation } from "../src/core/hybrid";
 import {
   checkpointBytes,
@@ -92,7 +93,7 @@ it.each([
   [
     "out of range criterion",
     (r: DetailRecord) => {
-      required(r.candidates[0]).key = "acceptance:6";
+      Reflect.set(required(r.candidates[0]), "key", "acceptance:6");
     },
   ],
   [
@@ -218,13 +219,11 @@ it("partial receipt restore requests only uncovered candidate keys", async () =>
   const covered = required(record.candidates[0]).key;
   receipt.candidateKeys = [covered];
   receipt.assessments = [required(receipt.assessments[0])];
-  const path = "../src/analysis/task-details";
-  const module = await import(path);
   const message = observation(
     "goal",
     "Implement parser, add regression, and validate it.",
   );
-  const request = module.taskDetailRequest(record, [covered], (id: string) =>
+  const request = taskDetailRequest(record, [covered], (id: string) =>
     id === message.id ? message : undefined,
   );
   expect(request).toBeDefined();

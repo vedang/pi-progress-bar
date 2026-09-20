@@ -1,38 +1,15 @@
 import { createHash } from "node:crypto";
 import { expect, it } from "vitest";
-import type { ScopePatch } from "../src/analysis/extractor";
 import * as extractor from "../src/analysis/extractor";
-import type { Observation, SourceRef } from "../src/core/hybrid-state";
+import {
+  groundDetailDrafts as ground,
+  parseExtraction,
+  type ScopePatch,
+} from "../src/analysis/extractor";
 import { observation } from "./fixtures/hybrid";
 
-type Key = "title" | "description" | `acceptance:${number}`;
-interface Draft {
-  operation: "add" | "revise" | "restore";
-  index: number;
-  fields: { key: Key; quote: string }[];
-}
-interface Parsed {
-  patch: ScopePatch;
-  detailDrafts: Draft[];
-}
-function parse(details: unknown): Parsed {
-  const fn = Reflect.get(extractor, "parseExtraction");
-  expect(fn, "Missing optional-isolated extraction parser").toBeTypeOf(
-    "function",
-  );
-  return Reflect.apply(fn, undefined, [JSON.stringify(raw(details))]);
-}
-function ground(
-  drafts: Draft[],
-  latest: Observation,
-): {
-  operation: string;
-  index: number;
-  candidates: { key: Key; source: SourceRef }[];
-}[] {
-  const fn = Reflect.get(extractor, "groundDetailDrafts");
-  expect(fn, "Missing independently grounded details").toBeTypeOf("function");
-  return Reflect.apply(fn, undefined, [drafts, latest]);
+function parse(details: unknown) {
+  return parseExtraction(JSON.stringify(raw(details)));
 }
 function raw(details: unknown) {
   return {
@@ -184,8 +161,6 @@ it("missing and nonunique optional quotes are omitted independently", () => {
   expect(ground(drafts, observation("other", "unrelated"))).toEqual([]);
 });
 it("revise/restore drafts retain operation-index identity; archive never accepts details", () => {
-  const fn = Reflect.get(extractor, "parseExtraction");
-  expect(fn).toBeTypeOf("function");
   const op = {
     id: "task:1",
     label: "Implement parser",
@@ -199,7 +174,7 @@ it("revise/restore drafts retain operation-index identity; archive never accepts
     revise: [op],
     restore: [{ ...op, id: "task:2" }],
   };
-  const parsed: Parsed = Reflect.apply(fn, undefined, [JSON.stringify(value)]);
+  const parsed = parseExtraction(JSON.stringify(value));
   expect(
     parsed.detailDrafts.map(({ operation, index }) => ({ operation, index })),
   ).toEqual([

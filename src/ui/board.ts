@@ -276,55 +276,83 @@ class TaskBoard implements BoardComponent {
   }
 
   private detailLines(task: BoardTask, layout: BoardLayout): string[] {
-    const taskWidth = layout.rightWidth;
-    const health = task.health;
-    const staticLines = [
-      `Task: ${task.label}`,
-      `Identity: ${task.taskId} · revision ${task.revision} · ${task.kind}`,
-      `Service: ${this.snapshot.board.service.label}`,
-      "Summary:",
-      `• Requirements: ${health.requirements}`,
-      `• Acceptance: ${health.acceptance}`,
-      `• New red test: ${health.newRedTest}`,
-      `• Red evidence: ${health.redEvidence}`,
-      `• Implementation: ${health.implementation}`,
-      `Assessment: ${this.provenance(task)}`,
-    ].map((line) => this.formatLine(line, taskWidth));
-    const body = this.debugger
-      ? [
-          this.formatLine("Debugger: task-local facts", taskWidth, "accent"),
-          this.formatLine(
-            `Session-wide global calls: Jev ${this.snapshot.presentation.usage.jev.calls} · Extraction ${this.snapshot.presentation.usage.extraction.calls}`,
-            taskWidth,
-            "dim",
-          ),
-          this.formatLine("Transitions:", taskWidth),
-          ...(task.transitions.length
-            ? task.transitions.map((transition) =>
-                this.formatLine(`• ${transition.kind}`, taskWidth),
-              )
-            : [
-                this.formatLine(
-                  "• No task-local transitions",
-                  taskWidth,
-                  "dim",
-                ),
-              ]),
-        ]
-      : [
-          this.formatLine(
-            "Debugger: off (d to inspect task-local facts)",
-            taskWidth,
-            "dim",
-          ),
-        ];
-    const capacity = Math.max(0, layout.contentRows - staticLines.length);
+    const { pinned, body } = this.detailContent(task, layout);
+    const capacity = Math.max(1, layout.contentRows - pinned.length);
     const maximum = Math.max(0, body.length - capacity);
     this.detailOffset = Math.max(0, Math.min(this.detailOffset, maximum));
     return [
-      ...staticLines,
+      ...pinned,
       ...body.slice(this.detailOffset, this.detailOffset + capacity),
     ];
+  }
+
+  /**
+   * Pinned rows preserve board orientation. All projected values also appear
+   * in the normal scroll body, wrapped before styling, so narrow boards never
+   * turn a safe truncation into permanently unreachable information.
+   */
+  private detailContent(
+    task: BoardTask,
+    layout: BoardLayout,
+  ): {
+    pinned: string[];
+    body: string[];
+  } {
+    const width = layout.rightWidth;
+    const health = task.health;
+    const pinned = [
+      this.formatLine(`Service: ${this.snapshot.board.service.label}`, width),
+      this.formatLine("Summary:", width),
+      this.formatLine("• Requirements:", width),
+      this.formatLine("• Acceptance:", width),
+      this.formatLine("• New red test:", width),
+      this.formatLine("• Red evidence:", width),
+      this.formatLine("• Implementation:", width),
+    ];
+    const body = [
+      ...this.wrapLines(`Task: ${task.label}`, width),
+      ...this.wrapLines(
+        `Identity: ${task.taskId} · revision ${task.revision} · ${task.kind}`,
+        width,
+      ),
+      ...this.wrapLines(`Service: ${this.snapshot.board.service.label}`, width),
+      ...this.wrapLines(`Requirements: ${health.requirements}`, width),
+      ...this.wrapLines(`Acceptance: ${health.acceptance}`, width),
+      ...this.wrapLines(`New red test: ${health.newRedTest}`, width),
+      ...this.wrapLines(`Red evidence: ${health.redEvidence}`, width),
+      ...this.wrapLines(`Implementation: ${health.implementation}`, width),
+      ...this.wrapLines(`Assessment: ${this.provenance(task)}`, width),
+    ];
+    if (!this.debugger)
+      return {
+        pinned,
+        body: [
+          ...body,
+          ...this.wrapLines(
+            "Debugger: off (d to inspect task-local facts)",
+            width,
+            "dim",
+          ),
+        ],
+      };
+    return {
+      pinned,
+      body: [
+        ...body,
+        ...this.wrapLines("Debugger: task-local facts", width, "accent"),
+        ...this.wrapLines(
+          `Session-wide global calls: Jev ${this.snapshot.presentation.usage.jev.calls} · Extraction ${this.snapshot.presentation.usage.extraction.calls}`,
+          width,
+          "dim",
+        ),
+        ...this.wrapLines("Transitions:", width),
+        ...(task.transitions.length
+          ? task.transitions.flatMap((transition) =>
+              this.wrapLines(`• ${transition.kind}`, width),
+            )
+          : this.wrapLines("• No task-local transitions", width, "dim")),
+      ],
+    };
   }
 
   private provenance(task: BoardTask): string {
@@ -363,14 +391,19 @@ class TaskBoard implements BoardComponent {
   }
 
   private detailCapacity(layout: BoardLayout): number {
-    return Math.max(1, layout.contentRows - 10);
+    const task = this.selected();
+    if (!task) return 1;
+    return Math.max(
+      1,
+      layout.contentRows - this.detailContent(task, layout).pinned.length,
+    );
   }
 
   private detailMaximum(layout: BoardLayout): number {
     const task = this.selected();
     if (!task) return 0;
-    const bodyLength = this.debugger ? task.transitions.length + 3 : 1;
-    return Math.max(0, bodyLength - this.detailCapacity(layout));
+    const content = this.detailContent(task, layout);
+    return Math.max(0, content.body.length - this.detailCapacity(layout));
   }
 
   private clampOffsets(layout: BoardLayout): void {
@@ -404,10 +437,42 @@ class TaskBoard implements BoardComponent {
     tone: "accent" | "muted" | "dim" | "warning" = "muted",
     selected = false,
   ): string {
-    const safe = truncateToWidth(
-      sanitizeTerminalText(text),
-      Math.max(1, width),
+    return this.styleLine(
+      truncateToWidth(sanitizeTerminalText(text), Math.max(1, width)),
+      width,
+      tone,
+      selected,
     );
+  }
+
+  private wrapLines(
+    text: string,
+    width: number,
+    tone: "accent" | "muted" | "dim" | "warning" = "muted",
+  ): string[] {
+    const safe = sanitizeTerminalText(text);
+    const columns = Math.max(1, width);
+    if (!safe) return [this.styleLine("", columns, tone)];
+    const lines: string[] = [];
+    let line = "";
+    for (const point of Array.from(safe)) {
+      const glyph = visibleWidth(point) > columns ? "?" : point;
+      if (line && visibleWidth(line + glyph) > columns) {
+        lines.push(this.styleLine(line, columns, tone));
+        line = "";
+      }
+      line += glyph;
+    }
+    if (line || !lines.length) lines.push(this.styleLine(line, columns, tone));
+    return lines;
+  }
+
+  private styleLine(
+    safe: string,
+    width: number,
+    tone: "accent" | "muted" | "dim" | "warning" = "muted",
+    selected = false,
+  ): string {
     const colored = selected
       ? this.options.theme.bg(
           "selectedBg",

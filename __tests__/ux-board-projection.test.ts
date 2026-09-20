@@ -121,7 +121,7 @@ describe("passive retained task board", () => {
     expect(task(h.monitor, "task:1").provenance.state).toBe("retained");
     expect(task(h.monitor, "task:2").health.acceptance).toBe("partial");
     const checkpoint = h.monitor.checkpoint();
-    expect(checkpoint).toHaveProperty("version", 7);
+    expect(checkpoint).toHaveProperty("version", 8);
     const calls = h.fetch.mock.calls.length;
     const extracts = h.extract.mock.calls.length;
     await h.monitor.restore(

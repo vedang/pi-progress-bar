@@ -72,6 +72,7 @@ function fixture() {
     return Response.json(body);
   });
   return Object.assign(h, {
+    published: h.changed,
     focus: (value: string) => {
       focus = value;
     },
@@ -353,8 +354,10 @@ describe("task source provenance", () => {
               ),
             ];
       });
+      const publications = h.published.mock.calls.length;
       h.replace(entries);
       await vi.advanceTimersByTimeAsync(100);
+      expect(h.published.mock.calls.length).toBeGreaterThan(publications);
       expect(task(h.monitor, "task:1").health).toEqual(unassessed);
       expect(h.monitor.state).toEqual(before);
       expect(h.fetch).toHaveBeenCalledTimes(calls);
@@ -457,7 +460,12 @@ describe("truthful display status", () => {
     expect(board(h.monitor).currentTask?.status).toBe("DONE");
     h.monitor.turnOff();
     h.append("off-work", "Investigate another parser boundary.", "user");
+    const saves = h.save.mock.calls.length;
     h.monitor.turnOn("/nonexistent-hybrid-test");
+    expect(h.save.mock.calls[saves]?.[0]).toBeDefined();
+    expect(h.save.mock.calls[saves]?.[0]).not.toHaveProperty(
+      "monitor.idleDoneTaskId",
+    );
     expect(board(h.monitor).currentTask).toBeUndefined();
     await h.settle("off-work");
     expect(board(h.monitor).currentTask).toBeUndefined();

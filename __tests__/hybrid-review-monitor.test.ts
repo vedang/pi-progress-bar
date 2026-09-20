@@ -256,7 +256,7 @@ it("qualifies a held first page as catching up history rather than current compl
   );
 });
 
-it("clears replacement pending when a revised task completes in the same observation", async () => {
+it("drops invalid old health when a revised task completes in the same observation", async () => {
   const h = fixture();
   h.start();
   await h.settle("goal");
@@ -302,9 +302,8 @@ it("clears replacement pending when a revised task completes in the same observa
     revision: 2,
     status: "done",
   });
-  expect(h.monitor.presentationSnapshot().card).toMatchObject({
-    label: before?.label,
-    retained: true,
-    replacementPending: false,
-  });
+  expect(h.monitor.presentationSnapshot().card).toBeUndefined();
+  expect(
+    h.monitor.boardSnapshot().tasks.find((task) => task.taskId === "task:1"),
+  ).toMatchObject({ status: "DONE", health: { acceptance: "Unassessed" } });
 });

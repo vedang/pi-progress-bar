@@ -106,6 +106,7 @@ it.each(["taskSource", "observation"] as const)(
     const restored = snapshot.tasks.find((task) => task.taskId === "task:1");
     expect(restored?.provenance.state).not.toBe("current");
     expect(restored?.health.acceptance).not.toBe("explicit");
+    expect(h.monitor.presentationSnapshot().card).toBeUndefined();
     expect(h.fetch).toHaveBeenCalledTimes(calls);
     expect(h.extract).toHaveBeenCalledTimes(extracts);
   },

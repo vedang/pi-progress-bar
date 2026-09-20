@@ -482,12 +482,13 @@ export class Monitor {
     if (authority === "amended") this.resetForCanonicalAmendment();
     else if (authority === "incomplete") this.scheduleCanonicalWake();
     else {
-      this.reconcileHealthCards(pass);
+      const healthChanged = this.reconcileHealthCards(pass);
       this.requeue(pass);
       if (this.queued.length) {
         this.idleDoneInvalidated = true;
         this.cancelHealth();
       }
+      if (healthChanged) this.publish();
       this.drain();
     }
   }
@@ -751,8 +752,9 @@ export class Monitor {
     this.epoch++;
     this.gateway.enable(this.identity());
     this.healthGateway.enable(this.identity());
-    this.save();
     this.requeue(pass, true);
+    if (this.queued.length) this.idleDoneInvalidated = true;
+    this.save();
     this.refreshBeads();
     this.finishControl(work);
     this.publish();
@@ -1126,14 +1128,7 @@ export class Monitor {
     )[0];
     const selected = focused ?? latest;
     if (!selected) {
-      // Runtime display may retain an old safe card while a replacement fact is
-      // unavailable. It is never persisted or exposed as board current health.
-      if (this.card)
-        this.card = {
-          ...copyCard(this.card),
-          retained: true,
-          replacementPending: !!focus,
-        };
+      this.card = undefined;
       return;
     }
     const isCurrent =

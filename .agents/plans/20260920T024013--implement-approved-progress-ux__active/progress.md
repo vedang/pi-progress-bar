@@ -75,3 +75,9 @@
 - Sole writer4ec8c43f returned source-only `0e1a36a8` / change tpwznppvuwyxyvouzyvkvnsozzwyxrxq; exact parent8d257026. Three source files, no test/config changes. Working copy clean5a9994cb on handoff.
 - Main independently reran make format/check/test PASS:448unit+15integration (`u06-repair-final-*` logs). All14 frozen review reds resolved.
 - Resumed full cumulative reviewer via same protocol: new run cb6b8d7c (prior8b4e9bac). U06 remains open until verdict; source frozen0e1a36a8. Next U07 not released.
+
+## U06 second-review corrections
+- Rereview cb6b8d7c BLOCK3P1: filtered optional fact survived in runtime card, optional-only invalidation not published, first ON save carried old idle selector before queued work invalidation.
+- Main appended assertions to existing regressions and reproduced5 failures/28passes (`u06-second-review-red.log`). For these small exact fixes, main deliberately owns local source correction: clear presentation when no valid fact, publish reconciled optional changes, requeue+invalidate before first enabled save.
+- Two old tests expected provenance-invalid health from revised task sources. Main updated them to require absent widget health / Unassessed board while preserving addition-case valid retained card and reported DONE lifecycle. This follows strict provenance contract, not compatibility preservation.
+- Final format/check/test PASS:448unit+15integration (`u06-second-review-*` gates). U06 remains open pending final cumulative reviewer verdict.

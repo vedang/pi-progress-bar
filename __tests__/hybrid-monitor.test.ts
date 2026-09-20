@@ -240,7 +240,7 @@ describe("integrated hybrid monitor", () => {
 
 describe("pure safe display publication groundwork", () => {
   it.each(["addition", "wording-only"])(
-    "retains coherent label and five assessed values while %s health is pending",
+    "retains only provenance-valid assessed values while %s health is pending",
     async (kind) => {
       const h = fixture();
       h.start();
@@ -303,12 +303,22 @@ describe("pure safe display publication groundwork", () => {
       await vi.advanceTimersByTimeAsync(100);
       expect(release).toBeDefined();
       const pending = h.monitor.presentationSnapshot().card;
-      expect(pending?.label).toBe(before?.label);
-      expect(pending?.health).toEqual(before?.health);
-      expect(pending).toMatchObject({
-        retained: true,
-        replacementPending: true,
-      });
+      if (kind === "addition") {
+        expect(pending?.label).toBe(before?.label);
+        expect(pending?.health).toEqual(before?.health);
+        expect(pending).toMatchObject({
+          retained: true,
+          replacementPending: true,
+        });
+      } else {
+        // Revised source invalidates old health even when requirementsChanged=false.
+        expect(pending).toBeUndefined();
+        expect(
+          h.monitor
+            .boardSnapshot()
+            .tasks.find((task) => task.taskId === "task:1")?.health.acceptance,
+        ).toBe("Unassessed");
+      }
       release?.();
       await vi.advanceTimersByTimeAsync(50);
       expect(h.monitor.presentationSnapshot().card?.label).toBe(

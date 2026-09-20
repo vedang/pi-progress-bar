@@ -25,8 +25,7 @@ export default function progressBar(pi: ExtensionAPI): void {
       if (!controller) {
         // Host contexts may be freshly wrapped for every event. Only explicit
         // session/branch/OFF lifecycle boundaries replace the UI generation.
-        // Board construction belongs to U10. U08 only consumes Enter exactly once.
-        controller = createUiController(createUiHost(ctx), snapshot, () => {});
+        controller = createUiController(createUiHost(ctx), snapshot);
       } else controller.update(snapshot);
       notifiedError = undefined;
       return;

@@ -31,7 +31,8 @@ const incompleteOsc = new RegExp(
   `(?:${esc}\\]|${String.fromCharCode(157)})(?:(?!${esc}\\\\|${String.fromCharCode(156)}|${String.fromCharCode(7)})[\\s\\S])*$`,
   "g",
 );
-const untrusted = (text: string) =>
+/** Shared terminal-safe display boundary for detached, untrusted text. */
+export const sanitizeTerminalText = (text: string) =>
   stripVTControlCharacters(text.replace(incompleteOsc, ""))
     .replace(/[\p{Cc}\p{Cf}]/gu, " ")
     .trim();
@@ -53,7 +54,7 @@ const compact = (value: number) => {
 /** Wrap sanitized text without padding; replace one too-wide glyph at tiny widths. */
 const wrap = (text: string, width: number) => {
   if (width < 1) return [""];
-  const safe = untrusted(text);
+  const safe = sanitizeTerminalText(text);
   if (!safe) return [""];
   const lines: string[] = [];
   let line = "";
@@ -70,7 +71,7 @@ const wrap = (text: string, width: number) => {
 };
 
 const shortWarning = (code: string, label: string, width: number) => {
-  const safe = untrusted(label);
+  const safe = sanitizeTerminalText(label);
   if (visibleWidth(safe) <= width) return safe;
   const alternatives = code.startsWith("saved-state-")
     ? ["Start fresh session", "New chat"]
@@ -183,7 +184,7 @@ export function renderWidget(
   return lines.flatMap((line, index) =>
     (selected && index === 2
       ? wrap(line, columns)
-      : [truncateToWidth(untrusted(line), columns)]
+      : [truncateToWidth(sanitizeTerminalText(line), columns)]
     ).map((part) => {
       const colored = theme.fg("muted", part);
       // Host themes are trusted; ensure an unexpected formatter never widens rows.

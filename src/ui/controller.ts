@@ -8,6 +8,7 @@ import {
   matchesKey,
   type TUI,
 } from "@earendil-works/pi-tui";
+import { type BoardComponent, createBoard } from "./board";
 import type { UiHost } from "./host";
 import { renderWidget, type WidgetSnapshot } from "./widget";
 
@@ -21,29 +22,78 @@ const clone = (snapshot: WidgetSnapshot): WidgetSnapshot =>
   structuredClone(snapshot);
 
 /**
- * Owns one below-editor widget generation and local selection only. Snapshot
- * data is copied at the boundary; input/render paths have no monitor access.
+ * Owns one below-editor widget generation, its detached board projection, and
+ * its exact overlay handle. Render/input paths have no monitor capability.
  */
 export function createUiController(
   host: UiHost,
   initial: WidgetSnapshot,
-  openBoard: (snapshot: WidgetSnapshot) => void,
 ): UiController {
   let snapshot = clone(initial);
   let selected = false;
-  let boardRequested = false;
   let disposed = false;
   let materialized = false;
   let theme: Theme | undefined;
+  let tui: TUI | undefined;
   let unsubscribe: (() => void) | undefined;
+  let board: BoardComponent | undefined;
+  let boardOverlay: ReturnType<UiHost["openOverlay"]> | undefined;
+
+  const safeSelection = () => host.canActivate(right);
+
+  const screenRows = () => {
+    try {
+      const rows = tui?.terminal.rows;
+      return typeof rows === "number" && Number.isFinite(rows) ? rows : 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  const closeBoard = () => {
+    const ownedBoard = board;
+    const ownedOverlay = boardOverlay;
+    board = undefined;
+    boardOverlay = undefined;
+    ownedOverlay?.close();
+    // Hosts normally dispose through their exact overlay close. Keep component
+    // cleanup idempotent when a rejected host returns a no-op handle instead.
+    ownedBoard?.dispose();
+  };
+
+  const openBoard = () => {
+    if (disposed || board || !theme) return;
+    let next: BoardComponent | undefined;
+    next = createBoard(snapshot, {
+      theme,
+      screenRows,
+      isFocused: () => board === next && boardOverlay?.isFocused() === true,
+      onClose: () => {
+        if (board !== next) return;
+        closeBoard();
+      },
+      requestRender: () => host.requestRender(),
+    });
+    board = next;
+    try {
+      boardOverlay = host.openOverlay(next, {
+        width: "94%",
+        maxHeight: "80%",
+        anchor: "center",
+        margin: 1,
+      });
+    } catch (error) {
+      if (board === next) board = undefined;
+      next.dispose();
+      throw error;
+    }
+  };
 
   const clearSelection = () => {
     if (!selected) return;
     selected = false;
     host.requestRender();
   };
-
-  const safeSelection = () => host.canActivate(right);
 
   const input: TerminalInputHandler = (data) => {
     if (disposed || isKeyRelease(data)) return;
@@ -56,10 +106,7 @@ export function createUiController(
       if (matchesKey(data, "right")) return { consume: true };
       if (matchesKey(data, "enter")) {
         selected = false;
-        if (!boardRequested) {
-          boardRequested = true;
-          openBoard(clone(snapshot));
-        }
+        openBoard();
         host.requestRender();
         return { consume: true };
       }
@@ -73,7 +120,6 @@ export function createUiController(
     }
     if (host.canActivate(data)) {
       selected = true;
-      boardRequested = false;
       host.requestRender();
       return { consume: true };
     }
@@ -87,8 +133,9 @@ export function createUiController(
     invalidate() {},
   };
 
-  host.attach((_tui: TUI, nextTheme: Theme) => {
+  host.attach((nextTui: TUI, nextTheme: Theme) => {
     if (disposed) return component;
+    tui = nextTui;
     theme = nextTheme;
     materialized = true;
     if (!unsubscribe) unsubscribe = host.onInput(input);
@@ -104,14 +151,17 @@ export function createUiController(
         return;
       }
       if (selected && !safeSelection()) selected = false;
-      if (materialized) host.requestRender();
+      if (board) board.update(snapshot);
+      else if (materialized) host.requestRender();
     },
     dispose() {
       if (disposed) return;
       disposed = true;
       selected = false;
+      closeBoard();
       unsubscribe?.();
       unsubscribe = undefined;
+      tui = undefined;
       host.dispose();
     },
   };

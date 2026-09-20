@@ -5,23 +5,40 @@ import type {
 import { Monitor } from "./core/monitor";
 import { selectedModelExtractor } from "./core/selected-model";
 import { command } from "./ui/commands";
-import { paint, widgetName } from "./ui/widget";
+import { createUiController, type UiController } from "./ui/controller";
+import { createUiHost } from "./ui/host";
 
 export default function progressBar(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let notifiedError: string | undefined;
+  let controller:
+    | { context: ExtensionContext; value: UiController }
+    | undefined;
+  const disposeController = () => {
+    controller?.value.dispose();
+    controller = undefined;
+  };
   const render = () => {
-    if (!context) return;
-    const view = monitor.presentationSnapshot();
-    if (view.enabled) {
-      paint(context, view);
+    const ctx = context;
+    if (!ctx) return;
+    const presentation = monitor.presentationSnapshot();
+    if (ctx.mode === "tui" && presentation.enabled) {
+      const snapshot = { presentation, board: monitor.boardSnapshot() };
+      if (!controller || controller.context !== ctx) {
+        disposeController();
+        // Board construction belongs to U10. U08 only consumes Enter exactly once.
+        controller = {
+          context: ctx,
+          value: createUiController(createUiHost(ctx), snapshot, () => {}),
+        };
+      } else controller.value.update(snapshot);
       notifiedError = undefined;
-    } else {
-      if (context.mode === "tui") context.ui.setWidget(widgetName, undefined);
-      if (monitor.error && monitor.error !== notifiedError && context.hasUI) {
-        context.ui.notify(monitor.error, "error");
-        notifiedError = monitor.error;
-      }
+      return;
+    }
+    disposeController();
+    if (monitor.error && monitor.error !== notifiedError && ctx.hasUI) {
+      ctx.ui.notify(monitor.error, "error");
+      notifiedError = monitor.error;
     }
   };
   const monitor = new Monitor(
@@ -45,6 +62,8 @@ export default function progressBar(pi: ExtensionAPI): void {
       )
       .at(-1);
   const restore = async (ctx: ExtensionContext, preserveControls: boolean) => {
+    // Session replacement/tree restore invalidates the owned UI generation first.
+    disposeController();
     context = ctx;
     const saved = checkpoint(ctx);
     await monitor.restore(
@@ -71,10 +90,10 @@ export default function progressBar(pi: ExtensionAPI): void {
   pi.on("session_tree", async (_event, ctx) => {
     await restore(ctx, true);
   });
-  pi.on("session_shutdown", (_event, ctx) => {
+  pi.on("session_shutdown", () => {
+    disposeController();
     monitor.stop();
     context = undefined;
-    if (ctx.mode === "tui") ctx.ui.setWidget(widgetName, undefined);
   });
   // Canonical active branch is authoritative; raw message_end is not observed.
   pi.on("context", (_event, ctx) => observe(ctx));

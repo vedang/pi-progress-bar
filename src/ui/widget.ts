@@ -1,15 +1,16 @@
-import { stripVTControlCharacters } from "node:util";
-
-import {
-  type ExtensionContext,
-  truncateToVisualLines,
-} from "@earendil-works/pi-coding-agent";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import type { BoardSnapshot } from "../core/board-projection";
 import type { PresentationSnapshot } from "../core/monitor";
 
 export const widgetName = "pi-progress-bar";
-const plain = (text: string) =>
-  stripVTControlCharacters(text).replace(/[\p{Cc}\p{Cf}]/gu, " ");
 
+export interface WidgetSnapshot {
+  presentation: PresentationSnapshot;
+  board: BoardSnapshot;
+}
+
+/** Existing safe health-label utility; board owns where it is displayed. */
 export function clarityLabel(score: unknown): string {
   if (
     typeof score !== "number" ||
@@ -24,81 +25,121 @@ export function clarityLabel(score: unknown): string {
   return "clear";
 }
 
-const clipVisualLine = (line: string, width: number) => {
-  const visualLines = truncateToVisualLines(line, 1000, width, 0).visualLines;
-  return visualLines.length ? [visualLines[0] ?? ""] : [""];
-};
-const timestamp = (value: number | undefined) => {
+const ansiSequence = new RegExp(
+  `${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`,
+  "g",
+);
+const untrusted = (text: string) =>
+  text
+    .replace(ansiSequence, "")
+    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
+    .replace(/[\r\n\t]/g, " ")
+    .trim();
+
+const time = (value: number | undefined) => {
   if (value === undefined) return "never";
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toISOString() : "unknown";
+  return Number.isFinite(date.getTime())
+    ? date.toISOString().slice(11, 19)
+    : "unknown";
 };
 
-/** Render copied presentation data only; no monitor or branch capability enters UI. */
-export function paint(ctx: ExtensionContext, view: PresentationSnapshot) {
-  if (ctx.mode !== "tui" || !view.enabled) return;
-  ctx.ui.setWidget(widgetName, (_tui, theme) => ({
-    render(width) {
-      if (width < 2) return [""];
-      const { progress, card } = view;
-      const current = progress.kind === "current";
-      const percent =
-        current && progress.total
-          ? Math.floor((progress.done * 100) / progress.total)
-          : undefined;
-      const filled = Math.floor((percent ?? 0) / 10);
-      const progressLine = progress.catchup
-        ? progress.catchup
-        : current
-          ? `${percent === undefined ? "" : `[${"#".repeat(filled)}${"-".repeat(10 - filled)}] `}Reported ${progress.done}/${progress.total}${percent === undefined ? "" : ` • ${percent}%`}`
-          : progress.kind === "previous"
-            ? `Reported previous ${progress.done}/${progress.total}`
-            : "Progress: no current tasks";
-      const provenance = card
-        ? [
-            `Task assessment: ${card.retained ? "retained" : "current"}`,
-            `As-of: ${timestamp(card.assessedAt)}`,
-            ...(card.replacementPending
-              ? ["Replacement assessment pending"]
-              : []),
-          ]
-        : [];
-      const health = card
-        ? [
-            `Requirements: ${card.health.requirements}`,
-            `Acceptance: ${card.health.acceptance}`,
-            `New red test: ${card.health.newRedTest}`,
-            `Red evidence: ${card.health.redEvidence}`,
-            `Implementation: ${card.health.implementation}`,
-          ]
-        : [
-            "Requirements: unknown",
-            "Acceptance: unknown",
-            "New red test: Unknown",
-            "Red evidence: Unknown",
-            "Implementation: unverified",
-          ];
-      const lines = [
-        theme.fg("accent", plain(progressLine)),
-        ...provenance.map((line) => theme.fg("muted", plain(line))),
-        ...(card ? [theme.fg("muted", plain(`Task: ${card.label}`))] : []),
-        theme.fg("muted", plain(`${view.activity} • ${view.service.label}`)),
-        theme.fg(
-          "muted",
-          plain(
-            `Last Jev dispatch: ${timestamp(view.lastJevCallAt)} • Last extraction dispatch: ${timestamp(view.lastExtractionCallAt)}`,
-          ),
-        ),
-        theme.fg(
-          "muted",
-          plain(
-            `Jev ${view.usage.jev.inputTokens}/${view.usage.jev.outputTokens} tokens • extraction ${view.usage.extraction.inputTokens}/${view.usage.extraction.outputTokens} tokens`,
-          ),
-        ),
-        ...health.map((line) => theme.fg("muted", plain(line))),
-      ];
-      return lines.flatMap((line) => clipVisualLine(line, width));
-    },
-    invalidate() {},
-  }));
+const compact = (value: number) => {
+  if (!Number.isFinite(value) || value < 0) return "0";
+  if (value < 10_000) return `${Math.floor(value)}`;
+  return `${(Math.round(value / 100) / 10).toFixed(1)}K`;
+};
+
+/** Wrap sanitized text without padding; replace one too-wide glyph at tiny widths. */
+const wrap = (text: string, width: number) => {
+  if (width < 1) return [""];
+  const safe = untrusted(text);
+  if (!safe) return [""];
+  const lines: string[] = [];
+  let line = "";
+  for (const point of Array.from(safe)) {
+    const glyph = visibleWidth(point) > width ? "?" : point;
+    if (line && visibleWidth(line + glyph) > width) {
+      lines.push(line);
+      line = "";
+    }
+    line += glyph;
+  }
+  if (line || !lines.length) lines.push(line);
+  return lines;
+};
+
+const warning = (snapshot: WidgetSnapshot) => {
+  const { presentation, board } = snapshot;
+  const { service, progress } = presentation;
+  if (
+    service.code === "saved-state-corrupt" ||
+    service.code === "saved-state-unsupported"
+  )
+    return service.label;
+  if (service.code === "capacity-exhausted") return service.label;
+  if (progress.kind === "previous")
+    return `Reported previous ${progress.done}/${progress.total}`;
+  if (progress.catchup) return progress.catchup;
+  if (
+    service.code === "jev-unavailable" ||
+    service.code === "model-unavailable"
+  )
+    return service.label;
+  if (service.code !== "ready" || board.service.code !== "ready")
+    return service.label;
+};
+
+const currentTask = (board: BoardSnapshot) => {
+  const current = board.currentTask;
+  if (!current) return "Current Task: not identified";
+  const task = board.tasks.find((item) => item.taskId === current.taskId);
+  if (!task) return `Current Task: (${current.status}) not identified`;
+  const qualifier = current.qualifier ? ` · ${current.qualifier}` : "";
+  return `Current Task: (${current.status}) ${task.label}${qualifier}`;
+};
+
+const usage = (snapshot: WidgetSnapshot) => {
+  const { jev, extraction } = snapshot.presentation.usage;
+  return `Jev · ↓ ${compact(jev.inputTokens)} · ↑ ${compact(jev.outputTokens)} tokens · ${jev.calls} calls • Extraction · ↓ ${compact(extraction.inputTokens)} · ↑ ${compact(extraction.outputTokens)} tokens · ${extraction.calls} calls`;
+};
+
+/**
+ * Pure compact view over detached monitor snapshots. It owns neither a monitor
+ * nor a host capability; wrapping/theme work cannot read history or dispatch.
+ */
+export function renderWidget(
+  snapshot: WidgetSnapshot,
+  selected: boolean,
+  width: number,
+  theme: Theme,
+): string[] {
+  const columns = Math.max(1, Math.floor(width));
+  const { presentation } = snapshot;
+  const issue = warning(snapshot);
+  const header = issue
+    ? issue
+    : presentation.progress.kind === "current" &&
+        presentation.progress.total > 0
+      ? (() => {
+          const { done, total } = presentation.progress;
+          const percent = Math.floor((done * 100) / total);
+          const filled = Math.floor((done * 12) / total);
+          return `Reported ${done}/${total} · ${percent}%  ${"█".repeat(filled)}${"░".repeat(12 - filled)}  Jev ${time(presentation.lastJevCallAt)}`;
+        })()
+      : presentation.progress.kind === "previous"
+        ? `Reported previous ${presentation.progress.done}/${presentation.progress.total}`
+        : "Progress: no current tasks";
+  const lines = [
+    header,
+    currentTask(snapshot.board),
+    ...(selected ? [usage(snapshot), "enter to see board"] : ["→ to inspect"]),
+  ];
+  return lines.flatMap((line) =>
+    wrap(line, columns).map((part) => {
+      const colored = theme.fg("muted", part);
+      // Host themes are trusted; ensure an unexpected formatter never widens rows.
+      return visibleWidth(colored) <= columns ? colored : part;
+    }),
+  );
 }

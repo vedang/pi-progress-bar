@@ -4,24 +4,23 @@ import type { Monitor } from "../core/monitor";
 const commands = `How to use:
   /progress                         Show this help and current state
   /progress on                      Start or resume automatic monitoring
-  /progress off                     Stop monitoring and hide the widget`;
+  /progress off                     Stop monitoring and hide the widget
+
+Widget controls:
+  Right / →                         Select progress usage when editor is empty
+  Enter                             Request task board
+  Left / Esc                        Return selection to editor`;
 
 const help = (monitor: Monitor) => {
   const view = monitor.presentationSnapshot();
-  const debug = monitor.debugSnapshot();
-  const notices = debug.diagnostics.length
-    ? debug.diagnostics
-        .map((item) => `${item.label}: ${item.count}`)
-        .join(" • ")
-    : "none";
   return `Automatic progress monitor
 
 State: ${view.enabled ? "ON" : "OFF"}
 Progress: ${view.progress.done}/${view.progress.total} (${view.progress.kind})
 Service: ${view.service.label}
-Jev usage: ${view.usage.jev.calls} calls • ${view.usage.jev.inputTokens} input tokens • ${view.usage.jev.outputTokens} output tokens
-Extraction usage: ${view.usage.extraction.calls} calls • ${view.usage.extraction.inputTokens} input tokens • ${view.usage.extraction.outputTokens} output tokens
-Diagnostics: ${notices}
+Jev requests: ${view.usage.jev.calls} actual dispatched requests • ${view.usage.jev.inputTokens} input tokens • ${view.usage.jev.outputTokens} output tokens
+Extraction requests: ${view.usage.extraction.calls} actual dispatched requests • ${view.usage.extraction.inputTokens} input tokens • ${view.usage.extraction.outputTokens} output tokens
+Request counts are session-wide transport dispatches, not questions or tasks.
 
 ${commands}`;
 };

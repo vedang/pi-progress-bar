@@ -2293,16 +2293,19 @@ export class Monitor {
     this.publish();
   }
 
+  /** Count every transport dispatch, including failed/retried same-ms attempts. */
   private recordJevDispatch(at: number) {
-    if (this.lastJevCallAt === at) return;
     this.lastJevCallAt = at;
+    this.usage.jev.calls = saturatingAdd(this.usage.jev.calls, 1);
     this.save();
     this.publish();
   }
 
+  /** Extraction reports dispatch itself; local failures without callback count zero. */
   private recordExtractionDispatch(at: number, epoch: number) {
     if (!this.enabled || epoch !== this.epoch) return;
     this.lastExtractionCallAt = at;
+    this.usage.extraction.calls = saturatingAdd(this.usage.extraction.calls, 1);
     this.save();
     this.publish();
   }
@@ -2351,7 +2354,6 @@ export class Monitor {
     // above covers barriers installed while its awaits yielded.
     if (this.activeAuthorityBarrier(epoch, owner))
       throw new RetryableProviderError();
-    this.usage.jev.calls = saturatingAdd(this.usage.jev.calls, 1);
     this.usage.jev.inputTokens = saturatingAdd(
       this.usage.jev.inputTokens,
       result.usage.input_tokens,
@@ -2394,10 +2396,6 @@ export class Monitor {
         !safeUsageValue(result.usage.outputTokens)
       )
         throw new RetryableProviderError();
-      this.usage.extraction.calls = saturatingAdd(
-        this.usage.extraction.calls,
-        1,
-      );
       this.usage.extraction.inputTokens = saturatingAdd(
         this.usage.extraction.inputTokens,
         result.usage.inputTokens,

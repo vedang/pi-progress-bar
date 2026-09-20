@@ -104,3 +104,10 @@
 - Cumulative reviewer107a01b3 verdict OK, no issues through43f57e16. Accepted report `u05-u06-accepted-review.md`.
 - Closed U06/y3h.7 with main452unit+15integration format/checkPASS. Strictv7 map/provenance, safe passive board, current/retained status and optional/core capacity isolation accepted.
 - Next sequential ticket U07/y3h.8: main widget/selection-controller reds. U08 source not released until reds frozen.
+
+## U07 main red contracts frozen
+- Replaced obsolete many-row widget tests in hybrid-view with approved compact two-data-row +hint fixture; renderer contract renderWidget({presentation,board},selected,width,theme), UTC HH:mm:ss dispatch time, twelve-cell direct ratio fill, actual status/idle qualifier, selected-only real requests/tokens, 10K rounding, 1–120 display columns/ANSI/wide/combining text and warning priority.
+- Added ux-controller tests for createUiController(host,snapshots,openBoardCallback): owned persistent attachment, deferred-factory subscription, safe Right activation/selected no-op, Enter once, Left/Esc, ordinary received-input passthrough, focus loss on update, detached snapshots, OFF/disposal/late-callback fencing. Board factory callback is a seam for U10, not permission to implement board early.
+- Added real-dispatch counter tests: current code counts accepted responses, not dispatch! Held/failed/retried Jev and failed extraction dispatch now red; batched-success/projection/reload control green. U08 must move calls increments to actual callbacks, retain accepted-result token accounting, count same-timestamp dispatches separately, preserve persistence/authority envelopes and no historical reconstruction.
+- Ordinary help red requires Right/Enter/Left/Esc and dispatch scope, no Diagnostics aggregates.
+- Format/check PASS. Full unit46red/446pass (492total), integration1red/15pass. Logs u07-{format,check,unit-red,integration-red}. Main owns tests/config; no new production source yet.

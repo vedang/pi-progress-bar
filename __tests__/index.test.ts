@@ -242,3 +242,15 @@ it("preserves a matching saved entry with no data as corrupt storage", async () 
   ).toBe(true);
   expect(Object.hasOwn(saved, "data")).toBe(false);
 });
+
+it("explains widget inspection without exposing debugger aggregates in ordinary help", async () => {
+  const h = fixture();
+  await h.emit("session_start");
+  await h.command("");
+  const help = String(h.notify.mock.calls.at(-1)?.[0]);
+  expect(help).toMatch(/Right|→/);
+  expect(help).toMatch(/Enter/i);
+  expect(help).toMatch(/Left|Esc/i);
+  expect(help).not.toMatch(/Diagnostics:/);
+  expect(help).toMatch(/dispatch|requests/i);
+});

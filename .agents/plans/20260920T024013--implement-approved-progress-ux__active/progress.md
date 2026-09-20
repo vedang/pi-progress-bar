@@ -70,3 +70,8 @@
 - Freeze result:14failed/434passed unit tests (448 total). Final format/check PASS. `u06-repair-red.log`; no source change since901aa031.
 - Correction: earlier extra/review check receipts were prematurely described PASS; captured logs actually had a test-helper initial-entry parameter type error from fresh reload fixture. Main now explicitly types monitorHarness initial input unknown[] consistent with internal canonical reader. Final u06-repair-check.log passes TypeScript and Knip; no source weakening.
 - Repair worker must remove persisted legacy card authority, maintain runtime presentation by exact health fact/selector only, mark unverifiable restored cards retained, continuously reconcile optional refs without semantic rebuild/rebill, and preserve full root authority/bounds invariants. No tests/config/Beads writes; report exact source-only handoff.
+
+## U06 repaired candidate validation
+- Sole writer4ec8c43f returned source-only `0e1a36a8` / change tpwznppvuwyxyvouzyvkvnsozzwyxrxq; exact parent8d257026. Three source files, no test/config changes. Working copy clean5a9994cb on handoff.
+- Main independently reran make format/check/test PASS:448unit+15integration (`u06-repair-final-*` logs). All14 frozen review reds resolved.
+- Resumed full cumulative reviewer via same protocol: new run cb6b8d7c (prior8b4e9bac). U06 remains open until verdict; source frozen0e1a36a8. Next U07 not released.

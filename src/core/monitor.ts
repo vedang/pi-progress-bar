@@ -955,20 +955,39 @@ export class Monitor {
     this.publish();
   }
 
+  private prospectiveIdleDoneTaskIdFor(state: HybridState) {
+    const included = state.tasks.filter((task) => task.included);
+    if (!included.length || !included.every((task) => task.status === "done"))
+      return;
+    const currentFocus = this.openFocus(this.state)?.id;
+    const taskId = this.lastDisplayedTaskId ?? currentFocus;
+    return included.some((task) => task.id === taskId) ? taskId : undefined;
+  }
+
+  private idleDoneTaskIdFor(
+    state: HybridState,
+    prospectiveIdleDoneTaskId?: string,
+  ) {
+    const taskId =
+      prospectiveIdleDoneTaskId ??
+      (!this.idleDoneInvalidated ? this.lastDisplayedTaskId : undefined);
+    return state.tasks.some(
+      (task) => task.id === taskId && task.included && task.status === "done",
+    )
+      ? taskId
+      : undefined;
+  }
+
   private metadata(
     enabled = this.enabled,
     healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
     state: HybridState = this.state,
+    prospectiveIdleDoneTaskId?: string,
   ): MonitorCheckpointMetadata {
-    const idleDoneTask =
-      !this.idleDoneInvalidated && this.lastDisplayedTaskId
-        ? state.tasks.find(
-            (task) =>
-              task.id === this.lastDisplayedTaskId &&
-              task.included &&
-              task.status === "done",
-          )
-        : undefined;
+    const idleDoneTaskId = this.idleDoneTaskIdFor(
+      state,
+      prospectiveIdleDoneTaskId,
+    );
     return {
       enabled,
       usage: {
@@ -979,7 +998,7 @@ export class Monitor {
       ...(this.lastExtractionCallAt
         ? { lastExtractionCallAt: this.lastExtractionCallAt }
         : {}),
-      ...(idleDoneTask ? { idleDoneTaskId: idleDoneTask.id } : {}),
+      ...(idleDoneTaskId ? { idleDoneTaskId } : {}),
       ...(healthCards.size
         ? { healthCards: [...healthCards.values()].map(copyHealthCard) }
         : {}),
@@ -1089,6 +1108,24 @@ export class Monitor {
     );
   }
 
+  /** Candidate semantic commits must not publish facts for replaced task sources. */
+  private healthCardsForState(state: HybridState) {
+    return new Map(
+      [...this.healthCards.values()]
+        .filter((card) => {
+          const task = state.tasks.find(
+            (item) =>
+              item.id === card.taskId &&
+              item.revision === card.revision &&
+              item.label === card.label &&
+              sameSource(item.source, card.provenance.taskSource),
+          );
+          return !!task;
+        })
+        .map((card) => [card.taskId, copyHealthCard(card)]),
+    );
+  }
+
   /** Drop only optional facts whose exact source/report refs changed or vanished. */
   private reconcileHealthCards(pass: CanonicalPass) {
     const accepted = [...this.healthCards.values()].filter((card) =>
@@ -1120,10 +1157,13 @@ export class Monitor {
   }
 
   /** Runtime widget card derives only from exact durable facts and live selector. */
-  private syncPresentationCard() {
-    const focus = this.openFocus(this.state);
-    const focused = focus ? this.healthCards.get(focus.id) : undefined;
-    const latest = [...this.healthCards.values()].sort(
+  private syncPresentationCard(
+    state: HybridState = this.state,
+    healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
+  ) {
+    const focus = this.openFocus(state);
+    const focused = focus ? healthCards.get(focus.id) : undefined;
+    const latest = [...healthCards.values()].sort(
       (left, right) => right.assessedAt - left.assessedAt,
     )[0];
     const selected = focused ?? latest;
@@ -1924,22 +1964,16 @@ export class Monitor {
     _card = this.card,
     healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
     state: HybridState = this.state,
+    prospectiveIdleDoneTaskId?: string,
   ): MonitorCheckpointMetadata {
     const maximum = Number.MAX_SAFE_INTEGER;
     // Existing cards are durable facts. The supplied candidate map already
     // contains the exact prospective replacement/new card.
     const maximumHealthCards = [...healthCards.values()].map(copyHealthCard);
-    const idleDoneTaskId =
-      !this.idleDoneInvalidated &&
-      this.lastDisplayedTaskId &&
-      state.tasks.some(
-        (task) =>
-          task.id === this.lastDisplayedTaskId &&
-          task.included &&
-          task.status === "done",
-      )
-        ? this.lastDisplayedTaskId
-        : undefined;
+    const idleDoneTaskId = this.idleDoneTaskIdFor(
+      state,
+      prospectiveIdleDoneTaskId,
+    );
     return {
       enabled: false,
       usage: {
@@ -1997,14 +2031,28 @@ export class Monitor {
     schemaBytes = 0,
     requests = 1,
     healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
+    prospectiveIdleDoneTaskId?: string,
   ): CapacityEnvelope {
-    const current = this.metadata();
+    const selector =
+      prospectiveIdleDoneTaskId ?? this.prospectiveIdleDoneTaskIdFor(candidate);
+    const current = this.metadata(
+      this.enabled,
+      healthCards,
+      this.state,
+      selector,
+    );
     const oldCard = this.retainedCardFor(this.state);
-    const dispatch = this.capacityMetadata(oldCard, healthCards, this.state);
+    const dispatch = this.capacityMetadata(
+      oldCard,
+      healthCards,
+      this.state,
+      selector,
+    );
     const accepted = this.capacityMetadata(
       card ?? this.retainedCardFor(candidate),
       healthCards,
       candidate,
+      selector,
     );
     const currentLimit = { ...this.state, capacity: "limit" as const };
     const candidateLimit = { ...candidate, capacity: "limit" as const };
@@ -2035,19 +2083,60 @@ export class Monitor {
     };
   }
 
+  /** Drop optional facts before mandatory admission; preserve semantic capacity. */
+  private evictOptionalHealth() {
+    const hadOptional =
+      this.healthCards.size > 0 ||
+      !!this.card ||
+      !!this.currentHealthTaskId ||
+      !!this.healthObservation ||
+      !!this.healthFlight;
+    this.healthCards.clear();
+    this.currentHealthTaskId = undefined;
+    this.cardHealthIdentity = undefined;
+    this.card = undefined;
+    this.healthObservation = undefined;
+    if (this.healthFlight) {
+      this.healthFlight = undefined;
+      this.healthGateway.invalidate();
+    }
+    if (!hadOptional) return;
+    // Optional eviction is independently durable before any paid core dispatch.
+    this.save();
+    this.publish();
+  }
+
   /** Required by core before any paid phase or dispatch timestamp. */
   private admit(plan: AdmissionPlan) {
     if (this.state.capacity === "limit") return false;
     try {
-      const envelope = this.capacityEnvelope(
+      const full = this.capacityEnvelope(
         plan.phase,
         plan.candidate,
         this.retainedCardFor(plan.candidate),
         plan.schemaBytes,
       );
-      if (envelope.maximum <= MAX_CHECKPOINT_BYTES) return true;
+      if (full.maximum <= MAX_CHECKPOINT_BYTES) return true;
     } catch {
-      // Invalid or unencodable candidate has no durable admission proof.
+      // Optional metadata can itself be stale/unencodable; try core-only next.
+    }
+    try {
+      // Optional health must never turn an otherwise durable core transition
+      // into a semantic capacity block.
+      const coreOnly = this.capacityEnvelope(
+        plan.phase,
+        plan.candidate,
+        undefined,
+        plan.schemaBytes,
+        1,
+        new Map(),
+      );
+      if (coreOnly.maximum <= MAX_CHECKPOINT_BYTES) {
+        this.evictOptionalHealth();
+        return true;
+      }
+    } catch {
+      // Core-only candidate lacks a valid durable proof.
     }
     this.rejectCapacity();
     return false;
@@ -2085,26 +2174,21 @@ export class Monitor {
   /** Whole optional batch admission precedes its first Jev request. */
   private admitHealth(
     task: HybridTask,
-    observationOrRequests: Observation | number,
-    maybeRequests?: number,
+    observation: Observation,
+    requests: number,
   ) {
-    const observation =
-      typeof observationOrRequests === "number"
-        ? {
-            id: task.source.entryId,
-            hash: task.source.messageHash,
-            role: task.source.role,
-            text: "",
-          }
-        : observationOrRequests;
-    const requests =
-      typeof observationOrRequests === "number"
-        ? observationOrRequests
-        : (maybeRequests ?? 0);
     if (this.state.capacity === "limit" || requests <= 0) return false;
     const prospective = this.maximumHealthCard(task, observation);
     const candidateCards = new Map(this.healthCards);
     candidateCards.set(task.id, prospective);
+    const prospectiveIdleDoneTaskId =
+      task.status === "done" &&
+      this.state.tasks.length > 0 &&
+      this.state.tasks
+        .filter((item) => item.included)
+        .every((item) => item.status === "done")
+        ? task.id
+        : undefined;
     try {
       if (
         this.capacityEnvelope(
@@ -2114,6 +2198,7 @@ export class Monitor {
           0,
           requests,
           candidateCards,
+          prospectiveIdleDoneTaskId,
         ).maximum <= MAX_CHECKPOINT_BYTES
       )
         return true;
@@ -2146,15 +2231,18 @@ export class Monitor {
   }
 
   private commit(state: HybridState) {
-    const previousCard = this.card ? copyCard(this.card) : undefined;
-    const previousDisplay = {
+    const previous = {
+      card: this.card ? copyCard(this.card) : undefined,
+      healthCards: this.healthCards,
+      currentHealthTaskId: this.currentHealthTaskId,
+      cardHealthIdentity: this.cardHealthIdentity,
       lastDisplayedTaskId: this.lastDisplayedTaskId,
       idleDoneInvalidated: this.idleDoneInvalidated,
     };
+    const candidateCards = this.healthCardsForState(state);
     const admittedCompletion = state.events
       .slice(this.state.events.length)
       .some((event) => event.kind === "complete");
-    this.retainCardBeforeReplacement(state);
     const focused = this.openFocus(state);
     if (focused && !state.scopeUnresolved && !state.pending) {
       this.lastDisplayedTaskId = focused.id;
@@ -2167,18 +2255,32 @@ export class Monitor {
         .every((task) => task.status === "done")
     )
       this.idleDoneInvalidated = false;
+    this.healthCards = candidateCards;
+    if (
+      !this.currentHealthTaskId ||
+      !candidateCards.has(this.currentHealthTaskId)
+    ) {
+      this.currentHealthTaskId = undefined;
+      this.cardHealthIdentity = undefined;
+    }
+    // Source replacement and every derived surface update before first commit
+    // publication. No intermediate snapshot can mix new tasks with old health.
+    this.syncPresentationCard(state, candidateCards);
     let checkpoint: unknown;
     try {
       // No new semantic state may fit only while ON: OFF control is durable.
-      encodeCheckpoint(state, this.metadata(false, this.healthCards, state));
+      encodeCheckpoint(state, this.metadata(false, candidateCards, state));
       checkpoint = encodeCheckpoint(
         state,
-        this.metadata(this.enabled, this.healthCards, state),
+        this.metadata(this.enabled, candidateCards, state),
       );
     } catch {
-      this.card = previousCard;
-      this.lastDisplayedTaskId = previousDisplay.lastDisplayedTaskId;
-      this.idleDoneInvalidated = previousDisplay.idleDoneInvalidated;
+      this.card = previous.card;
+      this.healthCards = previous.healthCards;
+      this.currentHealthTaskId = previous.currentHealthTaskId;
+      this.cardHealthIdentity = previous.cardHealthIdentity;
+      this.lastDisplayedTaskId = previous.lastDisplayedTaskId;
+      this.idleDoneInvalidated = previous.idleDoneInvalidated;
       this.rejectCapacity();
       throw new DurabilityCapacityError();
     }
@@ -2190,11 +2292,6 @@ export class Monitor {
     }
     this.refreshBeads();
     this.publish();
-  }
-
-  private retainCardBeforeReplacement(next: HybridState) {
-    const projected = this.retainedCardFor(next);
-    if (projected) this.card = projected;
   }
 
   private recordJevDispatch(at: number) {
@@ -2526,10 +2623,33 @@ export class Monitor {
     };
     const candidateCards = new Map(this.healthCards);
     candidateCards.set(task.id, card);
+    const previousDisplay = {
+      lastDisplayedTaskId: this.lastDisplayedTaskId,
+      idleDoneInvalidated: this.idleDoneInvalidated,
+    };
+    const establishesIdleDone =
+      task.status === "done" &&
+      this.state.tasks.length > 0 &&
+      this.state.tasks
+        .filter((item) => item.included)
+        .every((item) => item.status === "done");
+    // The selector changes durable bytes, so install it before final proof.
+    this.lastDisplayedTaskId = task.id;
+    this.idleDoneInvalidated = false;
     try {
       // A post-dispatch encode failure must never poison optional map/state.
-      encodeCheckpoint(this.state, this.metadata(this.enabled, candidateCards));
+      encodeCheckpoint(
+        this.state,
+        this.metadata(
+          this.enabled,
+          candidateCards,
+          this.state,
+          establishesIdleDone ? task.id : undefined,
+        ),
+      );
     } catch {
+      this.lastDisplayedTaskId = previousDisplay.lastDisplayedTaskId;
+      this.idleDoneInvalidated = previousDisplay.idleDoneInvalidated;
       this.note("health-capacity-skipped");
       this.publish();
       return;
@@ -2537,8 +2657,6 @@ export class Monitor {
     this.healthCards = candidateCards;
     this.currentHealthTaskId = task.id;
     this.cardHealthIdentity = snapshot.identity;
-    this.lastDisplayedTaskId = task.id;
-    this.idleDoneInvalidated = false;
     this.syncPresentationCard();
     this.save();
     this.publish();

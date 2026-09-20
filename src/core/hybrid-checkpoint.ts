@@ -83,16 +83,8 @@ export interface MonitorCheckpointMetadata {
   };
   lastJevCallAt?: number;
   lastExtractionCallAt?: number;
-  /** Legacy widget projection; retained for its current display contract. */
-  card?: {
-    taskId: string;
-    revision: number;
-    label: string;
-    retained: boolean;
-    replacementPending: boolean;
-    assessedAt: number;
-    health: HealthFields;
-  };
+  /** Exact completed task eligible for qualified idle display; no health payload. */
+  idleDoneTaskId?: string;
   /** At most one exact accepted health fact for every retained task. */
   healthCards?: HealthCard[];
 }
@@ -705,7 +697,12 @@ function validMonitorMetadata(
     !exactKeys(
       value,
       ["enabled", "usage"],
-      ["lastJevCallAt", "lastExtractionCallAt", "card", "healthCards"],
+      [
+        "lastJevCallAt",
+        "lastExtractionCallAt",
+        "idleDoneTaskId",
+        "healthCards",
+      ],
     ) ||
     typeof value.enabled !== "boolean" ||
     !record(value.usage) ||
@@ -721,7 +718,9 @@ function validMonitorMetadata(
     (Object.hasOwn(value, "lastJevCallAt") &&
       !nonNegativeInteger(value.lastJevCallAt)) ||
     (Object.hasOwn(value, "lastExtractionCallAt") &&
-      !nonNegativeInteger(value.lastExtractionCallAt))
+      !nonNegativeInteger(value.lastExtractionCallAt)) ||
+    (Object.hasOwn(value, "idleDoneTaskId") &&
+      !taskIdIsValid(value.idleDoneTaskId))
   )
     return false;
   if (Object.hasOwn(value, "healthCards")) {
@@ -737,37 +736,15 @@ function validMonitorMetadata(
     )
       return false;
   }
-  if (!Object.hasOwn(value, "card")) return true;
-  const card = value.card;
-  if (
-    !record(card) ||
-    !exactKeys(card, [
-      "taskId",
-      "revision",
-      "label",
-      "retained",
-      "replacementPending",
-      "assessedAt",
-      "health",
-    ]) ||
-    !taskIdIsValid(card.taskId) ||
-    !positiveInteger(card.revision) ||
-    !safeLabel(card.label) ||
-    typeof card.retained !== "boolean" ||
-    typeof card.replacementPending !== "boolean" ||
-    !nonNegativeInteger(card.assessedAt) ||
-    !record(card.health) ||
-    !exactKeys(card.health, [
-      "requirements",
-      "acceptance",
-      "newRedTest",
-      "redEvidence",
-      "implementation",
-    ]) ||
-    !Object.values(card.health).every(safeHealthLabel)
-  )
-    return false;
-  return state.tasks.some((task) => task.id === card.taskId);
+  return (
+    !Object.hasOwn(value, "idleDoneTaskId") ||
+    state.tasks.some(
+      (task) =>
+        task.id === value.idleDoneTaskId &&
+        task.included &&
+        task.status === "done",
+    )
+  );
 }
 
 function validHealthCard(value: unknown): value is HealthCard {
@@ -807,6 +784,7 @@ function validHealthCard(value: unknown): value is HealthCard {
     !validObservationRef(value.provenance.observation) ||
     !hashIsValid(value.provenance.snapshotHash) ||
     !Array.isArray(value.provenance.requestHashes) ||
+    value.provenance.requestHashes.length < 1 ||
     value.provenance.requestHashes.length > 20 ||
     !value.provenance.requestHashes.every(hashIsValid) ||
     !hashIsValid(value.provenance.evidenceHash) ||

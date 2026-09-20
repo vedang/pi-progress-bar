@@ -84,6 +84,10 @@ export function projectBoard(input: {
   healthCards: ReadonlyMap<string, HealthCard>;
   service: { code: string; label: string };
   unsettled: boolean;
+  /** Live proof exists only in this monitor epoch; restored cards stay retained. */
+  currentHealthTaskId?: string;
+  /** Accepted replacement is pending; old health stays visible but never current. */
+  pendingHealthTaskId?: string;
   lastDisplayedTaskId?: string;
 }): BoardSnapshot {
   const focusedTaskId = input.unsettled ? undefined : input.state.focusTaskId;
@@ -102,17 +106,23 @@ export function projectBoard(input: {
       ? { state: "unassessed" as const }
       : !sourceMatches
         ? { state: "stale" as const }
-        : status === "INPROG"
+        : input.pendingHealthTaskId === task.id
           ? {
-              state: "current" as const,
+              state: "replacement-pending" as const,
               assessedAt: card.assessedAt,
               role: card.provenance.observation.role,
             }
-          : {
-              state: "retained" as const,
-              assessedAt: card.assessedAt,
-              role: card.provenance.observation.role,
-            };
+          : status === "INPROG" && input.currentHealthTaskId === task.id
+            ? {
+                state: "current" as const,
+                assessedAt: card.assessedAt,
+                role: card.provenance.observation.role,
+              }
+            : {
+                state: "retained" as const,
+                assessedAt: card.assessedAt,
+                role: card.provenance.observation.role,
+              };
     return {
       taskId: task.id,
       label: task.label,

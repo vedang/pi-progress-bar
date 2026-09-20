@@ -124,7 +124,8 @@ it.each(["addition", "replacement", "path", "partial"])(
     if (!provisional) throw new Error("Missing provisional");
     const result = a.reconcileStartedTools(provisional, starts, final, cwd);
     expect(result.kind).toBe("changed");
-    expect(result.calls?.map((item) => item.callId)).toEqual(
+    if (result.kind !== "changed") throw new Error("Expected changed list");
+    expect(result.calls.map((item) => item.callId)).toEqual(
       startedCalls.map((item) => item.id),
     );
   },

@@ -290,9 +290,10 @@ class TaskBoard implements BoardComponent {
   }
 
   /**
-   * Pinned rows preserve board orientation. All projected values also appear
-   * in the normal scroll body, wrapped before styling, so narrow boards never
-   * turn a safe truncation into permanently unreachable information.
+   * Each service/health value has one rendering owner. On roomy panes it is a
+   * complete pinned Summary row. On tight panes only its heading is pinned and
+   * its wrapped continuation becomes scrollable; duplicating values is never a
+   * substitute for reachability.
    */
   private detailContent(
     task: BoardTask,
@@ -303,41 +304,39 @@ class TaskBoard implements BoardComponent {
   } {
     const width = layout.rightWidth;
     const health = task.health;
-    const pinned = [
-      this.formatLine(`Service: ${this.snapshot.board.service.label}`, width),
-      this.formatLine("Summary:", width),
-      this.formatLine(`• Requirements: ${health.requirements}`, width),
-      this.formatLine(`• Acceptance: ${health.acceptance}`, width),
-      this.formatLine(`• New red test: ${health.newRedTest}`, width),
-      this.formatLine(`• Red evidence: ${health.redEvidence}`, width),
-      this.formatLine(`• Implementation: ${health.implementation}`, width),
-    ];
-    const body = [
-      ...this.wrapLines(`Task: ${task.label}`, width),
-      ...this.wrapLines(
-        `Identity: ${task.taskId} · revision ${task.revision} · ${task.kind}`,
-        width,
-      ),
+    const fields = [
+      ["Requirements", health.requirements],
+      ["Acceptance", health.acceptance],
+      ["New red test", health.newRedTest],
+      ["Red evidence", health.redEvidence],
+      ["Implementation", health.implementation],
+    ] as const;
+    const summary = [
       ...this.wrapLines(`Service: ${this.snapshot.board.service.label}`, width),
-      ...this.wrapLines(`Requirements: ${health.requirements}`, width),
-      ...this.wrapLines(`Acceptance: ${health.acceptance}`, width),
-      ...this.wrapLines(`New red test: ${health.newRedTest}`, width),
-      ...this.wrapLines(`Red evidence: ${health.redEvidence}`, width),
-      ...this.wrapLines(`Implementation: ${health.implementation}`, width),
+      this.formatLine("Summary:", width),
+      ...fields.flatMap(([label, value]) =>
+        this.wrapLines(`• ${label}: ${value}`, width),
+      ),
+    ];
+    const pinValues = summary.length < layout.contentRows;
+    const pinned = pinValues
+      ? summary
+      : [
+          this.formatLine("Service:", width),
+          this.formatLine("Summary:", width),
+          ...fields.map(([label]) => this.formatLine(`• ${label}:`, width)),
+        ];
+    const body = [
+      ...(pinValues
+        ? []
+        : [
+            ...this.wrapLines(this.snapshot.board.service.label, width),
+            ...fields.flatMap(([, value]) => this.wrapLines(value, width)),
+          ]),
+      ...this.wrapLines(`Task: ${task.label}`, width),
       ...this.wrapLines(`Assessment: ${this.provenance(task)}`, width),
     ];
-    if (!this.debugger)
-      return {
-        pinned,
-        body: [
-          ...body,
-          ...this.wrapLines(
-            "Debugger: off (d to inspect task-local facts)",
-            width,
-            "dim",
-          ),
-        ],
-      };
+    if (!this.debugger) return { pinned, body };
     return {
       pinned,
       body: [

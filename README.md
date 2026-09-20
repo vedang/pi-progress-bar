@@ -15,7 +15,7 @@ pi install /absolute/path/to/pi-progress-bar.root
 Provide `TYPESAFE_API_KEY` through your environment; keep it out of tracked configuration. Installing with the key enables automatic monitoring and paid provider calls. The selected model uses **Pi-managed authentication**, not a second key copied into this extension. After updating an installed package, reload/restart Pi to load the new code.
 
 ```text
-/progress       Show state, separate provider usage, diagnostics and help
+/progress       Show state, service, separate provider usage and help
 /progress on    Enable or resume monitoring
 /progress off   Cancel monitoring and hide the widget
 ```
@@ -60,7 +60,7 @@ Red evidence derives **Not needed** from new-red-test applicability when no actu
 
 Completed or replaced tasks retain a coherent **retained / as-of / replacement pending** card until a new assessment is admitted. The label and all five fields are copied together. Assessment time is separate from **actual Jev and extraction dispatch time**, including failed attempts. Redraws do not change these facts or initiate requests. Trusted theme colors are preserved; untrusted text controls are sanitized before styling.
 
-Unresolved/previous scope has no misleading current percentage. Bare `/progress` exposes safe, capped diagnostic counts; the normal widget does not dump raw diagnostic codes. The task-local debugger is available only inside the board; there is no separate `/progress debugger` command. Styling is static and theme-aware; no animation, polling, or interpolated progress is used.
+Unresolved/previous scope has no misleading current percentage. Bare `/progress` shows service and provider usage; the normal widget does not dump raw diagnostic codes. The task-local debugger is available only inside the board; there is no separate `/progress debugger` command. Styling is static and theme-aware; no animation, polling, or interpolated progress is used.
 
 Optional **Task Title**, **Description**, and **Acceptance Criteria** appear only for unique exact canonical quotes independently accepted by Jev at confidence >=0.5 and probability >=0.8. Inferred, ambiguous, rejected, stale, or cross-task fields are omitted—not filled with placeholders. The tracked task label always remains. Optional detail failure or storage denial never blocks mandatory task tracking.
 

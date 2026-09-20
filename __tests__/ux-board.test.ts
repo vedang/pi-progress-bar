@@ -509,6 +509,65 @@ it("does not duplicate Summary when task debugger is enabled", async () => {
   expect(text).toContain("transition-0-0");
 });
 
+it.each([180, 56])(
+  "rich field provenance remains reachable at width %i without enabling debugger",
+  async (width) => {
+    const view = tasks(1);
+    const task = view.board.tasks[0];
+    if (!task) throw new Error("Missing task");
+    const value = (
+      text: string,
+      role: string,
+      second: string,
+      confidence: number,
+      probability: number,
+    ) => ({
+      text,
+      provenance: {
+        role,
+        validatedAt: Date.parse(`2026-09-20T10:00:${second}Z`),
+        confidence,
+        probability,
+      },
+    });
+    Object.assign(task, {
+      details: {
+        title: value("Exact title", "user", "01", 0.5, 0.8),
+        description: value("Exact description", "assistant", "02", 0.6, 0.9),
+        acceptanceCriteria: [
+          value("Exact condition", "intercom", "03", 0.7, 1),
+        ],
+      },
+    });
+    const h = await fixture(view, width === 56 ? 20 : 60);
+    h.board.handleInput(keys.right);
+    let seen = "";
+    for (let page = 0; page < 60; page++) {
+      const lines = h.board.render(width).map(stripVTControlCharacters);
+      for (const line of lines)
+        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+      seen += lines.join("").replace(/\s+/g, "");
+      h.board.handleInput(keys.pageDown);
+    }
+    for (const token of [
+      "user",
+      "assistant",
+      "intercom",
+      "10:00:01",
+      "10:00:02",
+      "10:00:03",
+      "50%",
+      "60%",
+      "70%",
+      "80%",
+      "90%",
+      "100%",
+    ])
+      expect(seen).toContain(token);
+    expect(seen).not.toMatch(/quoteHash|messageHash|entryId/);
+  },
+);
+
 it("renders accepted rich sections once without duplicating Summary or replacing tracked Task", async () => {
   const view = tasks(1);
   const task = view.board.tasks[0];

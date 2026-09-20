@@ -16,7 +16,7 @@ async function fixture(
   const state = await initial();
   const message = observation(
     "detail-context",
-    `For the other database task only: ${quote}. This is not requested for the parser.`,
+    `For the other database task only: [${quote}]. This is not requested for the parser.`,
     "assistant",
   );
   const record = detailRecord(required(state.tasks[0]), initialMessage);

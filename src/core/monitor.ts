@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
 
+import {
+  type ActivityCall,
+  type ActivityList,
+  activityFocusRequest,
+  captureDeclaredTools,
+  captureStartedTool,
+  reconcileStartedTools,
+} from "../analysis/activity-focus";
 import type { ExtractionInput } from "../analysis/extractor";
 import {
   type EvaluationRequest,
@@ -83,6 +91,19 @@ interface HealthWork {
   observation: Observation;
   taskId: string;
   revision: number;
+}
+
+interface ActivityBatch {
+  token: number;
+  epoch: number;
+  calls: ActivityCall[];
+  candidates?: { id: string; label: string; revision: number }[];
+}
+
+interface ActivityDeclaration {
+  batch: ActivityBatch;
+  provisional: ActivityList;
+  starts: Map<string, ActivityCall>;
 }
 
 interface ContextTarget {
@@ -273,6 +294,8 @@ export class Monitor {
   readonly gateway: JevGateway;
   /** Optional health has independent retry/permanent-failure state. */
   private readonly healthGateway: JevGateway;
+  /** Optional display-only tool activity never shares semantic transport authority. */
+  private readonly activityGateway: JevGateway;
   readonly evidence = new EvidenceStore();
   readonly usage = {
     jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
@@ -307,6 +330,13 @@ export class Monitor {
   private healthObservation?: HealthWork;
   private healthFlight?: { epoch: number; token: number; taskId: string };
   private nextHealthToken = 0;
+  private activityDeclaration?: ActivityDeclaration;
+  private activityFlight?: ActivityBatch;
+  private activityQueued?: ActivityBatch;
+  private nextActivityToken = 0;
+  /** Runtime-only activity can supersede semantic display, never semantic authority. */
+  private activityFocusTaskId?: string;
+  private activitySupersedesSemantic = false;
   /** Runtime-only projection derived from exact task-local cards. */
   private card?: RetainedCard;
   /** Bounded durable map, the only persisted health authority. */
@@ -346,11 +376,65 @@ export class Monitor {
       // Health is optional: a permanent health transport error cannot turn OFF tracking.
       onPermanentError: () => this.note("model-unavailable"),
     });
+    this.activityGateway = new JevGateway({
+      fetch: (url, init) => globalThis.fetch(url, init),
+      getApiKey: () => process.env.TYPESAFE_API_KEY,
+      onDispatch: (at) => this.recordJevDispatch(at),
+      // Activity is optional display enrichment; it never disables core tracking.
+      onPermanentError: () => this.note("jev-unavailable"),
+    });
   }
 
   /** Display focus never establishes tool evidence authority. */
   evidenceLink() {
     return undefined;
+  }
+
+  /** Provisional declared calls dispatch immediately; final reconciliation is turn-bound. */
+  observeActivityDeclaration(message: unknown) {
+    if (!this.enabled || !this.cwd) return;
+    const provisional = captureDeclaredTools(message, this.cwd);
+    if (!provisional) return;
+    const batch = this.newActivityBatch(provisional.calls);
+    this.activityDeclaration = { batch, provisional, starts: new Map() };
+    this.activityFocusTaskId = undefined;
+    this.activitySupersedesSemantic = true;
+    this.publish();
+    if (provisional.kind === "ready") this.scheduleActivity(batch);
+  }
+
+  /** Actual starts remain runtime-only matching material; never evidence or provider data. */
+  observeActivityStart(callId: string, toolName: string, args: unknown) {
+    const declaration = this.activityDeclaration;
+    if (!this.enabled || !this.cwd || !declaration) return;
+    const call = captureStartedTool(callId, toolName, args, this.cwd);
+    declaration.starts.set(callId, call);
+  }
+
+  /** Reconcile only once all host tool starts for this turn are known. */
+  observeActivityTurnEnd(message: unknown) {
+    const declaration = this.activityDeclaration;
+    if (!this.enabled || !this.cwd || !declaration) return;
+    this.activityDeclaration = undefined;
+    const result = reconcileStartedTools(
+      declaration.provisional,
+      declaration.starts,
+      message,
+      this.cwd,
+    );
+    if (result.kind === "unchanged") return;
+    // Later evidence supersedes provisional response before an optional correction.
+    this.nextActivityToken++;
+    this.activityFocusTaskId = undefined;
+    if (result.kind !== "changed" || !result.calls?.length) {
+      this.activitySupersedesSemantic = result.kind === "overflow";
+      this.publish();
+      return;
+    }
+    const batch = this.newActivityBatch(result.calls);
+    this.activitySupersedesSemantic = true;
+    this.publish();
+    this.scheduleActivity(batch);
   }
 
   observeToolStart(
@@ -464,8 +548,11 @@ export class Monitor {
       this.cancelHealth();
       this.gateway.pause();
       this.healthGateway.pause();
+      this.activityGateway.pause();
+      this.clearActivity(false);
       this.gateway.enable(this.identity());
       this.healthGateway.enable(this.identity());
+      this.activityGateway.enable(this.identity());
       this.waitingForWake = false;
       this.requeue(pass);
       this.drain();
@@ -596,6 +683,8 @@ export class Monitor {
     this.healthObservation = undefined;
     this.gateway.pause();
     this.healthGateway.pause();
+    this.activityGateway.pause();
+    this.clearActivity(false);
     this.evidence.clearPending();
   }
 
@@ -752,6 +841,7 @@ export class Monitor {
     this.epoch++;
     this.gateway.enable(this.identity());
     this.healthGateway.enable(this.identity());
+    this.activityGateway.enable(this.identity());
     this.requeue(pass, true);
     if (this.queued.length) this.idleDoneInvalidated = true;
     this.save();
@@ -868,6 +958,8 @@ export class Monitor {
       lastDisplayedTaskId: this.idleDoneInvalidated
         ? undefined
         : this.lastDisplayedTaskId,
+      activityFocusTaskId: this.activityFocusTaskId,
+      activitySupersedesSemantic: this.activitySupersedesSemantic,
     });
   }
 
@@ -923,6 +1015,7 @@ export class Monitor {
     this.clearRuntimeContext();
     this.queued = [];
     this.healthObservation = undefined;
+    this.clearActivity(false);
     this.blockedPending = undefined;
     this.activeObservation = undefined;
     this.catchingUp = false;
@@ -1733,6 +1826,146 @@ export class Monitor {
     this.queued = [...this.page];
   }
 
+  private newActivityBatch(calls: readonly ActivityCall[]): ActivityBatch {
+    return {
+      token: ++this.nextActivityToken,
+      epoch: this.epoch,
+      calls: calls.map((call) => ({
+        callId: call.callId,
+        member: { ...call.member },
+      })),
+    };
+  }
+
+  /** Activity is optional and ephemeral: clear it without touching semantic state. */
+  private clearActivity(cancel = true) {
+    this.nextActivityToken++;
+    this.activityDeclaration = undefined;
+    this.activityQueued = undefined;
+    this.activityFocusTaskId = undefined;
+    this.activitySupersedesSemantic = false;
+    if (cancel) this.activityGateway.invalidate();
+    this.activityFlight = undefined;
+  }
+
+  /** Exact saturated usage/timestamp proof for one optional dispatch; no eviction/limit marker. */
+  private admitActivity() {
+    if (this.state.capacity === "limit") return false;
+    try {
+      return (
+        this.capacityEnvelope("health", this.state, undefined, 0, 1).maximum <=
+        MAX_CHECKPOINT_BYTES
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private activityCandidates() {
+    return this.state.tasks
+      .filter((task) => task.included && task.status !== "done")
+      .map((task) => ({
+        id: task.id,
+        label: task.label,
+        revision: task.revision,
+      }));
+  }
+
+  private activityBatchCurrent(batch: ActivityBatch) {
+    return (
+      this.enabled &&
+      batch.epoch === this.epoch &&
+      batch.token === this.nextActivityToken
+    );
+  }
+
+  private scheduleActivity(batch: ActivityBatch) {
+    if (!this.activityBatchCurrent(batch)) return;
+    if (this.activityFlight) {
+      this.activityQueued = batch;
+      return;
+    }
+    if (!this.admitActivity()) {
+      if (this.activityBatchCurrent(batch)) {
+        this.activityFocusTaskId = undefined;
+        this.activitySupersedesSemantic = false;
+        this.publish();
+      }
+      return;
+    }
+    this.activityFlight = batch;
+    void this.processActivity(batch);
+  }
+
+  private async processActivity(batch: ActivityBatch) {
+    try {
+      const candidates = this.activityCandidates();
+      if (!this.activityBatchCurrent(batch) || !candidates.length) return;
+      batch.candidates = candidates.map((candidate) => ({ ...candidate }));
+      const request = activityFocusRequest(
+        batch.calls.map((call) => call.member),
+        batch.candidates,
+      );
+      const result = await this.activityGateway.evaluate(
+        request,
+        this.identity(),
+        true,
+      );
+      if (result) {
+        // Accepted responses retain usage even when their display generation went stale.
+        this.usage.jev.inputTokens = saturatingAdd(
+          this.usage.jev.inputTokens,
+          result.usage.input_tokens,
+        );
+        this.usage.jev.outputTokens = saturatingAdd(
+          this.usage.jev.outputTokens,
+          result.usage.output_tokens,
+        );
+        this.save();
+      }
+      if (!this.activityBatchCurrent(batch)) return;
+      const answer = result?.answers.activityFocus;
+      const probability =
+        answer?.type === "choice"
+          ? (answer.probabilities[answer.choice] ?? 0)
+          : 0;
+      const accepted =
+        answer?.type === "choice" &&
+        answer.confidence >= 0.5 &&
+        probability >= 0.8;
+      const selected =
+        accepted && !["none", "concurrent", "uncertain"].includes(answer.choice)
+          ? batch.candidates?.find((task) => task.id === answer.choice)
+          : undefined;
+      const current = selected
+        ? this.state.tasks.find(
+            (task) =>
+              task.id === selected.id &&
+              task.label === selected.label &&
+              task.revision === selected.revision &&
+              task.included &&
+              task.status !== "done",
+          )
+        : undefined;
+      this.activityFocusTaskId = current?.id;
+      // An accepted abstention or threshold abstention still supersedes stale INPROG.
+      this.activitySupersedesSemantic = true;
+      this.publish();
+    } catch {
+      if (this.activityBatchCurrent(batch)) {
+        this.activityFocusTaskId = undefined;
+        this.activitySupersedesSemantic = false;
+        this.note("jev-unavailable");
+        this.publish();
+      }
+    } finally {
+      if (this.activityFlight === batch) this.activityFlight = undefined;
+      const queued = this.activityQueued;
+      this.activityQueued = undefined;
+      if (queued) this.scheduleActivity(queued);
+    }
+  }
+
   private drain() {
     if (
       !this.enabled ||
@@ -1744,6 +1977,8 @@ export class Monitor {
     const observation = this.queued[0];
     if (observation) {
       const epoch = this.epoch;
+      // Canonical work preempts optional activity before durable semantic admission.
+      this.clearActivity();
       // Any newly processed canonical work invalidates retained idle completion.
       this.idleDoneInvalidated = true;
       this.processing = true;

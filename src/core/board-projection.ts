@@ -89,8 +89,17 @@ export function projectBoard(input: {
   /** Accepted replacement is pending; old health stays visible but never current. */
   pendingHealthTaskId?: string;
   lastDisplayedTaskId?: string;
+  /** Runtime-only safe tool judgment; never task/health/evidence authority. */
+  activityFocusTaskId?: string;
+  /** Newer activity pending/abstention hides semantic INPROG without mutating it. */
+  activitySupersedesSemantic?: boolean;
 }): BoardSnapshot {
-  const focusedTaskId = input.unsettled ? undefined : input.state.focusTaskId;
+  const semanticFocusTaskId = input.unsettled
+    ? undefined
+    : input.state.focusTaskId;
+  const focusedTaskId = input.activitySupersedesSemantic
+    ? input.activityFocusTaskId
+    : (input.activityFocusTaskId ?? semanticFocusTaskId);
   const transitions = new Map<string, { kind: string }[]>();
   for (const event of input.state.events) {
     const items = transitions.get(event.taskId) ?? [];

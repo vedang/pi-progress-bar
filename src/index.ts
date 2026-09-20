@@ -90,9 +90,18 @@ export default function progressBar(pi: ExtensionAPI): void {
     monitor.stop();
     context = undefined;
   });
-  // Canonical active branch is authoritative; raw message_end is not observed.
+  // Canonical active branch is authoritative for semantic tracking. Tool activity
+  // captures only safe runtime metadata from the post-listener assistant message.
+  pi.on("message_end", (event, ctx) => {
+    context = ctx;
+    monitor.observeActivityDeclaration(event.message);
+  });
   pi.on("context", (_event, ctx) => observe(ctx));
-  pi.on("turn_end", (_event, ctx) => observe(ctx));
+  pi.on("turn_end", (event, ctx) => {
+    context = ctx;
+    monitor.observeActivityTurnEnd(event.message);
+    observe(ctx);
+  });
   pi.on("agent_start", (_event, ctx) => {
     context = ctx;
     monitor.setActivity("Agent active");
@@ -107,6 +116,7 @@ export default function progressBar(pi: ExtensionAPI): void {
   });
   pi.on("tool_execution_start", (event, ctx) => {
     context = ctx;
+    monitor.observeActivityStart(event.toolCallId, event.toolName, event.args);
     monitor.observeToolStart(
       event.toolCallId,
       event.toolName,

@@ -139,3 +139,11 @@
 - Controller tests now demand real owned overlay instead of callback. Freeze94%width/80%height/center/margin1, refresh/reopen, OFF/dispose under sibling focus. Existing host exact-handle and index lifecycle tests retained. Production static API imports will replace temporary reflection after implementation.
 - Layout contract clarification: board.render(width) receives ALREADY bounded overlay width; do not apply94% twice. screenRows is terminal rows; rendered rows <=floor(.8*rows) and rows-2. 40x16 may use explicit size notice with Esc; do not drop health dimensions silently. d toggles debugger from either board pane, never replaces Summary; arrows/tab change panes and independent scrolling. No q alias required.
 - Gates format/check PASS. Full unit24red/506pass (`u09-unit-red.log`), integration17PASS. Reds are missing module/owned board behavior, not types. Actual-host fixture/script updated for real modal Esc before nonempty-editor test; new host proof is pending U10 and not claimed.
+
+## U10 source and main verification
+- Sole worker331deec9 source92ae27eb on exact35569740; board/layout/controller/index plus unchanged shared VT sanitizer export. Source-only handoff u10-worker.md; no test/config/core mutations.
+- Main replaced temporary board/controller/host-fixture reflection with static production imports; BoardComponent explicitly declares required input handler to match actual API.
+- Main found selected-task deletion retained previous task's debugger scroll: new regression1red19pass (`u10-removal-red.log`); update now resets detail offset when selected ID disappears.
+- Main make format/check/test PASS531unit+17integration (`u10-{format,check,test}.log`).
+- Main independently repeated four Pi0.85.1 controller probes PASS. Expanded offline actual-host static board matrix to16PASS:120x40/80x24/60x20/40x16 × regular/fullscreen × transformer before/after. Proven bounded rows/columns, five Summary labels when usable, explicit size notice at40x16, exact Esc close, nonempty/customeditor refusal, shutdown. `run-board-geometries.py`, `board-*.jsonl/.ansi`, `u10-geometries-proof.log`.
+- These are real-host static UI proofs, not full live-monitor/manual acceptance. pi-subagents co-load remains U17. U10 stays in_progress pending cumulative U09/U10 review; later source unreleased.

@@ -1,38 +1,12 @@
 import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { expect, it, vi } from "vitest";
+import { createBoard as create } from "../src/ui/board";
 import { monitorHarness } from "./fixtures/hybrid-monitor";
 import { uxView } from "./fixtures/ux-view";
 
 type Snapshot = ReturnType<typeof uxView>;
-interface Board extends Component {
-  update(snapshot: Snapshot): void;
-  handleInput(data: string): void;
-  dispose(): void;
-  viewState(): {
-    selectedId?: string;
-    listOffset: number;
-    detailOffset: number;
-    debugger: boolean;
-    pane: "list" | "detail";
-  };
-}
-interface Options {
-  theme: Theme;
-  screenRows(): number;
-  isFocused(): boolean;
-  onClose(): void;
-  requestRender(): void;
-}
-// Missing implementation is an intentional runtime red, not a TypeScript error.
-// Replace reflection with static production imports when U10 lands.
-async function create(snapshot: Snapshot, options: Options): Promise<Board> {
-  const path = "../src/ui/board.ts";
-  const module = await import(path);
-  expect(module.createBoard).toBeTypeOf("function");
-  return module.createBoard(snapshot, options);
-}
 function tasks(count: number): Snapshot {
   const view = uxView();
   const base = view.board.tasks[0];
@@ -383,4 +357,18 @@ it("removes whole untrusted terminal sequences before trusted theme styling", as
   expect(text).not.toContain("]8;;");
   expect(text).not.toContain("31m");
   for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(113);
+});
+
+it("resets task-local scroll when a publication removes the inspected task", async () => {
+  const h = await fixture(tasks(3));
+  h.board.handleInput("d");
+  h.board.handleInput(keys.right);
+  h.board.handleInput(keys.end);
+  h.text();
+  expect(h.board.viewState().detailOffset).toBeGreaterThan(0);
+  h.view.board.tasks.shift();
+  h.board.update(h.view);
+  expect(h.board.viewState().selectedId).toBe("task:1");
+  expect(h.board.viewState().detailOffset).toBe(0);
+  expect(h.text()).toContain("transition-1-0");
 });

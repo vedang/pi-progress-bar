@@ -58,11 +58,7 @@ async function fixture(deferred = false) {
   } as unknown as UiHost;
   const openBoard = vi.mocked(host.openOverlay);
   const view = uxView();
-  // U10 removes the inert callback seam; static two-argument call after implementation.
-  const controller = Reflect.apply(createUiController, undefined, [
-    host,
-    view,
-  ]) as ReturnType<typeof createUiController>;
+  const controller = createUiController(host, view);
   const input = (data: string) => listener?.(data);
   const text = () => component?.render(160).join("\n") ?? "";
   return {

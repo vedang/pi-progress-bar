@@ -28,6 +28,7 @@ export interface BoardOptions {
 }
 
 export interface BoardComponent extends Component {
+  handleInput(data: string): void;
   update(snapshot: WidgetSnapshot): void;
   dispose(): void;
   viewState(): BoardViewState;
@@ -82,6 +83,7 @@ class TaskBoard implements BoardComponent {
       this.selectedIndex = Math.min(previousIndex, tasks.length - 1);
       this.selectedId = tasks[this.selectedIndex]?.taskId;
       if (!previousId) this.selectDefault();
+      this.detailOffset = 0;
     } else {
       this.selectedId = undefined;
       this.selectedIndex = 0;

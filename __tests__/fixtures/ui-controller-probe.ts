@@ -3,7 +3,11 @@ import {
   CustomEditor,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, matchesKey } from "@earendil-works/pi-tui";
+import {
+  type Component,
+  matchesKey,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import { createUiController } from "../../src/ui/controller";
 import { createUiHost, type UiHost } from "../../src/ui/host";
 import { uxView } from "./ux-view";
@@ -18,6 +22,7 @@ export default function probe(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     const base = createUiHost(ctx);
     let component: Component | undefined;
+    let columns = 80;
     const transformedFirst =
       process.env.PROGRESS_UI_LISTENER_ORDER === "before";
     let stopTransform = () => {};
@@ -29,6 +34,7 @@ export default function probe(pi: ExtensionAPI) {
     const host: UiHost = {
       attach: (factory) =>
         base.attach((tui, theme) => {
+          columns = tui.terminal.columns;
           component = factory(tui, theme);
           return component;
         }),
@@ -53,7 +59,13 @@ export default function probe(pi: ExtensionAPI) {
         }),
       openOverlay: (view, options) => {
         const owned = base.openOverlay(view, options);
-        record({ event: "board-request", options, lines: view.render(75) });
+        const lines = view.render(Math.floor(columns * 0.94));
+        record({
+          event: "board-request",
+          options,
+          lines,
+          widths: lines.map(visibleWidth),
+        });
         return {
           isFocused: () => owned.isFocused(),
           close: () => {
@@ -65,11 +77,7 @@ export default function probe(pi: ExtensionAPI) {
       requestRender: () => base.requestRender(),
       dispose: () => base.dispose(),
     };
-    // U10 removes the inert callback seam; use static call after implementation.
-    const controller = Reflect.apply(createUiController, undefined, [
-      host,
-      uxView(),
-    ]) as ReturnType<typeof createUiController>;
+    const controller = createUiController(host, uxView());
     if (!transformedFirst) stopTransform = transform();
     const stop = ctx.ui.onTerminalInput((data) => {
       if (matchesKey(data, "f7")) {

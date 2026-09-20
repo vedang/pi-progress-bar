@@ -296,3 +296,41 @@ it("low-confidence activity does not become exclusive or disable mandatory track
   expect(h.monitor.boardSnapshot().currentTask?.status).not.toBe("INPROG");
   expect(h.monitor.enabled).toBe(true);
 });
+
+it("mandatory semantic flight prevents optional dispatch until eligible or superseded", async () => {
+  const h = await fixture();
+  const previous = h.fetch.getMockImplementation();
+  if (!previous) throw new Error("Missing transport");
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body));
+    if (request.questions.gate) await held;
+    return previous(url, init);
+  });
+  h.append("pending-semantic", "Now change the requested work.", "user");
+  await vi.advanceTimersByTimeAsync(1);
+  h.begin(call("a"));
+  await vi.advanceTimersByTimeAsync(10);
+  expect(h.requests).toHaveLength(0);
+  release();
+  await vi.advanceTimersByTimeAsync(100);
+});
+it("already-applied activity proof expires when its task revision changes", async () => {
+  const h = await fixture();
+  h.begin(call("a"));
+  await vi.advanceTimersByTimeAsync(10);
+  expect(h.monitor.boardSnapshot().currentTask).toMatchObject({
+    taskId: "task:2",
+    status: "INPROG",
+  });
+  const task = h.monitor.state.tasks.find((task) => task.id === "task:2");
+  if (!task) throw new Error("Missing task");
+  task.revision++;
+  expect(
+    h.monitor.boardSnapshot().tasks.find((task) => task.taskId === "task:2")
+      ?.status,
+  ).not.toBe("INPROG");
+});

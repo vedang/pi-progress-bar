@@ -1,37 +1,8 @@
 import { expect, it } from "vitest";
-import type { EvaluationRequest } from "../src/analysis/gateway";
+import * as activity from "../src/analysis/activity-focus";
 
-type Member = { toolName: string; path?: string; shellCategory?: string };
-type Call = { callId: string; member: Member };
-type List = {
-  kind: "ready" | "overflow" | "boundary-uncertain";
-  calls: Call[];
-};
-interface Api {
-  captureDeclaredTools(message: unknown, cwd: string): List | undefined;
-  captureStartedTool(
-    id: string,
-    name: string,
-    args: unknown,
-    cwd: string,
-  ): Call;
-  reconcileStartedTools(
-    provisional: List,
-    starts: ReadonlyMap<string, Call>,
-    final: unknown,
-    cwd: string,
-  ): {
-    kind: "unchanged" | "changed" | "empty" | "overflow" | "boundary-uncertain";
-    calls?: Call[];
-  };
-  activityFocusRequest(
-    members: readonly Member[],
-    tasks: readonly { id: string; label: string; revision: number }[],
-  ): EvaluationRequest;
-}
-async function api(): Promise<Api> {
-  const module = "../src/analysis/activity-focus.ts";
-  return import(module);
+async function api() {
+  return activity;
 }
 const cwd = "/repo";
 const call = (
@@ -232,4 +203,21 @@ it("does not create a batch from user text or tool-free assistant text", async (
     a.captureDeclaredTools({ role: "user", content: [call("a")] }, cwd),
   ).toBeUndefined();
   expect(a.captureDeclaredTools(message(), cwd)).toBeUndefined();
+});
+
+it("corrects provisional overflow when actual started list genuinely shrinks to fit", async () => {
+  const a = await api();
+  const oversized = message(call("a"), call("big", "界".repeat(1400), {}));
+  const provisional = a.captureDeclaredTools(oversized, cwd);
+  if (!provisional) throw new Error("Missing provisional");
+  expect(provisional.kind).toBe("overflow");
+  const started = a.captureStartedTool("a", "read", { path: "src/a.ts" }, cwd);
+  expect(
+    a.reconcileStartedTools(
+      provisional,
+      new Map([["a", started]]),
+      oversized,
+      cwd,
+    ),
+  ).toEqual({ kind: "changed", calls: [started] });
 });

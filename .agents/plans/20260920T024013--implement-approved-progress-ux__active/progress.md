@@ -121,3 +121,9 @@
 - Final make format/check/test PASS497unit+17integration (`u08-{format,check,test}.log`).
 - Actual installed Pi0.85.1 controller fixture (no monitor/providers/session writes) PASS all4 cases: regular/fullscreen × transformer before/after controller, safe empty Right, selected/Left/Enter-once, nonempty passthrough, configured CustomEditor refusal, cleanup. `run-controller-probe.py`, `controller-*.jsonl/.ansi`, `u08-host-proof.log`. Closes reverse-listener/custom-editor proof gaps; actual pi-subagents co-load remains U17 acceptance work.
 - U08 remains in_progress pending cumulative U07/U08 review. Board callback intentionally U10 seam, no modal yet; no later ticket released.
+
+## U08 review correction
+- Reviewer6ed7a84b BLOCK4P1: active Pending mislabeled outage / extraction hidden; CSI-only sanitizer left OSC/C1 fragments; tiny warnings misleading prefixes; selected return-key hint omitted.
+- Main reproduced11 failures/37passes (`u08-review-red.log`), then narrow fixes: exact Pending and Pending:retry differentiated; known analysis activity separate from genuine failure; Node full VT sanitizer with incomplete OSC-tail removal; code-specific complete short warnings and `!` when no word fits; selected full Enter/Left/Esc controls where fitting, preserving owner's `enter to see board` hint.
+- Tests include held Jev/extraction, full precedence chain, OSC/C1/incomplete CSI+OSC, trusted theme and widths1/2/8/20/40. Main format/check/test PASS507unit+17integration (`u08-review-*`).
+- Repeated actualPi0.85.1 four controller PTY cases PASS after fix (`u08-review-host-proof.log`). No provider calls. U08 acceptance still gated by cumulative rereview.

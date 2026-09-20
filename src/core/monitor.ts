@@ -1331,8 +1331,21 @@ export class Monitor {
         code: "service-unavailable",
         label: "Progress service unavailable",
       };
+    if (this.gateway.status === "Pending")
+      return { code: "analysis-active", label: "Assessing progress" };
+    if (this.gateway.status.startsWith("Pending:"))
+      return {
+        code: "retry-waiting",
+        label: "Waiting to retry progress analysis",
+      };
     if (!/^(?:Ready|Current)$/.test(this.gateway.status))
       return { code: "jev-unavailable", label: "Jev service unavailable" };
+    if (
+      ["Extracting tasks", "Assessing progress", "Analyzing progress"].includes(
+        this.activity,
+      )
+    )
+      return { code: "analysis-active", label: this.activity };
     return { code: "ready", label: "Ready" };
   }
 

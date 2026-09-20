@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { BoardSnapshot } from "../core/board-projection";
@@ -23,15 +24,16 @@ export function clarityLabel(score: unknown): string {
   return "clear";
 }
 
-const ansiSequence = new RegExp(
-  `${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`,
+const esc = String.fromCharCode(27);
+// Unterminated OSC tails have no visible label content. Drop before the proven
+// VT sanitizer, which handles complete OSC/CSI/C1 sequences and partial CSI.
+const incompleteOsc = new RegExp(
+  `(?:${esc}\\]|${String.fromCharCode(157)})(?:(?!${esc}\\\\|${String.fromCharCode(156)}|${String.fromCharCode(7)})[\\s\\S])*$`,
   "g",
 );
 const untrusted = (text: string) =>
-  text
-    .replace(ansiSequence, "")
+  stripVTControlCharacters(text.replace(incompleteOsc, ""))
     .replace(/[\p{Cc}\p{Cf}]/gu, " ")
-    .replace(/[\r\n\t]/g, " ")
     .trim();
 
 const time = (value: number | undefined) => {
@@ -67,25 +69,55 @@ const wrap = (text: string, width: number) => {
   return lines;
 };
 
-const warning = (snapshot: WidgetSnapshot) => {
+const shortWarning = (code: string, label: string, width: number) => {
+  const safe = untrusted(label);
+  if (visibleWidth(safe) <= width) return safe;
+  const alternatives = code.startsWith("saved-state-")
+    ? ["Start fresh session", "New chat"]
+    : code === "capacity-exhausted"
+      ? ["Capacity reached", "Capacity"]
+      : code === "previous"
+        ? ["Previous progress", "Previous"]
+        : code === "catchup"
+          ? ["Catching up", "Catch-up"]
+          : code === "analysis-active"
+            ? ["Analyzing", "Working"]
+            : code === "retry-waiting"
+              ? ["Retry waiting", "Waiting"]
+              : ["Service unavailable", "Offline"];
+  return alternatives.find((text) => visibleWidth(text) <= width) ?? "!";
+};
+
+const warning = (snapshot: WidgetSnapshot, width: number) => {
   const { presentation, board } = snapshot;
   const { service, progress } = presentation;
   if (
     service.code === "saved-state-corrupt" ||
     service.code === "saved-state-unsupported"
   )
-    return service.label;
-  if (service.code === "capacity-exhausted") return service.label;
+    return shortWarning(service.code, service.label, width);
+  if (service.code === "capacity-exhausted")
+    return shortWarning(service.code, service.label, width);
   if (progress.kind === "previous")
-    return `Reported previous ${progress.done}/${progress.total}`;
-  if (progress.catchup) return progress.catchup;
+    return shortWarning(
+      "previous",
+      `Reported previous ${progress.done}/${progress.total}`,
+      width,
+    );
+  if (progress.catchup) return shortWarning("catchup", progress.catchup, width);
   if (
     service.code === "jev-unavailable" ||
     service.code === "model-unavailable"
   )
-    return service.label;
+    return shortWarning(service.code, service.label, width);
   if (service.code !== "ready" || board.service.code !== "ready")
-    return service.label;
+    return shortWarning(service.code, service.label, width);
+  if (
+    ["Extracting tasks", "Assessing progress", "Analyzing progress"].includes(
+      presentation.activity,
+    )
+  )
+    return shortWarning("analysis-active", presentation.activity, width);
 };
 
 const currentTask = (board: BoardSnapshot) => {
@@ -114,7 +146,7 @@ export function renderWidget(
 ): string[] {
   const columns = Math.max(1, Math.floor(width));
   const { presentation } = snapshot;
-  const issue = warning(snapshot);
+  const issue = warning(snapshot, columns);
   const header = issue
     ? issue
     : presentation.progress.kind === "current" &&
@@ -136,7 +168,17 @@ export function renderWidget(
   const lines = [
     header,
     currentTask(snapshot.board),
-    ...(selected ? [usage(snapshot), "enter to see board"] : ["→ to inspect"]),
+    ...(selected
+      ? [
+          usage(snapshot),
+          "enter to see board",
+          ...(columns >= visibleWidth("Enter: task board · Left/Esc: back")
+            ? ["Enter: task board · Left/Esc: back"]
+            : columns >= visibleWidth("Left/Esc: back")
+              ? ["Left/Esc: back"]
+              : []),
+        ]
+      : ["→ to inspect"]),
   ];
   return lines.flatMap((line, index) =>
     (selected && index === 2

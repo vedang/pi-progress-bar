@@ -24,6 +24,9 @@ it("counts a dispatched Jev request immediately, before its response", async () 
   await vi.advanceTimersByTimeAsync(1);
   expect(h.fetch).toHaveBeenCalledTimes(1);
   expect(h.monitor.presentationSnapshot().usage.jev.calls).toBe(1);
+  expect(h.monitor.presentationSnapshot().service).toMatchObject({
+    code: "analysis-active",
+  });
 });
 it("counts failed Jev attempts and retries separately, not successful responses", async () => {
   const h = fixture();
@@ -91,4 +94,19 @@ it("publishes semantic capacity as a normal-view warning instead of Ready", asyn
     "capacity-exhausted",
   );
   expect(h.monitor.boardSnapshot().service.code).toBe("capacity-exhausted");
+});
+
+it("exposes dispatched extraction as active analysis, not ready progress", async () => {
+  const h = fixture();
+  h.extract.mockImplementation(async (_input, _signal, dispatch) => {
+    dispatch?.(Date.now());
+    return new Promise(() => {});
+  });
+  h.start();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.extract).toHaveBeenCalledTimes(1);
+  expect(h.monitor.presentationSnapshot().service).toMatchObject({
+    code: "analysis-active",
+    label: "Extracting tasks",
+  });
 });

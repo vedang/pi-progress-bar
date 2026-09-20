@@ -158,3 +158,66 @@ it("render, resize and theme handling are pure", () => {
   expect(view).toEqual(before);
   expect(fetch).not.toHaveBeenCalled();
 });
+
+it.each([
+  "\u001b]8;;https://example.invalid\u0007task\u001b]8;;\u0007",
+  "\u009b31mtask\u009b0m",
+  "task\u001b[31",
+  "task\u001b]8;;unterminated",
+])(
+  "strips complete or incomplete terminal control syntax from labels: %j",
+  (label) => {
+    const view = uxView();
+    const task = view.board.tasks[0];
+    if (!task) throw new Error("Missing task");
+    task.label = label;
+    expect(
+      stripVTControlCharacters(render(view, 160, false, true)[1] ?? ""),
+    ).toBe("Current Task: (INPROG) task");
+  },
+);
+it.each([
+  ["capacity-exhausted", "Progress state capacity reached", "Capacity"],
+  [
+    "saved-state-corrupt",
+    "Saved progress state needs a fresh session",
+    "New chat",
+  ],
+  ["jev-unavailable", "Jev service unavailable", "Offline"],
+])("uses truthful short warning names for %s", (code, label, short) => {
+  const view = uxView();
+  view.presentation.service = view.board.service = { code, label };
+  expect(render(view, 8)[0]).toBe(short);
+  for (const width of [1, 2]) expect(render(view, width)[0]).toBe("!");
+  for (const width of [20, 40])
+    expect(render(view, width)[0]).not.toMatch(/…|\.\.\.$/);
+});
+it("shows return controls at fitting widths while keeping owner board hint", () => {
+  const lines = render(uxView(), 160, true);
+  expect(lines.join("\n")).toContain("enter to see board");
+  expect(lines).toContain("Enter: task board · Left/Esc: back");
+});
+it("renders known active analysis and gives genuine errors higher priority", () => {
+  const view = uxView();
+  view.presentation.activity = "Extracting tasks";
+  expect(render(view)[0]).toBe("Extracting tasks");
+  view.presentation.service = {
+    code: "jev-unavailable",
+    label: "Jev service unavailable",
+  };
+  expect(render(view)[0]).toBe("Jev service unavailable");
+  view.presentation.progress.catchup = "Catching up history";
+  expect(render(view)[0]).toBe("Catching up history");
+  view.presentation.progress.kind = "previous";
+  expect(render(view)[0]).toContain("Reported previous");
+  view.presentation.service = {
+    code: "capacity-exhausted",
+    label: "Progress state capacity reached",
+  };
+  expect(render(view)[0]).toBe("Progress state capacity reached");
+  view.presentation.service = {
+    code: "saved-state-corrupt",
+    label: "Saved state needs a fresh session",
+  };
+  expect(render(view)[0]).toBe("Saved state needs a fresh session");
+});

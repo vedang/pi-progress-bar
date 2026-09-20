@@ -99,3 +99,8 @@
 - Main reproduced exact long-old-report→short-new-report byte-edge regression (`u06-replacement-red.log`:1failed13passed).
 - Main narrow correction splits dispatch map from candidate map; actual current metadata/current selector retained for current/request/current-limit accounting; prospective candidate used only for accepted/candidate-limit. Core-only fallback explicitly proves the empty post-eviction dispatch map.
 - Main format/check/test PASS452unit+15integration (`u06-replacement-*`). U06 source remains acceptance-gated, no later tickets released.
+
+## U06 accepted / U07 next
+- Cumulative reviewer107a01b3 verdict OK, no issues through43f57e16. Accepted report `u05-u06-accepted-review.md`.
+- Closed U06/y3h.7 with main452unit+15integration format/checkPASS. Strictv7 map/provenance, safe passive board, current/retained status and optional/core capacity isolation accepted.
+- Next sequential ticket U07/y3h.8: main widget/selection-controller reds. U08 source not released until reds frozen.

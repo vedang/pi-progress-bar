@@ -184,7 +184,11 @@ it("restoring an amended same-source branch preserves saved billing telemetry", 
   const after = h.monitor.presentationSnapshot();
   expect(h.monitor.state.tasks).toHaveLength(0);
   expect(after.card).toBeUndefined();
-  expect(after.usage).toEqual(before.usage);
+  // Held transport has already dispatched; tokens still await its response.
+  expect(after.usage).toEqual({
+    ...before.usage,
+    jev: { ...before.usage.jev, calls: before.usage.jev.calls + 1 },
+  });
   expect(after.lastExtractionCallAt).toBe(before.lastExtractionCallAt);
   expect(after.lastJevCallAt).toBeGreaterThanOrEqual(before.lastJevCallAt ?? 0);
 });
@@ -204,7 +208,8 @@ it("a true source replacement resets old session billing telemetry", async () =>
   h.monitor.turnOn("/nonexistent-hybrid-test");
   expect(h.monitor.state.sourceId).toBe("session:replacement");
   expect(h.monitor.presentationSnapshot().usage).toEqual({
-    jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
+    // Old-session counts reset; one new-session request has dispatched.
+    jev: { calls: 1, inputTokens: 0, outputTokens: 0 },
     extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
   });
   expect(h.monitor.presentationSnapshot().lastExtractionCallAt).toBeUndefined();
@@ -224,7 +229,7 @@ it("same-source canonical amendment preserves incurred usage and dispatch timest
   expect(before.usage.extraction.calls).toBeGreaterThan(0);
   expect(before.lastJevCallAt).toBeDefined();
   expect(before.lastExtractionCallAt).toBeDefined();
-  // Hold the next transport: compare the reconciliation boundary, not later costs.
+  // Hold the next response: preserve prior tokens, plus its real dispatch count.
   const fetch = h.fetch.getMockImplementation();
   if (!fetch) throw new Error("Missing transport");
   let release: (() => void) | undefined;
@@ -238,7 +243,10 @@ it("same-source canonical amendment preserves incurred usage and dispatch timest
   h.observe();
   const reset = h.monitor.presentationSnapshot();
   expect(h.monitor.state.tasks).toHaveLength(0);
-  expect(reset.usage).toEqual(before.usage);
+  expect(reset.usage).toEqual({
+    ...before.usage,
+    jev: { ...before.usage.jev, calls: before.usage.jev.calls + 1 },
+  });
   expect(reset.lastExtractionCallAt).toBe(before.lastExtractionCallAt);
   // The next real Jev dispatch may replace its timestamp; it must never vanish.
   expect(reset.lastJevCallAt).toBeGreaterThanOrEqual(before.lastJevCallAt ?? 0);

@@ -81,6 +81,7 @@ export function createUiController(
 
   const component: Component = {
     render(width) {
+      if (selected && !safeSelection()) selected = false;
       return renderWidget(snapshot, selected, width, theme as Theme);
     },
     invalidate() {},

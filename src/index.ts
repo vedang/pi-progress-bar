@@ -11,11 +11,9 @@ import { createUiHost } from "./ui/host";
 export default function progressBar(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let notifiedError: string | undefined;
-  let controller:
-    | { context: ExtensionContext; value: UiController }
-    | undefined;
+  let controller: UiController | undefined;
   const disposeController = () => {
-    controller?.value.dispose();
+    controller?.dispose();
     controller = undefined;
   };
   const render = () => {
@@ -24,14 +22,12 @@ export default function progressBar(pi: ExtensionAPI): void {
     const presentation = monitor.presentationSnapshot();
     if (ctx.mode === "tui" && presentation.enabled) {
       const snapshot = { presentation, board: monitor.boardSnapshot() };
-      if (!controller || controller.context !== ctx) {
-        disposeController();
+      if (!controller) {
+        // Host contexts may be freshly wrapped for every event. Only explicit
+        // session/branch/OFF lifecycle boundaries replace the UI generation.
         // Board construction belongs to U10. U08 only consumes Enter exactly once.
-        controller = {
-          context: ctx,
-          value: createUiController(createUiHost(ctx), snapshot, () => {}),
-        };
-      } else controller.value.update(snapshot);
+        controller = createUiController(createUiHost(ctx), snapshot, () => {});
+      } else controller.update(snapshot);
       notifiedError = undefined;
       return;
     }

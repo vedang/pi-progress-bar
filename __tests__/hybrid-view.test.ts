@@ -2,7 +2,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { expect, it, vi } from "vitest";
-import * as widget from "../src/ui/widget";
+import { renderWidget } from "../src/ui/widget";
 import { uxView } from "./fixtures/ux-view";
 
 function render(
@@ -11,16 +11,12 @@ function render(
   selected = false,
   color = false,
 ): string[] {
-  const fn = Reflect.get(widget, "renderWidget");
-  expect(fn, "pure renderWidget(snapshot,selected,width,theme)").toBeTypeOf(
-    "function",
-  );
   const theme = {
     fg: (_: string, text: string) =>
       color ? `\u001b[36m${text}\u001b[39m` : text,
     bold: (text: string) => text,
   } as Theme;
-  return Reflect.apply(fn, undefined, [view, selected, width, theme]);
+  return renderWidget(view, selected, width, theme);
 }
 it("renders exact compact ready fixture, with hidden usage and no health rows", () => {
   expect(render()).toEqual([
@@ -139,6 +135,20 @@ it.each([40, 80, 120])(
     expect(text).toContain("20 calls");
   },
 );
+it.each([40, 80, 120])(
+  "keeps two data rows plus hint for long labels at width %i",
+  (width) => {
+    const view = uxView();
+    const task = view.board.tasks[0];
+    if (!task) throw new Error("Missing task");
+    task.label = "Long task label ".repeat(20);
+    const lines = render(view, width);
+    expect(lines).toHaveLength(3);
+    expect(lines[2]).toBe("→ to inspect");
+    expect(lines[0]).toContain("Reported 7/12");
+  },
+);
+
 it("render, resize and theme handling are pure", () => {
   const view = uxView();
   const before = structuredClone(view);

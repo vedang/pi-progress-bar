@@ -352,7 +352,13 @@ it.each(["lower", "absent"])(
       ),
     );
     const after = h.monitor.presentationSnapshot();
-    expect(after.usage).toEqual(before.usage);
+    expect(after.usage).toEqual({
+      ...before.usage,
+      jev: {
+        ...before.usage.jev,
+        calls: before.usage.jev.calls + (mode === "absent" ? 1 : 0),
+      },
+    });
     expect(after.lastExtractionCallAt).toBeGreaterThanOrEqual(
       before.lastExtractionCallAt ?? 0,
     );

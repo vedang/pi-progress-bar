@@ -254,3 +254,17 @@ it("explains widget inspection without exposing debugger aggregates in ordinary 
   expect(help).not.toMatch(/Diagnostics:/);
   expect(help).toMatch(/dispatch|requests/i);
 });
+
+it("keeps one widget generation across fresh per-event context wrappers", async () => {
+  const h = fixture();
+  await h.emit("session_start");
+  const installs = () =>
+    h.setWidget.mock.calls.filter(([, widget]) => typeof widget === "function")
+      .length;
+  expect(installs()).toBe(1);
+  const start = h.handlers.get("agent_start");
+  await start?.({} as never, { ...h.ctx });
+  const end = h.handlers.get("agent_settled");
+  await end?.({} as never, { ...h.ctx });
+  expect(installs()).toBe(1);
+});

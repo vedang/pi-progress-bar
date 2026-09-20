@@ -1319,6 +1319,11 @@ export class Monitor {
         label: "Saved progress state needs a fresh session",
       };
     if (!this.enabled) return { code: "monitor-off", label: "Monitoring off" };
+    if (this.state.capacity === "limit")
+      return {
+        code: "capacity-exhausted",
+        label: "Progress state capacity reached",
+      };
     if (this.waitingForWake)
       return { code: "model-unavailable", label: "Selected model unavailable" };
     if (this.error)

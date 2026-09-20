@@ -78,3 +78,17 @@ it("counts batches once and leaves counts unchanged on projection/publication/re
   await vi.advanceTimersByTimeAsync(100);
   expect(h.monitor.presentationSnapshot().usage).toEqual(view.usage);
 });
+
+it("publishes semantic capacity as a normal-view warning instead of Ready", async () => {
+  const h = fixture();
+  h.start();
+  await h.settle("goal");
+  Reflect.apply(Reflect.get(h.monitor, "admit"), h.monitor, [
+    { phase: "gate", candidate: h.monitor.state, schemaBytes: 512 * 1024 },
+  ]);
+  expect(h.monitor.state.capacity).toBe("limit");
+  expect(h.monitor.presentationSnapshot().service.code).toBe(
+    "capacity-exhausted",
+  );
+  expect(h.monitor.boardSnapshot().service.code).toBe("capacity-exhausted");
+});

@@ -111,3 +111,13 @@
 - Added real-dispatch counter tests: current code counts accepted responses, not dispatch! Held/failed/retried Jev and failed extraction dispatch now red; batched-success/projection/reload control green. U08 must move calls increments to actual callbacks, retain accepted-result token accounting, count same-timestamp dispatches separately, preserve persistence/authority envelopes and no historical reconstruction.
 - Ordinary help red requires Right/Enter/Left/Esc and dispatch scope, no Diagnostics aggregates.
 - Format/check PASS. Full unit46red/446pass (492total), integration1red/15pass. Logs u07-{format,check,unit-red,integration-red}. Main owns tests/config; no new production source yet.
+
+## U08 main verification and host proof
+- Worker4263ab1d / nnqxtrwvomxknkssumpxttlouppkkklv source-only compact widget/controller/index/help and actual-dispatch counters. Main updated four old held-transport telemetry expectations while preserving tokens/session-reset checks; source worker did not edit tests.
+- Main replaced temporary renderer/controller imports with static production API. Removed unused obsolete widgetName export revealed by Knip.
+- Main discovered fresh event-context wrapper identity caused controller replacement. Red u08-context-red.log1fail8pass, fixed lifecycle ownership to explicit session/branch/OFF boundaries, not wrapper identity.
+- Main row-height/focus reds4fail43pass: unselected long labels/header grew beyond two data rows, redraw retained selected state after focus loss. Fixed header bar→percentage degradation, clip data rows/hint, wrap only selectedusage; render clears unsafe local selection without history/provider access.
+- Semantic capacity warning red1fail4pass: monitor service incorrectly Ready while core capacity limit; now normal snapshot exposes safe capacity-exhausted priority.
+- Final make format/check/test PASS497unit+17integration (`u08-{format,check,test}.log`).
+- Actual installed Pi0.85.1 controller fixture (no monitor/providers/session writes) PASS all4 cases: regular/fullscreen × transformer before/after controller, safe empty Right, selected/Left/Enter-once, nonempty passthrough, configured CustomEditor refusal, cleanup. `run-controller-probe.py`, `controller-*.jsonl/.ansi`, `u08-host-proof.log`. Closes reverse-listener/custom-editor proof gaps; actual pi-subagents co-load remains U17 acceptance work.
+- U08 remains in_progress pending cumulative U07/U08 review. Board callback intentionally U10 seam, no modal yet; no later ticket released.

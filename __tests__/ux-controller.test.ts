@@ -4,23 +4,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { expect, it, vi } from "vitest";
+import { createUiController } from "../src/ui/controller";
 import type { UiHost } from "../src/ui/host";
 import { uxView } from "./fixtures/ux-view";
 
-type Snapshot = ReturnType<typeof uxView>;
-interface Controller {
-  update(snapshot: Snapshot): void;
-  dispose(): void;
-}
 async function fixture(deferred = false) {
-  const modulePath = "../src/ui/controller";
-  const module = (await import(modulePath)) as {
-    createUiController(
-      host: UiHost,
-      snapshot: Snapshot,
-      openBoard: (snapshot: Snapshot) => void,
-    ): Controller;
-  };
   let component: Component | undefined;
   let factory: Parameters<UiHost["attach"]>[0] | undefined;
   let listener: TerminalInputHandler | undefined;
@@ -49,7 +37,7 @@ async function fixture(deferred = false) {
   } as unknown as UiHost;
   const openBoard = vi.fn();
   const view = uxView();
-  const controller = module.createUiController(host, view, openBoard);
+  const controller = createUiController(host, view, openBoard);
   const input = (data: string) => listener?.(data);
   const text = () => component?.render(160).join("\n") ?? "";
   return {
@@ -120,6 +108,14 @@ it("updates cached detached snapshots without replacing the widget or subscribin
   h.view.presentation.usage.jev.calls = 999;
   expect(h.text()).not.toContain("999 calls");
 });
+it("clears selection on redraw after editor/overlay preconditions are lost without publication", async () => {
+  const h = await fixture();
+  h.input("\u001b[C");
+  expect(h.text()).toContain("tokens");
+  h.unsafe();
+  expect(h.text()).not.toContain("tokens");
+});
+
 it("clears selection on a publication after editor/overlay preconditions are lost", async () => {
   const h = await fixture();
   h.input("\u001b[C");

@@ -1,9 +1,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { BoardSnapshot } from "../core/board-projection";
 import type { PresentationSnapshot } from "../core/monitor";
-
-export const widgetName = "pi-progress-bar";
 
 export interface WidgetSnapshot {
   presentation: PresentationSnapshot;
@@ -125,7 +123,12 @@ export function renderWidget(
           const { done, total } = presentation.progress;
           const percent = Math.floor((done * 100) / total);
           const filled = Math.floor((done * 12) / total);
-          return `Reported ${done}/${total} · ${percent}%  ${"█".repeat(filled)}${"░".repeat(12 - filled)}  Jev ${time(presentation.lastJevCallAt)}`;
+          const clock = `Jev ${time(presentation.lastJevCallAt)}`;
+          const counts = `Reported ${done}/${total}`;
+          const full = `${counts} · ${percent}%  ${"█".repeat(filled)}${"░".repeat(12 - filled)}  ${clock}`;
+          if (visibleWidth(full) <= columns) return full;
+          const noBar = `${counts} · ${percent}%  ${clock}`;
+          return visibleWidth(noBar) <= columns ? noBar : `${counts}  ${clock}`;
         })()
       : presentation.progress.kind === "previous"
         ? `Reported previous ${presentation.progress.done}/${presentation.progress.total}`
@@ -135,8 +138,11 @@ export function renderWidget(
     currentTask(snapshot.board),
     ...(selected ? [usage(snapshot), "enter to see board"] : ["→ to inspect"]),
   ];
-  return lines.flatMap((line) =>
-    wrap(line, columns).map((part) => {
+  return lines.flatMap((line, index) =>
+    (selected && index === 2
+      ? wrap(line, columns)
+      : [truncateToWidth(untrusted(line), columns)]
+    ).map((part) => {
       const colored = theme.fg("muted", part);
       // Host themes are trusted; ensure an unexpected formatter never widens rows.
       return visibleWidth(colored) <= columns ? colored : part;

@@ -1,6 +1,6 @@
 # Advisory nudges — canonical revision 3
 
-**Status:** A reconciliation is implemented locally, including finite delivery retries and master-control wiring. Automated unit, real-host and terminal-renderer checks pass; final local acceptance is being recorded and human manual acceptance remains pending. B/C corrective delivery remains unimplemented pending adapter/evidence gates. Existing health rubric alignment is implemented and calibrated separately. This revision replaces revision 2; owner decisions and Beads govern remaining scope. No release/install/publish/push is authorized.
+**Status:** A reconciliation is locally accepted (`839dea0a`), including finite delivery retries and master-control wiring. B/C corrective runtime is implemented; full independent review and final capability acceptance remain in progress. Human manual acceptance remains pending. Existing health rubric and corrective classification have separate bounded live calibration evidence. This revision replaces revision 2; owner decisions and Beads govern remaining scope. No release/install/publish/push is authorized.
 
 **Scope:** three incrementally accepted capabilities, in order: **A reconciliation**, **B test correction**, **C review correction**. No release, install, publish, push, branch, UI redesign, debugger work, Beads mutation, migration, or new user-facing control belongs here.
 
@@ -16,7 +16,9 @@
 
 ## 2. Source basis and known limits
 
-| Current source fact | Design consequence |
+The table records the pre-implementation source basis; current implementation details follow in section 11.
+
+| Initial source fact | Design consequence |
 | --- | --- |
 | `src/index.ts` restores on session start/tree, stops monitor on shutdown, sends `agent_settled` through `monitor.observe`, and observes canonical state on `context` and `turn_end`. | Advisory lifecycle wiring attaches to those proven local seams only after H0. A response must enter this existing monitor pipeline; advisory never writes board truth. |
 | `src/core/monitor.ts` owns enablement, canonical reads, semantic work, semantic-provider retries, ledger state, and detached snapshots. Board projection internally consumes unsettled state for focus; `boardSnapshot()` does not expose advisory readiness, and no advisory settlement projection exists. | A2 adds only a copied semantic-settlement projection. Monitor owns readiness/reason authority, not advisory formatting, advisory timers, advisory provider admission, delivery correlation, or advisory-delivery retries. |
@@ -86,7 +88,7 @@ A3 freezes the exact reconciliation template and deterministic controller cases 
 ### Contract
 
 - Reuse a **fresh existing** typed Jev `redApplicability: not-needed` fact. No second necessity assessment is introduced. BR1 freezes deterministic request/rubric tests and semantic corpus and main runs bounded live Jev calibration against the existing rubric. BR2 aligns existing rubric with long-term regression value without changing accepted thresholds, unrelated health behavior, v8, or policy vetoes; main then verifies the retained corpus with bounded paid Jev, retaining failures. Rubric calibration is separate from B1 task/attempt-classifier evaluation.
-- Trigger **after** observed start of writing a new failing test for a supported task. This is correction, not prevention: started action is not a reason to suppress the nudge. Exact start semantics and task binding are B0 investigation, never inferred from focus or tool/action name alone. Exact registered tool identity may participate only with proven schema and task-binding metadata.
+- Trigger on a proven builtin `write`/`edit` **attempted** `tool_execution_start`, then semantically bind it to a new failing test for a supported task. Owner explicitly accepts that Pi can subsequently block execution. This is correction, not prevention: started action is not a reason to suppress the nudge. Exact registration/schema and safe relative path identify the attempted action; task, new-vs-continued attempt and authority judgments are never inferred from focus or tool/action name alone.
 - Correct once per distinct test-writing attempt. Duplicate tool events and continued edits in one attempt do not repeat; a genuinely new attempt may nudge again. Exact event dedupe and freshness are deterministic; Jev may classify same/new/unknown attempt. Unknown abstains.
 - Exact owner message, with `X` bound only by demonstrated task association:
 
@@ -155,7 +157,7 @@ The graph below is descriptive only; this document does not modify Beads. `Main`
 
 Each accepted capability needs its named deterministic tests, relevant real-host delivery matrix, bounded Jev evidence where named, package dry-run, independent review of whole capability batch, and manual smoke recorded as pass/fail/pending rather than invented. Review findings require a main-owned failing regression before a source fix.
 
-H0 is characterized on both hosts, with limits recorded in section9; this is not capability acceptance. H1 found a copy-only evidence gap and returned a prerequisite to S0. Section9 freezes R0 engineering retry constants separately from the owner-approved60,000-ms reconciliation deadline. Owner resolved S0 by declining additional evidence machinery and retaining existing Jev processing; S1/S2 are not needed. B0 action binding, C0 review adapter, provider admission need, and all capability acceptance gates remain unresolved.
+H0 is characterized on both hosts, with limits recorded in section9; this is not capability acceptance. H1 found a copy-only evidence gap and returned a prerequisite to S0. Section9 freezes R0 engineering retry constants separately from the owner-approved60,000-ms reconciliation deadline. Owner resolved S0 by declining additional evidence machinery and retaining existing Jev processing; S1/S2 are not needed. A7 is locally accepted. B0 is supported for attempted builtin starts by explicit owner decision. T1/T2 are not needed: existing bounded gateway machinery is reused, without a provider-wide scheduler redesign. B/C runtime exists; their final host/semantic/independent-review gates remain in progress.
 
 ## 9. R0 — finite live reconciliation delivery contract
 
@@ -181,3 +183,13 @@ A3 tests formatter limits and same-run deadline retention. A5 owns fake-clock re
 - Current runtime seams: `src/index.ts`, `src/core/monitor.ts`, `src/core/hybrid.ts`, `src/core/hybrid-checkpoint.ts`, `src/sources/messages.ts`, `src/analysis/health.ts`, `src/analysis/gateway.ts`, and `src/analysis/scheduler.ts`.
 - Pi public extension/runtime behavior: `node_modules/@earendil-works/pi-coding-agent/docs/extensions.md` and `node_modules/@earendil-works/pi-coding-agent/docs/rpc.md`.
 - Existing v8 UX baseline, not advisory proof: `docs/design/ux-acceptance.md`.
+
+## 11. Implemented B/C runtime contract
+
+- `src/advisory/correction-adapter.ts` authenticates registered source metadata and schema. Builtin schema annotations (`description`, `~kind`) are accepted without weakening argument-shape checks. Only safe repository-relative paths survive; raw contents, replacements, review task arguments and child outputs never enter corrective requests.
+- B returns an attempted action immediately. C stores only the exact named foreground `review` declaration from the installed git pi-subagents package, then requires its own parent tool-call ID, workflow run ID, resolved named-resource provenance and a running child with a real run ID from `tool_execution_update`. Declarations alone never trigger C. Background, raw scripts, generic agents and mismatched receipts abstain. The adapter does not start or cancel anything.
+- `src/advisory/corrections.ts` serializes bounded optional classifications (20 queued attempts, 256 exact event IDs). One request covers every included row, at most 20 questions and 24 KiB total; overflow suppresses the entire request. B requires a copied current-revision existing `not-needed` fact at confidence ≥0.5 and probability ≥0.8. It never re-asks necessity.
+- B/C require exactly one confidently supported target; every other row must confidently be unrelated. Any required/unknown/ambiguous row vetoes advice. Existing-validation obligations do not imply a new failing test is mandatory; a later required review does not imply review is required now. Explicit current requirements, security/audit/risk and blockers remain protected. Classification is probabilistic, not an authority override.
+- Monitor owns bounded existing conversation context, full copied board, current accepted health facts, usage accounting and post-await freshness. A separate optional `JevGateway` reuses existing bounded provider behavior; there is no global one-flight guarantee. Inputs, navigation, shutdown, OFF and changed identity revoke stale inference. No checkpoint fields change.
+- B/C emit the exact owner strings in sections 5/6. They reuse the single section-9 delivery chain with `kind: "test-correction" | "review-correction"`; no second retry queue is created. Unlike A's initial idle-only send, correction may steer an active run. A pre-existing independently started run remains external/mixed after correction so its genuine settlement is still eligible for reconciliation. Correction cannot replace an already live advisory opportunity. No cooldown, periodic polling or restored retries.
+- Genuine later attempts can be assessed again; repeated event IDs and continued same-attempt edits are suppressed. Bounded history is ephemeral, not a durable exactly-once guarantee. Positive delivery evidence stops transport retries; unchanged board does not trigger retries. OFF cannot retract already-invoked messages.

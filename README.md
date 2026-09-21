@@ -20,7 +20,7 @@ Provide `TYPESAFE_API_KEY` through your environment; keep it out of tracked conf
 /progress off   Cancel monitoring and hide the widget
 ```
 
-New sessions default ON, including implemented reconciliation reminders; there is no separate advisory toggle. Missing/rejected Jev credentials leave the monitor OFF. A temporarily unavailable selected model holds its pending phase until an explicit model selection, OFF/ON, or reload; it does not silently switch providers. The agent itself continues working.
+New sessions default ON, including reconciliation reminders and supported corrective advice; there is no separate advisory toggle. Missing/rejected Jev credentials leave the monitor OFF. A temporarily unavailable selected model holds its pending phase until an explicit model selection, OFF/ON, or reload; it does not silently switch providers. The agent itself continues working.
 
 ## How progress works
 
@@ -42,7 +42,14 @@ In live TUI and RPC sessions, an independently started agent run settling with u
 
 The reminder is a visible custom conversation message and can **trigger a selected-model turn**, incurring model charges and ordinary Jev/extraction processing of its response. Existing evidence processing and completion thresholds remain unchanged; a reminder never directly marks work done. Uncertain delivery allows up to three attempts, at nominal 0/2/10 seconds; occasional duplicate reminders are possible. Retries and pending reminders are discarded on reload, navigation, shutdown or master OFF. Already-invoked messages cannot be retracted.
 
-`/progress off` disables monitoring and future reminders, not an already-running agent. Print/JSON one-shot sessions do not send delayed reminders; RPC must remain connected. Test-writing and review-correction advice are **not implemented yet**. This is a local candidate with automated host/terminal checks; human manual acceptance remains pending. No release is implied.
+Corrective advice can steer an active run immediately, without a cooldown:
+
+- **New failing tests:** proven builtin `write`/`edit` attempted starts are assessed against the whole included task board and bounded conversation context. An already accepted, current **Not needed** health judgment is reused; there is no second necessity assessment. An attempted call can qualify even if Pi subsequently blocks it. Explicit test requirements and existing validation remain binding.
+- **Premature reviews:** only the installed `nicobailon/pi-subagents` package's named foreground `{workflow: "review", args: {...}, async: false}` route is supported, after a correlated running-child receipt. Background calls, raw workflow scripts, generic reviewer names, shell commands and unsupported registrations abstain. Explicit review requests, security/risk checks and blockers protect required review. The extension never launches or cancels a child.
+
+Each correction uses one bounded Jev request covering every included task; unknown, ambiguous, oversized or stale evidence abstains. Duplicate events and continued attempts do not intentionally repeat advice; a genuinely new attempt can. Corrections share the reminder's finite delivery retries and may incur additional Jev and selected-model charges. Advice never directly changes task status or blocks a tool.
+
+`/progress off` disables monitoring and future advice, not an already-running agent. Print/JSON one-shot sessions do not send advice; RPC must remain connected. This is a local implementation candidate: independent B/C acceptance and human manual testing remain pending. No release is implied.
 
 ## Reading the widget
 
@@ -92,7 +99,7 @@ Optional **Task Title**, **Description**, and **Acceptance Criteria** appear onl
 
 Catch-up is chronological, not a fresh-message priority lane. Large history can therefore delay the newest request. Oversized messages are not partially interpreted. Capacity limits reject further mutation rather than evict accepted obligations. There is no automatic context compaction or unlimited-history promise.
 
-Semantic work has priority over optional health, tool-focus, and grounded-detail jobs. Optional jobs use separate bounded gateway state; this is not a single global provider-flight guarantee. New semantic evidence fences stale optional work. Accepted gate/patch/completion phases are checkpointed so eligible retries resume unfinished work rather than rebilling accepted phases. Jev transient failures use pending-only backoff/Retry-After; idle time and redraws never poll. No extraction repair loop or hidden model retry is used.
+Semantic work has priority over optional health, tool-focus, and grounded-detail jobs. Optional jobs, including corrective classification, use separate bounded gateway state; this is not a single global provider-flight guarantee. New semantic evidence fences stale optional work. Accepted gate/patch/completion phases are checkpointed so eligible retries resume unfinished work rather than rebilling accepted phases. Jev transient failures use pending-only backoff/Retry-After; idle time and redraws never poll. No extraction repair loop or hidden model retry is used.
 
 Each visible observation may incur a Jev gate plus completion/health requests. Extraction also incurs your selected provider's charges. Tool-only/thinking-only/blank messages do not trigger semantic task analysis. Declared tools can trigger an immediate optional provisional focus judgment; final observed tool membership triggers a correction only when its normalized list changed. Unchanged lists cause no duplicate judgment. Only tool names, safe repository-relative paths and fixed shell categories are sent—never raw commands, arguments, results, errors or runtime call IDs. This ephemeral focus cannot complete tasks or establish evidence. `/progress off` stops extension analysis, not the main agent.
 
@@ -100,7 +107,7 @@ Each visible observation may incur a Jev gate plus completion/health requests. E
 
 Bounded conversation/task excerpts go to **TypeSafe** (`https://api.typesafe.ai/v1/systemone`) and, when extraction is needed, to **your selected Pi model provider**. This is not local-only processing.
 
-Strict **v8** checkpoints persist bounded generated task labels, IDs/revisions, source hashes/ranges, assessment scalars, immutable mutation events, pending-phase journals, usage, dispatch timestamps, task-local health facts and optional detail validation receipts. They do **not** persist full source messages, prompts, provider envelopes, reasoning, tool bodies or credentials. Source references must resolve against the active branch. Checkpoints are trusted writable local state, not cryptographic protection against deliberate tampering.
+Strict **v8** checkpoints persist bounded generated task labels, IDs/revisions, source hashes/ranges, assessment scalars, immutable mutation events, pending-phase journals, usage, dispatch timestamps, task-local health facts and optional detail validation receipts. They do **not** persist full source messages, prompts, provider envelopes, reasoning, tool bodies or credentials. Advisory attempt history, health-eligibility copies, delivery identities and timers are ephemeral; reload abandons them. Source references must resolve against the active branch. Checkpoints are trusted writable local state, not cryptographic protection against deliberate tampering.
 
 Older checkpoints, including v7, and corrupt storage leave monitoring **OFF** with a fresh-session warning—**no migration or historical rebuilding/rebilling**. Test this candidate in a fresh session. Accepted same-version phases and saved detail receipts resume without rebilling covered work. Every new checkpoint must also fit its OFF representation. A same-version checkpoint that fits only while ON remains effectively OFF, preserving accepted work and telemetry. Canonical amendments invalidate stale derived references; optional-only detail mismatches drop those details without semantic replay. No local receipt can prevent remote billing if the process dies after provider acceptance but before the receipt is saved.
 

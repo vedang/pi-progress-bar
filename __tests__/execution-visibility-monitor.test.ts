@@ -61,6 +61,59 @@ async function setup() {
   return h;
 }
 describe("optional live visibility integration", () => {
+  it.each(["aborted", "error", "toolUse"])(
+    "never confirms newer %s prose against an identical older canonical entry",
+    async (stopReason) => {
+      const h = await setup();
+      h.append("prior-report", text);
+      await h.settle("prior-report");
+      h.monitor.observeVisibilityMessage(
+        { ...message(), stopReason },
+        h.reader(),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      h.monitor.confirmVisibilityBranch(h.reader());
+      await vi.advanceTimersByTimeAsync(100);
+      expect(
+        h.requests.filter((r) => "currentTask" in r.questions),
+      ).toHaveLength(0);
+      expect(h.monitor.visibilitySnapshot().actions).toEqual([]);
+      h.monitor.stop();
+    },
+  );
+  it.each(["", "x".repeat(13000)])(
+    "new inadmissible assistant text clears older current",
+    async (newText) => {
+      const h = await setup();
+      h.monitor.observeVisibilityMessage(message());
+      await vi.advanceTimersByTimeAsync(100);
+      expect(h.monitor.visibilitySnapshot().current).toBeDefined();
+      h.monitor.observeVisibilityMessage(message(newText));
+      await vi.advanceTimersByTimeAsync(100);
+      expect(h.monitor.visibilitySnapshot().current).toBeUndefined();
+      h.monitor.stop();
+    },
+  );
+  it("unchanged canonical confirmation cannot rebill an already classified source", async () => {
+    const h = await setup();
+    h.monitor.observeVisibilityMessage(message());
+    await vi.advanceTimersByTimeAsync(100);
+    h.append("live-report", text);
+    h.monitor.confirmVisibilityBranch(h.reader());
+    await h.settle("live-report");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.requests.filter((r) => "currentTask" in r.questions)).toHaveLength(
+      1,
+    );
+    h.monitor.modelSelected();
+    h.monitor.confirmVisibilityBranch(h.reader());
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.requests.filter((r) => "currentTask" in r.questions)).toHaveLength(
+      1,
+    );
+    h.monitor.stop();
+  });
+
   it("captures provisional commentary independently and never marks semantic input consumed", async () => {
     const h = await setup();
     const cursor = h.monitor.state.cursor;

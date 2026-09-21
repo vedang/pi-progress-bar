@@ -62,6 +62,26 @@ function fixture() {
   };
 }
 describe("detached execution visibility UX", () => {
+  it("stale current binding is unconfirmed, not another task", () => {
+    const h = fixture();
+    h.view.board.tasks[0].revision = 2;
+    h.board.update(h.view);
+    expect(h.text()).toContain("task unconfirmed");
+    expect(h.text()).not.toContain("other task");
+  });
+  it("MAYBE qualifies current association and reported history, never the semantic row", () => {
+    const h = fixture();
+    if (!h.view.visibility.current) throw Error("fixture");
+    h.view.visibility.current.certainty = "maybe";
+    h.view.visibility.actions[0].certainty = "maybe";
+    h.board.update(h.view);
+    expect(h.text()).toContain("(MAYBE)");
+    expect(renderWidget(h.view, false, 160, theme).join("\n")).toContain(
+      "(MAYBE)",
+    );
+    expect(h.view.board.tasks[0].status).toBe("INPROG");
+  });
+
   it("shows changing activity without changing reported completion", () => {
     const h = fixture();
     const text = renderWidget(h.view, false, 160, theme).join("\n");

@@ -127,6 +127,34 @@ describe("detached execution visibility UX", () => {
     expect(selected).toContain("1024");
     expect(h.view.presentation.usage.jev.calls).toBe(200);
   });
+  it("keeps scrolled action content anchored when newer history is prepended", () => {
+    const h = fixture();
+    const base = h.view.visibility.actions[0];
+    h.view.visibility.actions = Array.from({ length: 16 }, (_, index) => ({
+      ...structuredClone(base),
+      id: `action-${index}`,
+      order: index,
+      candidate: {
+        ...base.candidate,
+        quote: `ENTRY-${String(index).padStart(2, "0")} ${"long reported detail ".repeat(10)}`,
+      },
+    }));
+    h.board.update(h.view);
+    h.text();
+    h.board.handleInput("\u001b[C");
+    h.board.handleInput("\u001b[6~");
+    const first = h.text().match(/ENTRY-\d+/)?.[0];
+    expect(first).toBeDefined();
+    expect(h.board.viewState().detailOffset).toBeGreaterThan(0);
+    h.view.visibility.actions.push({
+      ...structuredClone(base),
+      id: "new-action",
+      order: 99,
+      candidate: { ...base.candidate, quote: "Newest reported action" },
+    });
+    h.board.update(h.view);
+    expect(h.text().match(/ENTRY-\d+/)?.[0]).toBe(first);
+  });
   it("terminal controls in reported prose cannot escape display", () => {
     const h = fixture();
     h.view.visibility.current = {

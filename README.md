@@ -49,7 +49,19 @@ Corrective advice can steer an active run immediately, without a cooldown:
 
 Each correction uses one bounded Jev request covering every included task; unknown, ambiguous, oversized or stale evidence abstains. Duplicate events and continued attempts do not intentionally repeat advice; a genuinely new attempt can. Corrections share the reminder's finite delivery retries and may incur additional Jev and selected-model charges. Advice never directly changes task status or blocks a tool.
 
-`/progress off` disables monitoring and future advice, not an already-running agent. Print/JSON one-shot sessions do not send advice; RPC must remain connected. This is a local implementation candidate: independent B/C acceptance and human manual testing remain pending. No release is implied.
+`/progress off` disables monitoring and future advice, not an already-running agent. Print/JSON one-shot sessions do not send advice; RPC must remain connected. Advisory capabilities are independently locally accepted; human manual testing remains pending. No release is implied.
+
+## Live execution visibility
+
+The widget now shows changing current activity, while the board keeps stable semantic tasks and adds **Current Activity** and task-local **Meaningful Actions**. Assistant prose is labeled **Agent says** or **Agent reported**, not verified execution. Tool phases are generic and unattributed. Visibility never changes task status, completion counts, health, or advisory authority.
+
+Visibility is runtime-only: **Since monitoring resumed · history may be incomplete**. History survives successive agent runs, but clears on OFF/reload, navigation, source changes or amendments. Nothing is restored or backfilled. It retains at most 48 actions, 16 per task; current reports expire for admission after five seconds. Missing, oversized, stale or ambiguous evidence may be omitted. The owner accepted a known residual ambiguous task assignment in the calibration corpus; this display is not a correctness guarantee.
+
+Optional visibility classification has separate usage accounting and a **1,024-call monitoring-lifetime budget**. At exhaustion, inferred labels/history stop with an explicit warning; local tool activity continues. Existing semantic/activity-focus calls are separate and are not covered by this budget.
+
+**Additional privacy disclosure:** visible assistant prose is sent to Jev for exact-excerpt selection and task binding. Provisional prose may be sent at `message_end` before a later extension changes/removes it; only exact canonical confirmation permits task-bound history. Prose can contain copied code, URLs, output or secrets. Terminal sanitization is not secret redaction. The new tool-phase path sends no provider payload and exposes no raw paths, commands, arguments or outputs; existing activity-focus inference retains its previously documented metadata behavior.
+
+Confidence-band `(MAYBE)` labels and ambiguity-clarification nudges have been investigated but are **not enabled** in this implementation candidate. Runtime/UI independent acceptance and human testing remain pending.
 
 ## Reading the widget
 

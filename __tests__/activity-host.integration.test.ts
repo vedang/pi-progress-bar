@@ -229,7 +229,7 @@ it.each(cases)(
           textEvents.push({
             phase: "final",
             text:
-              stored?.type === "message"
+              stored?.type === "message" && stored.message.role === "assistant"
                 ? visibleText(stored.message.content)
                 : "",
             canonical: !!stored,

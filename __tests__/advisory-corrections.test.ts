@@ -244,6 +244,7 @@ it("uses exact review message after trusted adapter supplies launched run id", a
       attemptId: "review-call",
       sourceRun: 1,
       fingerprint: "session:1",
+      reviewRunId: "launched-run",
     },
     content:
       "Reviewing the work done so far is premature. Please cancel the review and continue with the implementation. It is better to review the work when a bigger chunk of it has been completed.",

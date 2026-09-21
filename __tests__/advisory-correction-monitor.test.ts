@@ -157,3 +157,24 @@ it("withdraws old test eligibility as soon as replacement health is scheduled", 
   expect(h.emit).not.toHaveBeenCalled();
   expect(h.fetch.mock.calls.length).toBe(calls);
 });
+
+it("admits the complete twenty-row production snapshot when the provider request fits", async () => {
+  const h = await fixture();
+  const original = h.monitor.state.tasks[0];
+  h.monitor.state.tasks = Array.from({ length: 20 }, (_, index) => ({
+    ...structuredClone(original),
+    id: `task:${index + 1}`,
+    label: `Independent deliverable ${index + 1}`,
+  }));
+  const snapshot = method(h, "correctionSnapshot");
+  expect(snapshot.tasks).toHaveLength(20);
+  const calls = h.fetch.mock.calls.length;
+  await method(h, "observeCorrectionAttempt", attempt);
+  expect(h.fetch.mock.calls.length).toBe(calls + 1);
+  const request = JSON.parse(String(h.fetch.mock.calls.at(-1)?.[1]?.body));
+  expect(Object.keys(request.questions)).toHaveLength(20);
+  expect(Buffer.byteLength(JSON.stringify(request))).toBeLessThanOrEqual(
+    24 * 1024,
+  );
+  expect(Buffer.byteLength(snapshot.identity)).toBeLessThanOrEqual(128);
+});

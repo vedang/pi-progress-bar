@@ -550,9 +550,14 @@ it("actual Pi reload emits shutdown then fresh start without rearming a settled 
   }
 }, 10000);
 
-it.each(["tui", "rpc"] as const)(
-  "actual Pi %s runs production reconciliation and suppresses own-response recursion",
-  async (mode) => {
+it.each([
+  ["tui", "normal"],
+  ["rpc", "normal"],
+  ["rpc", "retry"],
+  ["rpc", "compaction"],
+] as const)(
+  "actual Pi %s runs production reconciliation without recursion through %s",
+  async (mode, recovery) => {
     vi.stubEnv("TYPESAFE_API_KEY", "offline-advisory-acceptance");
     vi.stubGlobal(
       "fetch",
@@ -560,7 +565,18 @@ it.each(["tui", "rpc"] as const)(
         jevReply(JSON.parse(String(init?.body))),
       ),
     );
-    const h = await host(mode, {}, true);
+    const h = await host(
+      mode,
+      {
+        retry: { enabled: recovery === "retry", maxRetries: 1, baseDelayMs: 1 },
+        compaction: {
+          enabled: recovery === "compaction",
+          reserveTokens: 100,
+          keepRecentTokens: 10,
+        },
+      },
+      true,
+    );
     const nativeTimeout = globalThis.setTimeout;
     const deadlines: Array<{
       callback: () => void;
@@ -580,6 +596,17 @@ it.each(["tui", "rpc"] as const)(
     try {
       h.faux.setResponses([
         fauxAssistantMessage("The parser is still pending."),
+        ...(recovery === "normal"
+          ? []
+          : [
+              fauxAssistantMessage("", {
+                stopReason: "error",
+                errorMessage:
+                  recovery === "retry"
+                    ? "429 rate limit"
+                    : "prompt is too long: 200000 tokens > 128000 maximum",
+              }),
+            ]),
         fauxAssistantMessage(
           "All three tasks remain pending; no implementation has been completed.",
         ),
@@ -610,6 +637,9 @@ it.each(["tui", "rpc"] as const)(
           h.trace.filter((entry) => entry.hook === "agent_settled"),
         ).toHaveLength(2),
       );
+      expect(
+        h.trace.filter((entry) => entry.hook === "agent_start"),
+      ).toHaveLength(recovery === "normal" ? 2 : 3);
       expect(deadlines).toHaveLength(1);
       const sent = h.manager
         .getBranch()

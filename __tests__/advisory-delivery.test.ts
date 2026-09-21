@@ -321,6 +321,7 @@ it.each([
     h.branch.push(h.canonical());
     h.delivery.onContext(h.branch);
   } else {
+    expect(h.delivery.onAgentSettled(h.branch)).toBe("uncertain-advisory");
     h.delivery.onAgentStart();
     expect(h.delivery.onAgentSettled(h.branch)).toBe("independent");
   }
@@ -329,4 +330,15 @@ it.each([
   expect(h.delivery.request({ ...request, opportunityId: nextId })).toBe(
     "started",
   );
+});
+
+it("preserves own origin across low-level retries before a single final settlement", async () => {
+  const h = await fixture();
+  h.delivery.request(request);
+  h.delivery.onAgentStart();
+  h.branch.push(h.canonical());
+  h.delivery.onContext(h.branch);
+  h.delivery.onAgentStart();
+  expect(h.delivery.onAgentSettled(h.branch)).toBe("advisory-only");
+  expect(h.delivery.onAgentSettled(h.branch)).toBeUndefined();
 });

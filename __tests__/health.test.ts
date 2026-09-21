@@ -73,3 +73,33 @@ describe("health question contracts", () => {
     );
   });
 });
+
+it("uses long-term regression value in the existing necessity question", () => {
+  const snapshot = healthSnapshot(ledger, 1, [
+    "Task requires durable protection, not a disposable one-off check.",
+  ]);
+  const question = snapshot?.request.questions.redApplicability;
+  expect(question?.instructions).toMatch(/long-term/i);
+  expect(question?.instructions).toMatch(/disposable|one-off/i);
+  expect(question?.instructions).toMatch(/durable|recurr/i);
+  expect(question?.type).toBe("choice");
+  expect(Object.keys(question?.criteria ?? {})).toEqual([
+    "needed",
+    "not-needed",
+    "unknown",
+  ]);
+  expect(
+    snapshot?.requests
+      .flatMap((request) => Object.keys(request.questions))
+      .filter((key) => key === "redApplicability"),
+  ).toHaveLength(1);
+});
+it("never uses new-test applicability to skip required tests or existing validation", () => {
+  const question = healthSnapshot(ledger, 1, [
+    "Explicit policy requires a regression test and running existing validation.",
+  ])?.request.questions.redApplicability;
+  expect(question?.instructions).toMatch(/required/i);
+  expect(question?.instructions).toMatch(/existing (tests|validation)/i);
+  expect(question?.instructions).toMatch(/unknown/i);
+  expect(question?.instructions).toMatch(/not.*skip|never.*skip/i);
+});

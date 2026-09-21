@@ -31,11 +31,14 @@ const questions: EvaluationRequest["questions"] = {
   redApplicability: {
     type: "choice",
     instructions:
-      "Would adding a NEW failing regression test provide meaningful task-specific value? Documentation/planning may be not-needed; small code changes are not automatically exempt. Respect only supplied explicit policy.",
+      "Would adding a NEW failing regression test provide long-term, durable task-specific protection against a future regression? Do not automatically exempt small code changes. Choose needed when durable regression protection is valuable or when current applicable authority explicitly requires a new test, even if durable value is otherwise low. Choose not-needed only when a new test adds no durable protection (for example, disposable one-off work, documentation, or planning) and no applicable authority requires it. If policy is contradictory, or policy authority or precedence is unknown, choose unknown rather than resolve it; also choose unknown when durable value cannot be grounded. This assesses only a NEW test: not-needed never permits skipping required existing tests or validation.",
     criteria: {
-      needed: "A new failing regression test is useful or required",
-      "not-needed": "A new failing regression test adds no meaningful value",
-      unknown: "Applicability or policy is insufficiently grounded",
+      needed:
+        "Durable task-specific future-regression protection is valuable, or an explicit applicable requirement requires a new failing regression test even without that value",
+      "not-needed":
+        "A new failing regression test adds no durable protection and no applicable explicit test requirement; never permits skipping existing required tests or validation",
+      unknown:
+        "Durable protection cannot be grounded, or test policy is contradictory or its authority or precedence is unknown",
     },
   },
   redReport: {

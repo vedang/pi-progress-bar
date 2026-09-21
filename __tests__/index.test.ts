@@ -575,37 +575,53 @@ it("observes a named launched review passively and emits exact corrective advice
   );
 });
 
-it("does not turn a late correction result into a fresh run after source settlement", async () => {
-  const h = await advisoryFixture();
-  admitCorrection();
-  const transport = vi.mocked(fetch).getMockImplementation();
-  if (!transport) throw new Error("transport");
-  let release = () => {};
-  const pending = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  vi.mocked(fetch).mockImplementation(async (url, init) => {
-    const request = JSON.parse(String(init?.body));
-    if (
-      Object.keys(request.questions).some((key) => key.startsWith("correct:"))
-    )
-      await pending;
-    return transport(url, init);
-  });
-  Reflect.set(h.ctx, "isIdle", () => false);
-  await h.emit("agent_start");
-  await h.emit("tool_execution_start", {
-    toolCallId: "late-test",
-    toolName: "write",
-    args: { path: "tests/parser.test.ts", content: "// test" },
-  });
-  await vi.advanceTimersByTimeAsync(20);
-  Reflect.set(h.ctx, "isIdle", () => true);
-  await h.emit("agent_settled");
-  release();
-  await vi.advanceTimersByTimeAsync(100);
-  expect(h.sendMessage).not.toHaveBeenCalled();
-});
+it.each(["settled", "new-start", "blocked-tool"] as const)(
+  "fences held correction across %s without cancelling a blocked attempt",
+  async (boundary) => {
+    const h = await advisoryFixture();
+    admitCorrection();
+    const transport = vi.mocked(fetch).getMockImplementation();
+    if (!transport) throw new Error("transport");
+    let release = () => {};
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      const request = JSON.parse(String(init?.body));
+      if (
+        Object.keys(request.questions).some((key) => key.startsWith("correct:"))
+      )
+        await pending;
+      return transport(url, init);
+    });
+    Reflect.set(h.ctx, "isIdle", () => false);
+    await h.emit("agent_start");
+    await h.emit("tool_execution_start", {
+      toolCallId: "late-test",
+      toolName: "write",
+      args: { path: "tests/parser.test.ts", content: "// test" },
+    });
+    await vi.advanceTimersByTimeAsync(20);
+    if (boundary === "settled") {
+      Reflect.set(h.ctx, "isIdle", () => true);
+      await h.emit("agent_settled");
+    } else if (boundary === "new-start") {
+      await h.emit("agent_start");
+    } else {
+      await h.emit("tool_execution_end", {
+        toolCallId: "late-test",
+        toolName: "write",
+        result: { content: [{ type: "text", text: "blocked" }] },
+        isError: true,
+      });
+    }
+    release();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.sendMessage).toHaveBeenCalledTimes(
+      boundary === "blocked-tool" ? 1 : 0,
+    );
+  },
+);
 
 it("cancels correction retries when its canonical relevance changes", async () => {
   const h = await advisoryFixture();

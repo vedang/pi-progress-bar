@@ -70,15 +70,26 @@ const requiredProperties = (
   );
 };
 
+// Host schemas include TypeBox annotations; they do not change argument shape.
+const schemaKeys = (value: RecordValue, keys: readonly string[]) =>
+  keys.every((key) => key in value) &&
+  Object.keys(value).every(
+    (key) => keys.includes(key) || key === "description" || key === "~kind",
+  );
+const sourceKeys = (value: RecordValue) =>
+  Object.keys(value).every((key) =>
+    ["path", "source", "scope", "origin", "baseDir"].includes(key),
+  ) &&
+  (value.baseDir === undefined || typeof value.baseDir === "string");
 const stringSchema = (value: unknown) =>
-  record(value) && exactKeys(value, ["type"]) && value.type === "string";
+  record(value) && schemaKeys(value, ["type"]) && value.type === "string";
 
 const builtinTool = (value: unknown, name: TestToolName) => {
   if (!record(value) || value.name !== name || !record(value.sourceInfo))
     return false;
   const source = value.sourceInfo;
   if (
-    !exactKeys(source, Object.keys(BUILTIN_SOURCE)) ||
+    !sourceKeys(source) ||
     source.path !== BUILTIN_SOURCE.path.replace("NAME", name) ||
     source.source !== BUILTIN_SOURCE.source ||
     source.scope !== BUILTIN_SOURCE.scope ||
@@ -88,7 +99,7 @@ const builtinTool = (value: unknown, name: TestToolName) => {
     return false;
   const parameters = value.parameters;
   if (
-    !exactKeys(parameters, ["type", "properties", "required"]) ||
+    !schemaKeys(parameters, ["type", "properties", "required"]) ||
     !record(parameters.properties)
   )
     return false;
@@ -105,10 +116,10 @@ const builtinTool = (value: unknown, name: TestToolName) => {
     exactKeys(properties, ["path", "edits"]) &&
     stringSchema(properties.path) &&
     record(edits) &&
-    exactKeys(edits, ["type", "items"]) &&
+    schemaKeys(edits, ["type", "items"]) &&
     edits.type === "array" &&
     record(edits.items) &&
-    exactKeys(edits.items, ["type", "properties", "required"]) &&
+    schemaKeys(edits.items, ["type", "properties", "required"]) &&
     edits.items.type === "object" &&
     record(edits.items.properties) &&
     exactKeys(edits.items.properties, ["oldText", "newText"]) &&
@@ -124,7 +135,7 @@ const subagentTool = (value: unknown) => {
     return false;
   const source = value.sourceInfo;
   if (
-    !exactKeys(source, ["path", "source", "scope", "origin"]) ||
+    !sourceKeys(source) ||
     typeof source.path !== "string" ||
     !SUBAGENT_PATH.test(source.path) ||
     source.source !== SUBAGENT_SOURCE.source ||

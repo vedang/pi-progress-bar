@@ -1,6 +1,6 @@
 # Advisory nudges — canonical revision 3
 
-**Status:** design and dependency contract only. No advisory runtime is implemented or accepted. This revision replaces revision 2. Owner packet and actual Beads graph govern where they are more specific than older prose.
+**Status:** A reconciliation is implemented locally, including finite delivery retries and master-control wiring. Automated unit, real-host and terminal-renderer checks pass; final local acceptance is being recorded and human manual acceptance remains pending. B/C corrective delivery remains unimplemented pending adapter/evidence gates. Existing health rubric alignment is implemented and calibrated separately. This revision replaces revision 2; owner decisions and Beads govern remaining scope. No release/install/publish/push is authorized.
 
 **Scope:** three incrementally accepted capabilities, in order: **A reconciliation**, **B test correction**, **C review correction**. No release, install, publish, push, branch, UI redesign, debugger work, Beads mutation, migration, or new user-facing control belongs here.
 

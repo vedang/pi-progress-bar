@@ -1,6 +1,6 @@
 # pi-progress-bar
 
-A passive progress and task-health widget for Pi. **Jev gates scope and judges completion; your selected Pi model extracts grounded tasks.** Code owns IDs, lifecycle, bounds and counting. It never executes your tasks or controls the agent.
+A progress and task-health widget for Pi with advisory status reconciliation. **Jev gates scope and judges completion; your selected Pi model extracts grounded tasks.** Code owns IDs, lifecycle, bounds and counting. It never executes your tasks or blocks tools. Its status reminders can wake the agent to answer.
 
 ## Install
 
@@ -20,7 +20,7 @@ Provide `TYPESAFE_API_KEY` through your environment; keep it out of tracked conf
 /progress off   Cancel monitoring and hide the widget
 ```
 
-New sessions default ON. Missing/rejected Jev credentials leave the monitor OFF. A temporarily unavailable selected model holds its pending phase until an explicit model selection, OFF/ON, or reload; it does not silently switch providers. The agent itself continues working.
+New sessions default ON, including implemented reconciliation reminders; there is no separate advisory toggle. Missing/rejected Jev credentials leave the monitor OFF. A temporarily unavailable selected model holds its pending phase until an explicit model selection, OFF/ON, or reload; it does not silently switch providers. The agent itself continues working.
 
 ## How progress works
 
@@ -36,6 +36,14 @@ Reported fraction = done / included tasks. It is not effort, ETA, code correctne
 
 Task IDs are code-generated. Wording edits preserve completion; changed requirements increment the task revision and reopen its work. Explicit withdrawal reopens only the affected completed task. Archiving removes a task from the denominator without completing it; restoring preserves its identity/history.
 
+## Reconciliation reminders
+
+In live TUI and RPC sessions, an independently started agent run settling with unfinished tasks arms a **60-second** deadline. The extension asks for each pending task's actual status only after task analysis settles; late analysis does not restart the minute. A response solely to this reminder does not rearm it. A later independent run can ask again, even if the board is unchanged.
+
+The reminder is a visible custom conversation message and can **trigger a selected-model turn**, incurring model charges and ordinary Jev/extraction processing of its response. Existing evidence processing and completion thresholds remain unchanged; a reminder never directly marks work done. Uncertain delivery allows up to three attempts, at nominal 0/2/10 seconds; occasional duplicate reminders are possible. Retries and pending reminders are discarded on reload, navigation, shutdown or master OFF. Already-invoked messages cannot be retracted.
+
+`/progress off` disables monitoring and future reminders, not an already-running agent. Print/JSON one-shot sessions do not send delayed reminders; RPC must remain connected. Test-writing and review-correction advice are **not implemented yet**. This is a local candidate with automated host/terminal checks; human manual acceptance remains pending. No release is implied.
+
 ## Reading the widget
 
 The below-editor widget shows the literal reported fraction, a 12-cell bar, last Jev dispatch time, and a named current task when eligible work exists. An initial selection is qualified **OPEN**, not invented activity. Accepted exclusive focus is **INPROG**; only accepted completion yields **DONE**. Archived tasks remain **ARCHIVED** in the board.
@@ -48,7 +56,7 @@ The board's single-copy Summary has five separate signals, in order:
 |---|---|
 | Requirements | Clarity of supplied requirements, not code quality |
 | Acceptance | Whether observable success conditions are supplied |
-| New red test | Whether a new failing regression test would be useful |
+| New red test | Whether a new failing test offers long-term regression value or is explicitly required; never permission to skip existing validation |
 | Red evidence | Reported failing-test evidence, not automatically verified execution |
 | Implementation | Not needed, appears complete, partial, contradicted or unverified, based on the task's implementation requirements and evidence |
 
@@ -96,7 +104,7 @@ Strict **v8** checkpoints persist bounded generated task labels, IDs/revisions, 
 
 Older checkpoints, including v7, and corrupt storage leave monitoring **OFF** with a fresh-session warning—**no migration or historical rebuilding/rebilling**. Test this candidate in a fresh session. Accepted same-version phases and saved detail receipts resume without rebilling covered work. Every new checkpoint must also fit its OFF representation. A same-version checkpoint that fits only while ON remains effectively OFF, preserving accepted work and telemetry. Canonical amendments invalidate stale derived references; optional-only detail mismatches drop those details without semantic replay. No local receipt can prevent remote billing if the process dies after provider acceptance but before the receipt is saved.
 
-The extension does not run commands/tests, mutate Beads, inject conversation messages, replace tools, follow child/sibling sessions, or send advisory nudges.
+The extension does not run commands/tests, mutate Beads, replace or block tools, cancel reviews, or follow child/sibling sessions. It does inject the reconciliation questions described above. Their content and answers may be retained in Pi's canonical session history; this is separate from the bounded v8 progress checkpoint.
 
 ## Development and evidence
 

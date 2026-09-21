@@ -1,6 +1,6 @@
 # Future plan: advisory nudges
 
-**Status:** Planning only. Future direction is requested; this document does not enable nudges or authorize implementation. Last updated: 2026-09-20. Hybrid runtime `e4dcfe08` passed cumulative independent review and was published with closure `0102cde4`; human QA remains separate. The [detailed implementation plan](../design/advisory-nudges.md) has independently passed plan review. It governs execution sequencing and explicit delivery prerequisites; implementation still needs owner authorization.
+**Status:** Historical exploration, superseded by the owner-authorized [canonical advisory contract](../design/advisory-nudges.md) and Beads epic `pi-progress-barroot-q0n`. A reconciliation is implemented locally under the existing master ON/OFF control; B/C corrective delivery remains pending. Automated checks do not replace pending human acceptance or authorize release. The historical proposals below are not current runtime/control authority.
 
 ## Confirmed direction
 

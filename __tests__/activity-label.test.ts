@@ -121,6 +121,10 @@ describe("typed two-stage label requests", () => {
       expect(question.instructions).toMatch(/quot/i);
       expect(question.instructions).toMatch(/fenc|code block/i);
       expect(question.instructions).toMatch(/example|sample/i);
+      expect(question.instructions).toMatch(
+        /(?:not|never|unstarted).*work|work.*(?:not|never|unstarted)/i,
+      );
+      expect(question.instructions).toMatch(/blocker|failure/i);
       expect(question.instructions).toMatch(/(?:not|without|no need).*verif/i);
       expect(question.instructions).toMatch(
         /quote.*(?:field|serialization)|(?:field|serialization).*quote/i,

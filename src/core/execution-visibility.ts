@@ -12,6 +12,7 @@ const MAX_ACTIONS = 48;
 const MAX_ACTIONS_PER_TASK = 16;
 const MAX_LIVE_SOURCES = 8;
 const MAX_DEDUPE = 256;
+const MAX_MAYBE_RECEIPTS = 8;
 const VISIBILITY_BUDGET = 1024;
 const CURRENT_FRESHNESS_MS = 5_000;
 const STAGE_ONE_MIN_CONFIDENCE = 0.5;
@@ -82,6 +83,14 @@ interface Source {
   runId?: number;
   confirmed: boolean;
   selections: LabelSelections;
+  maybeBindings: {
+    current?: LabelBinding;
+    history?: LabelBinding;
+  };
+}
+
+interface MaybeReceipt extends VisibilityMaybeAssociation {
+  key: string;
 }
 
 interface ToolActivity {
@@ -104,7 +113,24 @@ const phases = new Set<VisibilityToolPhase>([
 
 const digest = /^[a-f0-9]{64}$/;
 const cloneTask = (task: VisibilityTask): VisibilityTask => ({ ...task });
-const cloneCandidate = (candidate: Candidate): Candidate => ({ ...candidate });
+/** Explicit fields prevent an internal SelectedLabel assessment leaking by spread. */
+const cloneCandidate = (candidate: Candidate): Candidate => ({
+  id: candidate.id,
+  liveToken: candidate.liveToken,
+  messageHash: candidate.messageHash,
+  start: candidate.start,
+  end: candidate.end,
+  quote: candidate.quote,
+  quoteHash: candidate.quoteHash,
+});
+const cloneMaybeReceipt = (
+  receipt: VisibilityMaybeAssociation,
+): VisibilityMaybeAssociation => ({
+  id: receipt.id,
+  quote: receipt.quote,
+  task: cloneTask(receipt.task),
+  assessment: { ...receipt.assessment },
+});
 const cloneBundle = (bundle: LabelCandidateBundle): LabelCandidateBundle => ({
   liveToken: bundle.liveToken,
   messageHash: bundle.messageHash,
@@ -233,6 +259,9 @@ export class ExecutionVisibilityStore {
   private tools = new Map<string, ToolActivity>();
   private toolSequence = 0;
   private actions: VisibilityAction[] = [];
+  /** Canonical MAYBE bindings outlive ephemeral current display, never task state. */
+  private maybeReceipts: MaybeReceipt[] = [];
+  private readonly maybeReceiptKeys = new Set<string>();
   private dedupe: string[] = [];
   private readonly dedupeSet = new Set<string>();
   private usage: VisibilityUsage = {
@@ -270,6 +299,8 @@ export class ExecutionVisibilityStore {
     this.reportedCurrent = undefined;
     this.tools.clear();
     this.actions = [];
+    this.maybeReceipts = [];
+    this.maybeReceiptKeys.clear();
     this.dedupe = [];
     this.dedupeSet.clear();
     this.usage = { calls: 0, inputTokens: 0, outputTokens: 0 };
@@ -303,6 +334,7 @@ export class ExecutionVisibilityStore {
       runId: this.activeRunId,
       confirmed: false,
       selections: {},
+      maybeBindings: {},
     });
     this.latestToken = liveToken;
     this.reportedCurrent = undefined;
@@ -331,6 +363,7 @@ export class ExecutionVisibilityStore {
     source.confirmed = true;
     if (this.reportedCurrent?.token === token)
       this.reportedCurrent.current.provisional = false;
+    this.recordSourceMaybeReceipts(source);
     return true;
   }
 
@@ -383,6 +416,11 @@ export class ExecutionVisibilityStore {
     }
     const current = this.binding(source, "current", bindings?.current, tasks);
     const history = this.binding(source, "history", bindings?.history, tasks);
+    source.maybeBindings = {
+      ...(current?.certainty === "maybe" ? { current } : {}),
+      ...(history?.certainty === "maybe" ? { history } : {}),
+    };
+    this.recordSourceMaybeReceipts(source);
     if (
       current &&
       this.activeRunId !== undefined &&
@@ -484,48 +522,11 @@ export class ExecutionVisibilityStore {
   /**
    * Return exact copied MAYBE task associations for reconciliation. These remain
    * unresolved after ordinary semantic/status processing; only a separately
-   * validated ownership path may remove them. Current-only reports are included
-   * once when no retained action has the same task identity and exact prose.
+   * validated ownership path may remove them. Receipts contain no task-history
+   * authority, and current/history duplicates share one canonical receipt.
    */
   maybeAssociations(): VisibilityMaybeAssociation[] {
-    const results: VisibilityMaybeAssociation[] = [];
-    const seen = new Set<string>();
-    const append = (
-      id: string,
-      quote: string,
-      task: VisibilityTask,
-      assessment: ChoiceAssessment,
-    ) => {
-      const key = [task.id, task.revision, task.sourceDigest, quote].join(
-        "\u0000",
-      );
-      if (seen.has(key) || results.length >= 8) return;
-      seen.add(key);
-      results.push({
-        id,
-        quote,
-        task: cloneTask(task),
-        assessment: { ...assessment },
-      });
-    };
-    for (const action of this.actions) {
-      if (action.certainty !== "maybe" || !action.assessment) continue;
-      append(action.id, action.candidate.quote, action.task, action.assessment);
-    }
-    const current = this.reportedCurrent;
-    if (
-      current?.current.kind === "reported" &&
-      current.current.certainty === "maybe" &&
-      current.current.task &&
-      current.current.assessment
-    )
-      append(
-        `visibility-current:${this.generation}:${current.token}`,
-        current.current.text,
-        current.current.task,
-        current.current.assessment,
-      );
-    return results;
+    return this.maybeReceipts.map(cloneMaybeReceipt);
   }
 
   private source(token: string): Source | undefined {
@@ -588,6 +589,35 @@ export class ExecutionVisibilityStore {
       assessment: { ...binding.assessment },
       certainty,
     };
+  }
+
+  /** Add canonical MAYBE ownership exactly once; never turn it into history. */
+  private recordSourceMaybeReceipts(source: Source): void {
+    if (!source.confirmed) return;
+    for (const binding of Object.values(source.maybeBindings)) {
+      if (!binding) continue;
+      const key = [
+        binding.candidate.quoteHash,
+        binding.task.id,
+        binding.task.revision,
+        binding.task.sourceDigest,
+      ].join("\u0000");
+      if (this.maybeReceiptKeys.has(key)) continue;
+      if (this.maybeReceipts.length >= MAX_MAYBE_RECEIPTS) {
+        const dropped = this.maybeReceipts.pop();
+        if (dropped) this.maybeReceiptKeys.delete(dropped.key);
+        this.coverage = "incomplete";
+      }
+      const receipt: MaybeReceipt = {
+        key,
+        id: `visibility-maybe:${this.generation}:${source.order}:${binding.candidate.id}:${binding.task.id}:${binding.task.revision}`,
+        quote: binding.candidate.quote,
+        task: cloneTask(binding.task),
+        assessment: { ...binding.assessment },
+      };
+      this.maybeReceipts.unshift(receipt);
+      this.maybeReceiptKeys.add(key);
+    }
   }
 
   private appendHistory(source: Source, binding: LabelBinding): void {

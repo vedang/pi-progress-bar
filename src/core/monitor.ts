@@ -1496,6 +1496,9 @@ export class Monitor {
     const epoch = this.epoch;
     const correctionEpoch = this.correctionEpoch;
     if (!this.enabled) return;
+    // A prepared correction is mandatory advisory work. Abort optional stage 1/2
+    // before its own dispatch; do not wait for visibility cancellation to settle.
+    this.dropVisibilityFlight();
     try {
       const result = await this.correctionGateway.evaluate(
         request,

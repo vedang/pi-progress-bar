@@ -111,6 +111,18 @@ describe("lossless visibility candidate gate", () => {
 });
 
 describe("typed two-stage label requests", () => {
+  it("explicitly excludes quoted fictional voices and fenced examples from both selections", () => {
+    const request = buildLabelSelectionRequest(bundle());
+    for (const question of Object.values(request?.questions ?? {})) {
+      expect(question.instructions).toMatch(
+        /assistant.*(?:own|actual)|(?:own|actual).*assistant/i,
+      );
+      expect(question.instructions).toMatch(/fiction|hypothetical/i);
+      expect(question.instructions).toMatch(/quot/i);
+      expect(question.instructions).toMatch(/fenc|code block/i);
+      expect(question.instructions).toMatch(/example|sample/i);
+    }
+  });
   it("asks only current/history selection with explicit abstention options", () => {
     const b = bundle();
     const request = buildLabelSelectionRequest(b);

@@ -1,0 +1,1444 @@
+version: 2
+settings:
+  defaultAction: block
+  parseFailure: block
+  showStatus: true
+rules:
+  - id: path-secrets-env
+    type: path:zeroAccess
+    action: block
+    reason: environment files may contain secrets
+    match:
+      path:
+        any:
+          - .env*
+          - "*.env"
+        except:
+          - .env.example
+          - example.env
+          - .env.sample
+  - id: path-secrets-ssh
+    type: path:zeroAccess
+    action: block
+    reason: SSH key material is zero-access
+    match:
+      path:
+        any:
+          - ~/.ssh/
+          - "*_rsa"
+          - "*_ed25519"
+          - "*_ecdsa"
+          - authorized_keys
+  - id: path-secrets-cloud
+    type: path:zeroAccess
+    action: block
+    reason: cloud or cluster credentials are zero-access
+    match:
+      path:
+        any:
+          - ~/.aws/
+          - ~/.azure/
+          - ~/.config/gcloud/
+          - ~/.kube/
+          - kubeconfig
+  - id: path-secrets-service-account
+    type: path:zeroAccess
+    action: block
+    reason: service account credentials are zero-access
+    match:
+      path:
+        any:
+          - "*-credentials.json"
+          - "*serviceAccount*.json"
+          - "*service-account*.json"
+          - firebase-adminsdk*.json
+          - serviceAccountKey.json
+  - id: path-secrets-material
+    type: path:zeroAccess
+    action: block
+    reason: secret material is zero-access
+    match:
+      path:
+        any:
+          - "*-secret.yaml"
+          - secrets.yaml
+          - "*.pem"
+          - "*.key"
+          - "*.p12"
+          - "*.pfx"
+          - "*.token"
+  - id: path-secrets-terraform-state
+    type: path:zeroAccess
+    action: block
+    reason: Terraform state may contain secrets
+    match:
+      path:
+        any:
+          - "*.tfstate"
+          - "*.tfstate.backup"
+          - .terraform/
+  - id: path-secrets-platform
+    type: path:zeroAccess
+    action: block
+    reason: platform credentials are zero-access
+    match:
+      path:
+        any:
+          - ~/.docker/
+          - ~/.vault-token
+          - ~/.anthropic/
+          - ~/.config/op/
+          - .vercel/
+          - .netlify/
+          - .supabase/
+  - id: path-secrets-package-credentials
+    type: path:zeroAccess
+    action: block
+    reason: package or git credentials are zero-access
+    match:
+      path:
+        any:
+          - ~/.netrc
+          - ~/.npmrc
+          - ~/.pypirc
+          - ~/.git-credentials
+          - .git-credentials
+  - id: path-secrets-database-dumps
+    type: path:zeroAccess
+    action: block
+    reason: database dumps may contain sensitive data
+    match:
+      path:
+        any:
+          - dump.sql
+          - backup.sql
+          - "*.dump"
+  - id: path-secrets-gnupg
+    type: path:zeroAccess
+    action: block
+    reason: GnuPG keyrings and config are zero-access
+    match:
+      path:
+        any: ~/.gnupg/
+  - id: path-secrets-gh
+    type: path:zeroAccess
+    action: block
+    reason: GitHub CLI credentials are zero-access
+    match:
+      path:
+        any: ~/.config/gh/
+  - id: path-secrets-zshenv
+    type: path:zeroAccess
+    action: block
+    reason: zshenv may export secrets; treat as zero-access
+    match:
+      path:
+        any: ~/.zshenv
+  - id: path-pi-auth
+    type: path:zeroAccess
+    action: block
+    reason: Pi authentication material is zero-access
+    match:
+      path:
+        any:
+          - ~/.pi/agent/auth.json
+          - /Users/nejo/src/dotfiles/pi/agent/auth.json
+  - id: path-pi-sessions
+    type: path:zeroAccess
+    action: block
+    reason: Pi sessions may contain credentials and sensitive prompts
+    match:
+      path:
+        any: ~/.pi/agent/sessions/
+  - id: path-pi-control
+    type: path:readOnly
+    action: block
+    reason: Pi control-plane configuration and extension code are read-only
+    match:
+      path:
+        any:
+          - ~/.pi/agent/settings.json
+          - /Users/nejo/src/github/vedang/agents/pi-settings.json
+          - ~/.pi/agent/trust.json
+          - ~/.pi/agent/damage-control.yaml
+          - /Users/nejo/src/dotfiles/pi/agent/damage-control.yaml
+          - ~/.pi/agent/extensions/
+          - ~/.pi/agent/git/
+          - ~/.pi/agent/npm/
+  - id: path-readonly-system
+    type: path:readOnly
+    action: block
+    reason: system paths are read-only by default policy
+    match:
+      path:
+        any:
+          - /etc/
+          - /usr/
+          - /bin/
+          - /sbin/
+          - /boot/
+          - /root/
+  - id: path-outside-project-write
+    type: path:readOnly
+    action: block
+    reason: writes outside the project are blocked
+    match:
+      path:
+        outside: $CWD
+        except:
+          - /tmp/
+          - /dev/null
+          - ~/src/vedang/pi-progress-bar-testing/pi-progress-bar-testing.root/
+  - id: path-readonly-shell-history
+    type: path:readOnly
+    action: block
+    reason: shell history is read-only by default policy
+    match:
+      path:
+        any:
+          - ~/.bash_history
+          - ~/.zsh_history
+          - ~/.node_repl_history
+  - id: path-readonly-shell-startup
+    type: path:readOnly
+    action: block
+    reason: shell startup files are read-only by default policy
+    match:
+      path:
+        any:
+          - ~/.bashrc
+          - ~/.zshrc
+          - ~/.zprofile
+          - ~/.profile
+          - ~/.bash_profile
+  - id: path-readonly-lockfiles
+    type: path:readOnly
+    action: block
+    reason: lockfiles are read-only by default policy
+    match:
+      path:
+        any:
+          - package-lock.json
+          - yarn.lock
+          - pnpm-lock.yaml
+          - Gemfile.lock
+          - poetry.lock
+          - Pipfile.lock
+          - composer.lock
+          - Cargo.lock
+          - go.sum
+          - flake.lock
+          - bun.lockb
+          - uv.lock
+          - npm-shrinkwrap.json
+          - "*.lock"
+          - "*.lockb"
+  - id: path-readonly-generated
+    type: path:readOnly
+    action: block
+    reason: generated artifacts are read-only by default policy
+    match:
+      path:
+        any:
+          - "*.min.js"
+          - "*.min.css"
+          - "*.bundle.js"
+          - "*.chunk.js"
+          - dist/
+          - build/
+          - .next/
+          - .nuxt/
+          - .output/
+          - node_modules/
+          - __pycache__/
+          - .venv/
+          - venv/
+          - target/
+  - id: path-nodelete-agent-config
+    type: path:noDelete
+    action: block
+    reason: agent configuration must not be deleted or moved
+    match:
+      path:
+        any:
+          - .pi/
+          - AGENTS.md
+          - ~/.claude/
+          - CLAUDE.md
+  - id: path-nodelete-legal
+    type: path:noDelete
+    action: block
+    reason: legal files must not be deleted or moved
+    match:
+      path:
+        any:
+          - LICENSE
+          - LICENSE.*
+          - COPYING
+          - COPYING.*
+          - NOTICE
+          - PATENTS
+  - id: path-nodelete-docs
+    type: path:noDelete
+    action: block
+    reason: project documentation must not be deleted or moved
+    match:
+      path:
+        any:
+          - README.md
+          - README.*
+          - CONTRIBUTING.md
+          - CHANGELOG.md
+          - CODE_OF_CONDUCT.md
+          - SECURITY.md
+  - id: path-nodelete-git-metadata
+    type: path:noDelete
+    action: block
+    reason: git metadata must not be deleted or moved
+    match:
+      path:
+        any:
+          - .git/
+          - .gitignore
+          - .gitattributes
+          - .gitmodules
+          - .github/
+  - id: path-nodelete-ci-config
+    type: path:noDelete
+    action: block
+    reason: CI configuration must not be deleted or moved
+    match:
+      path:
+        any:
+          - .gitlab-ci.yml
+          - .circleci/
+          - Jenkinsfile
+          - .travis.yml
+          - azure-pipelines.yml
+  - id: path-nodelete-docker-config
+    type: path:noDelete
+    action: block
+    reason: Docker configuration must not be deleted or moved
+    match:
+      path:
+        any:
+          - Dockerfile
+          - Dockerfile.*
+          - docker-compose.yml
+          - docker-compose.*.yml
+          - .dockerignore
+  - id: dangerous-rm-flags
+    type: command
+    label: Dangerous rm flags
+    action: block
+    reason: rm with recursive/force flags is destructive; delete explicit targets one at a time
+    match:
+      commandAny:
+        - rm
+        - /bin/rm
+        - /usr/bin/rm
+        - /usr/local/bin/rm
+        - /opt/homebrew/bin/rm
+      flags:
+        any:
+          - -r
+          - -R
+          - --recursive
+          - --dir
+          - -f
+          - --force
+  - id: dangerous-rm-dynamic
+    type: command
+    label: Dynamic rm target
+    action: block
+    reason: rm target is dynamic; resolve paths before deleting
+    match:
+      commandAny:
+        - rm
+        - /bin/rm
+        - /usr/bin/rm
+        - /usr/local/bin/rm
+        - /opt/homebrew/bin/rm
+      dynamic: true
+  - id: destructive-remove-command
+    type: command
+    label: Destructive remove command
+    action: block
+    reason: command deletes or destructively overwrites files
+    match:
+      commandAny:
+        - shred
+        - rimraf
+  - id: host-privilege-escalation
+    type: command
+    label: Host privilege escalation
+    action: block
+    reason: privilege escalation is not allowed from the agent
+    match:
+      commandAny:
+        - sudo
+        - doas
+  - id: host-container-engines
+    type: command
+    label: Host container engines
+    action: block
+    reason: container engines can mount host paths or expose privileged sockets
+    match:
+      commandAny:
+        - docker
+        - podman
+        - nerdctl
+        - lima
+        - limactl
+  - id: host-system-control
+    type: command
+    label: Host system control
+    action: block
+    reason: host service, storage, power, security, and network controls are user-only
+    match:
+      commandAny:
+        - shutdown
+        - reboot
+        - halt
+        - poweroff
+        - launchctl
+        - systemctl
+        - service
+        - diskutil
+        - mount
+        - umount
+        - hdiutil
+        - pfctl
+        - iptables
+        - nft
+        - networksetup
+        - systemsetup
+        - scutil
+        - dscl
+        - installer
+        - softwareupdate
+        - crontab
+        - security
+        - defaults
+        - osascript
+  - id: host-process-control
+    type: command
+    label: Host process control
+    action: block
+    reason: broad process signaling can terminate the agent or user applications
+    match:
+      commandAny:
+        - kill
+        - killall
+        - pkill
+  - id: host-explicit-shell
+    type: command
+    label: Explicit nested shell
+    action: block
+    reason: explicit nested shells can hide generated or piped commands
+    match:
+      commandAny:
+        - bash
+        - sh
+        - zsh
+        - /bin/bash
+        - /bin/sh
+        - /bin/zsh
+        - /usr/bin/bash
+        - /usr/bin/sh
+        - /usr/bin/zsh
+  - id: host-eval
+    type: command
+    label: Shell eval
+    action: block
+    reason: eval executes generated shell text
+    match:
+      command: eval
+  - id: host-inline-interpreters
+    type: command
+    label: Inline interpreter code
+    action: block
+    reason: inline interpreter code can bypass shell and file-intent analysis
+    match:
+      commandAny:
+        - python
+        - python3
+        - node
+        - ruby
+        - perl
+        - php
+        - lua
+        - deno
+        - bun
+        - swift
+        - osascript
+        - /usr/bin/python3
+        - /usr/bin/ruby
+        - /usr/bin/perl
+        - /usr/bin/osascript
+        - /opt/homebrew/bin/python3
+        - /opt/homebrew/bin/node
+      flags:
+        any:
+          - -c
+          - -e
+          - --eval
+  - id: host-interpreter-stdin
+    type: command
+    label: Interpreter stdin execution
+    action: block
+    reason: interpreter code from stdin can bypass file-intent analysis
+    match:
+      commandAny:
+        - python
+        - python3
+        - node
+        - ruby
+        - perl
+        - php
+        - lua
+        - deno
+        - bun
+        - swift
+        - /usr/bin/python3
+        - /usr/bin/ruby
+        - /usr/bin/perl
+        - /opt/homebrew/bin/python3
+        - /opt/homebrew/bin/node
+      argsAny:
+        - "-"
+  - id: find-delete
+    type: command
+    label: Find delete
+    action: block
+    reason: find -delete can recursively remove matched paths
+    match:
+      command: find
+      argsAny:
+        - -delete
+  - id: rsync-delete
+    type: command
+    label: Rsync delete
+    action: block
+    reason: rsync delete options remove destination or source files
+    match:
+      command: rsync
+      argsAny:
+        - --delete
+        - --delete-before
+        - --delete-during
+        - --delete-delay
+        - --delete-after
+        - --delete-excluded
+        - --remove-source-files
+  - id: host-package-managers
+    type: command
+    label: Host package managers
+    action: block
+    reason: host package managers can execute install hooks and modify the user environment
+    match:
+      commandAny:
+        - brew
+        - port
+        - mas
+        - pip
+        - pip3
+        - gem
+  - id: host-package-execution
+    type: command
+    label: Downloaded package execution
+    action: block
+    reason: package runners can download and execute unreviewed code
+    match:
+      commandAny:
+        - npx
+        - npm
+        - pnpm
+        - yarn
+        - bun
+      subcommandAny:
+        - exec
+        - dlx
+        - x
+  - id: npx-rimraf
+    type: command
+    label: Npx rimraf
+    reason: npx rimraf recursively deletes files
+    match:
+      command: npx
+      subcommand: rimraf
+  - id: chmod-777
+    type: command
+    label: Chmod world writable
+    action: block
+    reason: chmod 777 makes files world-writable
+    match:
+      command: chmod
+      argsAny:
+        - "777"
+  - id: chown-recursive-root
+    type: command
+    label: Recursive chown root
+    action: block
+    reason: recursive chown to root is dangerous
+    match:
+      command: chown
+      flags:
+        any:
+          - -R
+          - -r
+      argsContainAny:
+        - root
+  - id: git-reset-hard
+    type: command
+    label: Git reset hard
+    action: block
+    reason: git reset --hard discards worktree changes; inspect diff or stash first
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: reset
+      flags:
+        any:
+          - --hard
+  - id: git-clean-force
+    type: command
+    label: Git clean force
+    action: block
+    reason: git clean -f deletes untracked files; run git clean -nd first
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: clean
+      flags:
+        any:
+          - -f
+          - --force
+        none:
+          - -n
+          - --dry-run
+  - id: git-push
+    type: command
+    label: Git push
+    action: block
+    reason: git push mutates remotes; leave pushing to user or CI
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: push
+  - id: git-rebase-interactive
+    type: command
+    label: Git rebase interactive
+    action: block
+    reason: git rebase --interactive requires a TTY and cannot run safely here
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: rebase
+      flags:
+        any:
+          - -i
+          - --interactive
+  - id: git-add-all
+    type: command
+    label: Git add all
+    action: block
+    reason: git add all stages broad changes; add explicit files
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: add
+      argsAny:
+        - .
+        - -A
+        - --all
+  - id: git-restore-all
+    type: command
+    label: Git restore all
+    action: block
+    reason: git restore -- . discards worktree changes; inspect diff or stash first
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: restore
+      argsAll:
+        - .
+  - id: git-checkout-all
+    type: command
+    label: Git checkout all
+    action: block
+    reason: git checkout -- . discards worktree changes; inspect diff or stash first
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: checkout
+      argsAll:
+        - --
+        - .
+  - id: git-stash-drop
+    type: command
+    label: Git stash drop
+    action: block
+    reason: git stash drop deletes saved work
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: stash
+      argsAny:
+        - drop
+  - id: git-stash-clear
+    type: command
+    label: Git stash clear
+    action: block
+    reason: git stash clear deletes all stashes
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: stash
+      argsAny:
+        - clear
+  - id: git-branch-delete
+    type: command
+    label: Git branch delete
+    action: block
+    reason: git branch delete removes branch refs
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: branch
+      flags:
+        any:
+          - -d
+          - -D
+          - --delete
+  - id: git-filter-branch
+    type: command
+    label: Git filter-branch
+    action: block
+    reason: git filter-branch rewrites repository history
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: filter-branch
+  - id: git-gc-prune-now
+    type: command
+    label: Git gc prune now
+    action: block
+    reason: git gc --prune=now aggressively removes unreachable objects
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: gc
+      argsAny:
+        - --prune=now
+  - id: git-reflog-expire
+    type: command
+    label: Git reflog expire
+    action: block
+    reason: git reflog expire removes recovery history
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: reflog
+      argsAny:
+        - expire
+  - id: docker-prune
+    type: command
+    label: Docker prune
+    action: block
+    reason: docker prune removes Docker resources
+    match:
+      command: docker
+      subcommandAny:
+        - system
+        - volume
+        - container
+        - image
+        - network
+        - builder
+      argsAny:
+        - prune
+  - id: docker-resource-delete
+    type: command
+    label: Docker resource delete
+    action: block
+    reason: docker resource delete removes Docker resources
+    match:
+      command: docker
+      subcommandAny:
+        - volume
+        - container
+        - image
+        - network
+      argsAny:
+        - rm
+        - remove
+  - id: mkfs-format
+    type: command
+    label: Filesystem format
+    action: block
+    reason: filesystem format command can destroy data
+    match:
+      commandAny:
+        - mkfs
+        - mkfs.ext2
+        - mkfs.ext3
+        - mkfs.ext4
+        - mkfs.xfs
+        - mkfs.btrfs
+        - mkfs.apfs
+        - mkfs.fat
+        - mkfs.vfat
+  - id: dd-device-write
+    type: command
+    label: dd device write
+    action: block
+    reason: dd writing to a device can destroy data
+    match:
+      command: dd
+      argsContainAny:
+        - of=/dev/
+  - id: kill-all-processes
+    type: command
+    label: Kill all processes
+    action: block
+    reason: kill -9 -1 kills all accessible processes
+    match:
+      command: kill
+      argsAll:
+        - "-9"
+        - "-1"
+  - id: killall-force
+    type: command
+    label: Killall force
+    reason: killall -9 force kills matching processes
+    match:
+      command: killall
+      flags:
+        any:
+          - "-9"
+  - id: pkill-force
+    type: command
+    label: Pkill force
+    reason: pkill -9 force kills matching processes
+    match:
+      command: pkill
+      flags:
+        any:
+          - "-9"
+  - id: history-clear
+    type: command
+    label: Clear shell history
+    action: block
+    reason: history -c clears shell history
+    match:
+      command: history
+      flags:
+        any:
+          - -c
+  - id: kubernetes-delete
+    type: command
+    label: Kubernetes delete
+    action: block
+    reason: kubectl delete namespace or --all removes cluster resources
+    match:
+      commandAny:
+        - kubectl
+        - oc
+      subcommand: delete
+      argsAny:
+        - namespace
+        - namespaces
+        - ns
+        - --all
+  - id: helm-delete
+    type: command
+    label: Helm delete
+    action: block
+    reason: helm delete/uninstall removes releases
+    match:
+      command: helm
+      subcommandAny:
+        - delete
+        - uninstall
+  - id: terraform-destroy
+    type: command
+    label: Terraform destroy
+    action: block
+    reason: terraform destroy deletes managed infrastructure
+    match:
+      command: terraform
+      subcommand: destroy
+  - id: pulumi-destroy
+    type: command
+    label: Pulumi destroy
+    action: block
+    reason: pulumi destroy deletes managed infrastructure
+    match:
+      command: pulumi
+      subcommand: destroy
+  - id: sql-destructive
+    type: command
+    label: SQL destructive statement
+    action: block
+    reason: DROP or TRUNCATE will permanently destroy table data
+    match:
+      commandAny:
+        - psql
+        - sqlite3
+        - mysql
+        - mariadb
+      visibleTextAny:
+        - drop
+        - truncate
+  - id: git-commit
+    type: command
+    label: Git commit
+    enabled: false
+    action: block
+    reason: git commit blocked by active rule
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: commit
+  - id: package-mutation
+    type: command
+    label: Package mutation
+    action: block
+    reason: package mutation blocked by active rule
+    match:
+      commandAny:
+        - npm
+        - pnpm
+        - yarn
+        - bun
+      subcommandAny:
+        - install
+        - add
+        - remove
+        - update
+        - upgrade
+  - id: package-publish
+    type: command
+    label: Package publish
+    reason: publishing a package to a registry requires confirmation
+    match:
+      commandAny:
+        - npm
+        - pnpm
+        - yarn
+        - bun
+      subcommand: publish
+      flags:
+        none:
+          - --dry-run
+  - id: deploy
+    type: command
+    label: Deploy
+    action: block
+    reason: deploy blocked by active rule
+    match:
+      commandAny:
+        - vercel
+        - netlify
+        - wrangler
+        - firebase
+      subcommandAny:
+        - deploy
+        - publish
+  - id: git-merge-runtime-block
+    type: command
+    label: Git merge
+    enabled: false
+    action: block
+    reason: git merge blocked by active rule
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: merge
+  - id: git-cherry-pick-runtime-block
+    type: command
+    label: Git cherry-pick
+    enabled: false
+    action: block
+    reason: git cherry-pick blocked by active rule
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: cherry-pick
+  - id: git-rebase-runtime-block
+    type: command
+    label: Git rebase
+    enabled: false
+    action: block
+    reason: git rebase blocked by active rule
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: rebase
+  - id: git-tag-create
+    type: command
+    label: Git tag creation
+    enabled: false
+    action: block
+    reason: git tag creation blocked by active rule
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: tag
+      operandCount:
+        min: 1
+  - id: git-stash-runtime-block
+    type: command
+    label: Git stash
+    enabled: false
+    action: block
+    reason: git stash blocked by active rule
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: stash
+  - id: git-checkout-branch-create
+    type: command
+    label: Git checkout branch creation
+    enabled: false
+    action: block
+    reason: git branch creation blocked by active rule
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: checkout
+      flags:
+        any:
+          - -b
+          - --orphan
+  - id: git-switch-branch-create
+    type: command
+    label: Git switch branch creation
+    enabled: false
+    action: block
+    reason: git branch creation blocked by active rule
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: switch
+      flags:
+        any:
+          - -c
+          - --create
+  - id: git-branch-create
+    type: command
+    label: Git branch creation
+    enabled: false
+    action: block
+    reason: git branch creation blocked by active rule
+    match:
+      command: git
+      optionsBeforeSubcommand:
+        value:
+          - -C
+          - -c
+          - --git-dir
+          - --work-tree
+          - --namespace
+          - --exec-path
+      subcommand: branch
+      flags:
+        none:
+          - -d
+          - -D
+          - --delete
+      operandCount:
+        min: 1
+  - id: cargo-mutation
+    type: command
+    label: Cargo mutation
+    action: block
+    reason: cargo mutation blocked by active rule
+    match:
+      command: cargo
+      subcommandAny:
+        - install
+        - add
+        - remove
+  - id: fly-deploy
+    type: command
+    label: fly deploy
+    action: block
+    reason: deployment blocked by active rule
+    match:
+      command: fly
+      subcommand: deploy
+  - id: railway-deploy
+    type: command
+    label: railway deploy
+    action: block
+    reason: deployment blocked by active rule
+    match:
+      command: railway
+      subcommand: deploy
+  - id: terraform-apply-plan
+    type: command
+    label: Terraform apply/plan
+    action: block
+    reason: terraform apply/plan blocked by active rule
+    match:
+      command: terraform
+      subcommandAny:
+        - apply
+        - plan
+  - id: pulumi-up-preview
+    type: command
+    label: Pulumi up/preview
+    action: block
+    reason: pulumi up/preview blocked by active rule
+    match:
+      command: pulumi
+      subcommandAny:
+        - up
+        - preview
+  - id: aws-s3-rb-force
+    type: command
+    label: Aws S3 Rb Force
+    action: block
+    reason: aws s3 rb --force removes buckets
+    match:
+      command: aws
+      subcommand: s3
+      argsAll:
+        - rb
+        - --force
+  - id: aws-delete-services
+    type: command
+    label: Aws Delete Services
+    action: block
+    reason: aws destructive service operation
+    match:
+      command: aws
+      subcommandAny:
+        - ec2
+        - rds
+        - cloudformation
+        - dynamodb
+        - eks
+        - lambda
+        - iam
+      argsContainAny:
+        - delete
+        - terminate
+  - id: gcloud-delete-disable
+    type: command
+    label: Gcloud Delete Disable
+    action: block
+    reason: gcloud destructive operation
+    match:
+      command: gcloud
+      argsContainAny:
+        - delete
+        - disable
+  - id: gcloud-storage-recursive-rm
+    type: command
+    label: Gcloud Storage Recursive Rm
+    action: block
+    reason: gcloud storage recursive remove
+    match:
+      command: gcloud
+      subcommand: storage
+      argsAll:
+        - rm
+      argsAny:
+        - -r
+        - --recursive
+  - id: gcloud-iam-mutations
+    type: command
+    label: Gcloud IAM mutations
+    action: block
+    reason: gcloud IAM policy mutation modifies access controls
+    match:
+      command: gcloud
+      argsContainAny:
+        - set-iam-policy
+        - add-iam-policy-binding
+        - remove-iam-policy-binding
+  - id: az-delete
+    type: command
+    label: Az Delete
+    action: block
+    reason: az delete operation
+    match:
+      command: az
+      argsAny:
+        - delete
+  - id: firebase-delete-disable
+    type: command
+    label: Firebase Delete Disable
+    action: block
+    reason: firebase destructive operation
+    match:
+      command: firebase
+      argsContainAny:
+        - delete
+        - remove
+        - disable
+  - id: vercel-delete
+    type: command
+    label: Vercel Delete
+    action: block
+    reason: vercel destructive operation
+    match:
+      command: vercel
+      argsAny:
+        - remove
+        - rm
+  - id: netlify-delete
+    type: command
+    label: Netlify Delete
+    action: block
+    reason: netlify destructive operation
+    match:
+      command: netlify
+      argsContainAny:
+        - delete
+  - id: wrangler-delete
+    type: command
+    label: Wrangler Delete
+    action: block
+    reason: wrangler destructive operation
+    match:
+      command: wrangler
+      argsContainAny:
+        - delete
+  - id: sql-delete-without-where
+    type: command
+    label: SQL delete without where
+    action: block
+    reason: DELETE without WHERE clause can delete all rows
+    match:
+      commandAny:
+        - psql
+        - sqlite3
+        - mysql
+        - mariadb
+      visibleTextAll:
+        - delete
+        - from
+      visibleTextNone:
+        - where
+  - id: sql-update-without-where
+    type: command
+    label: SQL update without where
+    action: block
+    reason: UPDATE without WHERE clause can update all rows
+    match:
+      commandAny:
+        - psql
+        - sqlite3
+        - mysql
+        - mariadb
+      visibleTextAll:
+        - update
+        - set
+      visibleTextNone:
+        - where
+  - id: sudo-rm
+    type: command
+    label: Sudo rm
+    action: block
+    reason: sudo rm is destructive
+    match:
+      command: sudo
+      subcommand: rm
+  - id: uv-add-remove
+    type: command
+    label: uv add/remove
+    action: block
+    reason: uv package mutation blocked by active rule
+    match:
+      command: uv
+      subcommandAny:
+        - add
+        - remove
+  - id: uv-pip-install
+    type: command
+    label: uv pip install
+    action: block
+    reason: uv pip install blocked by active rule
+    match:
+      command: uv
+      subcommand: pip
+      argsAny:
+        - install
+  - id: xargs-dangerous-rm-flags
+    type: command
+    label: xargs dangerous rm flags
+    action: block
+    reason: xargs rm with recursive or force flags is destructive
+    match:
+      command: xargs
+      subcommand: rm
+      flags:
+        any:
+          - -r
+          - -R
+          - --recursive
+          - --dir
+          - -f
+          - --force
+  - id: aws-s3-rm-recursive
+    type: command
+    label: AWS S3 recursive remove
+    action: block
+    reason: aws s3 rm --recursive deletes objects recursively
+    match:
+      command: aws
+      subcommand: s3
+      argsAll:
+        - rm
+        - --recursive

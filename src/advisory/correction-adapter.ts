@@ -35,6 +35,8 @@ interface ReviewCorrelation {
   toolName: "subagent";
 }
 
+const terminalWorkflowStates = new Set(["complete", "failed", "stopped"]);
+
 const record = (value: unknown): value is RecordValue => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
@@ -220,7 +222,9 @@ const namedReviewStart = (args: unknown) =>
   exactKeys(args, ["workflow", "args", "async"]) &&
   args.workflow === "review" &&
   record(args.args) &&
-  args.async === false;
+  // The installed named foreground route cannot expose a live workflow ID.
+  // Its existing async route returns a logical workflow receipt at tool end.
+  args.async === true;
 
 const unknownPolicy = (): CorrectionPolicyProjection => ({
   coverage: "unknown",
@@ -352,7 +356,7 @@ export const projectCorrectionAction = (
     : unknownAction();
 };
 
-const runningReviewReceipt = (
+const admittedAsyncReview = (
   callId: string,
   value: unknown,
 ): string | undefined => {
@@ -361,6 +365,8 @@ const runningReviewReceipt = (
   if (
     details.mode !== "workflow" ||
     !safeId(details.runId) ||
+    details.asyncId !== details.runId ||
+    details.toolCallId !== callId ||
     !record(details.workflow) ||
     !record(details.workflow.resource) ||
     !record(details.workflowChildren)
@@ -386,13 +392,9 @@ const runningReviewReceipt = (
     !Array.isArray(children.children)
   )
     return;
-  const child = children.children.find(
-    (candidate) =>
-      record(candidate) &&
-      candidate.state === "running" &&
-      safeId(candidate.runId),
-  );
-  return child && safeId(child.runId) ? child.runId : undefined;
+  // Named async admission has no child run ID yet. The logical workflow ID is
+  // the only real lifecycle identity; child output is never inspected.
+  return details.runId;
 };
 
 /**
@@ -401,6 +403,7 @@ const runningReviewReceipt = (
  */
 export class CorrectionAdapter {
   private readonly reviews = new Map<string, ReviewCorrelation>();
+  private readonly activeReviews = new Set<string>();
 
   constructor(private readonly options: CorrectionAdapterOptions) {}
 
@@ -439,23 +442,57 @@ export class CorrectionAdapter {
   }
 
   update(
+    _callId: string,
+    _toolName: string,
+    _partialResult: unknown,
+  ): CorrectionAttempt | undefined {
+    // Foreground updates cannot prove an installed child run identity.
+    return;
+  }
+
+  /**
+   * Async named workflow admission exists only in successful terminal tool
+   * receipt. This observes it; it never starts, waits on, or controls review.
+   */
+  end(
     callId: string,
     toolName: string,
-    partialResult: unknown,
+    result: unknown,
+    isError: boolean,
   ): CorrectionAttempt | undefined {
     const correlation = this.reviews.get(callId);
-    if (!correlation || toolName !== correlation.toolName) return;
-    const runId = runningReviewReceipt(callId, partialResult);
-    if (!runId) return;
     this.reviews.delete(callId);
+    if (!correlation || toolName !== correlation.toolName || isError) return;
+    const runId = admittedAsyncReview(callId, result);
+    if (!runId || this.activeReviews.size >= MAX_CORRELATIONS) return;
+    this.activeReviews.add(runId);
     return { kind: "review", id: callId, toolName: "subagent", runId };
   }
 
-  end(callId: string): void {
-    this.reviews.delete(callId);
+  hasPendingReview(callId: unknown): boolean {
+    return safeId(callId) && this.reviews.has(callId);
+  }
+
+  isReviewActive(runId: unknown): boolean {
+    return safeId(runId) && this.activeReviews.has(runId);
+  }
+
+  /** Completion may only revoke one previously admitted logical workflow. */
+  complete(data: unknown): void {
+    if (!record(data) || data.mode !== "workflow") return;
+    const runId = data.runId;
+    if (!safeId(runId)) return;
+    if (
+      data.state !== undefined &&
+      (typeof data.state !== "string" ||
+        !terminalWorkflowStates.has(data.state))
+    )
+      return;
+    this.activeReviews.delete(runId);
   }
 
   reset(): void {
     this.reviews.clear();
+    this.activeReviews.clear();
   }
 }

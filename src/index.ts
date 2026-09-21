@@ -9,6 +9,7 @@ import {
   projectCorrectionPolicy,
 } from "./advisory/correction-adapter";
 import type {
+  CorrectionAttemptSource,
   CorrectionBinding,
   CorrectionPolicyProjection,
 } from "./advisory/corrections";
@@ -50,6 +51,13 @@ export default function progressBar(pi: ExtensionAPI): void {
   const correctionAdapter = new CorrectionAdapter({
     tools: () => pi.getAllTools(),
   });
+  // Tool-end branch state can advance past its declaration. Keep only the
+  // already-reduced source action until this one admitted review ends.
+  const reviewSources = new Map<string, CorrectionAttemptSource>();
+  const resetCorrections = () => {
+    correctionAdapter.reset();
+    reviewSources.clear();
+  };
   const clearOpportunity = () => {
     currentOpportunity = undefined;
   };
@@ -69,7 +77,7 @@ export default function progressBar(pi: ExtensionAPI): void {
       // Cancelling here adds no advisory-specific command or preference.
       reconciliation?.cancel();
       delivery?.onMasterOff();
-      correctionAdapter.reset();
+      resetCorrections();
       activeCorrectionRun = undefined;
       activeCorrectionSource = undefined;
       pendingCorrectionPolicy = undefined;
@@ -114,7 +122,9 @@ export default function progressBar(pi: ExtensionAPI): void {
           currentOpportunity ||
           !binding ||
           activeCorrectionRun !== binding.sourceRun ||
-          !monitor.correctionIsCurrent(binding)
+          !monitor.correctionIsCurrent(binding) ||
+          (binding.reviewRunId !== undefined &&
+            !correctionAdapter.isReviewActive(binding.reviewRunId))
         )
           return;
         const opportunityId = randomUUID();
@@ -137,7 +147,9 @@ export default function progressBar(pi: ExtensionAPI): void {
       const correctionRelevant =
         correctionBinding !== undefined &&
         activeCorrectionRun === correctionBinding.sourceRun &&
-        monitor.correctionIsCurrent(correctionBinding);
+        monitor.correctionIsCurrent(correctionBinding) &&
+        (correctionBinding.reviewRunId === undefined ||
+          correctionAdapter.isReviewActive(correctionBinding.reviewRunId));
       return {
         enabled: snapshot.enabled,
         mode: context?.mode ?? "print",
@@ -213,6 +225,25 @@ export default function progressBar(pi: ExtensionAPI): void {
     reconciliation?.settled(runEpoch, origin);
   };
 
+  // Installed pi-subagents publishes this public lifecycle event after its
+  // result watcher observes completion. It can revoke a known review only.
+  const untrackAsyncReview = pi.events.on("subagent:async-complete", (data) => {
+    correctionAdapter.complete(data);
+    const binding = currentOpportunity?.binding;
+    if (
+      binding?.reviewRunId !== undefined &&
+      !correctionAdapter.isReviewActive(binding.reviewRunId)
+    ) {
+      delivery?.onCorrectionRunInvalidated();
+      clearCorrectionOpportunity();
+    }
+  });
+  (
+    pi as unknown as {
+      trackEventBusSubscription?: (unsubscribe: () => void) => void;
+    }
+  ).trackEventBusSubscription?.(untrackAsyncReview);
+
   pi.registerCommand("progress", {
     description: "Show or turn automatic progress monitoring on/off",
     handler: (args, ctx) => command(args, ctx, monitor),
@@ -221,7 +252,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     // Session replacement normally sends shutdown first. Repeat disposal here
     // for a direct host start boundary; no old timer may survive either path.
     delivery?.onSessionShutdown();
-    correctionAdapter.reset();
+    resetCorrections();
     reconciliation?.cancel();
     sessionEpoch++;
     branchEpoch++;
@@ -234,7 +265,7 @@ export default function progressBar(pi: ExtensionAPI): void {
   });
   pi.on("session_before_tree", () => {
     delivery?.onNavigation();
-    correctionAdapter.reset();
+    resetCorrections();
     monitor.invalidateCorrections();
     reconciliation?.cancel();
     activeCorrectionRun = undefined;
@@ -246,7 +277,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     // Real hosts fire session_before_tree first; repeat cancellation so this
     // post-navigation boundary is also safe when delivered alone.
     delivery?.onNavigation();
-    correctionAdapter.reset();
+    resetCorrections();
     monitor.invalidateCorrections();
     reconciliation?.cancel();
     branchEpoch++;
@@ -259,7 +290,7 @@ export default function progressBar(pi: ExtensionAPI): void {
   pi.on("session_shutdown", () => {
     disposeController();
     delivery?.onSessionShutdown();
-    correctionAdapter.reset();
+    resetCorrections();
     reconciliation?.cancel();
     activeCorrectionRun = undefined;
     activeCorrectionSource = undefined;
@@ -270,7 +301,7 @@ export default function progressBar(pi: ExtensionAPI): void {
   });
   pi.on("input", () => {
     delivery?.onInput();
-    correctionAdapter.reset();
+    resetCorrections();
     monitor.invalidateCorrections();
     reconciliation?.clearPendingIntent();
     activeCorrectionRun = undefined;
@@ -351,39 +382,39 @@ export default function progressBar(pi: ExtensionAPI): void {
       ctx.cwd,
     );
     const source = activeCorrectionSource;
-    if (correction && source)
-      void monitor.observeCorrectionAttempt(correction, {
-        ...source,
-        action: projectCorrectionAction(
-          ctx.sessionManager.getBranch(),
-          ctx.sessionManager.getLeafId(),
-          event.toolCallId,
-          ctx.cwd,
-        ),
-      });
+    const action = projectCorrectionAction(
+      ctx.sessionManager.getBranch(),
+      ctx.sessionManager.getLeafId(),
+      event.toolCallId,
+      ctx.cwd,
+    );
+    if (correction && source) {
+      void monitor.observeCorrectionAttempt(correction, { ...source, action });
+    } else if (source && correctionAdapter.hasPendingReview(event.toolCallId)) {
+      reviewSources.set(event.toolCallId, { ...source, action });
+    }
   });
   pi.on("tool_execution_update", (event, ctx) => {
     context = ctx;
-    const correction = correctionAdapter.update(
+    // No C authority comes from foreground partial results or child progress.
+    correctionAdapter.update(
       event.toolCallId,
       event.toolName,
       event.partialResult,
     );
-    const source = activeCorrectionSource;
-    if (correction && source)
-      void monitor.observeCorrectionAttempt(correction, {
-        ...source,
-        action: projectCorrectionAction(
-          ctx.sessionManager.getBranch(),
-          ctx.sessionManager.getLeafId(),
-          event.toolCallId,
-          ctx.cwd,
-        ),
-      });
   });
   pi.on("tool_execution_end", (event, ctx) => {
     context = ctx;
-    correctionAdapter.end(event.toolCallId);
+    const source = reviewSources.get(event.toolCallId);
+    reviewSources.delete(event.toolCallId);
+    const correction = correctionAdapter.end(
+      event.toolCallId,
+      event.toolName,
+      event.result,
+      event.isError,
+    );
+    if (correction && source)
+      void monitor.observeCorrectionAttempt(correction, source);
     monitor.observeToolEnd(
       event.toolCallId,
       event.toolName,

@@ -103,6 +103,8 @@ export interface CorrectionBinding {
   attemptId: string;
   sourceRun: number;
   fingerprint: string;
+  /** Existing named async review workflow; absent for test correction. */
+  reviewRunId?: string;
 }
 
 export type CorrectionEmission =
@@ -148,6 +150,7 @@ type SafeAttempt =
       id: string;
       kind: "review";
       toolName: "subagent";
+      runId: string;
       source: SafeAttemptSource;
     };
 
@@ -233,7 +236,7 @@ const safeRepoPath = (value: unknown): value is string => {
   return parts.every((part) => part !== "" && part !== "." && part !== "..");
 };
 
-const safeLaunchedRun = (value: unknown) =>
+const safeLaunchedRun = (value: unknown): value is string =>
   typeof value === "string" &&
   value.length > 0 &&
   Buffer.byteLength(value, "utf8") <= MAX_LOCAL_ID_BYTES &&
@@ -362,10 +365,11 @@ const safeAttempt = (
       source: safeSourceValue,
     };
   }
+  const runId = value.runId;
   if (
     value.kind !== "review" ||
     value.toolName !== REVIEW_TOOL ||
-    !safeLaunchedRun(value.runId)
+    !safeLaunchedRun(runId)
   )
     return;
   return {
@@ -373,6 +377,7 @@ const safeAttempt = (
     id: value.id,
     kind: "review",
     toolName: REVIEW_TOOL,
+    runId,
     source: safeSourceValue,
   };
 };
@@ -672,6 +677,7 @@ export class CorrectionController {
       attemptId: attempt.id,
       sourceRun: attempt.source.sourceRun,
       fingerprint: after.snapshotIdentity,
+      ...(attempt.kind === "review" ? { reviewRunId: attempt.runId } : {}),
     };
 
     if (attempt.kind === "test") {

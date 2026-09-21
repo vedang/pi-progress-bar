@@ -206,6 +206,34 @@ export interface DebugSnapshot {
   diagnostics: { code: string; label: string; count: number }[];
 }
 
+export type AdvisorySettlementReason =
+  | "disabled"
+  | "canonical-scan"
+  | "active-observation"
+  | "queued-observation"
+  | "pending-journal"
+  | "retry-timer"
+  | "model-wait"
+  | "unresolved"
+  | "capacity"
+  | "blocked"
+  | "ready";
+
+interface AdvisorySettlementTask {
+  id: string;
+  label: string;
+  status: HybridTask["status"];
+  included: true;
+  revision: number;
+}
+
+/** Copied semantic board authority for advisory readiness; never persisted. */
+export interface AdvisorySettlementSnapshot {
+  enabled: boolean;
+  reason: AdvisorySettlementReason;
+  tasks: AdvisorySettlementTask[];
+}
+
 const rejectedStorageMessage = (kind: "unsupported" | "corrupt") =>
   kind === "unsupported"
     ? "Saved progress state is unsupported; start a fresh session. Existing progress data was not changed."
@@ -1030,6 +1058,30 @@ export class Monitor {
     });
   }
 
+  /**
+   * Detached semantic-settlement authority for advisory reconciliation. Optional
+   * health, detail, activity, and Beads enrichment never affect readiness.
+   */
+  advisorySettlementSnapshot(): AdvisorySettlementSnapshot {
+    return {
+      enabled: this.enabled,
+      reason: this.advisorySettlementReason(),
+      tasks: this.state.tasks.flatMap((task) =>
+        task.included
+          ? [
+              {
+                id: task.id,
+                label: task.label,
+                status: task.status,
+                included: true,
+                revision: task.revision,
+              },
+            ]
+          : [],
+      ),
+    };
+  }
+
   /** Detached allowlisted diagnostics; intentionally excludes task/source/provider text. */
   debugSnapshot(): DebugSnapshot {
     return {
@@ -1047,6 +1099,21 @@ export class Monitor {
         count,
       })),
     };
+  }
+
+  private advisorySettlementReason(): AdvisorySettlementReason {
+    if (!this.enabled) return "disabled";
+    if (this.controlWork || this.pendingScan || this.canonicalWakeTimer)
+      return "canonical-scan";
+    if (this.activeObservation || this.processing) return "active-observation";
+    if (this.state.pending) return "pending-journal";
+    if (this.retryTimer || this.retryObservation) return "retry-timer";
+    if (this.queued.length) return "queued-observation";
+    if (this.waitingForWake) return "model-wait";
+    if (this.state.scopeUnresolved) return "unresolved";
+    if (this.state.capacity === "limit") return "capacity";
+    if (this.blockedPending) return "blocked";
+    return "ready";
   }
 
   private identity() {

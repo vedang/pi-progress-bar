@@ -215,3 +215,18 @@ describe("runtime-only execution visibility", () => {
     expect(store.snapshot().usage.calls).toBe(0);
   });
 });
+
+it("preserves MAYBE binding assessment without altering semantic task data", () => {
+  const { store, capture } = fixture();
+  const { b, selections } = capture();
+  const r = reply({ currentTask: task.id, historyTask: task.id });
+  for (const answer of Object.values(r.answers)) answer.confidence = 0.84;
+  const bindings = readLabelBindings(selections, [task], r);
+  store.confirm(b.liveToken, b.text);
+  store.acceptBindings(b.liveToken, bindings, [task]);
+  expect(store.snapshot().current).toMatchObject({ certainty: "maybe", task });
+  expect(store.snapshot().actions[0]).toMatchObject({
+    certainty: "maybe",
+    assessment: { confidence: 0.84, probability: 1 },
+  });
+});

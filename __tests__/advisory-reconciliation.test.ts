@@ -8,7 +8,20 @@ type Row = {
   included: boolean;
   revision: number;
 };
-type Board = { enabled: boolean; reason: string; tasks: Row[] };
+type Board = {
+  enabled: boolean;
+  reason: string;
+  tasks: Row[];
+  uncertainActivities?: {
+    id: string;
+    quote: string;
+    taskId: string;
+    taskLabel: string;
+    revision: number;
+    confidence: number;
+    probability: number;
+  }[];
+};
 type Request = { runId: number; content: string };
 type Controller = {
   runStarted(runId: number): void;
@@ -276,4 +289,65 @@ it("cannot emit twice through a synchronous reentrant callback", async () => {
   begin(h);
   await vi.advanceTimersByTimeAsync(60_000);
   expect(h.emit).toHaveBeenCalledTimes(1);
+});
+
+it("appends bounded MAYBE clarification to existing delayed status question", async () => {
+  const h = await fixture();
+  h.set({
+    ...h.board(),
+    uncertainActivities: [
+      {
+        id: "action1",
+        quote: "I am debugging token parsing.",
+        taskId: "task:1",
+        taskLabel: "Implement parser",
+        revision: 1,
+        confidence: 0.84,
+        probability: 0.87,
+      },
+    ],
+  });
+  begin(h);
+  await vi.advanceTimersByTimeAsync(59_999);
+  expect(h.emit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(h.emit).toHaveBeenCalledTimes(1);
+  const content = h.emit.mock.calls[0][0].content;
+  expect(content).toContain(question);
+  expect(content).toContain("MAYBE");
+  expect(content).toContain("I am debugging token parsing.");
+  expect(content).toContain("action1");
+  expect(content).toMatch(/which task/i);
+  expect(content).toMatch(/not.*(?:status|completion)/i);
+});
+it("omits stale or completed-task uncertainty without changing base reminder", async () => {
+  const h = await fixture();
+  const rows = [row(), { ...row("task:2"), status: "done" as const }];
+  h.set({
+    ...h.board(),
+    tasks: rows,
+    uncertainActivities: [
+      {
+        id: "stale",
+        quote: "Old report",
+        taskId: "task:1",
+        taskLabel: "Implement parser",
+        revision: 0,
+        confidence: 0.84,
+        probability: 0.87,
+      },
+      {
+        id: "done",
+        quote: "Completed task report",
+        taskId: "task:2",
+        taskLabel: "Implement parser",
+        revision: 1,
+        confidence: 0.84,
+        probability: 0.87,
+      },
+    ],
+  });
+  begin(h);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.emit.mock.calls[0][0].content).toBe(message([row()]));
 });

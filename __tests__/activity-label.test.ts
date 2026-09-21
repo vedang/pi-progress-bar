@@ -111,6 +111,38 @@ describe("lossless visibility candidate gate", () => {
 });
 
 describe("typed two-stage label requests", () => {
+  it.each([
+    [0.79, undefined],
+    [0.8, "maybe"],
+    [0.89, "maybe"],
+    [0.9, "confident"],
+    [1, "confident"],
+  ] as const)(
+    "bands task binding at confidence %s without changing selection",
+    (confidence, certainty) => {
+      const b = bundle();
+      const selected = readLabelSelections(
+        b,
+        result({ currentCandidate: b.candidates[0].id }, 0.5, 0.8),
+      );
+      expect(selected.current).toBeDefined();
+      const accepted = readLabelBindings(
+        selected,
+        tasks,
+        result({ currentTask: tasks[0].id }, confidence, 0.8),
+      );
+      if (certainty === undefined) expect(accepted.current).toBeUndefined();
+      else expect(accepted.current).toMatchObject({ certainty });
+      expect(
+        readLabelBindings(
+          selected,
+          tasks,
+          result({ currentTask: tasks[0].id }, confidence, 0.79),
+        ),
+      ).toEqual({});
+    },
+  );
+
   it("explicitly excludes quoted fictional voices and fenced examples from both selections", () => {
     const request = buildLabelSelectionRequest(bundle());
     for (const question of Object.values(request?.questions ?? {})) {

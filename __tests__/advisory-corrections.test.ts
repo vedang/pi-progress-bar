@@ -243,3 +243,66 @@ it("does not retain or send extra raw tool fields", async () => {
   } as Attempt);
   expect(JSON.stringify(h.evaluate.mock.calls)).not.toContain("PRIVATE_");
 });
+
+it("does not confuse existing validation or a later review requirement with authority to do the corrective action now", async () => {
+  const h = await fixture();
+  await h.controller.observe(attempt);
+  const testPolicy = JSON.stringify(h.evaluate.mock.calls[0][0]);
+  expect(testPolicy).toContain(
+    "Existing tests and validation remain required, but that alone does not require a NEW failing test",
+  );
+  await h.controller.observe({
+    kind: "review",
+    id: "review-policy",
+    toolName: "subagent",
+    runId: "running",
+  });
+  const reviewPolicy = JSON.stringify(h.evaluate.mock.calls[1][0]);
+  expect(reviewPolicy).toContain(
+    "A requirement to review later, after completion, is not a requirement to review now",
+  );
+});
+
+it("fits twenty ordinary task questions without duplicating the common policy per row", async () => {
+  const h = await fixture();
+  h.set({ tasks: Array.from({ length: 20 }, (_, i) => task(`task:${i + 1}`)) });
+  await h.controller.observe(attempt);
+  expect(h.evaluate).toHaveBeenCalledTimes(1);
+  expect(Object.keys(h.evaluate.mock.calls[0][0].questions)).toHaveLength(20);
+  expect(
+    Buffer.byteLength(JSON.stringify(h.evaluate.mock.calls[0][0])),
+  ).toBeLessThanOrEqual(24 * 1024);
+});
+
+it("does not choose a unique target merely because only one of two nudge claims crosses threshold", async () => {
+  const h = await fixture();
+  h.set({ tasks: [task(), task("task:2")] });
+  h.evaluate.mockImplementation(async (r) => {
+    const value = result(r);
+    value.answers["correct:task:1"] = {
+      type: "choice",
+      choice: "nudge",
+      confidence: 0.57,
+      probabilities: {
+        nudge: 0.67,
+        unknown: 0.2,
+        unrelated: 0.13,
+        required: 0,
+      },
+    };
+    value.answers["correct:task:2"] = {
+      type: "choice",
+      choice: "nudge",
+      confidence: 0.76,
+      probabilities: {
+        nudge: 0.82,
+        unknown: 0.09,
+        unrelated: 0.09,
+        required: 0,
+      },
+    };
+    return value;
+  });
+  await h.controller.observe(attempt);
+  expect(h.emit).not.toHaveBeenCalled();
+});

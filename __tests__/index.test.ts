@@ -465,9 +465,14 @@ function admitCorrection() {
           key,
           {
             type: "choice",
-            choice: "nudge",
+            choice: key === "correct:task:1" ? "nudge" : "unrelated",
             confidence: 1,
-            probabilities: { nudge: 1, required: 0, unrelated: 0, unknown: 0 },
+            probabilities: {
+              nudge: key === "correct:task:1" ? 1 : 0,
+              required: 0,
+              unrelated: key === "correct:task:1" ? 0 : 1,
+              unknown: 0,
+            },
           },
         ]),
       ),

@@ -18,6 +18,15 @@ import {
   captureStartedTool,
   reconcileStartedTools,
 } from "../analysis/activity-focus";
+import {
+  buildLabelBindingRequest,
+  buildLabelSelectionRequest,
+  type LabelCandidateBundle,
+  type LabelSelections,
+  readLabelBindings,
+  readLabelSelections,
+  type VisibilityTask,
+} from "../analysis/activity-label";
 import type { ExtractionInput } from "../analysis/extractor";
 import {
   type EvaluationRequest,
@@ -49,6 +58,11 @@ import {
   type BoardSnapshot,
   projectBoard,
 } from "./board-projection";
+import {
+  type ExecutionVisibilitySnapshot,
+  ExecutionVisibilityStore,
+  type VisibilityToolPhase,
+} from "./execution-visibility";
 import {
   type AcceptedSaveOptions,
   type AdmissionPlan,
@@ -146,6 +160,19 @@ interface ActivityFocus {
   id: string;
   label: string;
   revision: number;
+}
+
+interface VisibilitySource {
+  bundle: LabelCandidateBundle;
+  selections?: LabelSelections;
+  confirmed: boolean;
+}
+
+interface VisibilityFlight {
+  token: string;
+  stage: 1 | 2;
+  epoch: number;
+  generation: number;
 }
 
 interface ContextTarget {
@@ -355,6 +382,26 @@ const healthRequirements = (answer: ValidatedResult["answers"][string]) => {
   return answer.score === 3 ? "clear" : "unknown";
 };
 
+const record = (value: unknown): Record<string, unknown> | undefined =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+
+/** Exact assistant-visible prose only; tool blocks and other roles are ineligible. */
+const assistantVisibleText = (message: unknown) => {
+  const value = record(message);
+  if (value?.role !== "assistant") return;
+  if (typeof value.content === "string") return value.content;
+  if (!Array.isArray(value.content)) return;
+  const text: string[] = [];
+  for (const part of value.content) {
+    const item = record(part);
+    if (item?.type === "text" && typeof item.text === "string")
+      text.push(item.text);
+  }
+  return text.join("");
+};
+
 /**
  * Atomic host runtime for hybrid transactions. Display reads receive copied
  * projections only; focus is never evidence or tool-ownership authority.
@@ -374,6 +421,17 @@ export class Monitor {
   private readonly detailGateway: JevGateway;
   /** Optional corrective binding has its own one-flight transport authority. */
   private readonly correctionGateway: JevGateway;
+  /** Visibility transport and spend are isolated from semantic/advisory telemetry. */
+  private readonly visibilityGateway: JevGateway;
+  private readonly visibility = new ExecutionVisibilityStore();
+  private visibilitySources = new Map<string, VisibilitySource>();
+  private visibilityLatestToken?: string;
+  private visibilityStage1?: string;
+  private visibilityStage2: string[] = [];
+  private visibilityFlight?: VisibilityFlight;
+  /** Monitor-owned correction admission count gates optional visibility drain. */
+  private correctionActive = 0;
+  private correctionActivityGeneration = 0;
   private correctionController!: CorrectionController;
   /** Ephemeral raw rubric facts; never display or checkpoint data. */
   private correctionFacts = new Map<string, CorrectionFact>();
@@ -486,6 +544,19 @@ export class Monitor {
       // Corrections are optional and never disable semantic progress tracking.
       onPermanentError: () => this.note("model-unavailable"),
     });
+    this.visibilityGateway = new JevGateway({
+      fetch: (url, init) => globalThis.fetch(url, init),
+      getApiKey: () => process.env.TYPESAFE_API_KEY,
+      onDispatch: () => {
+        this.visibility.recordDispatch();
+        this.publish();
+      },
+      // Visibility is optional and must never change semantic/advisory availability.
+      onPermanentError: () => {
+        this.visibility.markIncomplete();
+        this.publish();
+      },
+    });
     this.correctionController = this.newCorrectionController();
   }
 
@@ -574,6 +645,105 @@ export class Monitor {
     }
   }
 
+  /** Start a live run without restoring or changing runtime history. */
+  visibilityRunStarted(): void {
+    if (!this.enabled) return;
+    this.visibility.startRun();
+    this.publish();
+  }
+
+  /** Settlement clears current display; a confirmed history flight may still finish. */
+  visibilityRunSettled(): void {
+    if (!this.enabled) return;
+    this.visibility.settle();
+    if (this.visibilityFlight?.stage === 1) this.dropVisibilityFlight();
+    this.visibilityStage1 = undefined;
+    this.publish();
+  }
+
+  /** Capture listener-relative live assistant text; never read branch history here. */
+  observeVisibilityMessage(message: unknown): void {
+    if (!this.enabled) return;
+    const text = assistantVisibleText(message);
+    if (text === undefined) return;
+    const bundle = this.visibility.capture(text);
+    if (!bundle) {
+      this.publish();
+      return;
+    }
+    this.visibilitySources.set(bundle.liveToken, {
+      bundle,
+      confirmed: false,
+    });
+    this.visibilityLatestToken = bundle.liveToken;
+    this.visibilityStage1 = bundle.liveToken;
+    while (this.visibilitySources.size > 8) {
+      const token = this.visibilitySources.keys().next().value as
+        | string
+        | undefined;
+      if (!token) break;
+      this.visibilitySources.delete(token);
+    }
+    // Latest live current outranks older optional history; drop rather than retry it.
+    if (this.visibilityFlight) this.dropVisibilityFlight();
+    this.drainVisibility();
+    this.publish();
+  }
+
+  /** Match only the active branch's terminal canonical assistant text. */
+  confirmVisibilityBranch(branch: readonly unknown[]): void {
+    if (!this.enabled || !this.visibilityLatestToken) return;
+    const token = this.visibilityLatestToken;
+    const source = this.visibilitySources.get(token);
+    if (!source) return;
+    const pass = new CanonicalPass(branch);
+    const header = [...pass.headers]
+      .reverse()
+      .find((candidate) => candidate.role === "assistant");
+    const canonical = header ? pass.observation(header.id) : undefined;
+    if (!this.visibility.confirm(token, canonical?.text ?? "")) {
+      this.visibilitySources.delete(token);
+      if (this.visibilityStage1 === token) this.visibilityStage1 = undefined;
+      this.visibilityStage2 = this.visibilityStage2.filter(
+        (id) => id !== token,
+      );
+    } else {
+      source.confirmed = true;
+      if (source.selections) this.enqueueVisibilityStage2(token);
+    }
+    this.drainVisibility();
+    this.publish();
+  }
+
+  /** Finite local tool phase only; no path, argument, output, or tool name escapes. */
+  observeVisibilityToolStart(
+    callId: string,
+    toolName: string,
+    args: unknown,
+  ): void {
+    if (!this.enabled) return;
+    this.visibility.toolStart(callId, this.visibilityPhase(toolName, args));
+    this.publish();
+  }
+
+  /** A terminal tool event only clears its matching local phase. */
+  observeVisibilityToolEnd(callId: string): void {
+    if (!this.enabled) return;
+    this.visibility.toolEnd(callId);
+    this.publish();
+  }
+
+  /** Detached runtime-only visibility projection; never semantic/checkpoint data. */
+  visibilitySnapshot(): ExecutionVisibilitySnapshot {
+    return this.visibility.snapshot();
+  }
+
+  /** Navigation is a lifetime boundary; no volatile report survives a tree change. */
+  invalidateVisibility(): void {
+    this.resetVisibility();
+    this.publish();
+  }
+
   setActivity(activity: string) {
     if (this.activity === activity) return;
     this.activity = activity;
@@ -658,12 +828,15 @@ export class Monitor {
       this.activityGateway.pause();
       this.detailGateway.pause();
       this.correctionGateway.pause();
+      this.dropVisibilityFlight();
+      this.visibilityGateway.pause();
       this.clearActivity(false);
       this.gateway.enable(this.identity());
       this.healthGateway.enable(this.identity());
       this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
       this.correctionGateway.enable(this.identity());
+      this.visibilityGateway.enable(this.visibilityIdentity());
       this.waitingForWake = false;
       this.requeue(pass);
       this.drain();
@@ -798,6 +971,7 @@ export class Monitor {
     this.activityGateway.pause();
     this.detailGateway.pause();
     this.correctionGateway.pause();
+    this.resetVisibility();
     this.clearActivity(false);
     this.evidence.clearPending();
   }
@@ -958,6 +1132,7 @@ export class Monitor {
     this.activityGateway.enable(this.identity());
     this.detailGateway.enable(this.identity());
     this.correctionGateway.enable(this.identity());
+    this.visibilityGateway.enable(this.visibilityIdentity());
     this.requeue(pass, true);
     if (this.queued.length) this.idleDoneInvalidated = true;
     this.save();
@@ -1171,7 +1346,13 @@ export class Monitor {
     attempt: CorrectionAttempt,
     source: CorrectionAttemptSource,
   ): Promise<void> {
-    return this.correctionController.observe(attempt, source);
+    const generation = this.correctionActivityGeneration;
+    this.correctionActive++;
+    return this.correctionController.observe(attempt, source).finally(() => {
+      if (generation !== this.correctionActivityGeneration) return;
+      this.correctionActive = Math.max(0, this.correctionActive - 1);
+      this.drainVisibility();
+    });
   }
 
   /**
@@ -1201,6 +1382,8 @@ export class Monitor {
   /** External input/lifecycle boundaries revoke ephemeral action authority. */
   invalidateCorrections(): void {
     this.correctionEpoch++;
+    this.correctionActivityGeneration++;
+    this.correctionActive = 0;
     this.correctionFacts.clear();
     this.correctionController.dispose();
     this.correctionGateway.invalidate();
@@ -2181,6 +2364,7 @@ export class Monitor {
       this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
       this.correctionGateway.enable(this.identity());
+      this.visibilityGateway.enable(this.visibilityIdentity());
       // Rebuild from current canonical branch after discarding stale semantics.
       this.requeue(this.beginCanonicalPass(), true);
       this.drain();
@@ -2484,6 +2668,234 @@ export class Monitor {
     }
   }
 
+  private visibilityIdentity() {
+    return `${this.identity()}:visibility:${this.visibility.snapshot().generation}`;
+  }
+
+  /** Optional visibility may run only after all semantic/advisory admission is quiet. */
+  private visibilityReady() {
+    return (
+      this.enabled &&
+      !this.controlWork &&
+      !this.processing &&
+      !this.queued.length &&
+      !this.waitingForWake &&
+      !this.retryTimer &&
+      !this.state.pending &&
+      !this.pendingScan &&
+      !this.canonicalWakeTimer &&
+      this.correctionActive === 0 &&
+      this.correctionGateway.status !== "Pending"
+    );
+  }
+
+  private visibilityTasks(): VisibilityTask[] | undefined {
+    const tasks = this.state.tasks
+      .filter((task) => task.included)
+      .map((task) => ({
+        id: task.id,
+        label: task.label,
+        revision: task.revision,
+        sourceDigest: sha256(
+          JSON.stringify([
+            task.source.entryId,
+            task.source.messageHash,
+            task.source.role,
+            task.source.start,
+            task.source.end,
+            task.source.quoteHash,
+          ]),
+        ),
+      }));
+    return tasks.length > 0 && tasks.length <= 20 ? tasks : undefined;
+  }
+
+  private visibilityPhase(
+    toolName: string,
+    args: unknown,
+  ): VisibilityToolPhase {
+    if (["read", "grep", "find", "search"].includes(toolName))
+      return "Inspecting code";
+    if (["edit", "write"].includes(toolName)) return "Editing code";
+    if (toolName !== "bash") return "Using a tool";
+    const command = record(args)?.command;
+    if (typeof command !== "string") return "Using a tool";
+    const first = command.trim().split(/\s+/, 1)[0] ?? "";
+    if (
+      ["bun", "npm", "pnpm", "yarn", "vitest", "jest", "pytest"].includes(
+        first,
+      ) &&
+      /(?:^|\s)(?:test|vitest|jest|pytest)(?:\s|$)/.test(command)
+    )
+      return "Running test command";
+    if (
+      ["make", "bun", "npm", "pnpm", "yarn"].includes(first) &&
+      /(?:^|\s)(?:build|compile)(?:\s|$)/.test(command)
+    )
+      return "Running build command";
+    return "Using a tool";
+  }
+
+  private resetVisibility() {
+    this.visibilityGateway.pause();
+    this.visibility.reset();
+    this.visibilitySources.clear();
+    this.visibilityLatestToken = undefined;
+    this.visibilityStage1 = undefined;
+    this.visibilityStage2 = [];
+    this.visibilityFlight = undefined;
+  }
+
+  /** Cancel optional work without retries when a newer mandatory boundary wins. */
+  private dropVisibilityFlight() {
+    if (!this.visibilityFlight) return;
+    this.visibilityGateway.invalidate();
+    this.visibility.markIncomplete();
+    this.visibilityFlight = undefined;
+  }
+
+  private enqueueVisibilityStage2(token: string) {
+    if (this.visibilityStage2.includes(token)) return;
+    if (this.visibilityStage2.length >= 4) {
+      const dropped = this.visibilityStage2.shift();
+      if (dropped) this.visibilitySources.delete(dropped);
+      this.visibility.markIncomplete();
+    }
+    this.visibilityStage2.push(token);
+  }
+
+  private visibilityFlightCurrent(flight: VisibilityFlight) {
+    return (
+      this.visibilityFlight === flight &&
+      flight.epoch === this.epoch &&
+      flight.generation === this.visibility.snapshot().generation &&
+      this.enabled
+    );
+  }
+
+  private drainVisibility() {
+    if (!this.visibilityReady() || this.visibilityFlight) return;
+    const stage1 = this.visibilityStage1;
+    if (stage1) {
+      this.visibilityStage1 = undefined;
+      const source = this.visibilitySources.get(stage1);
+      const request = source && buildLabelSelectionRequest(source.bundle);
+      if (
+        !source ||
+        !request ||
+        this.visibility.snapshot().budgetRemaining < 1
+      ) {
+        this.visibility.markIncomplete();
+        this.publish();
+        return;
+      }
+      const flight: VisibilityFlight = {
+        token: stage1,
+        stage: 1,
+        epoch: this.epoch,
+        generation: this.visibility.snapshot().generation,
+      };
+      this.visibilityFlight = flight;
+      void this.runVisibilityStage1(flight, request);
+      return;
+    }
+    const stage2 = this.visibilityStage2.shift();
+    if (!stage2) return;
+    const source = this.visibilitySources.get(stage2);
+    const tasks = this.visibilityTasks();
+    const request =
+      source?.confirmed && source.selections && tasks
+        ? buildLabelBindingRequest(
+            source.bundle,
+            source.selections,
+            tasks,
+            source.bundle.messageHash,
+          )
+        : undefined;
+    if (
+      !source ||
+      !tasks ||
+      !request ||
+      this.visibility.snapshot().budgetRemaining < 1
+    ) {
+      this.visibility.markIncomplete();
+      this.publish();
+      return;
+    }
+    const flight: VisibilityFlight = {
+      token: stage2,
+      stage: 2,
+      epoch: this.epoch,
+      generation: this.visibility.snapshot().generation,
+    };
+    this.visibilityFlight = flight;
+    void this.runVisibilityStage2(flight, request, tasks);
+  }
+
+  private async runVisibilityStage1(
+    flight: VisibilityFlight,
+    request: EvaluationRequest,
+  ) {
+    try {
+      const result = await this.visibilityGateway.evaluate(
+        request,
+        this.visibilityIdentity(),
+      );
+      if (!this.visibilityFlightCurrent(flight)) return;
+      if (!result) {
+        this.visibility.markIncomplete();
+        return;
+      }
+      this.visibility.recordUsage(result.usage);
+      const source = this.visibilitySources.get(flight.token);
+      if (!source) {
+        this.visibility.markIncomplete();
+        return;
+      }
+      const selections = readLabelSelections(source.bundle, result);
+      source.selections = selections;
+      this.visibility.acceptSelections(flight.token, selections);
+      if (source.confirmed) this.enqueueVisibilityStage2(flight.token);
+    } finally {
+      if (this.visibilityFlight === flight) this.visibilityFlight = undefined;
+      this.publish();
+      this.drainVisibility();
+    }
+  }
+
+  private async runVisibilityStage2(
+    flight: VisibilityFlight,
+    request: EvaluationRequest,
+    tasks: readonly VisibilityTask[],
+  ) {
+    try {
+      const result = await this.visibilityGateway.evaluate(
+        request,
+        this.visibilityIdentity(),
+      );
+      if (!this.visibilityFlightCurrent(flight)) return;
+      if (!result) {
+        this.visibility.markIncomplete();
+        return;
+      }
+      this.visibility.recordUsage(result.usage);
+      const source = this.visibilitySources.get(flight.token);
+      if (!source?.selections) {
+        this.visibility.markIncomplete();
+        return;
+      }
+      this.visibility.acceptBindings(
+        flight.token,
+        readLabelBindings(source.selections, tasks, result),
+        tasks,
+      );
+    } finally {
+      if (this.visibilityFlight === flight) this.visibilityFlight = undefined;
+      this.publish();
+      this.drainVisibility();
+    }
+  }
+
   private drain() {
     if (
       !this.enabled ||
@@ -2496,6 +2908,7 @@ export class Monitor {
     if (observation) {
       const epoch = this.epoch;
       // Canonical work preempts optional activity before durable semantic admission.
+      this.dropVisibilityFlight();
       this.clearActivity();
       // Any newly processed canonical work invalidates retained idle completion.
       this.idleDoneInvalidated = true;
@@ -2510,6 +2923,7 @@ export class Monitor {
       void this.processOne(active);
       return;
     }
+    this.drainVisibility();
     const detail = this.nextDetailWork();
     if (detail && !this.detailFlight) {
       const flight = {

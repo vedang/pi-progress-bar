@@ -379,6 +379,11 @@ export class ExecutionVisibilityStore {
     this.coverage = "incomplete";
   }
 
+  /** Explicitly retain an honest gap when optional visibility cannot be admitted. */
+  markIncomplete(): void {
+    this.coverage = "incomplete";
+  }
+
   /** Reserve one independent visibility provider dispatch. */
   recordDispatch(): boolean {
     if (this.usage.calls >= VISIBILITY_BUDGET) {

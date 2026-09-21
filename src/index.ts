@@ -270,6 +270,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     await restore(ctx, false);
   });
   pi.on("session_before_tree", () => {
+    monitor.invalidateVisibility();
     delivery?.onNavigation();
     resetCorrections();
     monitor.invalidateCorrections();
@@ -281,6 +282,7 @@ export default function progressBar(pi: ExtensionAPI): void {
   });
   pi.on("session_tree", async (_event, ctx) => {
     // Real hosts fire session_before_tree first; repeat cancellation so this
+    monitor.invalidateVisibility();
     // post-navigation boundary is also safe when delivered alone.
     delivery?.onNavigation();
     resetCorrections();
@@ -321,15 +323,18 @@ export default function progressBar(pi: ExtensionAPI): void {
     context = ctx;
     delivery?.onMessageEnd(event.message, ctx.sessionManager.getBranch());
     monitor.observeActivityDeclaration(event.message);
+    monitor.observeVisibilityMessage(event.message);
   });
   pi.on("context", (_event, ctx) => {
     delivery?.onContext(ctx.sessionManager.getBranch());
     observe(ctx);
+    monitor.confirmVisibilityBranch(ctx.sessionManager.getBranch());
   });
   pi.on("turn_end", (event, ctx) => {
     context = ctx;
     monitor.observeActivityTurnEnd(event.message);
     observe(ctx);
+    monitor.confirmVisibilityBranch(ctx.sessionManager.getBranch());
   });
   pi.on("before_agent_start", (event, ctx) => {
     context = ctx;
@@ -353,6 +358,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     pendingCorrectionPolicy = undefined;
     delivery?.onAgentStart();
     reconciliation?.runStarted(run);
+    monitor.visibilityRunStarted();
     monitor.setActivity("Agent active");
   });
   pi.on("agent_settled", (_event, ctx) => {
@@ -365,6 +371,8 @@ export default function progressBar(pi: ExtensionAPI): void {
     // Final canonical observation precedes delivery-origin classification and
     // controller readiness/deadline handling.
     observe(ctx);
+    monitor.confirmVisibilityBranch(ctx.sessionManager.getBranch());
+    monitor.visibilityRunSettled();
     const origin = delivery?.onAgentSettled(ctx.sessionManager.getBranch());
     delivery?.onCorrectionRunInvalidated();
     settle(origin);
@@ -390,6 +398,11 @@ export default function progressBar(pi: ExtensionAPI): void {
   pi.on("tool_execution_start", (event, ctx) => {
     context = ctx;
     monitor.observeActivityStart(event.toolCallId, event.toolName, event.args);
+    monitor.observeVisibilityToolStart(
+      event.toolCallId,
+      event.toolName,
+      event.args,
+    );
     monitor.observeToolStart(
       event.toolCallId,
       event.toolName,
@@ -442,6 +455,7 @@ export default function progressBar(pi: ExtensionAPI): void {
       event.result,
       event.isError,
     );
+    monitor.observeVisibilityToolEnd(event.toolCallId);
     monitor.setActivity(ctx.isIdle() ? "Idle" : "Agent active");
   });
 }

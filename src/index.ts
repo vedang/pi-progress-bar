@@ -3,8 +3,15 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { CorrectionAdapter } from "./advisory/correction-adapter";
-import type { CorrectionBinding } from "./advisory/corrections";
+import {
+  CorrectionAdapter,
+  projectCorrectionAction,
+  projectCorrectionPolicy,
+} from "./advisory/correction-adapter";
+import type {
+  CorrectionBinding,
+  CorrectionPolicyProjection,
+} from "./advisory/corrections";
 import {
   type AdvisoryDeliveryKind,
   ReconciliationDelivery,
@@ -28,6 +35,10 @@ export default function progressBar(pi: ExtensionAPI): void {
   let runEpoch = 0;
   /** Only a still-running source turn may receive its classifier result. */
   let activeCorrectionRun: number | undefined;
+  let pendingCorrectionPolicy: CorrectionPolicyProjection | undefined;
+  let activeCorrectionSource:
+    | { sourceRun: number; policy: CorrectionPolicyProjection }
+    | undefined;
   let currentOpportunity:
     | {
         id: string;
@@ -60,6 +71,8 @@ export default function progressBar(pi: ExtensionAPI): void {
       delivery?.onMasterOff();
       correctionAdapter.reset();
       activeCorrectionRun = undefined;
+      activeCorrectionSource = undefined;
+      pendingCorrectionPolicy = undefined;
       clearOpportunity();
     }
     if (ctx.mode === "tui" && presentation.enabled) {
@@ -214,6 +227,8 @@ export default function progressBar(pi: ExtensionAPI): void {
     branchEpoch++;
     runEpoch = 0;
     activeCorrectionRun = undefined;
+    activeCorrectionSource = undefined;
+    pendingCorrectionPolicy = undefined;
     clearOpportunity();
     await restore(ctx, false);
   });
@@ -223,6 +238,8 @@ export default function progressBar(pi: ExtensionAPI): void {
     monitor.invalidateCorrections();
     reconciliation?.cancel();
     activeCorrectionRun = undefined;
+    activeCorrectionSource = undefined;
+    pendingCorrectionPolicy = undefined;
     clearOpportunity();
   });
   pi.on("session_tree", async (_event, ctx) => {
@@ -234,6 +251,8 @@ export default function progressBar(pi: ExtensionAPI): void {
     reconciliation?.cancel();
     branchEpoch++;
     activeCorrectionRun = undefined;
+    activeCorrectionSource = undefined;
+    pendingCorrectionPolicy = undefined;
     clearOpportunity();
     await restore(ctx, true);
   });
@@ -243,6 +262,8 @@ export default function progressBar(pi: ExtensionAPI): void {
     correctionAdapter.reset();
     reconciliation?.cancel();
     activeCorrectionRun = undefined;
+    activeCorrectionSource = undefined;
+    pendingCorrectionPolicy = undefined;
     clearOpportunity();
     monitor.stop();
     context = undefined;
@@ -253,6 +274,8 @@ export default function progressBar(pi: ExtensionAPI): void {
     monitor.invalidateCorrections();
     reconciliation?.clearPendingIntent();
     activeCorrectionRun = undefined;
+    activeCorrectionSource = undefined;
+    pendingCorrectionPolicy = undefined;
     clearOpportunity();
   });
   // Canonical active branch is authoritative for semantic tracking. Tool activity
@@ -271,6 +294,12 @@ export default function progressBar(pi: ExtensionAPI): void {
     monitor.observeActivityTurnEnd(event.message);
     observe(ctx);
   });
+  pi.on("before_agent_start", (event, ctx) => {
+    context = ctx;
+    pendingCorrectionPolicy = projectCorrectionPolicy(
+      event.systemPromptOptions,
+    );
+  });
   pi.on("agent_start", (_event, ctx) => {
     context = ctx;
     // A subsequent logical run cannot receive stale classifier work from its
@@ -279,6 +308,11 @@ export default function progressBar(pi: ExtensionAPI): void {
     clearCorrectionOpportunity();
     const run = ++runEpoch;
     activeCorrectionRun = run;
+    activeCorrectionSource = {
+      sourceRun: run,
+      policy: pendingCorrectionPolicy ?? { coverage: "unknown", entries: [] },
+    };
+    pendingCorrectionPolicy = undefined;
     delivery?.onAgentStart();
     reconciliation?.runStarted(run);
     monitor.setActivity("Agent active");
@@ -287,6 +321,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     context = ctx;
     monitor.setActivity("Idle");
     activeCorrectionRun = undefined;
+    activeCorrectionSource = undefined;
     clearCorrectionOpportunity();
     // Final canonical observation precedes delivery-origin classification and
     // controller readiness/deadline handling.
@@ -315,10 +350,16 @@ export default function progressBar(pi: ExtensionAPI): void {
       event.args,
       ctx.cwd,
     );
-    if (correction && activeCorrectionRun !== undefined)
-      void monitor.observeCorrectionAttempt({
-        ...correction,
-        sourceRun: activeCorrectionRun,
+    const source = activeCorrectionSource;
+    if (correction && source)
+      void monitor.observeCorrectionAttempt(correction, {
+        ...source,
+        action: projectCorrectionAction(
+          ctx.sessionManager.getBranch(),
+          ctx.sessionManager.getLeafId(),
+          event.toolCallId,
+          ctx.cwd,
+        ),
       });
   });
   pi.on("tool_execution_update", (event, ctx) => {
@@ -328,10 +369,16 @@ export default function progressBar(pi: ExtensionAPI): void {
       event.toolName,
       event.partialResult,
     );
-    if (correction && activeCorrectionRun !== undefined)
-      void monitor.observeCorrectionAttempt({
-        ...correction,
-        sourceRun: activeCorrectionRun,
+    const source = activeCorrectionSource;
+    if (correction && source)
+      void monitor.observeCorrectionAttempt(correction, {
+        ...source,
+        action: projectCorrectionAction(
+          ctx.sessionManager.getBranch(),
+          ctx.sessionManager.getLeafId(),
+          event.toolCallId,
+          ctx.cwd,
+        ),
       });
   });
   pi.on("tool_execution_end", (event, ctx) => {

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import {
   type CorrectionAttempt,
+  type CorrectionAttemptSource,
+  type CorrectionAuthority,
   type CorrectionBinding,
   CorrectionController,
   type CorrectionEmission,
@@ -1123,7 +1125,7 @@ export class Monitor {
    * canonical text already resident in memory; it never reopens branch history.
    */
   correctionSnapshot(): CorrectionSnapshot {
-    const context = this.correctionContext();
+    const authority = this.correctionAuthority();
     const tasks: CorrectionTask[] = this.state.tasks.flatMap((task) => {
       if (!task.included) return [];
       const red = this.currentCorrectionFact(task);
@@ -1156,17 +1158,20 @@ export class Monitor {
                 source: task.source,
                 red: this.currentCorrectionFact(task),
               })),
-            context,
+            authority,
           }),
         )
         .digest("hex"),
       tasks,
-      context,
+      authority,
     };
   }
 
-  observeCorrectionAttempt(attempt: CorrectionAttempt): Promise<void> {
-    return this.correctionController.observe(attempt);
+  observeCorrectionAttempt(
+    attempt: CorrectionAttempt,
+    source: CorrectionAttemptSource,
+  ): Promise<void> {
+    return this.correctionController.observe(attempt, source);
   }
 
   /**
@@ -1221,16 +1226,18 @@ export class Monitor {
     };
   }
 
-  private correctionContext() {
-    const context: string[] = [];
-    let bytes = 0;
-    for (const observation of this.settledContext) {
-      const size = Buffer.byteLength(observation.text, "utf8");
-      if (bytes + size > 4 * 1024) break;
-      context.push(observation.text);
-      bytes += size;
-    }
-    return context;
+  private correctionAuthority(): CorrectionAuthority {
+    const conversation = this.settledContext.map((observation) => ({
+      role: observation.role,
+      text: observation.text,
+    }));
+    const authority: CorrectionAuthority = {
+      coverage: "complete",
+      conversation,
+    };
+    return Buffer.byteLength(JSON.stringify(authority), "utf8") <= 4 * 1024
+      ? authority
+      : { coverage: "unknown", conversation: [] };
   }
 
   private currentCorrectionFact(

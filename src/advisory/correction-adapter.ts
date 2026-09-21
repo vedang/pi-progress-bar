@@ -1,7 +1,15 @@
-import type { CorrectionAttempt } from "./corrections";
+import type {
+  CorrectionActionProjection,
+  CorrectionAttempt,
+  CorrectionPolicyEntry,
+  CorrectionPolicyProjection,
+} from "./corrections";
 
 const MAX_CORRELATIONS = 256;
 const MAX_ID_BYTES = 512;
+const MAX_POLICY_BYTES = 8 * 1024;
+const MAX_ACTION_BYTES = 4 * 1024;
+const MAX_ACTION_TOOLS = 32;
 const BUILTIN_SOURCE = {
   path: "<builtin:NAME>",
   source: "builtin",
@@ -213,6 +221,136 @@ const namedReviewStart = (args: unknown) =>
   args.workflow === "review" &&
   record(args.args) &&
   args.async === false;
+
+const unknownPolicy = (): CorrectionPolicyProjection => ({
+  coverage: "unknown",
+  entries: [],
+});
+const unknownAction = (): CorrectionActionProjection => ({
+  coverage: "unknown",
+  role: "assistant",
+  text: "",
+  batch: [],
+});
+
+/**
+ * Copies only loaded authority sources structured by Pi. It never reads the
+ * assembled prompt, skills, tool snippets, or any unlisted resource.
+ */
+export const projectCorrectionPolicy = (
+  options: unknown,
+): CorrectionPolicyProjection => {
+  if (!record(options) || typeof options.cwd !== "string" || !options.cwd)
+    return unknownPolicy();
+  const entries: CorrectionPolicyEntry[] = [];
+  if (options.customPrompt !== undefined) {
+    if (typeof options.customPrompt !== "string") return unknownPolicy();
+    entries.push({
+      role: "system",
+      source: "customPrompt",
+      text: options.customPrompt,
+    });
+  }
+  if (options.appendSystemPrompt !== undefined) {
+    if (typeof options.appendSystemPrompt !== "string") return unknownPolicy();
+    entries.push({
+      role: "system",
+      source: "appendSystemPrompt",
+      text: options.appendSystemPrompt,
+    });
+  }
+  if (options.promptGuidelines !== undefined) {
+    if (!Array.isArray(options.promptGuidelines)) return unknownPolicy();
+    for (const [index, text] of options.promptGuidelines.entries()) {
+      if (typeof text !== "string") return unknownPolicy();
+      entries.push({ role: "system", source: "promptGuideline", index, text });
+    }
+  }
+  if (options.contextFiles !== undefined) {
+    if (!Array.isArray(options.contextFiles)) return unknownPolicy();
+    for (const file of options.contextFiles) {
+      if (
+        !record(file) ||
+        typeof file.path !== "string" ||
+        !file.path ||
+        typeof file.content !== "string"
+      )
+        return unknownPolicy();
+      entries.push({
+        role: "system",
+        source: "contextFile",
+        path: file.path,
+        text: file.content,
+      });
+    }
+  }
+  const result: CorrectionPolicyProjection = { coverage: "complete", entries };
+  return Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_POLICY_BYTES
+    ? result
+    : unknownPolicy();
+};
+
+/**
+ * Copies finalized visible assistant declaration and safe tool identifiers.
+ * Tool arguments remain host-private except a verified repository-relative path.
+ */
+export const projectCorrectionAction = (
+  branch: readonly unknown[],
+  leafId: string | null,
+  callId: string,
+  cwd: string,
+): CorrectionActionProjection => {
+  if (!safeId(leafId) || !safeId(callId) || typeof cwd !== "string" || !cwd)
+    return unknownAction();
+  const matches = branch.filter(
+    (entry) => record(entry) && entry.id === leafId,
+  );
+  if (matches.length !== 1 || !record(matches[0])) return unknownAction();
+  const entry = matches[0];
+  if (entry.type !== "message" || !record(entry.message))
+    return unknownAction();
+  const message = entry.message;
+  if (message.role !== "assistant" || !Array.isArray(message.content))
+    return unknownAction();
+  const texts: string[] = [];
+  const batch: Array<{ toolName: string; path?: string; current: boolean }> =
+    [];
+  let current = 0;
+  for (const block of message.content) {
+    if (!record(block) || typeof block.type !== "string")
+      return unknownAction();
+    if (block.type === "text") {
+      if (typeof block.text !== "string") return unknownAction();
+      texts.push(block.text);
+      continue;
+    }
+    if (block.type !== "toolCall") continue;
+    if (!safeId(block.id) || !safeId(block.name)) return unknownAction();
+    if (batch.length >= MAX_ACTION_TOOLS) return unknownAction();
+    const arguments_ = record(block.arguments) ? block.arguments : undefined;
+    const path = arguments_
+      ? safeRelativePath(arguments_.path, cwd)
+      : undefined;
+    const isCurrent = block.id === callId;
+    if (isCurrent) current++;
+    batch.push({
+      toolName: block.name,
+      ...(path ? { path } : {}),
+      current: isCurrent,
+    });
+  }
+  const text = texts.join("\n");
+  if (!text || current !== 1) return unknownAction();
+  const result: CorrectionActionProjection = {
+    coverage: "complete",
+    role: "assistant",
+    text,
+    batch,
+  };
+  return Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_ACTION_BYTES
+    ? result
+    : unknownAction();
+};
 
 const runningReviewReceipt = (
   callId: string,

@@ -151,8 +151,13 @@ export class ReconciliationController {
       this.emitIfEligible(intent, snapshot);
   }
 
-  cancel(): void {
+  /** Drop a delayed advisory without invalidating the active run lifecycle. */
+  clearPendingIntent(): void {
     this.clearIntent();
+  }
+
+  cancel(): void {
+    this.clearPendingIntent();
     this.currentRunId = undefined;
     this.settledRunId = undefined;
   }

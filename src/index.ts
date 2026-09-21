@@ -185,7 +185,7 @@ export default function progressBar(pi: ExtensionAPI): void {
   });
   pi.on("input", () => {
     delivery?.onInput();
-    reconciliation?.cancel();
+    reconciliation?.clearPendingIntent();
     clearOpportunity();
   });
   // Canonical active branch is authoritative for semantic tracking. Tool activity

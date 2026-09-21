@@ -181,6 +181,12 @@ export class ReconciliationDelivery {
   }
 
   onInput(): void {
+    const chain = this.chain;
+    if (!chain) return;
+    // Input hook is authoritative even before branch canonicalization catches up.
+    // Retain candidate ownership for an already-invoked custom turn; its later
+    // start still belongs to this chain and settles as mixed external work.
+    chain.external = true;
     this.cancel("external-input");
   }
 
@@ -194,7 +200,9 @@ export class ReconciliationDelivery {
       chain.ownRun = run;
       return;
     }
-    if (chain.ownRun !== run) this.cancel("new-external-run");
+    // Only candidate-latched starts belong to this delivery. A later external
+    // run invalidates every terminal or uncertain chain from the old run.
+    this.clearChain(chain);
   }
 
   onMessageEnd(message: unknown, branch: readonly unknown[]): void {
@@ -237,7 +245,11 @@ export class ReconciliationDelivery {
         ? "advisory-only"
         : "uncertain-advisory";
 
-    if (origin !== "uncertain-advisory") this.clearChain(chain);
+    // Retain only a still-live uncertain chain so its bounded retry/grace work
+    // can gather canonical evidence. All terminal chains must release future
+    // opportunities after this settlement.
+    if (origin !== "uncertain-advisory" || chain.phase !== "pending")
+      this.clearChain(chain);
     return origin;
   }
 
@@ -426,6 +438,12 @@ export class ReconciliationDelivery {
     if (suffix.some(isExternalEntry)) {
       chain.external = true;
       this.clearTimer(chain);
+      // A previously uncertain run cannot receive a second settlement.
+      // Late authoritative external work therefore releases its old chain now.
+      if (chain.settledRun !== undefined) {
+        this.clearChain(chain);
+        return;
+      }
     }
     if (suffix.some((entry) => this.matches(chain, entry))) {
       chain.canonical = true;
@@ -458,6 +476,9 @@ export class ReconciliationDelivery {
     if (this.chain !== chain) return;
     chain.phase = "confirmed";
     this.clearTimer(chain);
+    // Confirmation may arrive after an uncertain settlement, whose result was
+    // already handed off. Release instead of waiting for an impossible repeat.
+    if (chain.settledRun !== undefined) this.clearChain(chain);
   }
 
   private cancel(_reason: string): void {
@@ -465,6 +486,7 @@ export class ReconciliationDelivery {
     if (!chain) return;
     this.clearTimer(chain);
     chain.phase = "cancelled";
+    if (chain.settledRun !== undefined) this.clearChain(chain);
   }
 
   private clearChain(chain: Chain): void {

@@ -574,3 +574,60 @@ it("observes a named launched review passively and emits exact corrective advice
     "PRIVATE_REVIEW_TASK",
   );
 });
+
+it("does not turn a late correction result into a fresh run after source settlement", async () => {
+  const h = await advisoryFixture();
+  admitCorrection();
+  const transport = vi.mocked(fetch).getMockImplementation();
+  if (!transport) throw new Error("transport");
+  let release = () => {};
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body));
+    if (
+      Object.keys(request.questions).some((key) => key.startsWith("correct:"))
+    )
+      await pending;
+    return transport(url, init);
+  });
+  Reflect.set(h.ctx, "isIdle", () => false);
+  await h.emit("agent_start");
+  await h.emit("tool_execution_start", {
+    toolCallId: "late-test",
+    toolName: "write",
+    args: { path: "tests/parser.test.ts", content: "// test" },
+  });
+  await vi.advanceTimersByTimeAsync(20);
+  Reflect.set(h.ctx, "isIdle", () => true);
+  await h.emit("agent_settled");
+  release();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.sendMessage).not.toHaveBeenCalled();
+});
+
+it("cancels correction retries when its canonical relevance changes", async () => {
+  const h = await advisoryFixture();
+  admitCorrection();
+  Reflect.set(h.ctx, "isIdle", () => false);
+  await h.emit("agent_start");
+  await h.emit("tool_execution_start", {
+    toolCallId: "stale-retry",
+    toolName: "write",
+    args: { path: "tests/parser.test.ts", content: "// test" },
+  });
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.sendMessage).toHaveBeenCalledTimes(1);
+  h.setEntries([
+    ...h.ctx.sessionManager.getBranch(),
+    branchEntry(
+      "revised-authority",
+      "The implementation is complete; reconsider the prior test assessment.",
+      "assistant",
+    ),
+  ]);
+  await h.emit("context");
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(h.sendMessage).toHaveBeenCalledTimes(1);
+});

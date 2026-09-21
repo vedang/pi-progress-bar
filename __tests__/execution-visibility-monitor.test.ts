@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ReconciliationController } from "../src/advisory/reconciliation";
 import type { EvaluationRequest } from "../src/analysis/gateway";
 import { correctionSource } from "./fixtures/correction-source";
 import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
@@ -62,6 +63,64 @@ async function setup() {
   return h;
 }
 describe("optional live visibility integration", () => {
+  it("current-only MAYBE survives settlement into the single delayed clarification", async () => {
+    const h = await setup();
+    const original = h.fetch.getMockImplementation();
+    if (!original) throw Error("fixture");
+    h.fetch.mockImplementation(async (url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const response = await original(url, init);
+      if (!visibility(request)) return response;
+      const body = (await response.json()) as {
+        answers: Record<
+          string,
+          {
+            choice: string;
+            confidence: number;
+            probabilities: Record<string, number>;
+          }
+        >;
+      };
+      if (body.answers.historyCandidate) {
+        body.answers.historyCandidate.choice = "none";
+        for (const key of Object.keys(
+          body.answers.historyCandidate.probabilities,
+        ))
+          body.answers.historyCandidate.probabilities[key] =
+            key === "none" ? 1 : 0;
+      }
+      if (body.answers.currentTask) body.answers.currentTask.confidence = 0.84;
+      return Response.json(body);
+    });
+    h.monitor.observeVisibilityMessage(message(), h.reader());
+    await vi.advanceTimersByTimeAsync(100);
+    h.append("maybe-report", text);
+    h.monitor.confirmVisibilityBranch(h.reader());
+    await h.settle("maybe-report");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.monitor.visibilitySnapshot().actions).toHaveLength(0);
+    h.monitor.visibilityRunSettled();
+    const emit = vi.fn();
+    const controller = new ReconciliationController({
+      snapshot: () => h.monitor.advisorySettlementSnapshot(),
+      emit,
+      clock: { now: () => Date.now(), setTimeout, clearTimeout },
+    });
+    controller.runStarted(1);
+    controller.settled(1, "independent");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(emit.mock.calls[0][0].content).toContain(text);
+    expect(emit.mock.calls[0][0].content).toContain("MAYBE");
+    h.append("generic-status", "The parser task is still pending.");
+    await h.settle("generic-status");
+    expect(
+      h.monitor.advisorySettlementSnapshot().uncertainActivities,
+    ).toHaveLength(1);
+    controller.dispose();
+    h.monitor.stop();
+  });
+
   it.each([1, 2])(
     "correction dispatch preempts held visibility stage %s without retry",
     async (stage) => {

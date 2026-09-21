@@ -317,7 +317,22 @@ it.each([false, true])(
             .map((ref) => ref.id) ?? [];
         expect([...assessed].sort()).toEqual([...eligible].sort());
         expect(assessed).toHaveLength(4);
-        expect(vi.mocked(fetch)).toHaveBeenCalledTimes(4);
+        const requests = vi
+          .mocked(fetch)
+          .mock.calls.map((call) => JSON.parse(String(call[1]?.body)));
+        const optional = requests.filter((request) =>
+          Object.keys(request.questions).some((key) =>
+            [
+              "currentCandidate",
+              "historyCandidate",
+              "currentTask",
+              "historyTask",
+            ].includes(key),
+          ),
+        );
+        expect(requests.length - optional.length).toBe(4);
+        expect(optional).toHaveLength(1);
+        expect(optional[0].questions).toHaveProperty("currentCandidate");
         await session.prompt("/progress off");
       } else expect(vi.mocked(fetch)).not.toHaveBeenCalled();
     } finally {

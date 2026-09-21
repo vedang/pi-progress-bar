@@ -61,6 +61,39 @@ function host() {
   } as unknown as ExtensionContext;
   const pi = {
     sendMessage,
+    getAllTools: () => [
+      {
+        name: "write",
+        sourceInfo: {
+          path: "<builtin:write>",
+          source: "builtin",
+          scope: "temporary",
+          origin: "top-level",
+        },
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" }, content: { type: "string" } },
+          required: ["path", "content"],
+        },
+      },
+      {
+        name: "subagent",
+        sourceInfo: {
+          path: "/agent/git/github.com/nicobailon/pi-subagents/index.ts",
+          source: "git:github.com/nicobailon/pi-subagents",
+          scope: "user",
+          origin: "package",
+        },
+        parameters: {
+          type: "object",
+          properties: {
+            workflow: { type: "string" },
+            args: { type: "object" },
+            async: { type: "boolean" },
+          },
+        },
+      },
+    ],
     on: (name: string, handler: Handler) => handlers.set(name, handler),
     registerCommand: (_name: string, options: { handler: typeof command }) => {
       command = options.handler;
@@ -413,4 +446,126 @@ it("active user steer preserves the current run for the next independent opportu
   await h.emit("agent_settled");
   await vi.advanceTimersByTimeAsync(60_000);
   expect(h.sendMessage).toHaveBeenCalledTimes(1);
+});
+
+function admitCorrection() {
+  const transport = vi.mocked(fetch).getMockImplementation();
+  if (!transport) throw new Error("Missing fetch fixture");
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body));
+    if (
+      !Object.keys(request.questions).some((key) => key.startsWith("correct:"))
+    )
+      return transport(url, init);
+    return Response.json({
+      model: "jev-1.13.0",
+      usage: { input_tokens: 2, output_tokens: 1 },
+      answers: Object.fromEntries(
+        Object.keys(request.questions).map((key) => [
+          key,
+          {
+            type: "choice",
+            choice: "nudge",
+            confidence: 1,
+            probabilities: { nudge: 1, required: 0, unrelated: 0, unknown: 0 },
+          },
+        ]),
+      ),
+    });
+  });
+}
+it("delivers attempted-write correction immediately under master ON", async () => {
+  const h = await advisoryFixture();
+  admitCorrection();
+  Reflect.set(h.ctx, "isIdle", () => false);
+  await h.emit("agent_start");
+  const event = {
+    toolCallId: "test-attempt",
+    toolName: "write",
+    args: {
+      path: "__tests__/parser.test.ts",
+      content: "PRIVATE_RAW_TEST_BODY",
+    },
+  };
+  await h.emit("tool_execution_start", event);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.sendMessage).toHaveBeenCalledTimes(1);
+  expect(h.sendMessage.mock.calls[0][0]).toMatchObject({
+    details: { kind: "test-correction" },
+    content: expect.stringContaining("does not need a failing test"),
+  });
+  expect(JSON.stringify(vi.mocked(fetch).mock.calls)).not.toContain(
+    "PRIVATE_RAW_TEST_BODY",
+  );
+  await h.emit("tool_execution_start", event);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.sendMessage).toHaveBeenCalledTimes(1);
+});
+it("observes a named launched review passively and emits exact corrective advice", async () => {
+  const h = await advisoryFixture();
+  admitCorrection();
+  Reflect.set(h.ctx, "isIdle", () => false);
+  await h.emit("agent_start");
+  const args = {
+    workflow: "review",
+    args: { task: "PRIVATE_REVIEW_TASK" },
+    async: false,
+  };
+  await h.emit("tool_execution_start", {
+    toolCallId: "review-attempt",
+    toolName: "subagent",
+    args,
+  });
+  expect(h.sendMessage).not.toHaveBeenCalled();
+  const partialResult = {
+    content: [{ type: "text", text: "PRIVATE_CHILD_BODY" }],
+    details: {
+      mode: "workflow",
+      runId: "workflow-1",
+      workflow: {
+        resource: {
+          kind: "workflow",
+          name: "review",
+          version: 1,
+          invocation: "named",
+          expansion: "resolved",
+          id: "00000000-0000-4000-8000-000000000001",
+        },
+      },
+      workflowChildren: {
+        version: 1,
+        parentToolCallId: "review-attempt",
+        workflowRunId: "workflow-1",
+        inventoryComplete: false,
+        workflowState: "running",
+        children: [
+          {
+            childId: "review",
+            state: "running",
+            runId: "child-1",
+            agent: "reviewer",
+          },
+        ],
+      },
+    },
+  };
+  await h.emit("tool_execution_update", {
+    toolCallId: "review-attempt",
+    toolName: "subagent",
+    args,
+    partialResult,
+  });
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.sendMessage).toHaveBeenCalledTimes(1);
+  expect(h.sendMessage.mock.calls[0][0]).toMatchObject({
+    details: { kind: "review-correction" },
+    content:
+      "Reviewing the work done so far is premature. Please cancel the review and continue with the implementation. It is better to review the work when a bigger chunk of it has been completed.",
+  });
+  expect(JSON.stringify(vi.mocked(fetch).mock.calls)).not.toContain(
+    "PRIVATE_CHILD_BODY",
+  );
+  expect(JSON.stringify(vi.mocked(fetch).mock.calls)).not.toContain(
+    "PRIVATE_REVIEW_TASK",
+  );
 });

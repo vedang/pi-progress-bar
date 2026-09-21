@@ -1,7 +1,13 @@
+import { randomUUID } from "node:crypto";
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import {
+  ReconciliationDelivery,
+  type SettlementOrigin,
+} from "./advisory/delivery";
+import { ReconciliationController } from "./advisory/reconciliation";
 import { Monitor } from "./core/monitor";
 import { selectedModelExtractor } from "./core/selected-model";
 import { command } from "./ui/commands";
@@ -12,6 +18,15 @@ export default function progressBar(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let notifiedError: string | undefined;
   let controller: UiController | undefined;
+  let reconciliation: ReconciliationController | undefined;
+  let delivery: ReconciliationDelivery | undefined;
+  let sessionEpoch = 0;
+  let branchEpoch = 0;
+  let runEpoch = 0;
+  let currentOpportunity: { id: string; runId: number } | undefined;
+  const clearOpportunity = () => {
+    currentOpportunity = undefined;
+  };
   const disposeController = () => {
     controller?.dispose();
     controller = undefined;
@@ -20,6 +35,13 @@ export default function progressBar(pi: ExtensionAPI): void {
     const ctx = context;
     if (!ctx) return;
     const presentation = monitor.presentationSnapshot();
+    if (!presentation.enabled) {
+      // Monitor control publishes through this seam, including /progress off.
+      // Cancelling here adds no advisory-specific command or preference.
+      reconciliation?.cancel();
+      delivery?.onMasterOff();
+      clearOpportunity();
+    }
     if (ctx.mode === "tui" && presentation.enabled) {
       const snapshot = { presentation, board: monitor.boardSnapshot() };
       if (!controller) {
@@ -28,13 +50,16 @@ export default function progressBar(pi: ExtensionAPI): void {
         controller = createUiController(createUiHost(ctx), snapshot);
       } else controller.update(snapshot);
       notifiedError = undefined;
-      return;
+    } else {
+      disposeController();
+      if (monitor.error && monitor.error !== notifiedError && ctx.hasUI) {
+        ctx.ui.notify(monitor.error, "error");
+        notifiedError = monitor.error;
+      }
     }
-    disposeController();
-    if (monitor.error && monitor.error !== notifiedError && ctx.hasUI) {
-      ctx.ui.notify(monitor.error, "error");
-      notifiedError = monitor.error;
-    }
+    // Semantic publish is controller's event-driven readiness refresh. The
+    // controller owns deadline; this does not create a polling cadence.
+    reconciliation?.refresh();
   };
   const monitor = new Monitor(
     render,
@@ -49,6 +74,45 @@ export default function progressBar(pi: ExtensionAPI): void {
       richDetailsEnabled: true,
     },
   );
+  delivery = new ReconciliationDelivery({
+    state: () => {
+      const snapshot = monitor.advisorySettlementSnapshot();
+      return {
+        enabled: snapshot.enabled,
+        mode: context?.mode ?? "print",
+        sessionEpoch,
+        branchEpoch,
+        opportunityId: currentOpportunity?.id,
+        relevant:
+          snapshot.reason === "ready" &&
+          snapshot.tasks.some((task) => task.status !== "done"),
+        idle: context?.isIdle() ?? false,
+        pendingMessages: context?.hasPendingMessages() ?? true,
+      };
+    },
+    branch: () => context?.sessionManager.getBranch() ?? [],
+    sendMessage: (message, options) => pi.sendMessage(message, options),
+  });
+  reconciliation = new ReconciliationController({
+    snapshot: () => monitor.advisorySettlementSnapshot(),
+    emit: ({ runId, content }) => {
+      const opportunityId = randomUUID();
+      currentOpportunity = { id: opportunityId, runId };
+      const result = delivery?.request({
+        kind: "reconciliation",
+        opportunityId,
+        content,
+        sessionEpoch,
+        branchEpoch,
+      });
+      if (result === "suppressed") clearOpportunity();
+    },
+    clock: {
+      now: () => Date.now(),
+      setTimeout: (callback, delay) => setTimeout(callback, delay),
+      clearTimeout: (timer) => clearTimeout(timer),
+    },
+  });
   const checkpoint = (ctx: ExtensionContext) =>
     ctx.sessionManager
       .getBranch()
@@ -74,6 +138,12 @@ export default function progressBar(pi: ExtensionAPI): void {
   const observe = (ctx: ExtensionContext) => {
     context = ctx;
     monitor.observe(() => ctx.sessionManager.getBranch());
+    reconciliation?.refresh();
+  };
+  const settle = (origin: SettlementOrigin | undefined) => {
+    if (origin === undefined) return;
+    if (origin !== "uncertain-advisory") clearOpportunity();
+    reconciliation?.settled(runEpoch, origin);
   };
 
   pi.registerCommand("progress", {
@@ -81,23 +151,54 @@ export default function progressBar(pi: ExtensionAPI): void {
     handler: (args, ctx) => command(args, ctx, monitor),
   });
   pi.on("session_start", async (_event, ctx) => {
+    // Session replacement normally sends shutdown first. Repeat disposal here
+    // for a direct host start boundary; no old timer may survive either path.
+    delivery?.onSessionShutdown();
+    reconciliation?.cancel();
+    sessionEpoch++;
+    branchEpoch++;
+    runEpoch = 0;
+    clearOpportunity();
     await restore(ctx, false);
   });
+  pi.on("session_before_tree", () => {
+    delivery?.onNavigation();
+    reconciliation?.cancel();
+    clearOpportunity();
+  });
   pi.on("session_tree", async (_event, ctx) => {
+    // Real hosts fire session_before_tree first; repeat cancellation so this
+    // post-navigation boundary is also safe when delivered alone.
+    delivery?.onNavigation();
+    reconciliation?.cancel();
+    branchEpoch++;
+    clearOpportunity();
     await restore(ctx, true);
   });
   pi.on("session_shutdown", () => {
     disposeController();
+    delivery?.onSessionShutdown();
+    reconciliation?.cancel();
+    clearOpportunity();
     monitor.stop();
     context = undefined;
+  });
+  pi.on("input", () => {
+    delivery?.onInput();
+    reconciliation?.cancel();
+    clearOpportunity();
   });
   // Canonical active branch is authoritative for semantic tracking. Tool activity
   // captures only safe runtime metadata from the post-listener assistant message.
   pi.on("message_end", (event, ctx) => {
     context = ctx;
+    delivery?.onMessageEnd(event.message, ctx.sessionManager.getBranch());
     monitor.observeActivityDeclaration(event.message);
   });
-  pi.on("context", (_event, ctx) => observe(ctx));
+  pi.on("context", (_event, ctx) => {
+    delivery?.onContext(ctx.sessionManager.getBranch());
+    observe(ctx);
+  });
   pi.on("turn_end", (event, ctx) => {
     context = ctx;
     monitor.observeActivityTurnEnd(event.message);
@@ -105,11 +206,17 @@ export default function progressBar(pi: ExtensionAPI): void {
   });
   pi.on("agent_start", (_event, ctx) => {
     context = ctx;
+    delivery?.onAgentStart();
+    reconciliation?.runStarted(++runEpoch);
     monitor.setActivity("Agent active");
   });
   pi.on("agent_settled", (_event, ctx) => {
+    context = ctx;
     monitor.setActivity("Idle");
+    // Final canonical observation precedes delivery-origin classification and
+    // controller readiness/deadline handling.
     observe(ctx);
+    settle(delivery?.onAgentSettled(ctx.sessionManager.getBranch()));
   });
   pi.on("model_select", (_event, ctx) => {
     context = ctx;

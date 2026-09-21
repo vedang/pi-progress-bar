@@ -707,7 +707,9 @@ it.each(["tui", "rpc"] as const)(
       vi.fn(async (_url: unknown, init?: RequestInit) => {
         const request = JSON.parse(String(init?.body));
         if (request.questions.redApplicability) healthCalls++;
-        const reply = await jevReply(request).json();
+        const reply = (await jevReply(request).json()) as {
+          answers: Record<string, unknown>;
+        };
         for (const key of Object.keys(request.questions)) {
           if (!key.startsWith("correct:")) continue;
           if (key === "correct:task:1") correctionCalls++;

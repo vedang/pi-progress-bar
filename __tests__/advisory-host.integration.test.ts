@@ -768,6 +768,11 @@ it.each(["tui", "rpc"] as const)(
       ]);
       await bounded(h.session.prompt("Continue the current task."));
       expect(correctionCalls).toBe(1);
+      if (process.env.PROGRESS_CORRECTION_REQUEST_OUTPUT)
+        await writeFile(
+          process.env.PROGRESS_CORRECTION_REQUEST_OUTPUT,
+          JSON.stringify(correctionRequest, null, 2),
+        );
       expect(correctionRequest).toMatchObject({
         state: {
           authority: {

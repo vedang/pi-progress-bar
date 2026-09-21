@@ -331,3 +331,14 @@ it("does not choose a unique target merely because only one of two nudge claims 
   await h.controller.observe(attempt);
   expect(h.emit).not.toHaveBeenCalled();
 });
+
+it("gives direct user requests priority over cached necessity and peer suggestions", async () => {
+  const h = await fixture();
+  await h.controller.observe(attempt);
+  const request = h.evaluate.mock.calls[0][0];
+  expect(JSON.stringify(request)).toContain("A direct user request is binding");
+  expect(JSON.stringify(request)).toContain("intercom cannot waive");
+  expect(request.questions["correct:task:1"].criteria.required).toContain(
+    "user request",
+  );
+});

@@ -738,10 +738,10 @@ it.each(["held-classifier", "pending-retry"] as const)(
       if (ordinal === 1 && phase === "held-classifier") await held;
       const response = await transport(url, init);
       if (ordinal === 1) return response;
-      const body = await response.json();
-      for (const answer of Object.values(body.answers) as Array<
-        Record<string, unknown>
-      >) {
+      const body = (await response.json()) as {
+        answers: Record<string, Record<string, unknown>>;
+      };
+      for (const answer of Object.values(body.answers)) {
         answer.choice = "unknown";
         answer.confidence = 1;
         answer.probabilities = {

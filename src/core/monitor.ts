@@ -1140,21 +1140,25 @@ export class Monitor {
     return {
       enabled: this.enabled,
       ready: this.advisorySettlementReason() === "ready",
-      identity: JSON.stringify({
-        sourceId: this.state.sourceId,
-        epoch: this.epoch,
-        correctionEpoch: this.correctionEpoch,
-        tasks: this.state.tasks
-          .filter((task) => task.included)
-          .map((task) => ({
-            id: task.id,
-            revision: task.revision,
-            status: task.status,
-            source: task.source,
-            red: this.currentCorrectionFact(task),
-          })),
-        context,
-      }),
+      identity: createHash("sha256")
+        .update(
+          JSON.stringify({
+            sourceId: this.state.sourceId,
+            epoch: this.epoch,
+            correctionEpoch: this.correctionEpoch,
+            tasks: this.state.tasks
+              .filter((task) => task.included)
+              .map((task) => ({
+                id: task.id,
+                revision: task.revision,
+                status: task.status,
+                source: task.source,
+                red: this.currentCorrectionFact(task),
+              })),
+            context,
+          }),
+        )
+        .digest("hex"),
       tasks,
       context,
     };

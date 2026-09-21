@@ -9,6 +9,7 @@ import {
   projectCorrectionPolicy,
 } from "./advisory/correction-adapter";
 import type {
+  CorrectionAttempt,
   CorrectionAttemptSource,
   CorrectionBinding,
   CorrectionPolicyProjection,
@@ -36,6 +37,8 @@ export default function progressBar(pi: ExtensionAPI): void {
   let runEpoch = 0;
   /** Only a still-running source turn may receive its classifier result. */
   let activeCorrectionRun: number | undefined;
+  /** Latest adapter-admitted B/C action within active source run. */
+  let activeCorrectionAttemptId: string | undefined;
   let pendingCorrectionPolicy: CorrectionPolicyProjection | undefined;
   let activeCorrectionSource:
     | { sourceRun: number; policy: CorrectionPolicyProjection }
@@ -57,6 +60,7 @@ export default function progressBar(pi: ExtensionAPI): void {
   const resetCorrections = () => {
     correctionAdapter.reset();
     reviewSources.clear();
+    activeCorrectionAttemptId = undefined;
   };
   const clearOpportunity = () => {
     currentOpportunity = undefined;
@@ -122,6 +126,7 @@ export default function progressBar(pi: ExtensionAPI): void {
           currentOpportunity ||
           !binding ||
           activeCorrectionRun !== binding.sourceRun ||
+          activeCorrectionAttemptId !== binding.attemptId ||
           !monitor.correctionIsCurrent(binding) ||
           (binding.reviewRunId !== undefined &&
             !correctionAdapter.isReviewActive(binding.reviewRunId))
@@ -147,6 +152,7 @@ export default function progressBar(pi: ExtensionAPI): void {
       const correctionRelevant =
         correctionBinding !== undefined &&
         activeCorrectionRun === correctionBinding.sourceRun &&
+        activeCorrectionAttemptId === correctionBinding.attemptId &&
         monitor.correctionIsCurrent(correctionBinding) &&
         (correctionBinding.reviewRunId === undefined ||
           correctionAdapter.isReviewActive(correctionBinding.reviewRunId));
@@ -339,6 +345,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     clearCorrectionOpportunity();
     const run = ++runEpoch;
     activeCorrectionRun = run;
+    activeCorrectionAttemptId = undefined;
     activeCorrectionSource = {
       sourceRun: run,
       policy: pendingCorrectionPolicy ?? { coverage: "unknown", entries: [] },
@@ -352,6 +359,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     context = ctx;
     monitor.setActivity("Idle");
     activeCorrectionRun = undefined;
+    activeCorrectionAttemptId = undefined;
     activeCorrectionSource = undefined;
     clearCorrectionOpportunity();
     // Final canonical observation precedes delivery-origin classification and
@@ -365,6 +373,20 @@ export default function progressBar(pi: ExtensionAPI): void {
     context = ctx;
     monitor.modelSelected();
   });
+  const observeCorrectionAttempt = (
+    attempt: CorrectionAttempt,
+    source: CorrectionAttemptSource,
+  ) => {
+    // A duplicate host start event for one tool call is not new authority.
+    // A distinct admitted B/C action supersedes its predecessor immediately,
+    // even while its classifier remains in flight or delivery retry is pending.
+    if (activeCorrectionAttemptId !== attempt.id) {
+      activeCorrectionAttemptId = attempt.id;
+      delivery?.onCorrectionRunInvalidated();
+      clearCorrectionOpportunity();
+    }
+    void monitor.observeCorrectionAttempt(attempt, source);
+  };
   pi.on("tool_execution_start", (event, ctx) => {
     context = ctx;
     monitor.observeActivityStart(event.toolCallId, event.toolName, event.args);
@@ -389,7 +411,7 @@ export default function progressBar(pi: ExtensionAPI): void {
       ctx.cwd,
     );
     if (correction && source) {
-      void monitor.observeCorrectionAttempt(correction, { ...source, action });
+      observeCorrectionAttempt(correction, { ...source, action });
     } else if (source && correctionAdapter.hasPendingReview(event.toolCallId)) {
       reviewSources.set(event.toolCallId, { ...source, action });
     }
@@ -413,8 +435,7 @@ export default function progressBar(pi: ExtensionAPI): void {
       event.result,
       event.isError,
     );
-    if (correction && source)
-      void monitor.observeCorrectionAttempt(correction, source);
+    if (correction && source) observeCorrectionAttempt(correction, source);
     monitor.observeToolEnd(
       event.toolCallId,
       event.toolName,

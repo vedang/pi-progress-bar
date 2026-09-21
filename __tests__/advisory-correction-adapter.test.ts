@@ -37,6 +37,8 @@ function receipt() {
     details: {
       mode: "workflow",
       runId: "workflow-1",
+      asyncId: "workflow-1",
+      toolCallId: "call-1",
       results: [],
       workflow: {
         resource: {
@@ -54,14 +56,7 @@ function receipt() {
         workflowRunId: "workflow-1",
         inventoryComplete: false,
         workflowState: "running",
-        children: [
-          {
-            childId: "review",
-            state: "running",
-            runId: "child-1",
-            agent: "reviewer",
-          },
-        ],
+        children: [],
       },
     },
   };
@@ -127,20 +122,21 @@ it("observes named review without launching or nudging before a correlated runni
       {
         workflow: "review",
         args: { task: "PRIVATE_REVIEW_TEXT" },
-        async: false,
+        async: true,
       },
       "/repo",
     ),
   ).toBeUndefined();
-  expect(adapter.update("call-1", "subagent", receipt())).toEqual({
+  expect(adapter.update("call-1", "subagent", receipt())).toBeUndefined();
+  expect(adapter.end("call-1", "subagent", receipt(), false)).toEqual({
     kind: "review",
     id: "call-1",
     toolName: "subagent",
-    runId: "child-1",
+    runId: "workflow-1",
   });
   expect(adapter.update("call-1", "subagent", receipt())).toBeUndefined();
 });
-it.each(["raw-script", "agent-name", "background", "spoofed-source"])(
+it.each(["raw-script", "agent-name", "foreground", "spoofed-source"])(
   "does not infer review purpose from %s",
   async (why) => {
     const tool = structuredClone(review);
@@ -154,10 +150,10 @@ it.each(["raw-script", "agent-name", "background", "spoofed-source"])(
           : {
               workflow: "review",
               args: { task: "review" },
-              async: why === "background",
+              async: why !== "foreground",
             };
     adapter.start("call-1", "subagent", args, "/repo");
-    expect(adapter.update("call-1", "subagent", receipt())).toBeUndefined();
+    expect(adapter.end("call-1", "subagent", receipt(), false)).toBeUndefined();
   },
 );
 it.each([
@@ -175,18 +171,24 @@ it.each([
     { workflow: "review", args: { task: "review" }, async: false },
     "/repo",
   );
+  adapter.start(
+    "call-1",
+    "subagent",
+    { workflow: "review", args: { task: "review" }, async: true },
+    "/repo",
+  );
   const value = receipt();
   if (why === "wrong-call")
     value.details.workflowChildren.parentToolCallId = "other";
   if (why === "wrong-workflow")
     value.details.workflowChildren.workflowRunId = "other";
-  if (why === "no-run") value.details.workflowChildren.children[0].runId = "";
+  if (why === "no-run") value.details.runId = "";
   if (why === "pending")
-    value.details.workflowChildren.children[0].state = "pending";
+    value.details.workflowChildren.workflowState = "pending";
   if (why === "completed")
     value.details.workflowChildren.workflowState = "completed";
   if (why === "wrong-resource") value.details.workflow.resource.name = "run-ci";
-  expect(adapter.update("call-1", "subagent", value)).toBeUndefined();
+  expect(adapter.end("call-1", "subagent", value, false)).toBeUndefined();
 });
 it("clears outstanding review correlation on lifecycle reset", async () => {
   const adapter = await fixture();
@@ -198,4 +200,24 @@ it("clears outstanding review correlation on lifecycle reset", async () => {
   );
   adapter.reset();
   expect(adapter.update("call-1", "subagent", receipt())).toBeUndefined();
+});
+
+it("tracks only successfully admitted async workflow until observed completion", async () => {
+  const adapter = await fixture();
+  const args = { workflow: "review", args: { task: "review" }, async: true };
+  adapter.start("call-1", "subagent", args, "/repo");
+  expect(adapter.end("call-1", "subagent", receipt(), false)).toMatchObject({
+    runId: "workflow-1",
+  });
+  expect(adapter.isReviewActive("workflow-1")).toBe(true);
+  adapter.complete({ mode: "workflow", runId: "unrelated", state: "complete" });
+  expect(adapter.isReviewActive("workflow-1")).toBe(true);
+  adapter.complete({
+    mode: "workflow",
+    runId: "workflow-1",
+    state: "complete",
+  });
+  expect(adapter.isReviewActive("workflow-1")).toBe(false);
+  adapter.start("call-2", "subagent", args, "/repo");
+  expect(adapter.end("call-2", "subagent", receipt(), true)).toBeUndefined();
 });

@@ -17,6 +17,7 @@ type Handler = (event: never, ctx: ExtensionContext) => unknown;
 function host() {
   let entries: unknown[] = [];
   const handlers = new Map<string, Handler>();
+  const bus = new Map<string, (data: unknown) => void>();
   let command:
     | ((args: string, ctx: ExtensionCommandContext) => Promise<void>)
     | undefined;
@@ -66,6 +67,12 @@ function host() {
   } as unknown as ExtensionContext;
   const pi = {
     sendMessage,
+    events: {
+      on: (name: string, listener: (data: unknown) => void) => {
+        bus.set(name, listener);
+        return () => bus.delete(name);
+      },
+    },
     getAllTools: () => [
       {
         name: "write",
@@ -117,6 +124,12 @@ function host() {
     hasPendingMessages,
     notify,
     setWidget,
+    completeReview: (runId: string) =>
+      bus.get("subagent:async-complete")?.({
+        mode: "workflow",
+        runId,
+        state: "complete",
+      }),
     emit: async (name: string, event = {}) => {
       if (name === "agent_start")
         await handlers.get("before_agent_start")?.(
@@ -554,74 +567,106 @@ it("delivers attempted-write correction immediately under master ON", async () =
   await vi.advanceTimersByTimeAsync(100);
   expect(h.sendMessage).toHaveBeenCalledTimes(1);
 });
-it("observes a named launched review passively and emits exact corrective advice", async () => {
-  const h = await advisoryFixture();
-  admitCorrection();
-  Reflect.set(h.ctx, "isIdle", () => false);
-  await h.emit("agent_start");
-  const args = {
-    workflow: "review",
-    args: { task: "PRIVATE_REVIEW_TASK" },
-    async: false,
-  };
-  await h.emit("tool_execution_start", {
-    toolCallId: "review-attempt",
-    toolName: "subagent",
-    args,
-  });
-  expect(h.sendMessage).not.toHaveBeenCalled();
-  const partialResult = {
-    content: [{ type: "text", text: "PRIVATE_CHILD_BODY" }],
-    details: {
-      mode: "workflow",
-      runId: "workflow-1",
-      workflow: {
-        resource: {
-          kind: "workflow",
-          name: "review",
+it.each([
+  "active",
+  "completed-before-result",
+  "completed-before-retry",
+] as const)(
+  "observes named async review with terminal freshness: %s",
+  async (scenario) => {
+    const h = await advisoryFixture();
+    admitCorrection();
+    Reflect.set(h.ctx, "isIdle", () => false);
+    await h.emit("agent_start");
+    const args = {
+      workflow: "review",
+      args: { task: "PRIVATE_REVIEW_TASK" },
+      async: true,
+    };
+    await h.emit("tool_execution_start", {
+      toolCallId: "review-attempt",
+      toolName: "subagent",
+      args,
+    });
+    expect(h.sendMessage).not.toHaveBeenCalled();
+    const partialResult = {
+      content: [{ type: "text", text: "PRIVATE_CHILD_BODY" }],
+      details: {
+        mode: "workflow",
+        runId: "workflow-1",
+        asyncId: "workflow-1",
+        toolCallId: "review-attempt",
+        workflow: {
+          resource: {
+            kind: "workflow",
+            name: "review",
+            version: 1,
+            invocation: "named",
+            expansion: "resolved",
+            id: "00000000-0000-4000-8000-000000000001",
+          },
+        },
+        workflowChildren: {
           version: 1,
-          invocation: "named",
-          expansion: "resolved",
-          id: "00000000-0000-4000-8000-000000000001",
+          parentToolCallId: "review-attempt",
+          workflowRunId: "workflow-1",
+          inventoryComplete: false,
+          workflowState: "running",
+          children: [],
         },
       },
-      workflowChildren: {
-        version: 1,
-        parentToolCallId: "review-attempt",
-        workflowRunId: "workflow-1",
-        inventoryComplete: false,
-        workflowState: "running",
-        children: [
-          {
-            childId: "review",
-            state: "running",
-            runId: "child-1",
-            agent: "reviewer",
-          },
-        ],
-      },
-    },
-  };
-  await h.emit("tool_execution_update", {
-    toolCallId: "review-attempt",
-    toolName: "subagent",
-    args,
-    partialResult,
-  });
-  await vi.advanceTimersByTimeAsync(100);
-  expect(h.sendMessage).toHaveBeenCalledTimes(1);
-  expect(h.sendMessage.mock.calls[0][0]).toMatchObject({
-    details: { kind: "review-correction" },
-    content:
-      "Reviewing the work done so far is premature. Please cancel the review and continue with the implementation. It is better to review the work when a bigger chunk of it has been completed.",
-  });
-  expect(JSON.stringify(vi.mocked(fetch).mock.calls)).not.toContain(
-    "PRIVATE_CHILD_BODY",
-  );
-  expect(JSON.stringify(vi.mocked(fetch).mock.calls)).not.toContain(
-    "PRIVATE_REVIEW_TASK",
-  );
-});
+    };
+    let release = () => {};
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    if (scenario === "completed-before-result") {
+      const transport = vi.mocked(fetch).getMockImplementation();
+      if (!transport) throw new Error("transport");
+      vi.mocked(fetch).mockImplementation(async (url, init) => {
+        if (
+          Object.keys(JSON.parse(String(init?.body)).questions).some((key) =>
+            key.startsWith("correct:"),
+          )
+        )
+          await pending;
+        return transport(url, init);
+      });
+    }
+    await h.emit("tool_execution_end", {
+      toolCallId: "review-attempt",
+      toolName: "subagent",
+      args,
+      result: partialResult,
+      isError: false,
+    });
+    if (scenario === "completed-before-result") {
+      h.completeReview("workflow-1");
+      release();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(h.sendMessage).not.toHaveBeenCalled();
+      return;
+    }
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.sendMessage).toHaveBeenCalledTimes(1);
+    if (scenario === "completed-before-retry") {
+      h.completeReview("workflow-1");
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(h.sendMessage).toHaveBeenCalledTimes(1);
+    }
+    expect(h.sendMessage.mock.calls[0][0]).toMatchObject({
+      details: { kind: "review-correction" },
+      content:
+        "Reviewing the work done so far is premature. Please cancel the review and continue with the implementation. It is better to review the work when a bigger chunk of it has been completed.",
+    });
+    expect(JSON.stringify(vi.mocked(fetch).mock.calls)).not.toContain(
+      "PRIVATE_CHILD_BODY",
+    );
+    expect(JSON.stringify(vi.mocked(fetch).mock.calls)).not.toContain(
+      "PRIVATE_REVIEW_TASK",
+    );
+  },
+);
 
 it.each(["settled", "new-start", "blocked-tool"] as const)(
   "fences held correction across %s without cancelling a blocked attempt",

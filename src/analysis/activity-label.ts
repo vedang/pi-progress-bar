@@ -13,6 +13,8 @@ const MAX_TASKS = 20;
 const MIN_CONFIDENCE = 0.5;
 const MIN_PROBABILITY = 0.8;
 const abstentions = new Set(["none", "concurrent", "uncertain"]);
+const reportAuthority =
+  "Eligible reports are this assistant's direct statements of its own actual work or observed findings. Do not select or bind a quoted, copied, fictional, external, hypothetical, example, sample, or fenced/code-block voice; reject future wishes or plans. If voice is unclear, abstain.";
 const digest = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 const digestPattern = /^[a-f0-9]{64}$/;
@@ -322,14 +324,12 @@ export function buildLabelSelectionRequest(
     questions: {
       currentCandidate: {
         type: "choice",
-        instructions:
-          "Which exact supplied candidate reports immediate work now? Do not infer a task.",
+        instructions: `${reportAuthority} Which exact supplied candidate reports immediate work now? Do not infer a task.`,
         criteria: candidateCriteria(bundle),
       },
       historyCandidate: {
         type: "choice",
-        instructions:
-          "Which exact supplied candidate reports one material finding, decision, validation, blocker, or completed intermediate action? Future intention alone is not history.",
+        instructions: `${reportAuthority} Which exact supplied candidate reports one material finding, decision, validation, blocker, or completed intermediate action? Future intention alone is not history.`,
         criteria: candidateCriteria(bundle),
       },
     },
@@ -525,7 +525,7 @@ export function buildLabelBindingRequest(
         `${kind}Task`,
         {
           type: "choice" as const,
-          instructions: `Which exact supplied task, if any, is bound to the fixed ${kind} candidate?`,
+          instructions: `${reportAuthority} Which exact supplied task, if any, is bound to the fixed ${kind} candidate?`,
           criteria: taskCriteria(tasks),
         },
       ]),

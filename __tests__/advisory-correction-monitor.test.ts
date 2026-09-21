@@ -136,3 +136,24 @@ it("new external input invalidates old health/attempt authority without persisti
     readSnapshot(h).tasks.every((task: { red?: unknown }) => !task.red),
   ).toBe(true);
 });
+
+it("withdraws old test eligibility as soon as replacement health is scheduled", async () => {
+  const h = await fixture();
+  const target = h.monitor.state.tasks[0];
+  expect(readSnapshot(h).tasks[0].red?.choice).toBe("not-needed");
+  method(
+    h,
+    "scheduleHealth",
+    {
+      id: "replacement-report",
+      role: "assistant",
+      text: "New evidence requires reassessment before test advice.",
+    },
+    target,
+  );
+  expect(readSnapshot(h).tasks[0].red).toBeUndefined();
+  const calls = h.fetch.mock.calls.length;
+  await method(h, "observeCorrectionAttempt", attempt);
+  expect(h.emit).not.toHaveBeenCalled();
+  expect(h.fetch.mock.calls.length).toBe(calls);
+});

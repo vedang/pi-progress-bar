@@ -21,6 +21,11 @@ function method(
   expect(fn, name).toBeTypeOf("function");
   return Reflect.apply(fn, h.monitor, args);
 }
+function readSnapshot(h: ReturnType<typeof monitorHarness>) {
+  return method(h, "correctionSnapshot") as {
+    tasks: Array<{ red?: { choice: string; revision: number } }>;
+  };
+}
 async function fixture() {
   const h = monitorHarness();
   running.push(h);
@@ -63,16 +68,16 @@ const attempt = {
 it("exposes detached runtime-only existing health facts and full included board", async () => {
   const h = await fixture();
   const checkpoint = JSON.stringify(h.monitor.checkpoint());
-  const snapshot = method(h, "correctionSnapshot");
+  const snapshot = readSnapshot(h);
   expect(snapshot.tasks).toHaveLength(3);
   expect(snapshot.tasks[0].red).toMatchObject({
     choice: "not-needed",
     revision: 1,
   });
-  snapshot.tasks[0].red.choice = "needed";
-  expect(method(h, "correctionSnapshot").tasks[0].red.choice).toBe(
-    "not-needed",
-  );
+  const red = snapshot.tasks[0].red;
+  if (!red) throw new Error("Missing health fact");
+  red.choice = "needed";
+  expect(readSnapshot(h).tasks[0].red?.choice).toBe("not-needed");
   expect(JSON.stringify(h.monitor.checkpoint())).toBe(checkpoint);
 });
 it("classifies started test using existing health, accounts dispatch, and emits no task mutation", async () => {
@@ -123,8 +128,6 @@ it("new external input invalidates old health/attempt authority without persisti
   await method(h, "observeCorrectionAttempt", attempt);
   expect(h.emit).not.toHaveBeenCalled();
   expect(
-    method(h, "correctionSnapshot").tasks.every(
-      (task: { red?: unknown }) => !task.red,
-    ),
+    readSnapshot(h).tasks.every((task: { red?: unknown }) => !task.red),
   ).toBe(true);
 });

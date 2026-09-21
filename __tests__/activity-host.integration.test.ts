@@ -10,8 +10,8 @@ import {
   InMemoryCredentialStore,
   Type,
 } from "@earendil-works/pi-ai";
-import type * as Pi from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import * as Pi from "@earendil-works/pi-coding-agent";
 import { expect, it } from "vitest";
 
 function latch() {
@@ -47,34 +47,53 @@ const cases = [
   "error",
   "transform-before",
   "transform-after",
+  "remove-before",
+  "remove-after",
 ] as const;
 
-it.skipIf(!hostRoot).each(cases)(
-  "installed Pi 0.85.1 proves provisional/final tool boundary: %s",
+it.each(cases)(
+  "actual Pi proves provisional/final tool boundary: %s",
   async (scenario) => {
-    if (!hostRoot) throw new Error("Installed host root required");
-    expect(
-      JSON.parse(readFileSync(join(hostRoot, "package.json"), "utf8")).version,
-    ).toBe("0.85.1");
+    if (hostRoot)
+      expect(
+        JSON.parse(readFileSync(join(hostRoot, "package.json"), "utf8"))
+          .version,
+      ).toBe("0.85.1");
     const {
       createAgentSession,
       DefaultResourceLoader,
       ModelRuntime,
       SessionManager,
       SettingsManager,
-    } = (await import(
-      pathToFileURL(join(hostRoot, "dist/index.js")).href
-    )) as typeof Pi;
+    } = hostRoot
+      ? ((await import(
+          pathToFileURL(join(hostRoot, "dist/index.js")).href
+        )) as typeof Pi)
+      : Pi;
     const cwd = await mkdtemp(join(tmpdir(), "progress-activity-host-"));
     const a = latch(),
       b = latch(),
       releaseA = latch(),
       releaseB = latch();
     const events: { kind: string; ids: string[] }[] = [];
+    const textEvents: { phase: string; text: string; canonical: boolean }[] =
+      [];
+    const visibleText = (content: unknown) =>
+      Array.isArray(content)
+        ? content
+            .flatMap((part) => (part?.type === "text" ? [part.text] : []))
+            .join("\n")
+        : "";
     const errors: unknown[] = [];
     const calls = [fauxToolCall("proof_a", {}), fauxToolCall("proof_b", {})];
     const ids = calls.map((call) => call.id);
-    const transformed = scenario.startsWith("transform-");
+    const transformed =
+      scenario.startsWith("transform-") || scenario.startsWith("remove-");
+    const finalText = scenario.startsWith("remove-")
+      ? ""
+      : transformed
+        ? "Final listener: checking parser edge cases."
+        : "Inspecting parser behavior.";
     const settingsManager = SettingsManager.inMemory({
       compaction: { enabled: false },
       retry: { enabled: false },
@@ -88,16 +107,22 @@ it.skipIf(!hostRoot).each(cases)(
     const faux = fauxProvider({ provider: "activity-host-proof" });
     runtime.registerNativeProvider(faux.provider);
     faux.setResponses([
-      fauxAssistantMessage(transformed ? calls.slice(0, 1) : calls, {
-        stopReason:
-          scenario === "truncated"
-            ? "length"
-            : scenario === "aborted"
-              ? "aborted"
-              : scenario === "error"
-                ? "error"
-                : "toolUse",
-      }),
+      fauxAssistantMessage(
+        [
+          { type: "text", text: "Inspecting parser behavior." },
+          ...(transformed ? calls.slice(0, 1) : calls),
+        ],
+        {
+          stopReason:
+            scenario === "truncated"
+              ? "length"
+              : scenario === "aborted"
+                ? "aborted"
+                : scenario === "error"
+                  ? "error"
+                  : "toolUse",
+        },
+      ),
       fauxAssistantMessage("Finished"),
     ]);
     const transform = (pi: ExtensionAPI) => {
@@ -107,7 +132,17 @@ it.skipIf(!hostRoot).each(cases)(
           !event.message.content.some((part) => part.type === "toolCall")
         )
           return;
-        return { message: { ...event.message, content: calls } };
+        return {
+          message: {
+            ...event.message,
+            content: [
+              ...(finalText
+                ? [{ type: "text" as const, text: finalText }]
+                : []),
+              ...calls,
+            ],
+          },
+        };
       });
     };
     const observer = (pi: ExtensionAPI) => {
@@ -144,13 +179,29 @@ it.skipIf(!hostRoot).each(cases)(
           },
         });
       }
-      pi.on("message_end", (event) => {
+      pi.on("message_end", (event, ctx) => {
         if (event.message.role !== "assistant") return;
         const declared = event.message.content.flatMap((part) =>
           part.type === "toolCall" ? [part.id] : [],
         );
-        if (declared.length)
+        if (declared.length) {
           events.push({ kind: "provisional", ids: [...declared] });
+          textEvents.push({
+            phase: "provisional",
+            text: visibleText(event.message.content),
+            canonical: ctx.sessionManager
+              .getBranch()
+              .some(
+                (entry) =>
+                  entry.type === "message" &&
+                  entry.message.role === "assistant" &&
+                  Array.isArray(entry.message.content) &&
+                  entry.message.content.some(
+                    (part) => part.type === "toolCall" && part.id === ids[0],
+                  ),
+              ),
+          });
+        }
       });
       pi.on("tool_execution_start", (event) => {
         events.push({ kind: "start", ids: [event.toolCallId] });
@@ -158,12 +209,31 @@ it.skipIf(!hostRoot).each(cases)(
       pi.on("tool_execution_end", (event) => {
         events.push({ kind: "end", ids: [event.toolCallId] });
       });
-      pi.on("turn_end", (event) => {
+      pi.on("turn_end", (event, ctx) => {
         if (event.message.role !== "assistant") return;
         const declared = event.message.content.flatMap((part) =>
           part.type === "toolCall" ? [part.id] : [],
         );
         if (declared.length) {
+          const stored = ctx.sessionManager
+            .getBranch()
+            .find(
+              (entry) =>
+                entry.type === "message" &&
+                entry.message.role === "assistant" &&
+                Array.isArray(entry.message.content) &&
+                entry.message.content.some(
+                  (part) => part.type === "toolCall" && part.id === ids[0],
+                ),
+            );
+          textEvents.push({
+            phase: "final",
+            text:
+              stored?.type === "message"
+                ? visibleText(stored.message.content)
+                : "",
+            canonical: !!stored,
+          });
           events.push({ kind: "final", ids: declared });
           events.push({
             kind: "results",
@@ -181,12 +251,11 @@ it.skipIf(!hostRoot).each(cases)(
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      extensionFactories:
-        scenario === "transform-before"
-          ? [transform, observer]
-          : scenario === "transform-after"
-            ? [observer, transform]
-            : [observer],
+      extensionFactories: scenario.endsWith("-before")
+        ? [transform, observer]
+        : scenario.endsWith("-after")
+          ? [observer, transform]
+          : [observer],
     });
     await loader.reload();
     const { session } = await createAgentSession({
@@ -220,9 +289,16 @@ it.skipIf(!hostRoot).each(cases)(
         );
         expect(events[0]).toEqual({
           kind: "provisional",
-          ids: scenario === "transform-after" ? ids.slice(0, 1) : ids,
+          ids: scenario.endsWith("-after") ? ids.slice(0, 1) : ids,
         });
         expect(events.some((event) => event.kind === "final")).toBe(false);
+        expect(textEvents[0]).toEqual({
+          phase: "provisional",
+          text: scenario.endsWith("-before")
+            ? finalText
+            : "Inspecting parser behavior.",
+          canonical: false,
+        });
         if (scenario === "partial") await bounded(session.abort());
         else if (scenario === "sequential") {
           expect(
@@ -247,6 +323,12 @@ it.skipIf(!hostRoot).each(cases)(
         }
       }
       await bounded(running);
+      if (!["aborted", "error", "partial", "truncated"].includes(scenario))
+        expect(textEvents.find((event) => event.phase === "final")).toEqual({
+          phase: "final",
+          text: finalText,
+          canonical: true,
+        });
       const started = events
         .filter((event) => event.kind === "start")
         .flatMap((event) => event.ids);

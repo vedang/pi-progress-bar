@@ -3,7 +3,9 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { CorrectionAdapter } from "./advisory/correction-adapter";
 import {
+  type AdvisoryDeliveryKind,
   ReconciliationDelivery,
   type SettlementOrigin,
 } from "./advisory/delivery";
@@ -23,7 +25,12 @@ export default function progressBar(pi: ExtensionAPI): void {
   let sessionEpoch = 0;
   let branchEpoch = 0;
   let runEpoch = 0;
-  let currentOpportunity: { id: string; runId: number } | undefined;
+  let currentOpportunity:
+    | { id: string; kind: AdvisoryDeliveryKind; runId?: number }
+    | undefined;
+  const correctionAdapter = new CorrectionAdapter({
+    tools: () => pi.getAllTools(),
+  });
   const clearOpportunity = () => {
     currentOpportunity = undefined;
   };
@@ -40,6 +47,7 @@ export default function progressBar(pi: ExtensionAPI): void {
       // Cancelling here adds no advisory-specific command or preference.
       reconciliation?.cancel();
       delivery?.onMasterOff();
+      correctionAdapter.reset();
       clearOpportunity();
     }
     if (ctx.mode === "tui" && presentation.enabled) {
@@ -72,6 +80,22 @@ export default function progressBar(pi: ExtensionAPI): void {
         return context;
       }),
       richDetailsEnabled: true,
+      onCorrection: ({ kind, content }) => {
+        const target = delivery;
+        // One chain owns all advisory retries. Never replace a live
+        // reconciliation opportunity with a concurrent correction.
+        if (!target || currentOpportunity) return;
+        const opportunityId = randomUUID();
+        currentOpportunity = { id: opportunityId, kind };
+        const result = target.request({
+          kind,
+          opportunityId,
+          content,
+          sessionEpoch,
+          branchEpoch,
+        });
+        if (result !== "started") clearOpportunity();
+      },
     },
   );
   delivery = new ReconciliationDelivery({
@@ -85,7 +109,8 @@ export default function progressBar(pi: ExtensionAPI): void {
         opportunityId: currentOpportunity?.id,
         relevant:
           snapshot.reason === "ready" &&
-          snapshot.tasks.some((task) => task.status !== "done"),
+          (currentOpportunity?.kind !== "reconciliation" ||
+            snapshot.tasks.some((task) => task.status !== "done")),
         idle: context?.isIdle() ?? false,
         pendingMessages: context?.hasPendingMessages() ?? true,
       };
@@ -97,7 +122,11 @@ export default function progressBar(pi: ExtensionAPI): void {
     snapshot: () => monitor.advisorySettlementSnapshot(),
     emit: ({ runId, content }) => {
       const opportunityId = randomUUID();
-      currentOpportunity = { id: opportunityId, runId };
+      currentOpportunity = {
+        id: opportunityId,
+        kind: "reconciliation",
+        runId,
+      };
       const result = delivery?.request({
         kind: "reconciliation",
         opportunityId,
@@ -154,6 +183,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     // Session replacement normally sends shutdown first. Repeat disposal here
     // for a direct host start boundary; no old timer may survive either path.
     delivery?.onSessionShutdown();
+    correctionAdapter.reset();
     reconciliation?.cancel();
     sessionEpoch++;
     branchEpoch++;
@@ -163,6 +193,8 @@ export default function progressBar(pi: ExtensionAPI): void {
   });
   pi.on("session_before_tree", () => {
     delivery?.onNavigation();
+    correctionAdapter.reset();
+    monitor.invalidateCorrections();
     reconciliation?.cancel();
     clearOpportunity();
   });
@@ -170,6 +202,8 @@ export default function progressBar(pi: ExtensionAPI): void {
     // Real hosts fire session_before_tree first; repeat cancellation so this
     // post-navigation boundary is also safe when delivered alone.
     delivery?.onNavigation();
+    correctionAdapter.reset();
+    monitor.invalidateCorrections();
     reconciliation?.cancel();
     branchEpoch++;
     clearOpportunity();
@@ -178,6 +212,7 @@ export default function progressBar(pi: ExtensionAPI): void {
   pi.on("session_shutdown", () => {
     disposeController();
     delivery?.onSessionShutdown();
+    correctionAdapter.reset();
     reconciliation?.cancel();
     clearOpportunity();
     monitor.stop();
@@ -185,6 +220,8 @@ export default function progressBar(pi: ExtensionAPI): void {
   });
   pi.on("input", () => {
     delivery?.onInput();
+    correctionAdapter.reset();
+    monitor.invalidateCorrections();
     reconciliation?.clearPendingIntent();
     clearOpportunity();
   });
@@ -232,9 +269,26 @@ export default function progressBar(pi: ExtensionAPI): void {
       ctx.sessionManager.getLeafId() ?? undefined,
     );
     monitor.setActivity("Tool active");
+    const correction = correctionAdapter.start(
+      event.toolCallId,
+      event.toolName,
+      event.args,
+      ctx.cwd,
+    );
+    if (correction) void monitor.observeCorrectionAttempt(correction);
+  });
+  pi.on("tool_execution_update", (event, ctx) => {
+    context = ctx;
+    const correction = correctionAdapter.update(
+      event.toolCallId,
+      event.toolName,
+      event.partialResult,
+    );
+    if (correction) void monitor.observeCorrectionAttempt(correction);
   });
   pi.on("tool_execution_end", (event, ctx) => {
     context = ctx;
+    correctionAdapter.end(event.toolCallId);
     monitor.observeToolEnd(
       event.toolCallId,
       event.toolName,

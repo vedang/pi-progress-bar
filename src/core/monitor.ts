@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-
+import {
+  type CorrectionAttempt,
+  CorrectionController,
+  type CorrectionEmission,
+  type CorrectionRedFact,
+  type CorrectionSnapshot,
+  type CorrectionTask,
+} from "../advisory/corrections";
 import {
   type ActivityCall,
   type ActivityList,
@@ -84,6 +91,8 @@ export interface MonitorOptions {
   ) => Promise<SelectedModelResult>;
   /** Runtime-only grounded-detail gate; production enables it and tests may disable it. */
   richDetailsEnabled?: boolean;
+  /** Accepted correction advice is runtime-only and delivered by the host seam. */
+  onCorrection?: (emission: CorrectionEmission) => void;
 }
 
 interface ProviderUsage {
@@ -110,6 +119,11 @@ interface HealthWork {
   observation: Observation;
   taskId: string;
   revision: number;
+}
+
+interface CorrectionFact extends CorrectionRedFact {
+  epoch: number;
+  taskSource: HybridTask["source"];
 }
 
 interface ActivityBatch {
@@ -307,6 +321,7 @@ const presentationCard = (
 });
 const MAX_HEALTH_REQUIREMENTS_BYTES = 4 * 1024;
 const MAX_HEALTH_REPORT_BYTES = 4 * 1024;
+const MAX_CORRECTION_FACTS = 20;
 
 const boundedHealthText = (text: string, maxBytes: number) => {
   if (Buffer.byteLength(text) <= maxBytes) return text;
@@ -354,6 +369,12 @@ export class Monitor {
   private readonly activityGateway: JevGateway;
   /** Optional grounded details never share semantic/health retry state. */
   private readonly detailGateway: JevGateway;
+  /** Optional corrective binding has its own one-flight transport authority. */
+  private readonly correctionGateway: JevGateway;
+  private correctionController!: CorrectionController;
+  /** Ephemeral raw rubric facts; never display or checkpoint data. */
+  private correctionFacts = new Map<string, CorrectionFact>();
+  private correctionEpoch = 0;
   readonly evidence = new EvidenceStore();
   readonly usage = {
     jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
@@ -455,6 +476,14 @@ export class Monitor {
       onDispatch: (at) => this.recordJevDispatch(at),
       onPermanentError: () => this.note("detail-capacity-skipped"),
     });
+    this.correctionGateway = new JevGateway({
+      fetch: (url, init) => globalThis.fetch(url, init),
+      getApiKey: () => process.env.TYPESAFE_API_KEY,
+      onDispatch: (at) => this.recordJevDispatch(at),
+      // Corrections are optional and never disable semantic progress tracking.
+      onPermanentError: () => this.note("model-unavailable"),
+    });
+    this.correctionController = this.newCorrectionController();
   }
 
   /** Display focus never establishes tool evidence authority. */
@@ -620,15 +649,18 @@ export class Monitor {
       this.epoch++;
       this.extractionController?.abort();
       this.cancelHealth();
+      this.invalidateCorrections();
       this.gateway.pause();
       this.healthGateway.pause();
       this.activityGateway.pause();
       this.detailGateway.pause();
+      this.correctionGateway.pause();
       this.clearActivity(false);
       this.gateway.enable(this.identity());
       this.healthGateway.enable(this.identity());
       this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
+      this.correctionGateway.enable(this.identity());
       this.waitingForWake = false;
       this.requeue(pass);
       this.drain();
@@ -756,11 +788,13 @@ export class Monitor {
     this.epoch++;
     this.extractionController?.abort();
     this.cancelHealth();
+    this.invalidateCorrections();
     this.healthObservation = undefined;
     this.gateway.pause();
     this.healthGateway.pause();
     this.activityGateway.pause();
     this.detailGateway.pause();
+    this.correctionGateway.pause();
     this.clearActivity(false);
     this.evidence.clearPending();
   }
@@ -920,6 +954,7 @@ export class Monitor {
     this.healthGateway.enable(this.identity());
     this.activityGateway.enable(this.identity());
     this.detailGateway.enable(this.identity());
+    this.correctionGateway.enable(this.identity());
     this.requeue(pass, true);
     if (this.queued.length) this.idleDoneInvalidated = true;
     this.save();
@@ -1082,6 +1117,62 @@ export class Monitor {
     };
   }
 
+  /**
+   * Detached correction authority. It copies current included rows and bounded
+   * canonical text already resident in memory; it never reopens branch history.
+   */
+  correctionSnapshot(): CorrectionSnapshot {
+    const context = this.correctionContext();
+    const tasks: CorrectionTask[] = this.state.tasks.flatMap((task) => {
+      if (!task.included) return [];
+      const red = this.currentCorrectionFact(task);
+      return [
+        {
+          id: task.id,
+          label: task.label,
+          revision: task.revision,
+          included: true,
+          status: task.status,
+          ...(red ? { red } : {}),
+        },
+      ];
+    });
+    return {
+      enabled: this.enabled,
+      ready: this.advisorySettlementReason() === "ready",
+      identity: JSON.stringify({
+        sourceId: this.state.sourceId,
+        epoch: this.epoch,
+        correctionEpoch: this.correctionEpoch,
+        tasks: this.state.tasks
+          .filter((task) => task.included)
+          .map((task) => ({
+            id: task.id,
+            revision: task.revision,
+            status: task.status,
+            source: task.source,
+            red: this.currentCorrectionFact(task),
+          })),
+        context,
+      }),
+      tasks,
+      context,
+    };
+  }
+
+  observeCorrectionAttempt(attempt: CorrectionAttempt): Promise<void> {
+    return this.correctionController.observe(attempt);
+  }
+
+  /** External input/lifecycle boundaries revoke ephemeral action authority. */
+  invalidateCorrections(): void {
+    this.correctionEpoch++;
+    this.correctionFacts.clear();
+    this.correctionController.dispose();
+    this.correctionGateway.invalidate();
+    this.correctionController = this.newCorrectionController();
+  }
+
   /** Detached allowlisted diagnostics; intentionally excludes task/source/provider text. */
   debugSnapshot(): DebugSnapshot {
     return {
@@ -1099,6 +1190,117 @@ export class Monitor {
         count,
       })),
     };
+  }
+
+  private correctionContext() {
+    const context: string[] = [];
+    let bytes = 0;
+    for (const observation of this.settledContext) {
+      const size = Buffer.byteLength(observation.text, "utf8");
+      if (bytes + size > 4 * 1024) break;
+      context.push(observation.text);
+      bytes += size;
+    }
+    return context;
+  }
+
+  private currentCorrectionFact(
+    task: HybridTask,
+  ): CorrectionRedFact | undefined {
+    const fact = this.correctionFacts.get(task.id);
+    if (
+      !fact ||
+      fact.epoch !== this.epoch ||
+      fact.revision !== task.revision ||
+      !sameSource(fact.taskSource, task.source)
+    )
+      return;
+    return {
+      choice: fact.choice,
+      confidence: fact.confidence,
+      probability: fact.probability,
+      revision: fact.revision,
+    };
+  }
+
+  private newCorrectionController() {
+    return new CorrectionController({
+      snapshot: () => this.correctionSnapshot(),
+      evaluate: (request) => this.evaluateCorrection(request),
+      emit: (emission) => {
+        if (!this.enabled) return;
+        try {
+          this.options.onCorrection?.({ ...emission });
+        } catch {
+          // Delivery is optional; controller result remains a safe abstention.
+        }
+      },
+    });
+  }
+
+  private async evaluateCorrection(request: EvaluationRequest) {
+    const epoch = this.epoch;
+    const correctionEpoch = this.correctionEpoch;
+    if (!this.enabled) return;
+    try {
+      const result = await this.correctionGateway.evaluate(
+        request,
+        this.identity(),
+        true,
+      );
+      if (
+        !result ||
+        !this.enabled ||
+        epoch !== this.epoch ||
+        correctionEpoch !== this.correctionEpoch
+      )
+        return;
+      this.usage.jev.inputTokens = saturatingAdd(
+        this.usage.jev.inputTokens,
+        result.usage.input_tokens,
+      );
+      this.usage.jev.outputTokens = saturatingAdd(
+        this.usage.jev.outputTokens,
+        result.usage.output_tokens,
+      );
+      this.save();
+      this.publish();
+      return result;
+    } catch {
+      return;
+    }
+  }
+
+  private acceptCorrectionFact(
+    task: HybridTask,
+    answer: ValidatedResult["answers"][string] | undefined,
+  ) {
+    this.correctionFacts.delete(task.id);
+    const probability =
+      answer?.type === "choice"
+        ? answer.probabilities[answer.choice]
+        : undefined;
+    if (
+      answer?.type !== "choice" ||
+      answer.choice !== "not-needed" ||
+      answer.confidence < 0.5 ||
+      probability === undefined ||
+      probability < 0.8
+    )
+      return;
+    if (
+      !this.correctionFacts.has(task.id) &&
+      this.correctionFacts.size >= MAX_CORRECTION_FACTS
+    )
+      return;
+    this.correctionFacts.set(task.id, {
+      choice: answer.choice,
+      confidence: answer.confidence,
+      probability,
+      revision: task.revision,
+      epoch: this.epoch,
+      taskSource: { ...task.source },
+    });
   }
 
   private advisorySettlementReason(): AdvisorySettlementReason {
@@ -1139,6 +1341,7 @@ export class Monitor {
 
   /** Semantic authority resets on amendment; billing lifetime resets only by source. */
   private resetState(sourceId: string, resetTelemetry = true) {
+    this.invalidateCorrections();
     this.state = emptyState(sourceId);
     this.card = undefined;
     this.healthCards.clear();
@@ -1941,6 +2144,7 @@ export class Monitor {
       this.healthGateway.enable(this.identity());
       this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
+      this.correctionGateway.enable(this.identity());
       // Rebuild from current canonical branch after discarding stale semantics.
       this.requeue(this.beginCanonicalPass(), true);
       this.drain();
@@ -3414,6 +3618,9 @@ export class Monitor {
     const acceptance = combined.answers.acceptance;
     const applicability = combined.answers.redApplicability;
     const reported = combined.answers.redReport;
+    // Admit raw redApplicability only after final epoch/canonical identity checks,
+    // before it is reduced to display-only HealthFields.
+    this.acceptCorrectionFact(task, applicability);
     const health: HealthFields = {
       requirements: healthRequirements(combined.answers.clarity),
       acceptance: acceptance?.type === "choice" ? acceptance.choice : "unknown",

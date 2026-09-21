@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 const ADVISORY_CUSTOM_TYPE = "pi-progress-advisory" as const;
 const RECONCILIATION_KIND = "reconciliation" as const;
+const CORRECTION_KINDS = new Set(["test-correction", "review-correction"]);
 const MAX_ATTEMPTS = 3;
 const RETRY_DELAYS_MS = [2_000, 8_000] as const;
 const FINAL_EVIDENCE_GRACE_MS = 8_000;
@@ -17,8 +18,13 @@ export type SettlementOrigin =
   | "uncertain-advisory"
   | "independent";
 
+export type AdvisoryDeliveryKind =
+  | "reconciliation"
+  | "test-correction"
+  | "review-correction";
+
 export type ReconciliationDeliveryRequest = Readonly<{
-  kind: "reconciliation";
+  kind: AdvisoryDeliveryKind;
   opportunityId: string;
   content: string;
   sessionEpoch: number;
@@ -49,7 +55,7 @@ type AdvisoryMessage = Readonly<{
   content: string;
   display: true;
   details: Readonly<{
-    kind: typeof RECONCILIATION_KIND;
+    kind: AdvisoryDeliveryKind;
     opportunityId: string;
     sendId: string;
   }>;
@@ -77,6 +83,8 @@ interface Chain {
   phase: Phase;
   timer?: Timer;
   candidateOwnRun: boolean;
+  /** A correction steers this already-started run; it never owns it. */
+  independentRun?: number;
   ownRun?: number;
   settledRun?: number;
   external: boolean;
@@ -172,6 +180,9 @@ export class ReconciliationDelivery {
       generation: ++this.nextGeneration,
       phase: "pending",
       candidateOwnRun: false,
+      ...(this.isCorrection(value.kind) && this.latestRun > this.lastSettledRun
+        ? { independentRun: this.latestRun }
+        : {}),
       external: false,
       canonical: false,
     };
@@ -195,6 +206,15 @@ export class ReconciliationDelivery {
     const run = ++this.latestRun;
     const chain = this.chain;
     if (!chain) return;
+    if (
+      chain.independentRun !== undefined &&
+      chain.independentRun > this.lastSettledRun
+    ) {
+      // A correction remains attached to externally-started work even if Pi
+      // reports an additional start before that work settles.
+      chain.independentRun = run;
+      return;
+    }
     if (
       chain.candidateOwnRun ||
       (chain.ownRun !== undefined && chain.ownRun > this.lastSettledRun)
@@ -236,19 +256,21 @@ export class ReconciliationDelivery {
     const run = this.latestRun;
     this.lastSettledRun = run;
     const chain = this.chain;
-    if (!chain || chain.ownRun !== run) return "independent";
+    if (!chain || (chain.ownRun !== run && chain.independentRun !== run))
+      return "independent";
 
     if (this.branchMatchesBaseline(chain, branch)) this.scan(chain, branch);
     else this.cancel("branch-changed");
 
     chain.settledRun = run;
-    const origin: SettlementOrigin = chain.external
-      ? chain.canonical
-        ? "mixed-external"
-        : "external"
-      : chain.canonical
-        ? "advisory-only"
-        : "uncertain-advisory";
+    const origin: SettlementOrigin =
+      chain.external || chain.independentRun === run
+        ? chain.canonical
+          ? "mixed-external"
+          : "external"
+        : chain.canonical
+          ? "advisory-only"
+          : "uncertain-advisory";
 
     // Retain only a still-live uncertain chain so its bounded retry/grace work
     // can gather canonical evidence. All terminal chains must release future
@@ -293,13 +315,13 @@ export class ReconciliationDelivery {
     }
 
     chain.attemptedIds.push(sendId);
-    chain.candidateOwnRun = true;
+    chain.candidateOwnRun = chain.independentRun === undefined;
     const message: AdvisoryMessage = {
       customType: ADVISORY_CUSTOM_TYPE,
       content: chain.request.content,
       display: true,
       details: {
-        kind: RECONCILIATION_KIND,
+        kind: chain.request.kind,
         opportunityId: chain.request.opportunityId,
         sendId,
       },
@@ -364,6 +386,9 @@ export class ReconciliationDelivery {
     }
     const ownRunActive =
       chain.ownRun === this.latestRun && this.latestRun > this.lastSettledRun;
+    const independentRunActive =
+      chain.independentRun === this.latestRun &&
+      this.latestRun > this.lastSettledRun;
     if (
       !state.enabled ||
       (state.mode !== "tui" && state.mode !== "rpc") ||
@@ -372,7 +397,7 @@ export class ReconciliationDelivery {
       state.opportunityId !== chain.request.opportunityId ||
       !state.relevant ||
       state.pendingMessages ||
-      (!state.idle && !ownRunActive)
+      (!state.idle && !ownRunActive && !independentRunActive)
     ) {
       this.cancel("opportunity-stale");
       return false;
@@ -394,7 +419,7 @@ export class ReconciliationDelivery {
       state.branchEpoch === request.branchEpoch &&
       state.opportunityId === request.opportunityId &&
       state.relevant &&
-      state.idle &&
+      (state.idle || this.isCorrection(request.kind)) &&
       !state.pendingMessages
     );
   }
@@ -402,7 +427,7 @@ export class ReconciliationDelivery {
   private validRequest(value: ReconciliationDeliveryRequest): boolean {
     if (
       !value ||
-      value.kind !== RECONCILIATION_KIND ||
+      (value.kind !== RECONCILIATION_KIND && !this.isCorrection(value.kind)) ||
       !validUuid(value.opportunityId) ||
       typeof value.content !== "string" ||
       !isSafeEpoch(value.sessionEpoch) ||
@@ -414,6 +439,10 @@ export class ReconciliationDelivery {
       Buffer.byteLength(JSON.stringify(value.content), "utf8") - 2 <=
         MAX_CONTENT_JSON_BODY_BYTES
     );
+  }
+
+  private isCorrection(kind: AdvisoryDeliveryKind) {
+    return CORRECTION_KINDS.has(kind);
   }
 
   private readBranch(): readonly unknown[] | undefined {
@@ -470,7 +499,7 @@ export class ReconciliationDelivery {
     )
       return false;
     return (
-      candidate.details.kind === RECONCILIATION_KIND &&
+      candidate.details.kind === chain.request.kind &&
       candidate.details.opportunityId === chain.request.opportunityId &&
       typeof candidate.details.sendId === "string" &&
       chain.attemptedIds.includes(candidate.details.sendId)

@@ -429,11 +429,20 @@ class TaskBoard implements BoardComponent {
           : "Agent current";
       const text = sanitizeTerminalText(current.text);
       if (current.task && this.sameVisibilityTask(task, current.task))
-        lines.push(...this.wrapLines(`${prefix}: ${text}`, width));
+        lines.push(
+          ...this.wrapLines(
+            `${prefix}: ${text}${
+              current.certainty === "maybe" ? " · (MAYBE)" : ""
+            }`,
+            width,
+          ),
+        );
       else if (current.task)
         lines.push(
           ...this.wrapLines(
-            `Agent current: ${text} · other task ${sanitizeTerminalText(current.task.label)}`,
+            `Agent current: ${text} · other task ${sanitizeTerminalText(current.task.label)}${
+              current.certainty === "maybe" ? " (MAYBE)" : ""
+            }`,
             width,
           ),
         );
@@ -477,7 +486,9 @@ class TaskBoard implements BoardComponent {
       const start = baseOffset + lines.length;
       lines.push(
         ...this.wrapLines(
-          `Agent reported: ${sanitizeTerminalText(action.candidate.quote)}`,
+          `Agent reported: ${sanitizeTerminalText(action.candidate.quote)}${
+            action.certainty === "maybe" ? " · (MAYBE)" : ""
+          }`,
           width,
         ),
       );

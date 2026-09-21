@@ -10,6 +10,7 @@ import {
   type CorrectionSnapshot,
   type CorrectionTask,
 } from "../advisory/corrections";
+import type { ReconciliationUncertainActivity } from "../advisory/reconciliation";
 import {
   type ActivityCall,
   type ActivityList,
@@ -276,6 +277,7 @@ export interface AdvisorySettlementSnapshot {
   enabled: boolean;
   reason: AdvisorySettlementReason;
   tasks: AdvisorySettlementTask[];
+  uncertainActivities?: ReconciliationUncertainActivity[];
 }
 
 const rejectedStorageMessage = (kind: "unsupported" | "corrupt") =>
@@ -1276,6 +1278,7 @@ export class Monitor {
    * health, detail, activity, and Beads enrichment never affect readiness.
    */
   advisorySettlementSnapshot(): AdvisorySettlementSnapshot {
+    const uncertainActivities = this.visibilityUncertainActivities();
     return {
       enabled: this.enabled,
       reason: this.advisorySettlementReason(),
@@ -1292,6 +1295,7 @@ export class Monitor {
             ]
           : [],
       ),
+      ...(uncertainActivities.length ? { uncertainActivities } : {}),
     };
   }
 
@@ -2708,6 +2712,47 @@ export class Monitor {
         ),
       }));
     return tasks.length > 0 && tasks.length <= 20 ? tasks : undefined;
+  }
+
+  /**
+   * Copy only still-open exact MAYBE task receipts into the established
+   * reconciliation snapshot. Generic semantic replies never clear them: no
+   * semantic reducer is an ownership validator for a reported activity.
+   */
+  private visibilityUncertainActivities(): ReconciliationUncertainActivity[] {
+    const current = new Map(
+      (this.visibilityTasks() ?? []).map((task) => [task.id, task]),
+    );
+    const open = new Set(
+      this.state.tasks
+        .filter((task) => task.included && task.status !== "done")
+        .map((task) => task.id),
+    );
+    return this.visibility
+      .maybeAssociations()
+      .flatMap((activity) => {
+        const task = current.get(activity.task.id);
+        if (
+          !task ||
+          !open.has(task.id) ||
+          task.label !== activity.task.label ||
+          task.revision !== activity.task.revision ||
+          task.sourceDigest !== activity.task.sourceDigest
+        )
+          return [];
+        return [
+          {
+            id: activity.id,
+            quote: activity.quote,
+            taskId: task.id,
+            taskLabel: task.label,
+            revision: task.revision,
+            confidence: activity.assessment.confidence,
+            probability: activity.assessment.probability,
+          },
+        ];
+      })
+      .slice(0, 8);
   }
 
   private visibilityPhase(

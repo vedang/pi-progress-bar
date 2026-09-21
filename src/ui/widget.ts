@@ -215,7 +215,11 @@ const visibilityCurrent = (
         boardTask.label === task.label &&
         boardTask.revision === task.revision,
     );
-  const qualifier = knownTask ? "" : " · task unconfirmed";
+  const qualifier = knownTask
+    ? ` · task ${sanitizeTerminalText(task.label)}${
+        current.certainty === "maybe" ? " (MAYBE)" : ""
+      }`
+    : " · task unconfirmed";
   return `${prefix}: ${sanitizeTerminalText(current.text)}${qualifier}`;
 };
 

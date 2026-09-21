@@ -1,5 +1,7 @@
 import {
+  type BindingCertainty,
   buildLabelCandidates,
+  type ChoiceAssessment,
   type LabelBindings,
   type LabelCandidateBundle,
   type LabelSelections,
@@ -12,7 +14,9 @@ const MAX_LIVE_SOURCES = 8;
 const MAX_DEDUPE = 256;
 const VISIBILITY_BUDGET = 1024;
 const CURRENT_FRESHNESS_MS = 5_000;
-const MIN_CONFIDENCE = 0.5;
+const STAGE_ONE_MIN_CONFIDENCE = 0.5;
+const BINDING_MAYBE_MIN_CONFIDENCE = 0.8;
+const BINDING_CONFIDENT_MIN_CONFIDENCE = 0.9;
 const MIN_PROBABILITY = 0.8;
 
 type Candidate = LabelCandidateBundle["candidates"][number];
@@ -39,6 +43,9 @@ export interface VisibilityCurrent {
   text: string;
   provisional?: boolean;
   task?: VisibilityTask;
+  /** Present only for a validated Stage-2 task association. */
+  certainty?: BindingCertainty;
+  assessment?: ChoiceAssessment;
 }
 
 export interface VisibilityAction {
@@ -46,6 +53,17 @@ export interface VisibilityAction {
   order: number;
   task: VisibilityTask;
   candidate: Candidate;
+  /** Normalized raw Stage-2 receipt; never UI/caller-provided authority. */
+  certainty?: BindingCertainty;
+  assessment?: ChoiceAssessment;
+}
+
+/** Bounded copied MAYBE receipt for the existing reconciliation message only. */
+export interface VisibilityMaybeAssociation {
+  id: string;
+  quote: string;
+  task: VisibilityTask;
+  assessment: ChoiceAssessment;
 }
 
 export interface ExecutionVisibilitySnapshot {
@@ -96,19 +114,21 @@ const cloneBundle = (bundle: LabelCandidateBundle): LabelCandidateBundle => ({
 const cloneCurrent = (current: VisibilityCurrent): VisibilityCurrent => ({
   ...current,
   ...(current.task ? { task: cloneTask(current.task) } : {}),
+  ...(current.assessment ? { assessment: { ...current.assessment } } : {}),
 });
 const cloneAction = (action: VisibilityAction): VisibilityAction => ({
   ...action,
   task: cloneTask(action.task),
   candidate: cloneCandidate(action.candidate),
+  ...(action.assessment ? { assessment: { ...action.assessment } } : {}),
 });
 
 const validNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
-const validAssessment = (
+const validStageOneAssessment = (
   value: unknown,
   choice: string,
-): value is { choice: string; confidence: number; probability: number } => {
+): value is ChoiceAssessment => {
   if (!value || typeof value !== "object") return false;
   const assessment = value as {
     choice?: unknown;
@@ -118,12 +138,25 @@ const validAssessment = (
   return (
     assessment.choice === choice &&
     validNumber(assessment.confidence) &&
-    assessment.confidence >= MIN_CONFIDENCE &&
+    assessment.confidence >= STAGE_ONE_MIN_CONFIDENCE &&
     assessment.confidence <= 1 &&
     validNumber(assessment.probability) &&
     assessment.probability >= MIN_PROBABILITY &&
     assessment.probability <= 1
   );
+};
+
+/** Binding-only band: Stage 1 remains at its original 0.5/0.8 gate. */
+const bindingCertainty = (
+  value: unknown,
+  choice: string,
+): BindingCertainty | undefined => {
+  if (!validStageOneAssessment(value, choice)) return;
+  const assessment = value as ChoiceAssessment;
+  if (assessment.confidence < BINDING_MAYBE_MIN_CONFIDENCE) return;
+  return assessment.confidence >= BINDING_CONFIDENT_MIN_CONFIDENCE
+    ? "confident"
+    : "maybe";
 };
 
 const sameCandidate = (left: Candidate, right: unknown): right is Candidate => {
@@ -354,7 +387,13 @@ export class ExecutionVisibilityStore {
             kind: "reported",
             text: current.candidate.quote,
             provisional: !source.confirmed,
-            ...(source.confirmed ? { task: cloneTask(current.task) } : {}),
+            ...(source.confirmed
+              ? {
+                  task: cloneTask(current.task),
+                  certainty: current.certainty,
+                  assessment: { ...current.assessment },
+                }
+              : {}),
           },
         };
       }
@@ -422,6 +461,53 @@ export class ExecutionVisibilityStore {
     };
   }
 
+  /**
+   * Return exact copied MAYBE task associations for reconciliation. These remain
+   * unresolved after ordinary semantic/status processing; only a separately
+   * validated ownership path may remove them. Current-only reports are included
+   * once when no retained action has the same task identity and exact prose.
+   */
+  maybeAssociations(): VisibilityMaybeAssociation[] {
+    const results: VisibilityMaybeAssociation[] = [];
+    const seen = new Set<string>();
+    const append = (
+      id: string,
+      quote: string,
+      task: VisibilityTask,
+      assessment: ChoiceAssessment,
+    ) => {
+      const key = [task.id, task.revision, task.sourceDigest, quote].join(
+        "\u0000",
+      );
+      if (seen.has(key) || results.length >= 8) return;
+      seen.add(key);
+      results.push({
+        id,
+        quote,
+        task: cloneTask(task),
+        assessment: { ...assessment },
+      });
+    };
+    for (const action of this.actions) {
+      if (action.certainty !== "maybe" || !action.assessment) continue;
+      append(action.id, action.candidate.quote, action.task, action.assessment);
+    }
+    const current = this.reportedCurrent;
+    if (
+      current?.current.kind === "reported" &&
+      current.current.certainty === "maybe" &&
+      current.current.task &&
+      current.current.assessment
+    )
+      append(
+        `visibility-current:${this.generation}:${current.token}`,
+        current.current.text,
+        current.current.task,
+        current.current.assessment,
+      );
+    return results;
+  }
+
   private source(token: string): Source | undefined {
     const source = this.sources.get(token);
     if (source) return source;
@@ -436,7 +522,10 @@ export class ExecutionVisibilityStore {
     const candidate = source.bundle.candidates.find((entry) =>
       sameCandidate(entry, selected),
     );
-    if (!candidate || !validAssessment(selected.assessment, candidate.id))
+    if (
+      !candidate ||
+      !validStageOneAssessment(selected.assessment, candidate.id)
+    )
       return;
     return {
       ...cloneCandidate(candidate),
@@ -471,11 +560,13 @@ export class ExecutionVisibilityStore {
     const prior = source.selections[kind];
     if (prior && !sameSelected(prior, binding.candidate)) return;
     const task = tasks.find((entry) => sameTask(entry, binding.task));
-    if (!task || !validAssessment(binding.assessment, task.id)) return;
+    const certainty = task && bindingCertainty(binding.assessment, task.id);
+    if (!task || !certainty || binding.certainty !== certainty) return;
     return {
       candidate,
       task: cloneTask(task),
       assessment: { ...binding.assessment },
+      certainty,
     };
   }
 
@@ -508,6 +599,8 @@ export class ExecutionVisibilityStore {
       order: this.actionSequence,
       task: cloneTask(binding.task),
       candidate: cloneCandidate(binding.candidate),
+      certainty: binding.certainty,
+      assessment: { ...binding.assessment },
     });
     this.dedupeSet.add(key);
     this.dedupe.push(key);

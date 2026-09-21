@@ -10,7 +10,12 @@ const MAX_MESSAGE_BYTES = 12 * 1024;
 const MAX_CANDIDATES = 12;
 const MAX_CANDIDATE_SCALARS = 240;
 const MAX_TASKS = 20;
-const MIN_CONFIDENCE = 0.5;
+// Stage 1 accepts a reported activity at the existing calibrated gate. Stage 2
+// alone qualifies task ownership: confidence below 0.8 remains unbound, while
+// 0.8–<0.9 is visible as MAYBE rather than silently upgraded to certainty.
+const STAGE_ONE_MIN_CONFIDENCE = 0.5;
+const BINDING_MAYBE_MIN_CONFIDENCE = 0.8;
+const BINDING_CONFIDENT_MIN_CONFIDENCE = 0.9;
 const MIN_PROBABILITY = 0.8;
 const abstentions = new Set(["none", "concurrent", "uncertain"]);
 const reportAuthority =
@@ -43,11 +48,13 @@ export interface VisibilityTask {
   sourceDigest: string;
 }
 
-interface ChoiceAssessment {
+export interface ChoiceAssessment {
   choice: string;
   confidence: number;
   probability: number;
 }
+
+export type BindingCertainty = "confident" | "maybe";
 
 type SelectedLabel = ExactLabelCandidate & {
   assessment: ChoiceAssessment;
@@ -61,7 +68,10 @@ export interface LabelSelections {
 interface LabelBinding {
   candidate: SelectedLabel;
   task: VisibilityTask;
+  /** Raw Stage-2 receipt; task ownership is never inferred from this label. */
   assessment: ChoiceAssessment;
+  /** Normalized from Stage-2 confidence by readLabelBindings(). */
+  certainty: BindingCertainty;
 }
 
 export interface LabelBindings {
@@ -363,7 +373,7 @@ const choiceAssessment = (
     typeof answer.choice !== "string" ||
     typeof answer.confidence !== "number" ||
     !Number.isFinite(answer.confidence) ||
-    answer.confidence < MIN_CONFIDENCE ||
+    answer.confidence < STAGE_ONE_MIN_CONFIDENCE ||
     answer.confidence > 1 ||
     !probabilities
   )
@@ -377,6 +387,15 @@ const choiceAssessment = (
   )
     return;
   return { choice: answer.choice, confidence: answer.confidence, probability };
+};
+
+const bindingCertainty = (
+  assessment: ChoiceAssessment,
+): BindingCertainty | undefined => {
+  if (assessment.confidence < BINDING_MAYBE_MIN_CONFIDENCE) return;
+  return assessment.confidence >= BINDING_CONFIDENT_MIN_CONFIDENCE
+    ? "confident"
+    : "maybe";
 };
 
 const selectedCandidate = (
@@ -451,7 +470,7 @@ const exactSelectedCandidate = (
     assessment.choice !== candidate.id ||
     typeof assessment.confidence !== "number" ||
     !Number.isFinite(assessment.confidence) ||
-    assessment.confidence < MIN_CONFIDENCE ||
+    assessment.confidence < STAGE_ONE_MIN_CONFIDENCE ||
     assessment.confidence > 1 ||
     typeof assessment.probability !== "number" ||
     !Number.isFinite(assessment.probability) ||
@@ -570,7 +589,7 @@ const validSelectedLabel = (value: unknown): value is SelectedLabel => {
     assessment.choice === candidate.id &&
     typeof assessment.confidence === "number" &&
     Number.isFinite(assessment.confidence) &&
-    assessment.confidence >= MIN_CONFIDENCE &&
+    assessment.confidence >= STAGE_ONE_MIN_CONFIDENCE &&
     assessment.confidence <= 1 &&
     typeof assessment.probability === "number" &&
     Number.isFinite(assessment.probability) &&
@@ -588,18 +607,23 @@ const boundLabel = (
   const candidate = asRecord(selections)?.[kind];
   if (!candidate || !validSelectedLabel(candidate)) return;
   const assessment = choiceAssessment(result, `${kind}Task`);
-  if (!assessment || abstentions.has(assessment.choice)) return;
+  const certainty = assessment && bindingCertainty(assessment);
+  if (!assessment || !certainty || abstentions.has(assessment.choice)) return;
   const task = tasks.find((entry) => entry.id === assessment.choice);
   return task
     ? {
         candidate: { ...candidate, assessment: { ...candidate.assessment } },
         task: { ...task },
         assessment,
+        certainty,
       }
     : undefined;
 };
 
-/** Read only high-confidence, high-probability bindings to supplied task IDs. */
+/**
+ * Read supplied Stage-2 task bindings. Probability remains >=0.8 independent
+ * of confidence; binding confidence >=0.9 is confident and 0.8–<0.9 is MAYBE.
+ */
 export function readLabelBindings(
   selections: LabelSelections,
   tasks: readonly VisibilityTask[],

@@ -61,7 +61,9 @@ Optional visibility classification has separate usage accounting and a **1,024-c
 
 **Additional privacy disclosure:** visible assistant prose is sent to Jev for exact-excerpt selection and task binding. Provisional prose may be sent at `message_end` before a later extension changes/removes it; only exact canonical confirmation permits task-bound history. Prose can contain copied code, URLs, output or secrets. Terminal sanitization is not secret redaction. The new tool-phase path sends no provider payload and exposes no raw paths, commands, arguments or outputs; existing activity-focus inference retains its previously documented metadata behavior.
 
-Confidence-band `(MAYBE)` labels and ambiguity-clarification nudges have been investigated but are **not enabled** in this implementation candidate. Runtime/UI independent acceptance and human testing remain pending.
+Task ownership confidence is visible without changing semantic task state: Stage-2 binding confidence **≥0.9** is shown normally; **0.8–<0.9** shows `(MAYBE)` beside the current/history task association; below 0.8 stays task-unconfirmed. The selected-probability gate remains **≥0.8** in every band. Stage-1 report selection remains unchanged at confidence **≥0.5** plus probability **≥0.8**.
+
+At the existing 60-second run-end reconciliation, up to eight current-open-task `(MAYBE)` receipts are appended as JSON-escaped, untrusted reported data. The agent is asked which board task, `other`, or `unknown` each concerns, then for actual status. This adds no separate timer/message chain, does not wake an all-done board, and no generic status reply silently resolves an ownership receipt. Runtime/UI independent acceptance and human testing remain pending.
 
 ## Reading the widget
 

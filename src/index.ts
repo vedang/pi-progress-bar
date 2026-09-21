@@ -327,7 +327,10 @@ export default function progressBar(pi: ExtensionAPI): void {
     context = ctx;
     delivery?.onMessageEnd(event.message, ctx.sessionManager.getBranch());
     monitor.observeActivityDeclaration(event.message);
-    monitor.observeVisibilityMessage(event.message);
+    monitor.observeVisibilityMessage(
+      event.message,
+      ctx.sessionManager.getBranch(),
+    );
   });
   pi.on("context", (_event, ctx) => {
     delivery?.onContext(ctx.sessionManager.getBranch());

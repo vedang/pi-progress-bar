@@ -58,6 +58,7 @@ import {
   type BoardDetailRecord,
   type BoardSnapshot,
   projectBoard,
+  visibilityTaskSourceDigest,
 } from "./board-projection";
 import {
   type ExecutionVisibilitySnapshot,
@@ -163,10 +164,19 @@ interface ActivityFocus {
   revision: number;
 }
 
+interface VisibilityCanonicalFrontier {
+  length: number;
+  digest: string;
+  lastId?: string;
+  lastRole?: string;
+}
+
 interface VisibilitySource {
   bundle: LabelCandidateBundle;
+  frontier: VisibilityCanonicalFrontier;
   selections?: LabelSelections;
   confirmed: boolean;
+  stage2: "unseen" | "queued" | "in-flight" | "terminal";
 }
 
 interface VisibilityFlight {
@@ -427,6 +437,8 @@ export class Monitor {
   private readonly visibilityGateway: JevGateway;
   private readonly visibility = new ExecutionVisibilityStore();
   private visibilitySources = new Map<string, VisibilitySource>();
+  /** Last branch frontier observed before a one-argument live capture. */
+  private visibilityCanonicalFrontier?: VisibilityCanonicalFrontier;
   private visibilityLatestToken?: string;
   private visibilityStage1?: string;
   private visibilityStage2: string[] = [];
@@ -663,11 +675,32 @@ export class Monitor {
     this.publish();
   }
 
-  /** Capture listener-relative live assistant text; never read branch history here. */
-  observeVisibilityMessage(message: unknown): void {
+  /**
+   * Capture listener-relative live assistant text. The optional active branch is
+   * a preappend canonical frontier, never evidence selected by text alone.
+   */
+  observeVisibilityMessage(
+    message: unknown,
+    branch?: readonly unknown[],
+  ): void {
     if (!this.enabled) return;
+    const value = record(message);
+    if (value?.role !== "assistant") return;
+    // Every assistant ingress clears older provisional current and its pending
+    // Stage 1 before this message can abstain, overflow, or be rejected.
+    this.supersedeVisibilityMessage();
+    if (value.stopReason === "error" || value.stopReason === "aborted") {
+      this.visibility.markIncomplete();
+      this.publish();
+      return;
+    }
+    const frontier = this.visibilityFrontier(branch);
     const text = assistantVisibleText(message);
-    if (text === undefined) return;
+    if (!frontier || text === undefined) {
+      this.visibility.markIncomplete();
+      this.publish();
+      return;
+    }
     const bundle = this.visibility.capture(text);
     if (!bundle) {
       this.publish();
@@ -675,7 +708,9 @@ export class Monitor {
     }
     this.visibilitySources.set(bundle.liveToken, {
       bundle,
+      frontier,
       confirmed: false,
+      stage2: "unseen",
     });
     this.visibilityLatestToken = bundle.liveToken;
     this.visibilityStage1 = bundle.liveToken;
@@ -684,31 +719,22 @@ export class Monitor {
         | string
         | undefined;
       if (!token) break;
-      this.visibilitySources.delete(token);
+      this.dropVisibilitySource(token);
     }
-    // Latest live current outranks older optional history; drop rather than retry it.
-    if (this.visibilityFlight) this.dropVisibilityFlight();
     this.drainVisibility();
     this.publish();
   }
 
-  /** Match only the active branch's terminal canonical assistant text. */
+  /** Match only a new canonical assistant entry after this source's frontier. */
   confirmVisibilityBranch(branch: readonly unknown[]): void {
     if (!this.enabled || !this.visibilityLatestToken) return;
     const token = this.visibilityLatestToken;
     const source = this.visibilitySources.get(token);
     if (!source) return;
     const pass = new CanonicalPass(branch);
-    const header = [...pass.headers]
-      .reverse()
-      .find((candidate) => candidate.role === "assistant");
-    const canonical = header ? pass.observation(header.id) : undefined;
+    const canonical = this.visibilityCanonicalAfter(pass, source.frontier);
     if (!this.visibility.confirm(token, canonical?.text ?? "")) {
-      this.visibilitySources.delete(token);
-      if (this.visibilityStage1 === token) this.visibilityStage1 = undefined;
-      this.visibilityStage2 = this.visibilityStage2.filter(
-        (id) => id !== token,
-      );
+      this.dropVisibilitySource(token);
     } else {
       source.confirmed = true;
       if (source.selections) this.enqueueVisibilityStage2(token);
@@ -814,6 +840,7 @@ export class Monitor {
   modelSelected() {
     if (this.controlWork || !this.enabled) return;
     const pass = this.beginCanonicalPass();
+    this.rememberVisibilityFrontier(pass);
     const authority = this.reconcileAuthority(pass);
     if (authority === "amended") this.resetForCanonicalAmendment();
     else if (authority === "incomplete") this.scheduleCanonicalWake();
@@ -849,8 +876,11 @@ export class Monitor {
   /** Canonical branch is read only on host observation, never projections. */
   observe(reader: () => readonly unknown[]) {
     this.reader = reader;
-    if (this.controlWork || !this.enabled) return;
+    // Keep a host-observed canonical frontier for the one-argument test seam;
+    // it is never inferred from arbitrary historical assistant prose.
     const pass = this.beginCanonicalPass();
+    this.rememberVisibilityFrontier(pass);
+    if (this.controlWork || !this.enabled) return;
     const authority = this.reconcileAuthority(pass);
     if (authority === "amended") this.resetForCanonicalAmendment();
     else if (authority === "incomplete") this.scheduleCanonicalWake();
@@ -1135,6 +1165,7 @@ export class Monitor {
     this.detailGateway.enable(this.identity());
     this.correctionGateway.enable(this.identity());
     this.visibilityGateway.enable(this.visibilityIdentity());
+    this.rememberVisibilityFrontier(pass);
     this.requeue(pass, true);
     if (this.queued.length) this.idleDoneInvalidated = true;
     this.save();
@@ -2700,16 +2731,7 @@ export class Monitor {
         id: task.id,
         label: task.label,
         revision: task.revision,
-        sourceDigest: sha256(
-          JSON.stringify([
-            task.source.entryId,
-            task.source.messageHash,
-            task.source.role,
-            task.source.start,
-            task.source.end,
-            task.source.quoteHash,
-          ]),
-        ),
+        sourceDigest: visibilityTaskSourceDigest(task),
       }));
     return tasks.length > 0 && tasks.length <= 20 ? tasks : undefined;
   }
@@ -2781,10 +2803,80 @@ export class Monitor {
     return "Using a tool";
   }
 
+  private visibilityFrontier(
+    branch?: readonly unknown[],
+  ): VisibilityCanonicalFrontier | undefined {
+    if (branch) return this.frontierFor(new CanonicalPass(branch));
+    return this.visibilityCanonicalFrontier
+      ? { ...this.visibilityCanonicalFrontier }
+      : undefined;
+  }
+
+  private frontierFor(pass: CanonicalPass): VisibilityCanonicalFrontier {
+    const headers = pass.headers.map((header) => [header.id, header.role]);
+    const last = pass.headers.at(-1);
+    return {
+      length: headers.length,
+      digest: sha256(JSON.stringify(headers)),
+      ...(last ? { lastId: last.id, lastRole: last.role } : {}),
+    };
+  }
+
+  /** Cache only a canonical frontier for one-argument test/host fallback. */
+  private rememberVisibilityFrontier(pass: CanonicalPass): void {
+    this.visibilityCanonicalFrontier = this.frontierFor(pass);
+  }
+
+  private visibilityCanonicalAfter(
+    pass: CanonicalPass,
+    frontier: VisibilityCanonicalFrontier,
+  ) {
+    if (pass.headers.length <= frontier.length) return;
+    const prefix = pass.headers
+      .slice(0, frontier.length)
+      .map((header) => [header.id, header.role]);
+    if (sha256(JSON.stringify(prefix)) !== frontier.digest) return;
+    const header = pass.headers
+      .slice(frontier.length)
+      .reverse()
+      .find((candidate) => candidate.role === "assistant");
+    return header ? pass.observation(header.id) : undefined;
+  }
+
+  /** Retain confirmed history while removing stale provisional current/Stage 1. */
+  private supersedeVisibilityMessage() {
+    const prior = this.visibilityLatestToken;
+    this.visibility.supersede();
+    this.visibilityLatestToken = undefined;
+    this.visibilityStage1 = undefined;
+    if (this.visibilityFlight?.stage === 1) this.dropVisibilityFlight();
+    if (prior && !this.visibilitySources.get(prior)?.confirmed)
+      this.visibilitySources.delete(prior);
+  }
+
+  private terminalVisibilityStage2(token: string) {
+    const source = this.visibilitySources.get(token);
+    if (source) source.stage2 = "terminal";
+    this.visibilityStage2 = this.visibilityStage2.filter((id) => id !== token);
+  }
+
+  private dropVisibilitySource(token: string) {
+    const source = this.visibilitySources.get(token);
+    if (source) source.stage2 = "terminal";
+    if (this.visibilityFlight?.token === token) this.dropVisibilityFlight();
+    this.visibilitySources.delete(token);
+    if (this.visibilityLatestToken === token)
+      this.visibilityLatestToken = undefined;
+    if (this.visibilityStage1 === token) this.visibilityStage1 = undefined;
+    this.visibilityStage2 = this.visibilityStage2.filter((id) => id !== token);
+    this.visibility.markIncomplete();
+  }
+
   private resetVisibility() {
     this.visibilityGateway.pause();
     this.visibility.reset();
     this.visibilitySources.clear();
+    this.visibilityCanonicalFrontier = undefined;
     this.visibilityLatestToken = undefined;
     this.visibilityStage1 = undefined;
     this.visibilityStage2 = [];
@@ -2793,19 +2885,23 @@ export class Monitor {
 
   /** Cancel optional work without retries when a newer mandatory boundary wins. */
   private dropVisibilityFlight() {
-    if (!this.visibilityFlight) return;
+    const flight = this.visibilityFlight;
+    if (!flight) return;
+    if (flight.stage === 2) this.terminalVisibilityStage2(flight.token);
     this.visibilityGateway.invalidate();
     this.visibility.markIncomplete();
     this.visibilityFlight = undefined;
   }
 
   private enqueueVisibilityStage2(token: string) {
-    if (this.visibilityStage2.includes(token)) return;
+    const source = this.visibilitySources.get(token);
+    if (source?.stage2 !== "unseen") return;
     if (this.visibilityStage2.length >= 4) {
       const dropped = this.visibilityStage2.shift();
-      if (dropped) this.visibilitySources.delete(dropped);
+      if (dropped) this.dropVisibilitySource(dropped);
       this.visibility.markIncomplete();
     }
+    source.stage2 = "queued";
     this.visibilityStage2.push(token);
   }
 
@@ -2847,9 +2943,15 @@ export class Monitor {
     const stage2 = this.visibilityStage2.shift();
     if (!stage2) return;
     const source = this.visibilitySources.get(stage2);
+    if (source?.stage2 !== "queued") {
+      this.terminalVisibilityStage2(stage2);
+      this.visibility.markIncomplete();
+      this.publish();
+      return;
+    }
     const tasks = this.visibilityTasks();
     const request =
-      source?.confirmed && source.selections && tasks
+      source.confirmed && source.selections && tasks
         ? buildLabelBindingRequest(
             source.bundle,
             source.selections,
@@ -2857,16 +2959,13 @@ export class Monitor {
             source.bundle.messageHash,
           )
         : undefined;
-    if (
-      !source ||
-      !tasks ||
-      !request ||
-      this.visibility.snapshot().budgetRemaining < 1
-    ) {
+    if (!tasks || !request || this.visibility.snapshot().budgetRemaining < 1) {
+      this.terminalVisibilityStage2(stage2);
       this.visibility.markIncomplete();
       this.publish();
       return;
     }
+    source.stage2 = "in-flight";
     const flight: VisibilityFlight = {
       token: stage2,
       stage: 2,
@@ -2929,12 +3028,14 @@ export class Monitor {
         this.visibility.markIncomplete();
         return;
       }
+      const currentTasks = this.visibilityTasks();
       this.visibility.acceptBindings(
         flight.token,
         readLabelBindings(source.selections, tasks, result),
-        tasks,
+        currentTasks ?? [],
       );
     } finally {
+      this.terminalVisibilityStage2(flight.token);
       if (this.visibilityFlight === flight) this.visibilityFlight = undefined;
       this.publish();
       this.drainVisibility();
@@ -3832,6 +3933,9 @@ export class Monitor {
       }
     }
     this.state = copyState(state);
+    // A semantic revision/source replacement cannot leave an old report bound
+    // to a task that no longer exists under its exact identity.
+    this.visibility.reconcileCurrentTasks(this.visibilityTasks() ?? []);
     this.rebuildDetailValues();
     try {
       this.persist(checkpoint);

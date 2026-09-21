@@ -213,7 +213,9 @@ const visibilityCurrent = (
       (boardTask) =>
         boardTask.taskId === task.id &&
         boardTask.label === task.label &&
-        boardTask.revision === task.revision,
+        boardTask.revision === task.revision &&
+        (boardTask.sourceDigest === undefined ||
+          boardTask.sourceDigest === task.sourceDigest),
     );
   const qualifier = knownTask
     ? ` · task ${sanitizeTerminalText(task.label)}${

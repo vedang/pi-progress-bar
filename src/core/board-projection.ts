@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { HealthCard } from "./hybrid-checkpoint";
 import {
   type HybridState,
@@ -41,6 +42,8 @@ interface BoardTask {
   taskId: string;
   label: string;
   revision: number;
+  /** Stable digest of exact semantic source identity; never source text. */
+  sourceDigest?: string;
   kind: string;
   included: boolean;
   status: BoardTaskStatus;
@@ -80,6 +83,20 @@ const unassessed = (): BoardHealth => ({
   redEvidence: "Unassessed",
   implementation: "Unassessed",
 });
+
+export const visibilityTaskSourceDigest = (task: HybridTask) =>
+  createHash("sha256")
+    .update(
+      JSON.stringify([
+        task.source.entryId,
+        task.source.messageHash,
+        task.source.role,
+        task.source.start,
+        task.source.end,
+        task.source.quoteHash,
+      ]),
+    )
+    .digest("hex");
 
 const sameSource = (task: HybridTask, card: HealthCard) =>
   task.revision === card.revision &&
@@ -169,6 +186,7 @@ export function projectBoard(input: {
       taskId: task.id,
       label: task.label,
       revision: task.revision,
+      sourceDigest: visibilityTaskSourceDigest(task),
       kind: task.kind,
       included: task.included,
       status,

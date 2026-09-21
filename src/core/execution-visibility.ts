@@ -276,8 +276,19 @@ export class ExecutionVisibilityStore {
     this.coverage = "since-monitoring-resumed";
   }
 
+  /**
+   * Every newer assistant ingress supersedes old provisional current activity,
+   * including blank, tool-only, rejected, and over-bound messages. Confirmed
+   * history remains retained independently.
+   */
+  supersede(): void {
+    this.latestToken = undefined;
+    this.reportedCurrent = undefined;
+  }
+
   /** Capture a bounded, lossless provisional assistant report. */
   capture(text: string): LabelCandidateBundle | undefined {
+    this.supersede();
     const liveToken = `visibility:${this.generation}:${++this.sourceSequence}`;
     const bundle = buildLabelCandidates(text, liveToken);
     if (!bundle) {
@@ -400,6 +411,15 @@ export class ExecutionVisibilityStore {
     }
     if (!source.confirmed || !history) return;
     this.appendHistory(source, history);
+  }
+
+  /** Clear a current binding whose exact semantic task identity no longer exists. */
+  reconcileCurrentTasks(currentTasks: readonly VisibilityTask[]): void {
+    const current = this.reportedCurrent?.current;
+    if (!current?.task) return;
+    if (currentTasks.some((task) => sameTask(task, current.task))) return;
+    this.reportedCurrent = undefined;
+    this.coverage = "incomplete";
   }
 
   /** Publish one finite unattributed phase. Raw host IDs never enter snapshots. */

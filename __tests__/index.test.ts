@@ -54,7 +54,12 @@ function host() {
     hasPendingMessages,
     sessionManager: {
       getBranch: () => entries,
-      getLeafId: () => "goal",
+      getLeafId: () => {
+        const last = entries.at(-1);
+        return last && typeof last === "object"
+          ? Reflect.get(last, "id")
+          : "goal";
+      },
       getSessionId: () => "session:test",
     },
     ui: { notify, setWidget },
@@ -113,6 +118,49 @@ function host() {
     notify,
     setWidget,
     emit: async (name: string, event = {}) => {
+      if (name === "agent_start")
+        await handlers.get("before_agent_start")?.(
+          {
+            systemPromptOptions: {
+              cwd: ctx.cwd,
+              contextFiles: [
+                {
+                  path: `${ctx.cwd}/AGENTS.md`,
+                  content:
+                    "Preserve existing validation. No mandatory new tests.",
+                },
+              ],
+            },
+          } as never,
+          ctx,
+        );
+      if (name === "tool_execution_start") {
+        const toolCallId = Reflect.get(event, "toolCallId");
+        entries = [
+          ...entries,
+          {
+            type: "message",
+            id: `assistant-${toolCallId}`,
+            parentId: ctx.sessionManager.getLeafId(),
+            message: {
+              role: "assistant",
+              stopReason: "toolUse",
+              content: [
+                {
+                  type: "text",
+                  text: "Starting a new failing parser test or the declared review of partial parser work.",
+                },
+                {
+                  type: "toolCall",
+                  id: toolCallId,
+                  name: Reflect.get(event, "toolName"),
+                  arguments: Reflect.get(event, "args"),
+                },
+              ],
+            },
+          },
+        ];
+      }
       await handlers.get(name)?.(event as never, ctx);
     },
     setEntries: (next: unknown[]) => {

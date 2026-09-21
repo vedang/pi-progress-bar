@@ -4,6 +4,7 @@ import type {
   EvaluationRequest,
   ValidatedResult,
 } from "../src/analysis/gateway";
+import { correctionSource } from "./fixtures/correction-source";
 
 type Task = {
   id: string;
@@ -85,11 +86,28 @@ async function fixture() {
   };
   const emit = vi.fn();
   const evaluate = vi.fn(async (r: EvaluationRequest) => result(r));
-  const controller: Controller = new CorrectionController({
-    snapshot: () => structuredClone(state),
+  const underlying = new CorrectionController({
+    snapshot: () => ({
+      ...structuredClone(state),
+      authority: {
+        coverage: "complete" as const,
+        conversation: state.context.map((text, index) => ({
+          role: index === 0 ? ("user" as const) : ("assistant" as const),
+          text,
+        })),
+      },
+    }),
     evaluate,
     emit,
   });
+  const controller: Controller = {
+    observe: (value) =>
+      Reflect.apply(underlying.observe, underlying, [
+        value,
+        correctionSource(value),
+      ]),
+    dispose: () => underlying.dispose(),
+  };
   active.push(controller);
   return {
     controller,
@@ -117,6 +135,7 @@ it("asks only task/attempt/policy binding and reuses existing not-needed fact", 
   expect(h.emit).toHaveBeenCalledExactlyOnceWith({
     kind: "test-correction",
     attemptId: "call-1",
+    binding: { attemptId: "call-1", sourceRun: 1, fingerprint: "session:1" },
     content:
       "Task Implement parser does not need a failing test, as the test will not provide any long-term value. Please directly start with the implementation instead.",
   });
@@ -221,6 +240,11 @@ it("uses exact review message after trusted adapter supplies launched run id", a
   expect(h.emit).toHaveBeenCalledExactlyOnceWith({
     kind: "review-correction",
     attemptId: "review-call",
+    binding: {
+      attemptId: "review-call",
+      sourceRun: 1,
+      fingerprint: "session:1",
+    },
     content:
       "Reviewing the work done so far is premature. Please cancel the review and continue with the implementation. It is better to review the work when a bigger chunk of it has been completed.",
   });

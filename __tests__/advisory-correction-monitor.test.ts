@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { correctionSource } from "./fixtures/correction-source";
 import { monitorHarness } from "./fixtures/hybrid-monitor";
 
 const running: ReturnType<typeof monitorHarness>[] = [];
@@ -19,6 +20,8 @@ function method(
 ) {
   const fn = Reflect.get(h.monitor, name);
   expect(fn, name).toBeTypeOf("function");
+  if (name === "observeCorrectionAttempt")
+    args.push(correctionSource(args[0] as { toolName: string; path?: string }));
   return Reflect.apply(fn, h.monitor, args);
 }
 function readSnapshot(h: ReturnType<typeof monitorHarness>) {

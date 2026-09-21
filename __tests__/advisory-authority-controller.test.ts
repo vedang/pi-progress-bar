@@ -57,33 +57,35 @@ async function exercise(
       ),
     }),
   );
-  const controller = new CorrectionController({
-    snapshot: () => ({
-      enabled: true,
-      ready: true,
-      identity: "production-fingerprint",
-      sourceRun: 1,
-      context: [],
-      authority,
-      tasks: [
-        {
-          id: "task:1",
-          label: "Implement disposable parser",
-          revision: 1,
-          included: true,
-          status: "not-started",
-          red: {
-            choice: "not-needed",
+  const controller = Reflect.construct(CorrectionController, [
+    {
+      snapshot: () => ({
+        enabled: true,
+        ready: true,
+        identity: "production-fingerprint",
+        sourceRun: 1,
+        context: [],
+        authority,
+        tasks: [
+          {
+            id: "task:1",
+            label: "Implement disposable parser",
             revision: 1,
-            confidence: 1,
-            probability: 1,
+            included: true,
+            status: "not-started",
+            red: {
+              choice: "not-needed",
+              revision: 1,
+              confidence: 1,
+              probability: 1,
+            },
           },
-        },
-      ],
-    }),
-    evaluate,
-    emit,
-  });
+        ],
+      }),
+      evaluate,
+      emit,
+    },
+  ]) as CorrectionController;
   try {
     await Reflect.apply(controller.observe, controller, [
       {

@@ -143,6 +143,9 @@ async function host(
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
+    appendSystemPrompt: correctionProof
+      ? ["Loaded policy: preserve existing validation; new tests are optional."]
+      : [],
     extensionFactories: [
       ...(production
         ? [
@@ -177,13 +180,23 @@ async function host(
         );
         extension.on("agent_start", (_e, ctx) => record("agent_start", ctx));
         extension.on("context", (_e, ctx) => record("context", ctx));
-        extension.on("message_end", (e, ctx) =>
+        extension.on("message_end", (e, ctx) => {
+          if (
+            correctionProof &&
+            e.message.role === "assistant" &&
+            e.message.content.some((block) => block.type === "toolCall")
+          ) {
+            e.message.content.unshift({
+              type: "text",
+              text: "FINAL_POST_LISTENER: starting a new failing parser test now.",
+            });
+          }
           record(
             `message_end:${e.message.role}`,
             ctx,
             e.message.role === "assistant" ? e.message.stopReason : undefined,
-          ),
-        );
+          );
+        });
         extension.on("agent_end", (_e, ctx) => record("agent_end", ctx));
         extension.on("agent_settled", (_e, ctx) => {
           record("agent_settled", ctx);
@@ -702,6 +715,7 @@ it.each(["tui", "rpc"] as const)(
     vi.stubEnv("TYPESAFE_API_KEY", "offline-correction-proof");
     let healthCalls = 0;
     let correctionCalls = 0;
+    let correctionRequest: unknown;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_url: unknown, init?: RequestInit) => {
@@ -712,7 +726,10 @@ it.each(["tui", "rpc"] as const)(
         };
         for (const key of Object.keys(request.questions)) {
           if (!key.startsWith("correct:")) continue;
-          if (key === "correct:task:1") correctionCalls++;
+          if (key === "correct:task:1") {
+            correctionCalls++;
+            correctionRequest = request;
+          }
           const choice = key === "correct:task:1" ? "nudge" : "unrelated";
           reply.answers[key] = {
             type: "choice",
@@ -751,6 +768,33 @@ it.each(["tui", "rpc"] as const)(
       ]);
       await bounded(h.session.prompt("Continue the current task."));
       expect(correctionCalls).toBe(1);
+      expect(correctionRequest).toMatchObject({
+        state: {
+          authority: {
+            policy: {
+              coverage: "complete",
+              entries: expect.arrayContaining([
+                {
+                  role: "system",
+                  source: "appendSystemPrompt",
+                  text: expect.stringContaining("Loaded policy"),
+                },
+              ]),
+            },
+            conversation: expect.arrayContaining([
+              { role: "user", text: expect.any(String) },
+            ]),
+            action: {
+              coverage: "complete",
+              role: "assistant",
+              text: expect.stringContaining("FINAL_POST_LISTENER"),
+            },
+          },
+        },
+      });
+      expect(JSON.stringify(correctionRequest)).not.toContain(
+        "PRIVATE_TEST_BODY",
+      );
       expect(h.sent).toHaveLength(1);
       expect(h.sent[0]).toMatchObject({
         details: { kind: "test-correction" },

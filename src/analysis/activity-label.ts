@@ -14,7 +14,7 @@ const MIN_CONFIDENCE = 0.5;
 const MIN_PROBABILITY = 0.8;
 const abstentions = new Set(["none", "concurrent", "uncertain"]);
 const reportAuthority =
-  "Eligible reports are this assistant's direct statements of its own actual work or observed findings. Do not select or bind a quoted, copied, fictional, external, hypothetical, example, sample, or fenced/code-block voice; reject future wishes or plans. If voice is unclear, abstain.";
+  "Treat visible prose as this assistant's report of its own actual work or findings, not independently verified fact: direct first-person or un-attributed declarative claims need no external verification. The quote field is source serialization, not a quoted speaker. Reject only content explicitly framed as another voice (a user, documentation, or fictional/external attribution), or as an example/sample, hypothetical/future claim, or fenced/code-block material. If assistant authorship is unclear, abstain.";
 const digest = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 const digestPattern = /^[a-f0-9]{64}$/;
@@ -295,11 +295,20 @@ const candidateCriteria = (bundle: LabelCandidateBundle) =>
   Object.fromEntries([
     ...bundle.candidates.map((candidate) => [
       candidate.id,
-      `Exact visible-prose candidate ${candidate.id}.`,
+      `Exact visible-prose candidate ${candidate.id}: select when its text directly reports this assistant's work or finding; no independent proof is needed.`,
     ]),
-    ["none", "No supplied candidate fits."],
-    ["concurrent", "Several supplied candidates are equally applicable."],
-    ["uncertain", "Insufficient certainty from supplied visible prose."],
+    [
+      "none",
+      "No supplied candidate is a direct assistant report; all are ineligible, future, or unrelated.",
+    ],
+    [
+      "concurrent",
+      "Several direct reports are equally applicable, so no single exact candidate can be selected.",
+    ],
+    [
+      "uncertain",
+      "Assistant authorship or the report role is unclear from supplied visible prose.",
+    ],
   ]);
 
 /** Stage 1 only selects supplied candidate IDs; it cannot bind a task. */

@@ -166,7 +166,10 @@ it("admits the complete twenty-row production snapshot when the provider request
     id: `task:${index + 1}`,
     label: `Independent deliverable ${index + 1}`,
   }));
-  const snapshot = method(h, "correctionSnapshot");
+  const snapshot = method(h, "correctionSnapshot") as {
+    tasks: unknown[];
+    identity: string;
+  };
   expect(snapshot.tasks).toHaveLength(20);
   const calls = h.fetch.mock.calls.length;
   await method(h, "observeCorrectionAttempt", attempt);

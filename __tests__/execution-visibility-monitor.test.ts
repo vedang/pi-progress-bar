@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EvaluationRequest } from "../src/analysis/gateway";
+import { correctionSource } from "./fixtures/correction-source";
 import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
 
 beforeEach(() => {
@@ -61,6 +62,58 @@ async function setup() {
   return h;
 }
 describe("optional live visibility integration", () => {
+  it.each([1, 2])(
+    "correction dispatch preempts held visibility stage %s without retry",
+    async (stage) => {
+      const h = await setup();
+      const original = h.fetch.getMockImplementation();
+      if (!original) throw Error("fixture");
+      let signal: AbortSignal | undefined;
+      let count = 0;
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.fetch.mockImplementation(async (url, init) => {
+        const request = JSON.parse(String(init?.body));
+        const selectedStage = stage === 1 ? "currentCandidate" : "currentTask";
+        if (selectedStage in request.questions) {
+          count++;
+          signal = init?.signal ?? undefined;
+          await held;
+        }
+        return original(url, init);
+      });
+      h.monitor.observeVisibilityMessage(message(), h.reader());
+      await vi.advanceTimersByTimeAsync(100);
+      if (stage === 2) {
+        h.append("live-report", text);
+        h.monitor.confirmVisibilityBranch(h.reader());
+        await h.settle("live-report");
+      }
+      expect(signal).toBeDefined();
+      expect(signal?.aborted).toBe(false);
+      const attempt = {
+        kind: "test" as const,
+        id: "new-corrective-write",
+        toolName: "write",
+        path: "__tests__/parser.test.ts",
+      };
+      await h.monitor.observeCorrectionAttempt(
+        attempt,
+        correctionSource(attempt),
+      );
+      expect(signal?.aborted).toBe(true);
+      release();
+      await vi.advanceTimersByTimeAsync(100);
+      h.monitor.confirmVisibilityBranch(h.reader());
+      h.monitor.modelSelected();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(count).toBe(1);
+      h.monitor.stop();
+    },
+  );
+
   it.each(["aborted", "error", "toolUse"])(
     "never confirms newer %s prose against an identical older canonical entry",
     async (stopReason) => {

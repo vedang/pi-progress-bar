@@ -230,3 +230,36 @@ it("preserves MAYBE binding assessment without altering semantic task data", () 
     assessment: { confidence: 0.84, probability: 1 },
   });
 });
+
+it("retains canonical current-only MAYBE across settlement and newer status prose", () => {
+  const { store, capture } = fixture();
+  const { b } = capture();
+  const selections = readLabelSelections(
+    b,
+    reply({ currentCandidate: b.candidates[0].id, historyCandidate: "none" }),
+  );
+  const answer = reply({ currentTask: task.id });
+  answer.answers.currentTask.confidence = 0.84;
+  const bindings = readLabelBindings(selections, [task], answer);
+  store.confirm(b.liveToken, b.text);
+  store.acceptBindings(b.liveToken, bindings, [task]);
+  expect(store.snapshot().actions).toHaveLength(0);
+  store.settle();
+  expect(store.maybeAssociations()).toHaveLength(1);
+  store.startRun();
+  capture("The task is still pending.");
+  expect(store.maybeAssociations()).toHaveLength(1);
+  store.reset();
+  expect(store.maybeAssociations()).toEqual([]);
+});
+it("action snapshot never shares nested candidate assessment with internal state", () => {
+  const { store, capture } = fixture();
+  const { b, bindings } = capture();
+  store.confirm(b.liveToken, b.text);
+  store.acceptBindings(b.liveToken, bindings, [task]);
+  const before = JSON.stringify(store.snapshot());
+  const snapshot = store.snapshot();
+  const extra = Reflect.get(snapshot.actions[0].candidate, "assessment");
+  if (extra) extra.confidence = 0;
+  expect(JSON.stringify(store.snapshot())).toBe(before);
+});

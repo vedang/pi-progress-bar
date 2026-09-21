@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   type CorrectionAttempt,
+  type CorrectionBinding,
   CorrectionController,
   type CorrectionEmission,
   type CorrectionRedFact,
@@ -1166,6 +1167,30 @@ export class Monitor {
 
   observeCorrectionAttempt(attempt: CorrectionAttempt): Promise<void> {
     return this.correctionController.observe(attempt);
+  }
+
+  /**
+   * Read-only transport fence for a classifier result accepted in a prior turn.
+   * It intentionally recomputes copied state rather than retaining a task pointer.
+   */
+  correctionIsCurrent(binding: CorrectionBinding): boolean {
+    if (
+      !binding ||
+      typeof binding.attemptId !== "string" ||
+      !binding.attemptId ||
+      typeof binding.sourceRun !== "number" ||
+      !Number.isSafeInteger(binding.sourceRun) ||
+      binding.sourceRun <= 0 ||
+      typeof binding.fingerprint !== "string" ||
+      !binding.fingerprint
+    )
+      return false;
+    const snapshot = this.correctionSnapshot();
+    return (
+      snapshot.enabled &&
+      snapshot.ready &&
+      snapshot.identity === binding.fingerprint
+    );
   }
 
   /** External input/lifecycle boundaries revoke ephemeral action authority. */

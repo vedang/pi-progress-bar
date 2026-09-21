@@ -284,6 +284,13 @@ export class ReconciliationDelivery {
     this.cancel("master-off");
   }
 
+  /** Source-turn ownership is index-only; never apply it to reconciliation. */
+  onCorrectionRunInvalidated(): void {
+    const chain = this.chain;
+    if (chain && this.isCorrection(chain.request.kind))
+      this.cancel("correction-source-ended");
+  }
+
   onNavigation(): void {
     this.erase();
   }

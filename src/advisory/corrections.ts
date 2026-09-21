@@ -63,6 +63,15 @@ export interface CorrectionAttempt {
   toolName: string;
   path?: string;
   runId?: string;
+  /** Index-owned active run identity; adapters never invent this. */
+  sourceRun?: number;
+}
+
+/** Opaque delivery freshness proof; no task, tool body, or provider result. */
+export interface CorrectionBinding {
+  attemptId: string;
+  sourceRun: number;
+  fingerprint: string;
 }
 
 export type CorrectionEmission =
@@ -70,11 +79,13 @@ export type CorrectionEmission =
       kind: "test-correction";
       attemptId: string;
       content: string;
+      binding?: CorrectionBinding;
     }
   | {
       kind: "review-correction";
       attemptId: string;
       content: string;
+      binding?: CorrectionBinding;
     };
 
 export interface CorrectionControllerOptions {
@@ -90,12 +101,14 @@ type SafeAttempt =
       kind: "test";
       toolName: "write" | "edit";
       path: string;
+      sourceRun?: number;
     }
   | {
       key: string;
       id: string;
       kind: "review";
       toolName: "subagent";
+      sourceRun?: number;
     };
 
 type AttemptSummary =
@@ -114,6 +127,7 @@ interface PreparedCorrection {
   request: EvaluationRequest;
   tasks: readonly SafeTask[];
   fingerprint: string;
+  snapshotIdentity: string;
 }
 
 interface QueuedAttempt {
@@ -134,6 +148,9 @@ const validTaskId = (value: unknown): value is string => {
 
 const safeRevision = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+const safeSourceRun = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 
 const safeUnit = (value: unknown): value is number =>
   typeof value === "number" &&
@@ -184,7 +201,12 @@ const safeLaunchedRun = (value: unknown) =>
 
 /** Keeps only adapter-registered, provider-safe action metadata. */
 const safeAttempt = (value: CorrectionAttempt): SafeAttempt | undefined => {
-  if (!value || !safeLocalId(value.id)) return;
+  if (
+    !value ||
+    !safeLocalId(value.id) ||
+    (value.sourceRun !== undefined && !safeSourceRun(value.sourceRun))
+  )
+    return;
   if (value.kind === "test") {
     if (!TEST_TOOLS.has(value.toolName) || !safeRepoPath(value.path)) return;
     const toolName = value.toolName as "write" | "edit";
@@ -194,6 +216,7 @@ const safeAttempt = (value: CorrectionAttempt): SafeAttempt | undefined => {
       kind: "test",
       toolName,
       path: value.path,
+      ...(value.sourceRun === undefined ? {} : { sourceRun: value.sourceRun }),
     };
   }
   if (
@@ -207,6 +230,7 @@ const safeAttempt = (value: CorrectionAttempt): SafeAttempt | undefined => {
     id: value.id,
     kind: "review",
     toolName: REVIEW_TOOL,
+    ...(value.sourceRun === undefined ? {} : { sourceRun: value.sourceRun }),
   };
 };
 
@@ -446,6 +470,7 @@ export class CorrectionController {
     return {
       request,
       tasks: board,
+      snapshotIdentity: snapshot.identity,
       fingerprint: JSON.stringify({
         identity: snapshot.identity,
         tasks: state.tasks,
@@ -483,6 +508,15 @@ export class CorrectionController {
     )
       return;
 
+    const binding =
+      attempt.sourceRun === undefined
+        ? undefined
+        : {
+            attemptId: attempt.id,
+            sourceRun: attempt.sourceRun,
+            fingerprint: after.snapshotIdentity,
+          };
+
     if (attempt.kind === "test") {
       const targets = after.tasks.filter(
         (task, index) =>
@@ -507,6 +541,7 @@ export class CorrectionController {
         kind: "test-correction",
         attemptId: attempt.id,
         content: testMessage(targets[0].label),
+        ...(binding ? { binding } : {}),
       });
       return;
     }
@@ -516,6 +551,7 @@ export class CorrectionController {
       kind: "review-correction",
       attemptId: attempt.id,
       content: reviewMessage,
+      ...(binding ? { binding } : {}),
     });
   }
 }

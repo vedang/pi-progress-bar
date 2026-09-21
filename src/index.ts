@@ -4,6 +4,7 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { CorrectionAdapter } from "./advisory/correction-adapter";
+import type { CorrectionBinding } from "./advisory/corrections";
 import {
   type AdvisoryDeliveryKind,
   ReconciliationDelivery,
@@ -25,14 +26,24 @@ export default function progressBar(pi: ExtensionAPI): void {
   let sessionEpoch = 0;
   let branchEpoch = 0;
   let runEpoch = 0;
+  /** Only a still-running source turn may receive its classifier result. */
+  let activeCorrectionRun: number | undefined;
   let currentOpportunity:
-    | { id: string; kind: AdvisoryDeliveryKind; runId?: number }
+    | {
+        id: string;
+        kind: AdvisoryDeliveryKind;
+        runId?: number;
+        binding?: CorrectionBinding;
+      }
     | undefined;
   const correctionAdapter = new CorrectionAdapter({
     tools: () => pi.getAllTools(),
   });
   const clearOpportunity = () => {
     currentOpportunity = undefined;
+  };
+  const clearCorrectionOpportunity = () => {
+    if (currentOpportunity?.kind !== "reconciliation") clearOpportunity();
   };
   const disposeController = () => {
     controller?.dispose();
@@ -48,6 +59,7 @@ export default function progressBar(pi: ExtensionAPI): void {
       reconciliation?.cancel();
       delivery?.onMasterOff();
       correctionAdapter.reset();
+      activeCorrectionRun = undefined;
       clearOpportunity();
     }
     if (ctx.mode === "tui" && presentation.enabled) {
@@ -80,13 +92,20 @@ export default function progressBar(pi: ExtensionAPI): void {
         return context;
       }),
       richDetailsEnabled: true,
-      onCorrection: ({ kind, content }) => {
+      onCorrection: ({ kind, content, binding }) => {
         const target = delivery;
-        // One chain owns all advisory retries. Never replace a live
-        // reconciliation opportunity with a concurrent correction.
-        if (!target || currentOpportunity) return;
+        // A classifier result is useful only in its originating active turn.
+        // One chain owns all advisory retries; never replace a live opportunity.
+        if (
+          !target ||
+          currentOpportunity ||
+          !binding ||
+          activeCorrectionRun !== binding.sourceRun ||
+          !monitor.correctionIsCurrent(binding)
+        )
+          return;
         const opportunityId = randomUUID();
-        currentOpportunity = { id: opportunityId, kind };
+        currentOpportunity = { id: opportunityId, kind, binding };
         const result = target.request({
           kind,
           opportunityId,
@@ -101,6 +120,11 @@ export default function progressBar(pi: ExtensionAPI): void {
   delivery = new ReconciliationDelivery({
     state: () => {
       const snapshot = monitor.advisorySettlementSnapshot();
+      const correctionBinding = currentOpportunity?.binding;
+      const correctionRelevant =
+        correctionBinding !== undefined &&
+        activeCorrectionRun === correctionBinding.sourceRun &&
+        monitor.correctionIsCurrent(correctionBinding);
       return {
         enabled: snapshot.enabled,
         mode: context?.mode ?? "print",
@@ -109,8 +133,9 @@ export default function progressBar(pi: ExtensionAPI): void {
         opportunityId: currentOpportunity?.id,
         relevant:
           snapshot.reason === "ready" &&
-          (currentOpportunity?.kind !== "reconciliation" ||
-            snapshot.tasks.some((task) => task.status !== "done")),
+          (currentOpportunity?.kind === "reconciliation"
+            ? snapshot.tasks.some((task) => task.status !== "done")
+            : correctionRelevant),
         idle: context?.isIdle() ?? false,
         pendingMessages: context?.hasPendingMessages() ?? true,
       };
@@ -188,6 +213,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     sessionEpoch++;
     branchEpoch++;
     runEpoch = 0;
+    activeCorrectionRun = undefined;
     clearOpportunity();
     await restore(ctx, false);
   });
@@ -196,6 +222,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     correctionAdapter.reset();
     monitor.invalidateCorrections();
     reconciliation?.cancel();
+    activeCorrectionRun = undefined;
     clearOpportunity();
   });
   pi.on("session_tree", async (_event, ctx) => {
@@ -206,6 +233,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     monitor.invalidateCorrections();
     reconciliation?.cancel();
     branchEpoch++;
+    activeCorrectionRun = undefined;
     clearOpportunity();
     await restore(ctx, true);
   });
@@ -214,6 +242,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     delivery?.onSessionShutdown();
     correctionAdapter.reset();
     reconciliation?.cancel();
+    activeCorrectionRun = undefined;
     clearOpportunity();
     monitor.stop();
     context = undefined;
@@ -223,6 +252,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     correctionAdapter.reset();
     monitor.invalidateCorrections();
     reconciliation?.clearPendingIntent();
+    activeCorrectionRun = undefined;
     clearOpportunity();
   });
   // Canonical active branch is authoritative for semantic tracking. Tool activity
@@ -243,17 +273,27 @@ export default function progressBar(pi: ExtensionAPI): void {
   });
   pi.on("agent_start", (_event, ctx) => {
     context = ctx;
+    // A subsequent logical run cannot receive stale classifier work from its
+    // predecessor. Reconciliation retains its separate retry/compaction rules.
+    delivery?.onCorrectionRunInvalidated();
+    clearCorrectionOpportunity();
+    const run = ++runEpoch;
+    activeCorrectionRun = run;
     delivery?.onAgentStart();
-    reconciliation?.runStarted(++runEpoch);
+    reconciliation?.runStarted(run);
     monitor.setActivity("Agent active");
   });
   pi.on("agent_settled", (_event, ctx) => {
     context = ctx;
     monitor.setActivity("Idle");
+    activeCorrectionRun = undefined;
+    clearCorrectionOpportunity();
     // Final canonical observation precedes delivery-origin classification and
     // controller readiness/deadline handling.
     observe(ctx);
-    settle(delivery?.onAgentSettled(ctx.sessionManager.getBranch()));
+    const origin = delivery?.onAgentSettled(ctx.sessionManager.getBranch());
+    delivery?.onCorrectionRunInvalidated();
+    settle(origin);
   });
   pi.on("model_select", (_event, ctx) => {
     context = ctx;
@@ -275,7 +315,11 @@ export default function progressBar(pi: ExtensionAPI): void {
       event.args,
       ctx.cwd,
     );
-    if (correction) void monitor.observeCorrectionAttempt(correction);
+    if (correction && activeCorrectionRun !== undefined)
+      void monitor.observeCorrectionAttempt({
+        ...correction,
+        sourceRun: activeCorrectionRun,
+      });
   });
   pi.on("tool_execution_update", (event, ctx) => {
     context = ctx;
@@ -284,7 +328,11 @@ export default function progressBar(pi: ExtensionAPI): void {
       event.toolName,
       event.partialResult,
     );
-    if (correction) void monitor.observeCorrectionAttempt(correction);
+    if (correction && activeCorrectionRun !== undefined)
+      void monitor.observeCorrectionAttempt({
+        ...correction,
+        sourceRun: activeCorrectionRun,
+      });
   });
   pi.on("tool_execution_end", (event, ctx) => {
     context = ctx;

@@ -19,6 +19,7 @@ function fixture() {
     revision: 1,
     sourceDigest: "a".repeat(64),
   };
+  base.board.tasks[0].sourceDigest = task.sourceDigest;
   const visibility: ExecutionVisibilitySnapshot = {
     generation: 1,
     coverage: "since-monitoring-resumed",
@@ -62,6 +63,25 @@ function fixture() {
   };
 }
 describe("detached execution visibility UX", () => {
+  it("missing source identity cannot authorize a task association", () => {
+    const h = fixture();
+    delete h.view.board.tasks[0].sourceDigest;
+    h.board.update(h.view);
+    expect(h.text()).toContain("task unconfirmed");
+    expect(h.text()).not.toContain(
+      "Agent reported: Delimiter validation completed",
+    );
+  });
+  it("missing board task cannot authorize other-task wording even in digest-free snapshots", () => {
+    const h = fixture();
+    delete h.view.board.tasks[0].sourceDigest;
+    if (!h.view.visibility.current?.task) throw Error("fixture");
+    h.view.visibility.current.task.id = "missing";
+    h.board.update(h.view);
+    expect(h.text()).not.toContain("other task");
+    expect(h.text()).toContain("task unconfirmed");
+  });
+
   it("stale current binding is unconfirmed, not another task", () => {
     const h = fixture();
     h.view.board.tasks[0].revision = 2;
@@ -117,6 +137,12 @@ describe("detached execution visibility UX", () => {
       task: other,
     };
     h.view.visibility.actions[0].task = other;
+    h.view.board.tasks.push({
+      ...h.view.board.tasks[0],
+      taskId: other.id,
+      label: other.label,
+      sourceDigest: other.sourceDigest,
+    });
     h.board.update(h.view);
     const text = h.text();
     expect(text).toContain("other task Authentication");

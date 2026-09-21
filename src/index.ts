@@ -88,7 +88,11 @@ export default function progressBar(pi: ExtensionAPI): void {
       clearOpportunity();
     }
     if (ctx.mode === "tui" && presentation.enabled) {
-      const snapshot = { presentation, board: monitor.boardSnapshot() };
+      const snapshot = {
+        presentation,
+        board: monitor.boardSnapshot(),
+        visibility: monitor.visibilitySnapshot(),
+      };
       if (!controller) {
         // Host contexts may be freshly wrapped for every event. Only explicit
         // session/branch/OFF lifecycle boundaries replace the UI generation.

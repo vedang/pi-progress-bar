@@ -14,6 +14,8 @@ import {
 } from "./widget";
 
 type BoardTask = WidgetSnapshot["board"]["tasks"][number];
+type VisibilitySnapshot = NonNullable<WidgetSnapshot["visibility"]>;
+type VisibilityAction = VisibilitySnapshot["actions"][number];
 
 type DetailValue = {
   text: string;
@@ -31,6 +33,12 @@ interface BoardViewState {
   detailOffset: number;
   debugger: boolean;
   pane: "list" | "detail";
+}
+
+interface ActionAnchor {
+  id: string;
+  order: number;
+  lineOffset: number;
 }
 
 export interface BoardOptions {
@@ -66,6 +74,9 @@ class TaskBoard implements BoardComponent {
   private selectedIndex = 0;
   private listOffset = 0;
   private detailOffset = 0;
+  /** Stable action + wrapped-line position while the user scrolls history. */
+  private actionAnchor: ActionAnchor | undefined;
+  private actionAnchorGap = false;
   private debugger = false;
   private pane: "list" | "detail" = "list";
   private disposed = false;
@@ -84,6 +95,7 @@ class TaskBoard implements BoardComponent {
     if (this.disposed) return;
     const previousIndex = this.selectedIndex;
     const previousId = this.selectedId;
+    const anchor = this.captureActionAnchor() ?? this.actionAnchor;
     this.snapshot = clone(next);
     const tasks = this.tasks();
     const currentIndex = previousId
@@ -97,13 +109,15 @@ class TaskBoard implements BoardComponent {
       this.selectedIndex = Math.min(previousIndex, tasks.length - 1);
       this.selectedId = tasks[this.selectedIndex]?.taskId;
       if (!previousId) this.selectDefault();
-      this.detailOffset = 0;
+      this.resetActionAnchor();
     } else {
       this.selectedId = undefined;
       this.selectedIndex = 0;
       this.listOffset = 0;
-      this.detailOffset = 0;
+      this.resetActionAnchor();
     }
+    if (previousId !== this.selectedId) this.resetActionAnchor();
+    else if (anchor) this.restoreActionAnchor(anchor);
     this.clampOffsets(this.lastLayout);
     this.options.requestRender();
   }
@@ -236,7 +250,7 @@ class TaskBoard implements BoardComponent {
     if (next === this.selectedIndex) return;
     this.selectedIndex = next;
     this.selectedId = tasks[next]?.taskId;
-    this.detailOffset = 0;
+    this.resetActionAnchor();
     this.clampOffsets(this.lastLayout);
     this.requestRender();
   }
@@ -255,6 +269,7 @@ class TaskBoard implements BoardComponent {
     next = Math.max(0, Math.min(next, maximum));
     if (next === this.detailOffset) return;
     this.detailOffset = next;
+    this.actionAnchor = this.captureActionAnchor();
     this.requestRender();
   }
 
@@ -309,6 +324,7 @@ class TaskBoard implements BoardComponent {
   ): {
     pinned: string[];
     body: string[];
+    actions: Map<string, { order: number; start: number; end: number }>;
   } {
     const width = layout.rightWidth;
     const health = task.health;
@@ -354,25 +370,180 @@ class TaskBoard implements BoardComponent {
           ]
         : []),
     ];
-    if (!this.debugger) return { pinned, body };
-    return {
-      pinned,
-      body: [
-        ...body,
-        ...this.wrapLines("Debugger: task-local facts", width, "accent"),
+    const visibility = this.visibilityLines(task, width, body.length);
+    body.push(...visibility.lines);
+    if (!this.debugger) return { pinned, body, actions: visibility.actions };
+    body.push(
+      ...this.wrapLines("Debugger: task-local facts", width, "accent"),
+      ...this.wrapLines(
+        `Session-wide global calls: Jev ${this.snapshot.presentation.usage.jev.calls} · Extraction ${this.snapshot.presentation.usage.extraction.calls}`,
+        width,
+        "dim",
+      ),
+      ...(this.snapshot.visibility
+        ? this.wrapLines(
+            `Visibility: ↓ ${this.snapshot.visibility.usage.inputTokens} · ↑ ${this.snapshot.visibility.usage.outputTokens} tokens · ${this.snapshot.visibility.usage.calls} calls · ${this.snapshot.visibility.budgetRemaining} remaining · last ${time(this.snapshot.visibility.usage.lastCallAt) ?? "never"}`,
+            width,
+            "dim",
+          )
+        : []),
+      ...this.wrapLines("Transitions:", width),
+      ...(task.transitions.length
+        ? task.transitions.flatMap((transition) =>
+            this.wrapLines(`• ${transition.kind}`, width),
+          )
+        : this.wrapLines("• No task-local transitions", width, "dim")),
+    );
+    return { pinned, body, actions: visibility.actions };
+  }
+
+  private sameVisibilityTask(
+    task: BoardTask,
+    candidate: VisibilityAction["task"],
+  ) {
+    return (
+      task.taskId === candidate.id &&
+      task.label === candidate.label &&
+      task.revision === candidate.revision
+    );
+  }
+
+  private visibilityLines(task: BoardTask, width: number, baseOffset: number) {
+    const visibility = this.snapshot.visibility;
+    const lines: string[] = [];
+    const actions = new Map<
+      string,
+      { order: number; start: number; end: number }
+    >();
+    if (!visibility) return { lines, actions };
+    lines.push(...this.wrapLines("Current Activity:", width));
+    const current = visibility.current;
+    if (!current)
+      lines.push(...this.wrapLines("Agent current: unavailable", width, "dim"));
+    else {
+      const prefix =
+        current.kind === "reported"
+          ? current.provisional
+            ? "Agent says (provisional)"
+            : "Agent says"
+          : "Agent current";
+      const text = sanitizeTerminalText(current.text);
+      if (current.task && this.sameVisibilityTask(task, current.task))
+        lines.push(...this.wrapLines(`${prefix}: ${text}`, width));
+      else if (current.task)
+        lines.push(
+          ...this.wrapLines(
+            `Agent current: ${text} · other task ${sanitizeTerminalText(current.task.label)}`,
+            width,
+          ),
+        );
+      else
+        lines.push(
+          ...this.wrapLines(`${prefix}: ${text} · task unconfirmed`, width),
+        );
+    }
+    lines.push(...this.wrapLines("Meaningful Actions:", width));
+    lines.push(
+      ...this.wrapLines(
+        "Since monitoring resumed · history may be incomplete",
+        width,
+        "dim",
+      ),
+    );
+    if (visibility.budgetRemaining === 0)
+      lines.push(
         ...this.wrapLines(
-          `Session-wide global calls: Jev ${this.snapshot.presentation.usage.jev.calls} · Extraction ${this.snapshot.presentation.usage.extraction.calls}`,
+          "Visibility budget reached · history incomplete",
           width,
-          "dim",
+          "warning",
         ),
-        ...this.wrapLines("Transitions:", width),
-        ...(task.transitions.length
-          ? task.transitions.flatMap((transition) =>
-              this.wrapLines(`• ${transition.kind}`, width),
-            )
-          : this.wrapLines("• No task-local transitions", width, "dim")),
-      ],
-    };
+      );
+    if (this.actionAnchorGap)
+      lines.push(
+        ...this.wrapLines(
+          "History gap — viewed action no longer retained",
+          width,
+          "warning",
+        ),
+      );
+    const taskActions = visibility.actions
+      .filter((action) => this.sameVisibilityTask(task, action.task))
+      .sort((left, right) => right.order - left.order);
+    if (!taskActions.length)
+      lines.push(
+        ...this.wrapLines("• No task-bound reported actions", width, "dim"),
+      );
+    for (const action of taskActions) {
+      const start = baseOffset + lines.length;
+      lines.push(
+        ...this.wrapLines(
+          `Agent reported: ${sanitizeTerminalText(action.candidate.quote)}`,
+          width,
+        ),
+      );
+      actions.set(action.id, {
+        order: action.order,
+        start,
+        end: baseOffset + lines.length,
+      });
+    }
+    return { lines, actions };
+  }
+
+  private captureActionAnchor(): ActionAnchor | undefined {
+    if (this.detailOffset <= 0) return;
+    const task = this.selected();
+    if (!task || !this.lastLayout.usable) return;
+    const { actions } = this.detailContent(task, this.lastLayout);
+    for (const [id, action] of actions) {
+      if (this.detailOffset < action.start || this.detailOffset >= action.end)
+        continue;
+      return {
+        id,
+        order: action.order,
+        lineOffset: this.detailOffset - action.start,
+      };
+    }
+  }
+
+  private restoreActionAnchor(anchor: ActionAnchor): void {
+    const task = this.selected();
+    if (!task || !this.lastLayout.usable) return;
+    this.actionAnchor = anchor;
+    this.actionAnchorGap = false;
+    let actions = this.detailContent(task, this.lastLayout).actions;
+    let matched = actions.get(anchor.id);
+    if (!matched) {
+      this.actionAnchorGap = true;
+      actions = this.detailContent(task, this.lastLayout).actions;
+      matched = [...actions.entries()]
+        .map(([id, action]) => ({ id, action }))
+        .sort(
+          (left, right) =>
+            Math.abs(left.action.order - anchor.order) -
+            Math.abs(right.action.order - anchor.order),
+        )[0]?.action;
+      const nearest = [...actions.entries()].find(
+        ([, action]) => action === matched,
+      );
+      if (nearest)
+        this.actionAnchor = {
+          id: nearest[0],
+          order: nearest[1].order,
+          lineOffset: 0,
+        };
+    }
+    if (matched) {
+      const lineOffset = this.actionAnchor?.lineOffset ?? anchor.lineOffset;
+      this.detailOffset =
+        matched.start + Math.min(lineOffset, matched.end - matched.start - 1);
+    }
+  }
+
+  private resetActionAnchor(): void {
+    this.detailOffset = 0;
+    this.actionAnchor = undefined;
+    this.actionAnchorGap = false;
   }
 
   private detailValueLines(

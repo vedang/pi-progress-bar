@@ -2,11 +2,14 @@ import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { BoardSnapshot } from "../core/board-projection";
+import type { ExecutionVisibilitySnapshot } from "../core/execution-visibility";
 import type { PresentationSnapshot } from "../core/monitor";
 
 export interface WidgetSnapshot {
   presentation: PresentationSnapshot;
   board: BoardSnapshot;
+  /** Optional while old host/test projections have no runtime visibility data. */
+  visibility?: ExecutionVisibilitySnapshot;
 }
 
 /** Existing safe health-label utility; board owns where it is displayed. */
@@ -151,6 +154,7 @@ type WidgetLine = {
   tone?: "hint" | "warning";
   status?: string;
   bar?: { filled: string; empty: string };
+  wrap?: boolean;
 };
 
 const styleStatus = (text: string, status: string, theme: Theme) => {
@@ -185,6 +189,34 @@ const styleWidgetLine = (line: WidgetLine, text: string, theme: Theme) => {
 const usage = (snapshot: WidgetSnapshot) => {
   const { jev, extraction } = snapshot.presentation.usage;
   return `Jev · ↓ ${compact(jev.inputTokens)} · ↑ ${compact(jev.outputTokens)} tokens · ${jev.calls} calls • Extraction · ↓ ${compact(extraction.inputTokens)} · ↑ ${compact(extraction.outputTokens)} tokens · ${extraction.calls} calls`;
+};
+
+const visibilityUsage = (visibility: ExecutionVisibilitySnapshot) =>
+  `Visibility · ↓ ${compact(visibility.usage.inputTokens)} · ↑ ${compact(visibility.usage.outputTokens)} tokens · ${visibility.usage.calls} calls · ${visibility.budgetRemaining} remaining · last ${time(visibility.usage.lastCallAt)}`;
+
+const visibilityCurrent = (
+  visibility: ExecutionVisibilitySnapshot,
+  board: BoardSnapshot,
+) => {
+  const current = visibility.current;
+  if (!current) return;
+  const prefix =
+    current.kind === "reported"
+      ? current.provisional
+        ? "Agent says (provisional)"
+        : "Agent says"
+      : "Agent current";
+  const task = current.task;
+  const knownTask =
+    task &&
+    board.tasks.some(
+      (boardTask) =>
+        boardTask.taskId === task.id &&
+        boardTask.label === task.label &&
+        boardTask.revision === task.revision,
+    );
+  const qualifier = knownTask ? "" : " · task unconfirmed";
+  return `${prefix}: ${sanitizeTerminalText(current.text)}${qualifier}`;
 };
 
 /**
@@ -228,12 +260,26 @@ export function renderWidget(
           }
         : { text: "Progress: no current tasks" };
   const task = currentTask(snapshot.board);
+  const current = snapshot.visibility
+    ? visibilityCurrent(snapshot.visibility, snapshot.board)
+    : undefined;
+  const visibilityWarning =
+    snapshot.visibility?.budgetRemaining === 0
+      ? "Visibility budget reached · history incomplete"
+      : undefined;
   const lines: WidgetLine[] = [
     header,
+    ...(current ? [{ text: current, wrap: true }] : []),
+    ...(visibilityWarning
+      ? [{ text: visibilityWarning, tone: "warning" as const }]
+      : []),
     task,
     ...(selected
       ? [
-          { text: usage(snapshot) },
+          { text: usage(snapshot), wrap: true },
+          ...(snapshot.visibility
+            ? [{ text: visibilityUsage(snapshot.visibility), wrap: true }]
+            : []),
           { text: "enter to see board", tone: "hint" as const },
           ...(columns >= visibleWidth("Enter: task board · Left/Esc: back")
             ? [
@@ -248,12 +294,11 @@ export function renderWidget(
         ]
       : [{ text: "→ to inspect", tone: "hint" as const }]),
   ];
-  return lines.flatMap((line, index) => {
+  return lines.flatMap((line) => {
     const safe = sanitizeTerminalText(line.text);
-    const parts =
-      selected && index === 2
-        ? wrap(safe, columns)
-        : [truncateToWidth(safe, columns)];
+    const parts = line.wrap
+      ? wrap(safe, columns)
+      : [truncateToWidth(safe, columns)];
     return parts.map((part) => {
       const colored = styleWidgetLine(line, part, theme);
       // Host themes are trusted; ensure an unexpected formatter never widens rows.

@@ -16,7 +16,13 @@ type Origin =
   | "external"
   | "uncertain-advisory";
 type Delivery = {
-  request(value: typeof request): "started" | "duplicate" | "suppressed";
+  request(value: {
+    kind: "reconciliation";
+    opportunityId: string;
+    content: string;
+    sessionEpoch: number;
+    branchEpoch: number;
+  }): "started" | "duplicate" | "suppressed";
   onInput(): void;
   onAgentStart(): void;
   onMessageEnd(message: unknown, branch: readonly unknown[]): void;
@@ -288,4 +294,39 @@ it("branch-prefix change cancels retries while own custom/checkpoint appends do 
   h.branch[0] = { type: "custom", id: "different" };
   await vi.advanceTimersByTimeAsync(18_000);
   expect(h.sendMessage).toHaveBeenCalledTimes(1);
+});
+
+it("retains input-hook authority when user entry is not yet canonical", async () => {
+  const h = await fixture();
+  h.delivery.request(request);
+  h.delivery.onAgentStart();
+  h.delivery.onInput();
+  h.branch.push(h.canonical());
+  h.delivery.onContext(h.branch);
+  expect(h.delivery.onAgentSettled(h.branch)).toBe("mixed-external");
+});
+it.each([
+  "exhaust-before-settle",
+  "late-confirm-after-settle",
+  "new-external-start",
+])("releases terminal chain for fresh opportunity: %s", async (scenario) => {
+  const h = await fixture();
+  h.delivery.request(request);
+  h.delivery.onAgentStart();
+  if (scenario === "exhaust-before-settle") {
+    await vi.advanceTimersByTimeAsync(18_000);
+    expect(h.delivery.onAgentSettled(h.branch)).toBe("uncertain-advisory");
+  } else if (scenario === "late-confirm-after-settle") {
+    expect(h.delivery.onAgentSettled(h.branch)).toBe("uncertain-advisory");
+    h.branch.push(h.canonical());
+    h.delivery.onContext(h.branch);
+  } else {
+    h.delivery.onAgentStart();
+    expect(h.delivery.onAgentSettled(h.branch)).toBe("independent");
+  }
+  const nextId = "00000000-0000-4000-8000-000000000002";
+  h.set({ opportunityId: nextId, idle: true });
+  expect(h.delivery.request({ ...request, opportunityId: nextId })).toBe(
+    "started",
+  );
 });

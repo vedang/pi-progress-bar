@@ -401,3 +401,16 @@ it("canonical own response and duplicate settlement never recursively rearm", as
   await vi.advanceTimersByTimeAsync(120_000);
   expect(h.sendMessage).toHaveBeenCalledTimes(1);
 });
+
+it("active user steer preserves the current run for the next independent opportunity", async () => {
+  const h = await advisoryFixture();
+  await h.emit("agent_start");
+  await h.emit("input", {
+    text: "Also continue the regression",
+    source: "interactive",
+  });
+  // Real Pi may finish queued active input without another agent_start.
+  await h.emit("agent_settled");
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.sendMessage).toHaveBeenCalledTimes(1);
+});

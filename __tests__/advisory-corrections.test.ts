@@ -140,10 +140,11 @@ it.each(["needed", "unknown", "missing", "stale", "weak"])(
   async (reason) => {
     const h = await fixture();
     const t = task();
+    if (!t.red) throw new Error("Missing fixture health");
     if (reason === "missing") t.red = undefined;
-    else if (reason === "stale") t.red!.revision = 2;
-    else if (reason === "weak") t.red!.probability = 0.79;
-    else t.red!.choice = reason;
+    else if (reason === "stale") t.red.revision = 2;
+    else if (reason === "weak") t.red.probability = 0.79;
+    else t.red.choice = reason;
     h.set({ tasks: [t] });
     await h.controller.observe(attempt);
     expect(h.evaluate).not.toHaveBeenCalled();

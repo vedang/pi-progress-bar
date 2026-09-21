@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import {
   fauxAssistantMessage,
   fauxProvider,
+  fauxToolCall,
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
 import type {
@@ -71,6 +72,7 @@ async function host(
   mode: Mode,
   settings: Parameters<typeof pinnedPi.SettingsManager.inMemory>[0] = {},
   production = false,
+  correctionProof = false,
 ) {
   const pi = process.env.PROGRESS_PI_HOST_ROOT
     ? ((await import(
@@ -112,6 +114,7 @@ async function host(
   let context: ExtensionContext | undefined;
   const trace: Trace[] = [];
   const errors: unknown[] = [];
+  const sent: Parameters<ExtensionAPI["sendMessage"]>[0][] = [];
   const settled = latch();
   const record = (hook: string, ctx: ExtensionContext, stop?: string) => {
     context = ctx;
@@ -141,9 +144,30 @@ async function host(
     noThemes: true,
     noContextFiles: true,
     extensionFactories: [
-      ...(production ? [progressBar] : []),
+      ...(production
+        ? [
+            (extension: ExtensionAPI) =>
+              progressBar({
+                ...extension,
+                sendMessage: (message, options) => {
+                  sent.push(message);
+                  extension.sendMessage(message, options);
+                },
+              }),
+          ]
+        : []),
       (extension) => {
         api = extension;
+        if (correctionProof)
+          extension.on("tool_call", async () => {
+            await vi.waitFor(() => expect(sent).toHaveLength(1), {
+              timeout: 3000,
+            });
+            return {
+              block: true,
+              reason: "Offline attempted-start transport proof",
+            };
+          });
         extension.on("session_start", (_e, ctx) =>
           record("session_start", ctx),
         );
@@ -202,7 +226,7 @@ async function host(
     settingsManager,
     modelRuntime: runtime,
     model: faux.getModel(),
-    tools: [],
+    tools: correctionProof ? ["write"] : [],
     thinkingLevel: "off",
   });
   await session.bindExtensions({ mode, onError: (e) => errors.push(e) });
@@ -215,6 +239,7 @@ async function host(
     faux,
     trace,
     errors,
+    sent,
     settled,
     async dispose() {
       if (process.env.PROGRESS_ADVISORY_HOST_ARTIFACT_DIR) {
@@ -664,6 +689,85 @@ it.each([
       dateSpy?.mockRestore();
       timerSpy.mockRestore();
       for (const deadline of deadlines) clearTimeout(deadline.timer);
+      await h.dispose();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  },
+);
+
+it.each(["tui", "rpc"] as const)(
+  "actual Pi %s delivers production correction during a builtin attempted start",
+  async (mode) => {
+    vi.stubEnv("TYPESAFE_API_KEY", "offline-correction-proof");
+    let healthCalls = 0;
+    let correctionCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body));
+        if (request.questions.redApplicability) healthCalls++;
+        const reply = await jevReply(request).json();
+        for (const key of Object.keys(request.questions)) {
+          if (!key.startsWith("correct:")) continue;
+          if (key === "correct:task:1") correctionCalls++;
+          const choice = key === "correct:task:1" ? "nudge" : "unrelated";
+          reply.answers[key] = {
+            type: "choice",
+            choice,
+            confidence: 1,
+            probabilities: {
+              nudge: choice === "nudge" ? 1 : 0,
+              unrelated: choice === "unrelated" ? 1 : 0,
+              required: 0,
+              unknown: 0,
+            },
+          };
+        }
+        return Response.json(reply);
+      }),
+    );
+    const h = await host(mode, {}, true, true);
+    try {
+      const initialHealthCalls = healthCalls;
+      h.faux.setResponses([
+        async () => {
+          await vi.waitFor(() =>
+            expect(healthCalls).toBeGreaterThan(initialHealthCalls),
+          );
+          return fauxAssistantMessage(
+            [
+              fauxToolCall("write", {
+                path: "regression.test.ts",
+                content: "// PRIVATE_TEST_BODY",
+              }),
+            ],
+            { stopReason: "toolUse" },
+          );
+        },
+        fauxAssistantMessage("The implementation remains pending."),
+      ]);
+      await bounded(h.session.prompt("Continue the current task."));
+      expect(correctionCalls).toBe(1);
+      expect(h.sent).toHaveLength(1);
+      expect(h.sent[0]).toMatchObject({
+        details: { kind: "test-correction" },
+        display: true,
+      });
+      expect(
+        h.manager
+          .getBranch()
+          .filter(
+            (entry) =>
+              entry.type === "custom_message" &&
+              entry.customType === "pi-progress-advisory",
+          ),
+      ).toHaveLength(1);
+      expect(
+        h.trace.filter((entry) => entry.hook === "agent_start"),
+      ).toHaveLength(1);
+      expect(h.errors).toEqual([]);
+    } finally {
       await h.dispose();
       vi.unstubAllGlobals();
       vi.unstubAllEnvs();

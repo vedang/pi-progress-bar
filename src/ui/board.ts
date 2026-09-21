@@ -405,24 +405,14 @@ class TaskBoard implements BoardComponent {
       task.taskId === candidate.id &&
       task.label === candidate.label &&
       task.revision === candidate.revision &&
-      (task.sourceDigest === undefined ||
-        task.sourceDigest === candidate.sourceDigest)
+      task.sourceDigest === candidate.sourceDigest
     );
   }
 
   /** A bound "other task" must still exist under exact board identity. */
   private boardHasVisibilityTask(candidate: VisibilityAction["task"]) {
     const tasks = this.snapshot.board.tasks;
-    if (tasks.some((task) => this.sameVisibilityTask(task, candidate)))
-      return true;
-    // Legacy external snapshots predate source digests. They can render an
-    // unrelated task only when no current row shares its ID; a same-ID stale
-    // revision/source remains unconfirmed. Production snapshots always carry
-    // source digests and therefore never use this compatibility path.
-    return (
-      !tasks.some((task) => task.taskId === candidate.id) &&
-      !tasks.some((task) => task.sourceDigest !== undefined)
-    );
+    return tasks.some((task) => this.sameVisibilityTask(task, candidate));
   }
 
   private visibilityLines(task: BoardTask, width: number, baseOffset: number) {

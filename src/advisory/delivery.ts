@@ -195,13 +195,18 @@ export class ReconciliationDelivery {
     const run = ++this.latestRun;
     const chain = this.chain;
     if (!chain) return;
-    if (chain.candidateOwnRun) {
+    if (
+      chain.candidateOwnRun ||
+      (chain.ownRun !== undefined && chain.ownRun > this.lastSettledRun)
+    ) {
+      // Pi may restart an active turn for retry or compaction without an
+      // intervening settlement. Keep this chain correlated to final run.
       chain.candidateOwnRun = false;
       chain.ownRun = run;
       return;
     }
-    // Only candidate-latched starts belong to this delivery. A later external
-    // run invalidates every terminal or uncertain chain from the old run.
+    // A noncandidate start after prior settlement is independent work, not a
+    // continuation of an old terminal or uncertain advisory chain.
     this.clearChain(chain);
   }
 

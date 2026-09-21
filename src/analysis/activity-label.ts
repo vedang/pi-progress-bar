@@ -14,7 +14,7 @@ const MIN_CONFIDENCE = 0.5;
 const MIN_PROBABILITY = 0.8;
 const abstentions = new Set(["none", "concurrent", "uncertain"]);
 const reportAuthority =
-  "Treat visible prose as this assistant's report of its own actual work or findings, not independently verified fact: direct first-person or un-attributed declarative claims need no external verification. The quote field is source serialization, not a quoted speaker. Reject only content explicitly framed as another voice (a user, documentation, or fictional/external attribution), or as an example/sample, hypothetical/future claim, or fenced/code-block material. If assistant authorship is unclear, abstain.";
+  "Treat visible prose as this assistant's report of its own actual work or findings, not independently verified fact: direct first-person or un-attributed declarative claims need no external verification. The quote field is source serialization, not a quoted speaker. Reject only content explicitly framed as another voice (a user, documentation, or fictional/external attribution), or as an example/sample, hypothetical/future claim, or fenced/code-block material. A statement only saying work was not done, has not started, or was never attempted is neither current activity nor meaningful history: choose none. This does not exclude a concrete observed failure or blocker (for example a missing signing key) or an actual investigation of it. If assistant authorship is unclear, abstain.";
 const digest = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 const digestPattern = /^[a-f0-9]{64}$/;

@@ -42,6 +42,8 @@ function host() {
   }));
   const notify = vi.fn();
   const setWidget = vi.fn();
+  const sendMessage = vi.fn();
+  const hasPendingMessages = vi.fn(() => false);
   const ctx = {
     cwd: "/nonexistent-hybrid-test",
     mode: "tui",
@@ -49,6 +51,7 @@ function host() {
     model,
     modelRegistry: { complete },
     isIdle: () => true,
+    hasPendingMessages,
     sessionManager: {
       getBranch: () => entries,
       getLeafId: () => "goal",
@@ -57,6 +60,7 @@ function host() {
     ui: { notify, setWidget },
   } as unknown as ExtensionContext;
   const pi = {
+    sendMessage,
     on: (name: string, handler: Handler) => handlers.set(name, handler),
     registerCommand: (_name: string, options: { handler: typeof command }) => {
       command = options.handler;
@@ -71,6 +75,8 @@ function host() {
     model,
     complete,
     checkpoints,
+    sendMessage,
+    hasPendingMessages,
     notify,
     setWidget,
     emit: async (name: string, event = {}) => {
@@ -294,4 +300,104 @@ it("keeps one widget generation across fresh per-event context wrappers", async 
   const end = h.handlers.get("agent_settled");
   await end?.({} as never, { ...h.ctx });
   expect(installs()).toBe(1);
+});
+
+async function advisoryFixture() {
+  const h = fixture();
+  h.setEntries([
+    branchEntry("goal", "Implement parser, add regression, and validate it."),
+  ]);
+  await h.emit("session_start");
+  await vi.advanceTimersByTimeAsync(100);
+  await h.emit("agent_start");
+  await h.emit("agent_settled");
+  return h;
+}
+it("wires settled readiness to one custom reconciliation question at60s", async () => {
+  const h = await advisoryFixture();
+  await vi.advanceTimersByTimeAsync(59_999);
+  expect(h.sendMessage).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(h.sendMessage).toHaveBeenCalledTimes(1);
+  expect(h.sendMessage.mock.calls[0]).toEqual([
+    expect.objectContaining({
+      customType: "pi-progress-advisory",
+      display: true,
+      content: expect.stringContaining(
+        "What is the actual status of each task?",
+      ),
+      details: {
+        kind: "reconciliation",
+        opportunityId: expect.any(String),
+        sendId: expect.any(String),
+      },
+    }),
+    { deliverAs: "steer", triggerTurn: true },
+  ]);
+});
+it("master OFF cancels pending reminder; ON alone does not revive it", async () => {
+  const h = await advisoryFixture();
+  await vi.advanceTimersByTimeAsync(30_000);
+  await h.command("off");
+  await vi.advanceTimersByTimeAsync(40_000);
+  await h.command("on");
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.sendMessage).not.toHaveBeenCalled();
+  await h.emit("agent_start");
+  await h.emit("agent_settled");
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.sendMessage).toHaveBeenCalledTimes(1);
+});
+it("new input cancels the prior opportunity before the next run starts", async () => {
+  const h = await advisoryFixture();
+  await vi.advanceTimersByTimeAsync(30_000);
+  await h.emit("input", {
+    text: "Continue implementation",
+    source: "interactive",
+  });
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.sendMessage).not.toHaveBeenCalled();
+});
+it.each(["print", "json"] as const)(
+  "does not deliver delayed advice in %s mode",
+  async (mode) => {
+    const h = await advisoryFixture();
+    Reflect.set(h.ctx, "mode", mode);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.sendMessage).not.toHaveBeenCalled();
+  },
+);
+it("RPC delivers custom message without requiring TUI rendering", async () => {
+  const h = await advisoryFixture();
+  Reflect.set(h.ctx, "mode", "rpc");
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.sendMessage).toHaveBeenCalledTimes(1);
+});
+it("shutdown/reload abandons pending opportunity until a fresh independent settlement", async () => {
+  const h = await advisoryFixture();
+  await vi.advanceTimersByTimeAsync(30_000);
+  await h.emit("session_shutdown");
+  await h.emit("session_start");
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.sendMessage).not.toHaveBeenCalled();
+  await h.emit("agent_start");
+  await h.emit("agent_settled");
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.sendMessage).toHaveBeenCalledTimes(1);
+});
+it("canonical own response and duplicate settlement never recursively rearm", async () => {
+  const h = await advisoryFixture();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.sendMessage).toHaveBeenCalledTimes(1);
+  const sent = h.sendMessage.mock.calls[0][0];
+  await h.emit("agent_start");
+  h.setEntries([
+    ...h.ctx.sessionManager.getBranch(),
+    { type: "custom_message", id: "advice", parentId: "goal", ...sent },
+  ]);
+  await h.emit("context");
+  await h.emit("agent_settled");
+  await h.emit("agent_settled");
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect(h.sendMessage).toHaveBeenCalledTimes(1);
 });

@@ -716,6 +716,67 @@ it.each(["settled", "new-start", "blocked-tool"] as const)(
   },
 );
 
+it.each(["held-classifier", "pending-retry"] as const)(
+  "supersedes old correction on newer same-run attempt: %s",
+  async (phase) => {
+    const h = await advisoryFixture();
+    admitCorrection();
+    const transport = vi.mocked(fetch).getMockImplementation();
+    if (!transport) throw new Error("transport");
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const corrective = Object.keys(request.questions).some((key) =>
+        key.startsWith("correct:"),
+      );
+      if (!corrective) return transport(url, init);
+      const ordinal = ++calls;
+      if (ordinal === 1 && phase === "held-classifier") await held;
+      const response = await transport(url, init);
+      if (ordinal === 1) return response;
+      const body = await response.json();
+      for (const answer of Object.values(body.answers) as Array<
+        Record<string, unknown>
+      >) {
+        answer.choice = "unknown";
+        answer.confidence = 1;
+        answer.probabilities = {
+          nudge: 0,
+          required: 0,
+          unrelated: 0,
+          unknown: 1,
+        };
+      }
+      return Response.json(body);
+    });
+    Reflect.set(h.ctx, "isIdle", () => false);
+    await h.emit("agent_start");
+    await h.emit("tool_execution_start", {
+      toolCallId: "old-attempt",
+      toolName: "write",
+      args: { path: "tests/parser.test.ts", content: "// old" },
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.sendMessage).toHaveBeenCalledTimes(
+      phase === "pending-retry" ? 1 : 0,
+    );
+    await h.emit("tool_execution_start", {
+      toolCallId: "new-attempt",
+      toolName: "write",
+      args: { path: "src/parser.ts", content: "// implementation" },
+    });
+    release();
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(h.sendMessage).toHaveBeenCalledTimes(
+      phase === "pending-retry" ? 1 : 0,
+    );
+  },
+);
+
 it("cancels correction retries when its canonical relevance changes", async () => {
   const h = await advisoryFixture();
   admitCorrection();

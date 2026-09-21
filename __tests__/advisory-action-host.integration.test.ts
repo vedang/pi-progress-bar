@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-ai";
 import * as pinnedPi from "@earendil-works/pi-coding-agent";
 import { expect, it } from "vitest";
+import { CorrectionAdapter } from "../src/advisory/correction-adapter";
 
 // Characterization only: a public start event is not proof a write executed.
 it.each(["blocked", "truncated", "valid"] as const)(
@@ -49,6 +50,7 @@ it.each(["blocked", "truncated", "valid"] as const)(
       fauxAssistantMessage("Finished"),
     ]);
     const errors: unknown[] = [];
+    const attempts: unknown[] = [];
     let registered: ReturnType<pinnedPi.ExtensionAPI["getAllTools"]> = [];
     const loader = new pi.DefaultResourceLoader({
       cwd,
@@ -61,10 +63,16 @@ it.each(["blocked", "truncated", "valid"] as const)(
       noContextFiles: true,
       extensionFactories: [
         (api) => {
+          const adapter = new CorrectionAdapter({
+            tools: () => api.getAllTools(),
+          });
           api.on("session_start", () => {
             registered = api.getAllTools();
           });
           api.on("tool_execution_start", (event) => {
+            attempts.push(
+              adapter.start(event.toolCallId, event.toolName, event.args, cwd),
+            );
             events.push({
               kind: "start",
               exists: existsSync(path),
@@ -122,6 +130,14 @@ it.each(["blocked", "truncated", "valid"] as const)(
           properties: { path: { type: "string" }, content: { type: "string" } },
         },
       });
+      expect(attempts).toEqual([
+        {
+          kind: "test",
+          id: call.id,
+          toolName: "write",
+          path: "regression.test.ts",
+        },
+      ]);
       expect(events[0]).toEqual({ kind: "start", exists: false, id: call.id });
       expect(events.every((event) => event.id === call.id)).toBe(true);
       expect(events.filter((event) => event.kind === "update")).toEqual([]);

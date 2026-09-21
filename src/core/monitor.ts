@@ -2865,6 +2865,7 @@ export class Monitor {
       );
     if (!target) return;
     // New report supersedes live proof before optional work begins.
+    this.correctionFacts.delete(target.id);
     this.currentHealthTaskId = undefined;
     this.healthObservation = {
       observation: { ...observation },

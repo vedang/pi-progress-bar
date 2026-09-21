@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { CorrectionController } from "../src/advisory/corrections";
 import type {
   EvaluationRequest,
   ValidatedResult,
@@ -72,8 +73,6 @@ function result(
   };
 }
 async function fixture() {
-  const path = "../src/advisory/corrections.ts";
-  const module = await import(path);
   let state: Snapshot = {
     enabled: true,
     ready: true,
@@ -86,7 +85,7 @@ async function fixture() {
   };
   const emit = vi.fn();
   const evaluate = vi.fn(async (r: EvaluationRequest) => result(r));
-  const controller: Controller = new module.CorrectionController({
+  const controller: Controller = new CorrectionController({
     snapshot: () => structuredClone(state),
     evaluate,
     emit,

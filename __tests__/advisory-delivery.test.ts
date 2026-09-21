@@ -17,7 +17,7 @@ type Origin =
   | "uncertain-advisory";
 type Delivery = {
   request(value: {
-    kind: "reconciliation";
+    kind: "reconciliation" | "test-correction" | "review-correction";
     opportunityId: string;
     content: string;
     sessionEpoch: number;
@@ -342,3 +342,17 @@ it("preserves own origin across low-level retries before a single final settleme
   expect(h.delivery.onAgentSettled(h.branch)).toBe("advisory-only");
   expect(h.delivery.onAgentSettled(h.branch)).toBeUndefined();
 });
+
+it.each(["test-correction", "review-correction"] as const)(
+  "steers %s immediately during active external work without misclassifying its run",
+  async (kind) => {
+    const h = await fixture();
+    h.delivery.onAgentStart();
+    h.set({ idle: false });
+    expect(h.delivery.request({ ...request, kind })).toBe("started");
+    expect(h.sendMessage.mock.calls[0][0].details.kind).toBe(kind);
+    h.branch.push(h.canonical());
+    h.delivery.onContext(h.branch);
+    expect(h.delivery.onAgentSettled(h.branch)).toBe("mixed-external");
+  },
+);

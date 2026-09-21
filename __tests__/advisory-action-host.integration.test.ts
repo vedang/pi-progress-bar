@@ -49,6 +49,7 @@ it.each(["blocked", "truncated", "valid"] as const)(
       fauxAssistantMessage("Finished"),
     ]);
     const errors: unknown[] = [];
+    let registered: ReturnType<pinnedPi.ExtensionAPI["getAllTools"]> = [];
     const loader = new pi.DefaultResourceLoader({
       cwd,
       agentDir: join(cwd, "agent"),
@@ -60,6 +61,9 @@ it.each(["blocked", "truncated", "valid"] as const)(
       noContextFiles: true,
       extensionFactories: [
         (api) => {
+          api.on("session_start", () => {
+            registered = api.getAllTools();
+          });
           api.on("tool_execution_start", (event) => {
             events.push({
               kind: "start",
@@ -111,6 +115,13 @@ it.each(["blocked", "truncated", "valid"] as const)(
         onError: (error) => errors.push(error),
       });
       await session.prompt("Run the synthetic write proof.");
+      expect(registered.find((tool) => tool.name === "write")).toMatchObject({
+        sourceInfo: { source: "builtin", path: "<builtin:write>" },
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" }, content: { type: "string" } },
+        },
+      });
       expect(events[0]).toEqual({ kind: "start", exists: false, id: call.id });
       expect(events.every((event) => event.id === call.id)).toBe(true);
       expect(events.filter((event) => event.kind === "update")).toEqual([]);

@@ -13,6 +13,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import * as pinnedPi from "@earendil-works/pi-coding-agent";
 import { expect, it, vi } from "vitest";
+import { processObservation } from "../src/core/hybrid";
+import { encodeCheckpoint } from "../src/core/hybrid-checkpoint";
+import { emptyState } from "../src/core/hybrid-state";
+import progressBar from "../src/index";
+import { addPatch, backend, observation } from "./fixtures/hybrid";
+import { jevReply } from "./fixtures/hybrid-monitor";
 
 function latch() {
   let release = () => {};
@@ -64,6 +70,7 @@ const message = {
 async function host(
   mode: Mode,
   settings: Parameters<typeof pinnedPi.SettingsManager.inMemory>[0] = {},
+  production = false,
 ) {
   const pi = process.env.PROGRESS_PI_HOST_ROOT
     ? ((await import(
@@ -78,6 +85,21 @@ async function host(
     ...settings,
   });
   const manager = pi.SessionManager.create(cwd, join(cwd, "sessions"));
+  if (production) {
+    const text = "Implement parser and add regression tests.";
+    const id = manager.appendMessage({
+      role: "user",
+      content: text,
+      timestamp: Date.now(),
+    });
+    const source = observation(id, text);
+    const state = await processObservation(
+      emptyState(manager.getSessionId()),
+      source,
+      backend(addPatch(source)),
+    );
+    manager.appendCustomEntry("pi-progress-bar", encodeCheckpoint(state));
+  }
   const runtime = await pi.ModelRuntime.create({
     credentials: new InMemoryCredentialStore(),
     modelsPath: null,
@@ -119,6 +141,7 @@ async function host(
     noThemes: true,
     noContextFiles: true,
     extensionFactories: [
+      ...(production ? [progressBar] : []),
       (extension) => {
         api = extension;
         extension.on("session_start", (_e, ctx) =>
@@ -526,3 +549,94 @@ it("actual Pi reload emits shutdown then fresh start without rearming a settled 
     await h.dispose();
   }
 }, 10000);
+
+it.each(["tui", "rpc"] as const)(
+  "actual Pi %s runs production reconciliation and suppresses own-response recursion",
+  async (mode) => {
+    vi.stubEnv("TYPESAFE_API_KEY", "offline-advisory-acceptance");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init?: RequestInit) =>
+        jevReply(JSON.parse(String(init?.body))),
+      ),
+    );
+    const h = await host(mode, {}, true);
+    const nativeTimeout = globalThis.setTimeout;
+    const deadlines: Array<{
+      callback: () => void;
+      timer: ReturnType<typeof setTimeout>;
+    }> = [];
+    const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      callback: (...args: unknown[]) => void,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
+      const timer = nativeTimeout(callback, delay, ...args);
+      if (delay === 60_000)
+        deadlines.push({ callback: () => callback(...args), timer });
+      return timer;
+    }) as typeof setTimeout);
+    let dateSpy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      h.faux.setResponses([
+        fauxAssistantMessage("The parser is still pending."),
+        fauxAssistantMessage(
+          "All three tasks remain pending; no implementation has been completed.",
+        ),
+      ]);
+      await bounded(
+        h.session.prompt("Report current status without changing scope."),
+      );
+      await vi.waitFor(() => expect(deadlines).toHaveLength(1));
+      const deadline = deadlines[0];
+      const now = Date.now();
+      // Accelerate only the extension deadline; actual Pi lifecycle/provider remain real.
+      dateSpy = vi.spyOn(Date, "now").mockReturnValue(now + 60_001);
+      clearTimeout(deadline.timer);
+      deadline.callback();
+      await vi.waitFor(() =>
+        expect(
+          h.manager
+            .getBranch()
+            .filter(
+              (entry) =>
+                entry.type === "custom_message" &&
+                entry.customType === "pi-progress-advisory",
+            ),
+        ).toHaveLength(1),
+      );
+      await vi.waitFor(() =>
+        expect(
+          h.trace.filter((entry) => entry.hook === "agent_settled"),
+        ).toHaveLength(2),
+      );
+      expect(deadlines).toHaveLength(1);
+      const sent = h.manager
+        .getBranch()
+        .find(
+          (entry) =>
+            entry.type === "custom_message" &&
+            entry.customType === "pi-progress-advisory",
+        );
+      expect(sent).toMatchObject({
+        display: true,
+        content: expect.stringContaining(
+          "What is the actual status of each task?",
+        ),
+        details: {
+          kind: "reconciliation",
+          opportunityId: expect.any(String),
+          sendId: expect.any(String),
+        },
+      });
+      expect(h.errors).toEqual([]);
+    } finally {
+      dateSpy?.mockRestore();
+      timerSpy.mockRestore();
+      for (const deadline of deadlines) clearTimeout(deadline.timer);
+      await h.dispose();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  },
+);

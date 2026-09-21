@@ -63,7 +63,7 @@ Optional visibility classification has separate usage accounting and a **1,024-c
 
 Task ownership confidence is visible without changing semantic task state: Stage-2 binding confidence **≥0.9** is shown normally; **0.8–<0.9** shows `(MAYBE)` beside the current/history task association; below 0.8 stays task-unconfirmed. The selected-probability gate remains **≥0.8** in every band. Stage-1 report selection remains unchanged at confidence **≥0.5** plus probability **≥0.8**.
 
-At the existing 60-second run-end reconciliation, up to eight current-open-task `(MAYBE)` receipts are appended as JSON-escaped, untrusted reported data. The agent is asked which board task, `other`, or `unknown` each concerns, then for actual status. This adds no separate timer/message chain, does not wake an all-done board, and no generic status reply silently resolves an ownership receipt. Runtime/UI independent acceptance and human testing remain pending.
+At the existing 60-second run-end reconciliation, up to eight current-open-task `(MAYBE)` receipts are appended as JSON-escaped, untrusted reported data. The agent is asked which board task, `other`, or `unknown` each concerns, then for actual status. This adds no separate timer/message chain, does not wake an all-done board, and no generic status reply silently resolves an ownership receipt. Runtime/UI and MAYBE clarification are independently locally accepted through `8144d354` (review `73c1b12f`): 917 unit tests and 71 integration tests on each Pi host pass. Human manual testing remains pending; no release is implied.
 
 ## Reading the widget
 

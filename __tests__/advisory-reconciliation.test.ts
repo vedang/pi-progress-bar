@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { ReconciliationController } from "../src/advisory/reconciliation";
 
 type Row = {
   id: string;
@@ -47,13 +48,10 @@ const question =
 const message = (rows: Row[]) =>
   `${heading}\n${rows.map((r) => `${r.id} — ${r.label}`).join("\n")}\n\n${question}`;
 async function fixture() {
-  // Dynamic path keeps the red phase type-checkable before the module exists.
-  const path = "../src/advisory/reconciliation.ts";
-  const module = await import(path);
   let board: Board = { enabled: true, reason: "ready", tasks: [row()] };
   const emit = vi.fn<(request: Request) => void>();
   const snapshot = vi.fn(() => board);
-  const controller: Controller = new module.ReconciliationController({
+  const controller: Controller = new ReconciliationController({
     snapshot,
     emit,
     clock: {

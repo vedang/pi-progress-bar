@@ -1,5 +1,17 @@
 # Jev call batching audit
 
+## Current independent-health addendum (`pi-progress-barroot-7rv`)
+
+The focus-gated health conclusions below describe the historical runtime, not the current contract. Health now assesses each eligible task independently after semantic settlement, without guessing an exclusive focus. Open tasks refresh per committed observation; newly done tasks receive terminal-report health; valid terminal cards wait for lifecycle/card invalidation rather than unrelated later reports.
+
+One health flight drains at most 20 task-keyed jobs before optional details. Coalescing retains bounded chronological context (16 whole reports / 4KiB serialized reports), with explicit omissions, task-specific judgments and atomic five-field admission. Fairness applies among ready jobs after finite semantic settlement. Transient health retry requires a backoff deadline and a real canonical/evidence/control wake; there is no health timer or idle polling.
+
+Cost per settled observation is the sum of eligible task request batches; request packing is unchanged. Sequential observations, retries and cancelled flights can add cost. Neither queue bounds nor the separate visibility-call budget cap lifetime health spend.
+
+Strict v9 checkpoints add bounded coverage proof. Matching coverage restores retained without rebilling, even when ephemeral evidence is lost; stale/missing open and terminal work is reconstructed without semantic replay. Older versions, including v8, remain OFF without migration or automatic rebuilding. Deterministic replay establishes local mechanics only; real model linkage accuracy needs separately approved paid evaluation.
+
+## Historical audit (preserved evidence)
+
 Runtime inspected: `d780df28`. Scope: `pi-progress-barroot-knq`. Batch independent judgments sharing evidence and lifecycle; do not minimize calls at the expense of correctness.
 
 | Call | Existing natural batch | Why separate from next phase |

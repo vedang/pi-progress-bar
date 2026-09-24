@@ -1,5 +1,7 @@
 # Progress UX — local candidate acceptance
 
+> Historical acceptance evidence below is unchanged. The later `pi-progress-barroot-7rv` change independently schedules per-task health and introduces strict v9 coverage proof; old v8 sessions remain OFF without migration. These earlier test totals/review do not certify that later implementation. See PRODUCT.md and README.md for its current contract; final full-batch verification/review is tracked in `7rv.8`/`7rv.9`.
+
 ## Frozen source
 
 - Accepted hybrid baseline: `0102cde4`.

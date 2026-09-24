@@ -4,11 +4,17 @@
 
 **Scope:** three incrementally accepted capabilities, in order: **A reconciliation**, **B test correction**, **C review correction**. No release, install, publish, push, branch, UI redesign, debugger work, Beads mutation, migration, or new user-facing control belongs here.
 
+## Independent-health amendment (`pi-progress-barroot-7rv`)
+
+Owner subsequently authorized strict **v9** bounded task-health coverage proof. This supersedes this document's v8-preservation constraint for that health change only; historical v8 source/acceptance facts below remain historical. No migration or durable advisory queue is added: old v8 remains OFF without automatic replay/rebilling.
+
+Independent health scheduling does not expand advisory authority. Enqueuing a task's replacement immediately revokes only its current/advisory proof. New facts require exact task/source/revision/epoch, current job identity and accepted receipt checks; superseded responses cannot restore actionable not-needed facts. Runtime advisory facts are not recovered from retained checkpoint cards. Optional health queue/flight never gates reconciliation readiness or owns focus/tool linkage. Existing correction thresholds, policy vetoes and delivery rules stay unchanged.
+
 ## 1. Fixed product boundaries
 
 - The existing `/progress on|off` monitor control is sole user-facing master control. Master ON enables every accepted advisory capability; master OFF disables progress and advisory behavior. No advisory ON/OFF command, preference, capability switch, session opt-in, legacy rollout state, or other user-facing advisory configuration may be added.
 - Advisory is advisory only. It never edits code or tests, changes task status directly, blocks tools, cancels a review, controls a child, or overrides explicit user/repository requirements.
-- Preserve strict progress checkpoint **v8**. No v8 field change or migration is authorized. A conditional evidence/provider change needs its named gate and explicit owner approval; it is not implied by this design.
+- Advisory itself adds no persisted fields or migration. The separately owner-authorized independent-health amendment above uses strict **v9**. Further conditional evidence/provider changes still need their named gate and explicit owner approval.
 - Every capability is locally accepted under master ON or remains unavailable. An unavailable later capability never disables an earlier accepted one. Local acceptance is not release authorization.
 - Main owns all new/changed deterministic tests and paid Jev work. Characterization may add evidence only. Planning artifacts remain untracked.
 

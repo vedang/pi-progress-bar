@@ -2325,7 +2325,7 @@ export class Monitor {
     this.publish();
   }
 
-  /** Every current state/proof/runtime source is authoritative for this pass. */
+  /** Mandatory semantic sources only; optional health validates independently. */
   private canonicalReferences() {
     const references: {
       entryId: string;
@@ -2400,16 +2400,6 @@ export class Monitor {
         messageHash: observation.hash,
         role: observation.role,
       })),
-      ...[...this.healthJobs.values()]
-        .flatMap((job) => [job.work, ...(job.successor ? [job.successor] : [])])
-        .flatMap((work) => [
-          {
-            entryId: work.observation.id,
-            messageHash: work.observation.hash,
-            role: work.observation.role,
-          },
-          ...work.reports.references,
-        ]),
       ...(this.catchupTarget
         ? [
             {
@@ -4864,39 +4854,18 @@ export class Monitor {
     };
     const candidateCards = new Map(this.healthCards);
     candidateCards.set(task.id, card);
-    const previousDisplay = {
-      lastDisplayedTaskId: this.lastDisplayedTaskId,
-      idleDoneInvalidated: this.idleDoneInvalidated,
-    };
-    const establishesIdleDone =
-      task.status === "done" &&
-      this.state.tasks.length > 0 &&
-      this.state.tasks
-        .filter((item) => item.included)
-        .every((item) => item.status === "done");
-    if (establishesIdleDone) {
-      // All-done display is semantic; receipt capacity preflight above reserves
-      // its selector before this terminal task can retain that display.
-      this.lastDisplayedTaskId = task.id;
-      this.idleDoneInvalidated = false;
-    }
+    // Health receipt order never owns selection, including all-done refreshes.
     try {
       encodeCheckpoint(
         this.state,
         this.metadata(this.enabled, candidateCards, this.state),
       );
     } catch {
-      this.lastDisplayedTaskId = previousDisplay.lastDisplayedTaskId;
-      this.idleDoneInvalidated = previousDisplay.idleDoneInvalidated;
       this.note("health-capacity-skipped");
       this.publish();
       return { kind: "terminal" };
     }
-    if (!this.healthFlightCurrent(flight, work)) {
-      this.lastDisplayedTaskId = previousDisplay.lastDisplayedTaskId;
-      this.idleDoneInvalidated = previousDisplay.idleDoneInvalidated;
-      return { kind: "terminal" };
-    }
+    if (!this.healthFlightCurrent(flight, work)) return { kind: "terminal" };
     this.healthCards = candidateCards;
     this.currentHealthProofs.set(task.id, snapshot.identity);
     // Advisory authority follows the same exact task-local receipt.

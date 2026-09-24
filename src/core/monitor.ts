@@ -95,6 +95,7 @@ import {
   type HybridTask,
   type Observation,
   observationRef,
+  tasksNewestFirst,
 } from "./hybrid-state";
 import type { Ledger } from "./types";
 
@@ -181,6 +182,10 @@ type HealthAttempt =
 interface CorrectionFact extends CorrectionRedFact {
   epoch: number;
   taskSource: HybridTask["source"];
+  /** Exact runtime health input that admitted this advisory fact. */
+  healthIdentity: string;
+  /** Digest binds the fact to its accepted task-local health receipt. */
+  snapshotHash: string;
 }
 
 interface ActivityBatch {
@@ -544,12 +549,11 @@ export class Monitor {
   private card?: RetainedCard;
   /** Bounded durable map, the only persisted health authority. */
   private healthCards = new Map<string, HealthCard>();
-  /** Current proof cannot survive reload because snapshot identity includes epoch. */
-  private currentHealthTaskId?: string;
+  /** Runtime task-local proof; snapshot identities cannot survive reload. */
+  private currentHealthProofs = new Map<string, string>();
   private lastDisplayedTaskId?: string;
   /** New unclassified work immediately disqualifies retained idle DONE display. */
   private idleDoneInvalidated = false;
-  private cardHealthIdentity?: string;
   private beads = new Map<string, BeadsPresentation>();
   private beadsGeneration = 0;
   private beadsInFlight = false;
@@ -694,7 +698,7 @@ export class Monitor {
     this.evidence.finish(callId, toolName, value, Date.now());
     if (JSON.stringify(this.evidence.snapshot()) !== evidence) {
       // Validated passive evidence is a named health wake, never semantic work.
-      this.currentHealthTaskId = undefined;
+      this.currentHealthProofs.clear();
       this.wakeHealthFromCurrent("evidence");
       this.syncPresentationCard();
       this.publish();
@@ -1339,9 +1343,8 @@ export class Monitor {
         !!this.queued.length ||
         !!this.state.pending ||
         this.state.scopeUnresolved,
-      currentHealthTaskId: this.currentHealthTaskId,
-      pendingHealthTaskId:
-        this.healthFlight?.taskId ?? this.nextPendingHealthJob()?.work.taskId,
+      currentHealthTaskIds: new Set(this.currentHealthProofs.keys()),
+      pendingHealthTaskIds: this.pendingHealthTaskIds(),
       lastDisplayedTaskId: this.idleDoneInvalidated
         ? undefined
         : this.lastDisplayedTaskId,
@@ -1508,11 +1511,21 @@ export class Monitor {
     task: HybridTask,
   ): CorrectionRedFact | undefined {
     const fact = this.correctionFacts.get(task.id);
+    const job = this.healthJobs.get(task.id);
+    const card = this.healthCards.get(task.id);
     if (
       !fact ||
       fact.epoch !== this.epoch ||
       fact.revision !== task.revision ||
-      !sameSource(fact.taskSource, task.source)
+      !sameSource(fact.taskSource, task.source) ||
+      !job ||
+      job.identity !== fact.healthIdentity ||
+      job.successor ||
+      !card ||
+      card.taskId !== task.id ||
+      card.revision !== task.revision ||
+      !sameSource(card.provenance.taskSource, task.source) ||
+      card.provenance.snapshotHash !== fact.snapshotHash
     )
       return;
     return {
@@ -1576,8 +1589,12 @@ export class Monitor {
 
   private acceptCorrectionFact(
     task: HybridTask,
+    work: HealthWork,
+    flight: HealthFlight,
+    snapshotIdentity: string,
     answer: ValidatedResult["answers"][string] | undefined,
   ) {
+    if (!this.healthFlightCurrent(flight, work)) return;
     this.correctionFacts.delete(task.id);
     const probability =
       answer?.type === "choice"
@@ -1603,6 +1620,8 @@ export class Monitor {
       revision: task.revision,
       epoch: this.epoch,
       taskSource: { ...task.source },
+      healthIdentity: this.healthWorkIdentity(work),
+      snapshotHash: sha256(snapshotIdentity),
     });
   }
 
@@ -1653,10 +1672,9 @@ export class Monitor {
     this.parkedDetails.clear();
     this.detailFlight = undefined;
     this.detailGateway.invalidate();
-    this.currentHealthTaskId = undefined;
+    this.currentHealthProofs.clear();
     this.lastDisplayedTaskId = undefined;
     this.idleDoneInvalidated = false;
-    this.cardHealthIdentity = undefined;
     this.clearRuntimeContext();
     this.queued = [];
     this.healthJobs.clear();
@@ -1697,7 +1715,7 @@ export class Monitor {
     const included = state.tasks.filter((task) => task.included);
     if (!included.length || !included.every((task) => task.status === "done"))
       return;
-    const currentFocus = this.openFocus(this.state)?.id;
+    const currentFocus = this.openFocus(state)?.id;
     const taskId = this.lastDisplayedTaskId ?? currentFocus;
     return included.some((task) => task.id === taskId) ? taskId : undefined;
   }
@@ -1816,8 +1834,7 @@ export class Monitor {
         .map((card) => [card.taskId, copyHealthCard(card)]),
     );
     // Stored card digests prove safe retention, not live freshness after reload.
-    this.currentHealthTaskId = undefined;
-    this.cardHealthIdentity = undefined;
+    this.currentHealthProofs.clear();
     const details = this.options.richDetailsEnabled
       ? ((metadata?.taskDetails ?? []) as TaskDetailRecord[])
       : [];
@@ -1970,7 +1987,7 @@ export class Monitor {
     this.healthCards = new Map(
       accepted.map((card) => [card.taskId, copyHealthCard(card)]),
     );
-    this.currentHealthTaskId = undefined;
+    this.reconcileCurrentHealthProofs();
     this.syncPresentationCard();
     return true;
   }
@@ -1991,31 +2008,88 @@ export class Monitor {
     };
   }
 
-  /** Runtime widget card derives only from exact durable facts and live selector. */
+  /** Board-equivalent selection derives from semantic state, never health arrival order. */
+  private presentationTaskId(state: HybridState) {
+    const focus = this.openFocus(state);
+    if (focus) return focus.id;
+    const tasks = tasksNewestFirst(state);
+    const allDone =
+      tasks.length > 0 &&
+      tasks
+        .filter((task) => task.included)
+        .every((task) => task.status === "done");
+    if (!this.idleDoneInvalidated && allDone && this.lastDisplayedTaskId) {
+      const retained = tasks.find(
+        (task) =>
+          task.id === this.lastDisplayedTaskId &&
+          task.included &&
+          task.status === "done",
+      );
+      if (retained) return retained.id;
+    }
+    const open = tasks.filter(
+      (task) => task.included && task.status !== "done",
+    );
+    return (
+      open.find((task) => task.id === this.lastDisplayedTaskId)?.id ??
+      open.at(-1)?.id
+    );
+  }
+
+  private currentHealthProofMatches(card: HealthCard) {
+    const identity = this.currentHealthProofs.get(card.taskId);
+    return !!identity && sha256(identity) === card.provenance.snapshotHash;
+  }
+
+  /** Drop only task-local live proof whose retained card no longer validates. */
+  private reconcileCurrentHealthProofs(
+    state: HybridState = this.state,
+    healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
+  ) {
+    for (const [taskId, identity] of this.currentHealthProofs) {
+      const task = state.tasks.find((item) => item.id === taskId);
+      const card = healthCards.get(taskId);
+      if (
+        !task ||
+        !card ||
+        !this.healthCardMatchesTask(card, task) ||
+        sha256(identity) !== card.provenance.snapshotHash
+      )
+        this.currentHealthProofs.delete(taskId);
+    }
+  }
+
+  /** Runtime widget card follows semantic/board selection, not assessment completion. */
   private syncPresentationCard(
     state: HybridState = this.state,
     healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
   ) {
-    const focus = this.openFocus(state);
-    const focused = focus ? healthCards.get(focus.id) : undefined;
-    const latest = [...healthCards.values()].sort(
-      (left, right) => right.assessedAt - left.assessedAt,
-    )[0];
-    const selected = focused ?? latest;
-    if (!selected) {
+    const selectedTaskId = this.presentationTaskId(state);
+    const selected = selectedTaskId
+      ? healthCards.get(selectedTaskId)
+      : undefined;
+    const retained = this.card ? healthCards.get(this.card.taskId) : undefined;
+    const retainedTask = retained
+      ? state.tasks.find((task) => task.id === retained.taskId)
+      : undefined;
+    const card =
+      selected ??
+      (retainedTask && this.healthCardMatchesTask(retained, retainedTask)
+        ? retained
+        : undefined);
+    if (!card) {
       this.card = undefined;
       return;
     }
+    const focus = this.openFocus(state);
     const isCurrent =
       !!focus &&
-      selected.taskId === focus.id &&
-      this.currentHealthTaskId === selected.taskId &&
-      !this.hasPendingHealthWork() &&
-      !this.healthFlight;
+      card.taskId === focus.id &&
+      this.currentHealthProofMatches(card);
     this.card = this.presentationCardFor(
-      selected,
+      card,
       !isCurrent,
-      !!focus && !isCurrent,
+      !!selectedTaskId && this.hasPendingHealthForTask(selectedTaskId),
     );
   }
 
@@ -2107,7 +2181,7 @@ export class Monitor {
   }
 
   private cancelHealth() {
-    this.currentHealthTaskId = undefined;
+    this.currentHealthProofs.clear();
     const flight = this.healthFlight;
     if (!flight) {
       this.syncPresentationCard();
@@ -3584,15 +3658,16 @@ export class Monitor {
     );
   }
 
-  private hasPendingHealthWork() {
-    return [...this.healthJobs.values()].some(
-      (job) => job.state !== "terminal",
-    );
+  private hasPendingHealthForTask(taskId: string) {
+    const job = this.healthJobs.get(taskId);
+    return !!job && job.state !== "terminal";
   }
 
-  private nextPendingHealthJob() {
-    return [...this.healthJobs.values()].find(
-      (job) => job.state !== "terminal",
+  private pendingHealthTaskIds() {
+    return new Set(
+      [...this.healthJobs.values()]
+        .filter((job) => job.state !== "terminal")
+        .map((job) => job.work.taskId),
     );
   }
 
@@ -3724,16 +3799,26 @@ export class Monitor {
     }
   }
 
+  /** A new task input revokes only that task's live/advisory proof immediately. */
+  private admitHealthReplacement(taskId: string) {
+    this.currentHealthProofs.delete(taskId);
+    this.correctionFacts.delete(taskId);
+  }
+
   /** Queued work keeps its position; a successor to a flight is placed after peers. */
   private enqueueHealth(work: HealthWork) {
     const identity = this.healthWorkIdentity(work);
     const existing = this.healthJobs.get(work.taskId);
     if (existing) {
       if (existing.state === "in-flight") {
-        if (existing.identity !== identity) existing.successor = work;
+        if (existing.identity !== identity) {
+          this.admitHealthReplacement(work.taskId);
+          existing.successor = work;
+        }
         return;
       }
       if (existing.identity === identity) return;
+      this.admitHealthReplacement(work.taskId);
       const remainsParked =
         existing.state === "parked" &&
         Number.isFinite(existing.parkedUntil) &&
@@ -3747,7 +3832,18 @@ export class Monitor {
       return;
     }
     if (this.healthJobs.size >= 20) return;
+    this.admitHealthReplacement(work.taskId);
     this.healthJobs.set(work.taskId, { work, identity, state: "ready" });
+  }
+
+  private healthFlightCurrent(flight: HealthFlight, work: HealthWork) {
+    const job = this.healthJobs.get(work.taskId);
+    return (
+      this.healthFlight === flight &&
+      job?.state === "in-flight" &&
+      job.identity === this.healthWorkIdentity(work) &&
+      !job.successor
+    );
   }
 
   /** Every committed observation refreshes open tasks without requiring focus. */
@@ -3770,9 +3866,6 @@ export class Monitor {
     const evidenceGeneration = this.healthEvidenceGeneration();
     for (const task of tasks) {
       const prior = priorTasks.find((item) => item.id === task.id);
-      // Replacement invalidates only this task's advisory fact.
-      this.correctionFacts.delete(task.id);
-      this.currentHealthTaskId = undefined;
       this.enqueueHealth(
         this.healthWork(
           task,
@@ -3992,7 +4085,7 @@ export class Monitor {
       this.healthCards.size > 0 ||
       this.taskDetails.size > 0 ||
       !!this.card ||
-      !!this.currentHealthTaskId ||
+      this.currentHealthProofs.size > 0 ||
       this.healthJobs.size > 0 ||
       !!this.healthFlight;
     this.healthCards.clear();
@@ -4003,8 +4096,7 @@ export class Monitor {
       this.detailFlight = undefined;
       this.detailGateway.invalidate();
     }
-    this.currentHealthTaskId = undefined;
-    this.cardHealthIdentity = undefined;
+    this.currentHealthProofs.clear();
     this.card = undefined;
     this.healthJobs.clear();
     if (this.healthFlight) {
@@ -4096,14 +4188,6 @@ export class Monitor {
     const prospective = this.maximumHealthCard(task, observation);
     const candidateCards = new Map(this.healthCards);
     candidateCards.set(task.id, prospective);
-    const prospectiveIdleDoneTaskId =
-      task.status === "done" &&
-      this.state.tasks.length > 0 &&
-      this.state.tasks
-        .filter((item) => item.included)
-        .every((item) => item.status === "done")
-        ? task.id
-        : undefined;
     try {
       if (
         this.capacityEnvelope(
@@ -4113,7 +4197,6 @@ export class Monitor {
           0,
           requests,
           candidateCards,
-          prospectiveIdleDoneTaskId,
         ).maximum <= MAX_CHECKPOINT_BYTES
       )
         return true;
@@ -4151,8 +4234,7 @@ export class Monitor {
       healthCards: this.healthCards,
       taskDetails: this.taskDetails,
       detailValues: this.detailValues,
-      currentHealthTaskId: this.currentHealthTaskId,
-      cardHealthIdentity: this.cardHealthIdentity,
+      currentHealthProofs: new Map(this.currentHealthProofs),
       lastDisplayedTaskId: this.lastDisplayedTaskId,
       idleDoneInvalidated: this.idleDoneInvalidated,
     };
@@ -4186,13 +4268,7 @@ export class Monitor {
       this.idleDoneInvalidated = false;
     this.healthCards = candidateCards;
     this.taskDetails = candidateDetails;
-    if (
-      !this.currentHealthTaskId ||
-      !candidateCards.has(this.currentHealthTaskId)
-    ) {
-      this.currentHealthTaskId = undefined;
-      this.cardHealthIdentity = undefined;
-    }
+    this.reconcileCurrentHealthProofs(state, candidateCards);
     // Source replacement and every derived surface update before first commit
     // publication. No intermediate snapshot can mix new tasks with old health.
     this.syncPresentationCard(state, candidateCards);
@@ -4251,8 +4327,7 @@ export class Monitor {
           this.healthCards = previous.healthCards;
           this.taskDetails = previous.taskDetails;
           this.detailValues = previous.detailValues;
-          this.currentHealthTaskId = previous.currentHealthTaskId;
-          this.cardHealthIdentity = previous.cardHealthIdentity;
+          this.currentHealthProofs = previous.currentHealthProofs;
           this.lastDisplayedTaskId = previous.lastDisplayedTaskId;
           this.idleDoneInvalidated = previous.idleDoneInvalidated;
           this.rejectCapacity();
@@ -4263,8 +4338,7 @@ export class Monitor {
         this.healthCards = previous.healthCards;
         this.taskDetails = previous.taskDetails;
         this.detailValues = previous.detailValues;
-        this.currentHealthTaskId = previous.currentHealthTaskId;
-        this.cardHealthIdentity = previous.cardHealthIdentity;
+        this.currentHealthProofs = previous.currentHealthProofs;
         this.lastDisplayedTaskId = previous.lastDisplayedTaskId;
         this.idleDoneInvalidated = previous.idleDoneInvalidated;
         this.rejectCapacity();
@@ -4608,12 +4682,10 @@ export class Monitor {
       : undefined;
     if (!current || current.identity !== snapshot.identity)
       return { kind: "terminal" };
+    if (!this.healthFlightCurrent(flight, work)) return { kind: "terminal" };
     const acceptance = combined.answers.acceptance;
     const applicability = combined.answers.redApplicability;
     const reported = combined.answers.redReport;
-    // Admit raw redApplicability only after final epoch/canonical identity checks,
-    // before it is reduced to display-only HealthFields.
-    this.acceptCorrectionFact(task, applicability);
     const health: HealthFields = {
       requirements: healthRequirements(combined.answers.clarity),
       acceptance: acceptance?.type === "choice" ? acceptance.choice : "unknown",
@@ -4676,40 +4748,28 @@ export class Monitor {
     };
     const candidateCards = new Map(this.healthCards);
     candidateCards.set(task.id, card);
-    const previousDisplay = {
-      lastDisplayedTaskId: this.lastDisplayedTaskId,
-      idleDoneInvalidated: this.idleDoneInvalidated,
-    };
-    const establishesIdleDone =
-      task.status === "done" &&
-      this.state.tasks.length > 0 &&
-      this.state.tasks
-        .filter((item) => item.included)
-        .every((item) => item.status === "done");
-    // The selector changes durable bytes, so install it before final proof.
-    this.lastDisplayedTaskId = task.id;
-    this.idleDoneInvalidated = false;
     try {
-      // A post-dispatch encode failure must never poison optional map/state.
+      // Health receipt persists task-local fact only; it never changes selector.
       encodeCheckpoint(
         this.state,
-        this.metadata(
-          this.enabled,
-          candidateCards,
-          this.state,
-          establishesIdleDone ? task.id : undefined,
-        ),
+        this.metadata(this.enabled, candidateCards, this.state),
       );
     } catch {
-      this.lastDisplayedTaskId = previousDisplay.lastDisplayedTaskId;
-      this.idleDoneInvalidated = previousDisplay.idleDoneInvalidated;
       this.note("health-capacity-skipped");
       this.publish();
       return { kind: "terminal" };
     }
+    if (!this.healthFlightCurrent(flight, work)) return { kind: "terminal" };
     this.healthCards = candidateCards;
-    this.currentHealthTaskId = task.id;
-    this.cardHealthIdentity = snapshot.identity;
+    this.currentHealthProofs.set(task.id, snapshot.identity);
+    // Advisory authority follows the same exact task-local receipt.
+    this.acceptCorrectionFact(
+      task,
+      work,
+      flight,
+      snapshot.identity,
+      applicability,
+    );
     this.syncPresentationCard();
     this.save();
     this.publish();

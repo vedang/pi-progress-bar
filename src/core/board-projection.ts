@@ -127,10 +127,10 @@ export function projectBoard(input: {
   taskDetails?: ReadonlyMap<string, BoardDetailRecord>;
   service: { code: string; label: string };
   unsettled: boolean;
-  /** Live proof exists only in this monitor epoch; restored cards stay retained. */
-  currentHealthTaskId?: string;
-  /** Accepted replacement is pending; old health stays visible but never current. */
-  pendingHealthTaskId?: string;
+  /** Live task-local proof exists only in this monitor epoch; restored cards stay retained. */
+  currentHealthTaskIds?: ReadonlySet<string>;
+  /** Accepted replacements pending by task; old cards remain task-locally retained. */
+  pendingHealthTaskIds?: ReadonlySet<string>;
   lastDisplayedTaskId?: string;
   /** Runtime-only safe tool judgment; never task/health/evidence authority. */
   activityFocusTaskId?: string;
@@ -165,13 +165,13 @@ export function projectBoard(input: {
       ? { state: "unassessed" as const }
       : !sourceMatches
         ? { state: "stale" as const }
-        : input.pendingHealthTaskId === task.id
+        : input.pendingHealthTaskIds?.has(task.id)
           ? {
               state: "replacement-pending" as const,
               assessedAt: card.assessedAt,
               role: card.provenance.observation.role,
             }
-          : status === "INPROG" && input.currentHealthTaskId === task.id
+          : status === "INPROG" && input.currentHealthTaskIds?.has(task.id)
             ? {
                 state: "current" as const,
                 assessedAt: card.assessedAt,

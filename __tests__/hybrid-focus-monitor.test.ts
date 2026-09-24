@@ -68,7 +68,7 @@ it("health follows new open focus B rather than just-completed old focus A", asy
   expect(h.monitor.evidenceLink()).toBeUndefined();
 });
 it.each(["none", "concurrent", "uncertain"])(
-  "retains old values honestly with %s activity and no current health inference",
+  "refreshes health with %s activity without inferring current focus",
   async (focus) => {
     const h = fixture(focus);
     h.start();
@@ -79,7 +79,7 @@ it.each(["none", "concurrent", "uncertain"])(
     await h.settle("ambiguous");
     expect(h.monitor.state.focusTaskId).toBeUndefined();
     expect(h.requests.filter((r) => "clarity" in r.questions)).toHaveLength(
-      calls,
+      calls + 3,
     );
     expect(h.monitor.presentationSnapshot().card).toMatchObject({
       taskId: before?.taskId,

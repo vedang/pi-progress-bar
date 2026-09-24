@@ -89,7 +89,7 @@ function fixture() {
 }
 
 describe("passive retained task board", () => {
-  it("lists newest-first all tasks with five explicitly unassessed fields", async () => {
+  it("lists newest-first all tasks with independently assessed health", async () => {
     const h = fixture();
     h.start();
     await h.settle("goal");
@@ -101,8 +101,8 @@ describe("passive retained task board", () => {
     expect(task(h.monitor, "task:2")).toMatchObject({
       status: "OPEN",
       included: true,
-      health: unassessed,
-      provenance: { state: "unassessed" },
+      health: { acceptance: "explicit" },
+      provenance: { state: "retained" },
     });
     expect(task(h.monitor, "task:1").health.acceptance).toBe("explicit");
     expect(task(h.monitor, "task:1").provenance.assessedAt).toBeGreaterThan(0);
@@ -146,7 +146,7 @@ describe("passive retained task board", () => {
       "unknown",
     );
     expect(task(h.monitor, "task:1").provenance.state).toBe("current");
-    expect(task(h.monitor, "task:2").health).toEqual(unassessed);
+    expect(task(h.monitor, "task:2").health.acceptance).toBe("unknown");
   });
 
   it("copies every nested projection and reads without history, persistence, or inference", async () => {

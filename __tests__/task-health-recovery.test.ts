@@ -255,6 +255,29 @@ it("earlier report amendment invalidates coverage even when target and task sour
   ).not.toBe("Reported red");
 });
 
+it("repairs optional-only coverage amendment live without semantic replay", async () => {
+  const h = await ready();
+  h.append("earlier", "PARSER_RED_REPORT failing regression.");
+  await h.settle("earlier");
+  for (let i = 0; i < 4; i++) {
+    h.append(`later-${i}`, `Documentation progress ${i}`);
+    await h.settle(`later-${i}`);
+  }
+  const before = structuredClone(h.monitor.state);
+  const calls = h.healthRequests().length;
+  const extracts = h.extract.mock.calls.length;
+  const gates = h.requests.filter((r) => "gate" in r.questions).length;
+  h.replace(h.reader().map((entry) => (entry as { id: string }).id === "earlier"
+    ? branchEntry("earlier", "Previous failing report withdrawn.") : entry));
+  await vi.advanceTimersByTimeAsync(200);
+  expect(h.healthRequests().length).toBeGreaterThan(calls);
+  expect(h.cards()).toHaveLength(3);
+  expect(h.cards().find((card) => card.taskId === "task:1")?.health.redEvidence).not.toBe("Reported red");
+  expect(h.monitor.state).toEqual(before);
+  expect(h.extract).toHaveBeenCalledTimes(extracts);
+  expect(h.requests.filter((r) => "gate" in r.questions)).toHaveLength(gates);
+});
+
 it("omitted reports remain honest across reload without repeat calls for matching proof", async () => {
   const h = await ready();
   for (let i = 0; i < 20; i++) h.append(`r-${i}`, `Canonical update ${i}.`);

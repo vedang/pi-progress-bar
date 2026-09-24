@@ -297,6 +297,81 @@ it("bounded report context exposes omitted oversized target without authoritativ
   expect(context?.omissions.length).toBeGreaterThan(0);
 });
 
+it("wakes parked terminal repair on a later canonical commit without changing its target", async () => {
+  const h = fixture(1);
+  h.start();
+  await h.settle("goal");
+  const transport = h.fetch.getMockImplementation();
+  if (!transport) throw new Error("transport");
+  let fail = true;
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body));
+    if (fail && request.questions.clarity) {
+      fail = false;
+      return new Response("unavailable", { status: 503 });
+    }
+    return transport(url, init);
+  });
+  h.completed.add("task:1");
+  h.append("terminal", "Parser is complete.");
+  await h.settle("terminal");
+  expect(h.cards()[0]?.provenance.observation.entryId).toBe("goal");
+  await vi.advanceTimersByTimeAsync(10000);
+  h.append("later", "Acknowledged.");
+  await h.settle("later");
+  expect(h.cards()[0]?.provenance.observation.entryId).toBe("terminal");
+});
+
+it("counts array punctuation inside the serialized report byte budget", () => {
+  const goal = branchEntry("goal", "tiny");
+  const empty = branchEntry("target", "x");
+  const pass = new CanonicalPass([goal, empty]);
+  const overhead = ["goal", "target"].reduce((n, id) => n + Buffer.byteLength(JSON.stringify(pass.observation(id))), 0) - 1;
+  const context = new CanonicalPass([goal, branchEntry("target", "x".repeat(4095 - overhead))]).healthReportContext("target");
+  expect(Buffer.byteLength(JSON.stringify(context?.reports))).toBeLessThanOrEqual(4096);
+});
+
+it("keeps unattempted peers ahead of refreshed tasks after an evidence wake", async () => {
+  const h = fixture();
+  const transport = h.fetch.getMockImplementation();
+  if (!transport) throw new Error("transport");
+  let release: (() => void) | undefined;
+  let hold = true;
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+    const response = await transport(url, init);
+    if (hold && request.questions.clarity && taskId(request) === "task:2") {
+      hold = false;
+      await new Promise<void>((resolve) => { release = resolve; });
+    }
+    return response;
+  });
+  h.start();
+  await h.settle("goal");
+  expect(h.healthRequests().map(taskId)).toEqual(["task:1", "task:2"]);
+  editEvidence(h);
+  release?.();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(h.healthRequests().map(taskId).slice(0, 3)).toEqual(["task:1", "task:2", "task:3"]);
+  expect(h.cards()).toHaveLength(3);
+});
+
+it("preserves the terminal target when a cardless task is preempted by later prose", async () => {
+  const h = fixture();
+  const held = heldHealth(h);
+  h.start();
+  await h.settle("goal");
+  h.completed.add("task:1");
+  h.append("terminal", "Parser complete after PARSER_RED_REPORT.");
+  await h.settle("terminal");
+  h.append("later", "Documentation still in progress.");
+  await h.settle("later");
+  held.releaseAll();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(h.cards().find((card) => card.taskId === "task:1")?.provenance.observation.entryId).toBe("terminal");
+  expect(h.cards().find((card) => card.taskId === "task:2")?.provenance.observation.entryId).toBe("later");
+});
+
 it("report membership and coverage digest are independent of prior exploratory reads", () => {
   const entries = Array.from({ length: 100 }, (_, i) =>
     branchEntry(`r${i}`, `Report ${i}`),

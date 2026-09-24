@@ -56,7 +56,7 @@ it("persists exact source, report, request, snapshot and evidence identities wit
   h.start();
   await h.settle("goal");
   const cards = records(h);
-  expect(cards).toHaveLength(1);
+  expect(cards).toHaveLength(3);
   const card = cards[0];
   const first = h.monitor.state.tasks[0];
   expect(card?.taskId).toBe(first?.id);
@@ -68,8 +68,10 @@ it("persists exact source, report, request, snapshot and evidence identities wit
   });
   const healthRequests = h.requests.filter(
     (r) =>
-      "clarity" in r.questions ||
-      Object.keys(r.questions).some((q) => q.startsWith("criterion:")),
+      (r.state as { evidence?: { taskId?: string } }).evidence?.taskId ===
+        card?.taskId &&
+      ("clarity" in r.questions ||
+        Object.keys(r.questions).some((q) => q.startsWith("criterion:"))),
   );
   expect(card?.provenance.requestHashes).toEqual(healthRequests.map(digest));
   expect(card?.provenance.snapshotHash).toMatch(/^[a-f0-9]{64}$/);
@@ -80,7 +82,7 @@ it("persists exact source, report, request, snapshot and evidence identities wit
 });
 
 it.each(["taskSource", "observation"] as const)(
-  "never presents a restored card with mismatched %s canonical provenance as current",
+  "repairs optional health with mismatched %s provenance without semantic replay",
   async (field) => {
     const h = fixture();
     h.start();
@@ -109,10 +111,12 @@ it.each(["taskSource", "observation"] as const)(
       }[];
     };
     const restored = snapshot.tasks.find((task) => task.taskId === "task:1");
-    expect(restored?.provenance.state).not.toBe("current");
-    expect(restored?.health.acceptance).not.toBe("explicit");
-    expect(h.monitor.presentationSnapshot().card).toBeUndefined();
-    expect(h.fetch).toHaveBeenCalledTimes(calls);
+    expect(restored?.health.acceptance).toBe("explicit");
+    expect(
+      records(h).find((item) => item.taskId === "task:1")?.provenance
+        .taskSource,
+    ).toEqual(h.monitor.state.tasks[0]?.source);
+    expect(h.fetch).toHaveBeenCalledTimes(calls + 1);
     expect(h.extract).toHaveBeenCalledTimes(extracts);
   },
 );
@@ -287,7 +291,7 @@ it("evicts optional health when mandatory core work fits only without the map", 
   const h = fixture();
   h.start();
   await h.settle("goal");
-  expect(records(h)).toHaveLength(1);
+  expect(records(h)).toHaveLength(3);
   const candidate = structuredClone(h.monitor.state);
   candidate.scopeError = "";
   const coreMetadata = Reflect.apply(

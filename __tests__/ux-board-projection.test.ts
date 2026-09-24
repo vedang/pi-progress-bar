@@ -117,7 +117,10 @@ describe("passive retained task board", () => {
     h.acceptance("partial");
     h.append("switch", "Now writing the regression.");
     await h.settle("switch");
-    expect(task(h.monitor, "task:1").health).toEqual(first.health);
+    expect(task(h.monitor, "task:1").health.acceptance).toBe("partial");
+    expect(task(h.monitor, "task:1").provenance.assessedAt).toBeGreaterThan(
+      first.provenance.assessedAt ?? 0,
+    );
     expect(task(h.monitor, "task:1").provenance.state).toBe("retained");
     expect(task(h.monitor, "task:2").health.acceptance).toBe("partial");
     const checkpoint = h.monitor.checkpoint();
@@ -131,7 +134,7 @@ describe("passive retained task board", () => {
       h.reader,
     );
     await vi.advanceTimersByTimeAsync(100);
-    expect(task(h.monitor, "task:1").health).toEqual(first.health);
+    expect(task(h.monitor, "task:1").health.acceptance).toBe("partial");
     expect(task(h.monitor, "task:2").health.acceptance).toBe("partial");
     expect(h.fetch).toHaveBeenCalledTimes(calls);
     expect(h.extract).toHaveBeenCalledTimes(extracts);
@@ -275,7 +278,10 @@ describe("task source provenance", () => {
     );
     expect(h.monitor.evidence.codeRevision()).toBeGreaterThan(0);
     expect(task(h.monitor, "task:1").provenance.state).not.toBe("current");
-    expect(h.fetch).toHaveBeenCalledTimes(calls);
+    // A validated evidence generation is a named health wake, not ownership.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.fetch).toHaveBeenCalledTimes(calls + 3);
+    expect(h.monitor.evidenceLink()).toBeUndefined();
   });
 
   it("publishes no old-source widget health at intermediate revised commit before completion settles", async () => {

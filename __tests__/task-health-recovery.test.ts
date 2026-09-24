@@ -225,6 +225,36 @@ it("omitted reports remain honest across reload without repeat calls for matchin
   expect(h.fetch).toHaveBeenCalledTimes(calls);
 });
 
+it.each(["raw-text", "too-many-refs", "wrong-complete", "unknown-field"])(
+  "rejects malformed coverage %s before any provider dispatch",
+  async (kind) => {
+    const h = await ready();
+    const saved = h.monitor.checkpoint() as {
+      version: number;
+      monitor: { healthCards: { provenance: Record<string, unknown> }[] };
+    };
+    expect(saved.version).toBe(9);
+    const coverage = saved.monitor.healthCards[0].provenance.coverage as Record<
+      string,
+      unknown
+    >;
+    expect(coverage).toBeDefined();
+    if (kind === "raw-text") coverage.reports = [{ text: "PRIVATE_RAW_TEXT" }];
+    else if (kind === "too-many-refs")
+      coverage.references = Array.from(
+        { length: 17 },
+        () => (coverage.references as unknown[])[0],
+      );
+    else if (kind === "wrong-complete") coverage.complete = "yes";
+    else coverage.unexpected = true;
+    const calls = h.fetch.mock.calls.length;
+    expect(checkpointStorageStatus(saved)).toBe("corrupt");
+    await reload(h, saved);
+    expect(h.monitor.enabled).toBe(false);
+    expect(h.fetch).toHaveBeenCalledTimes(calls);
+  },
+);
+
 it("corrupt coverage proof remains OFF, never silently rebuilds or rebills", async () => {
   const h = await ready();
   const saved = h.monitor.checkpoint() as {

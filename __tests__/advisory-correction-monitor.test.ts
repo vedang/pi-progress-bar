@@ -109,7 +109,9 @@ it("never uses health from an older task revision", async () => {
   const calls = h.fetch.mock.calls.length;
   await method(h, "observeCorrectionAttempt", attempt);
   expect(h.emit).not.toHaveBeenCalled();
-  expect(h.fetch.mock.calls.length).toBe(calls);
+  expect(readSnapshot(h).tasks[0].red).toBeUndefined();
+  // Other independently assessed tasks may still warrant classification.
+  expect(h.fetch.mock.calls.length).toBe(calls + 1);
 });
 it("OFF fences a classification already in flight", async () => {
   const h = await fixture();
@@ -142,18 +144,19 @@ it("new external input invalidates old health/attempt authority without persisti
 
 it("withdraws old test eligibility as soon as replacement health is scheduled", async () => {
   const h = await fixture();
-  const target = h.monitor.state.tasks[0];
   expect(readSnapshot(h).tasks[0].red?.choice).toBe("not-needed");
-  method(
-    h,
-    "scheduleHealth",
-    {
-      id: "replacement-report",
-      role: "assistant",
-      text: "New evidence requires reassessment before test advice.",
-    },
-    target,
+  const transport = h.fetch.getMockImplementation();
+  if (!transport) throw new Error("transport");
+  h.fetch.mockImplementation(async (url, init) => {
+    if (JSON.parse(String(init?.body)).questions.clarity)
+      return new Promise<Response>(() => {});
+    return transport(url, init);
+  });
+  h.append(
+    "replacement-report",
+    "New evidence requires reassessment before test advice.",
   );
+  await h.settle("replacement-report");
   expect(readSnapshot(h).tasks[0].red).toBeUndefined();
   const calls = h.fetch.mock.calls.length;
   await method(h, "observeCorrectionAttempt", attempt);

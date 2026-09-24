@@ -256,7 +256,7 @@ it("qualifies a held first page as catching up history rather than current compl
   );
 });
 
-it("drops invalid old health when a revised task completes in the same observation", async () => {
+it("replaces invalid old health when a revised task completes in the same observation", async () => {
   const h = fixture();
   h.start();
   await h.settle("goal");
@@ -302,8 +302,26 @@ it("drops invalid old health when a revised task completes in the same observati
     revision: 2,
     status: "done",
   });
-  expect(h.monitor.presentationSnapshot().card).toBeUndefined();
   expect(
     h.monitor.boardSnapshot().tasks.find((task) => task.taskId === "task:1"),
-  ).toMatchObject({ status: "DONE", health: { acceptance: "Unassessed" } });
+  ).toMatchObject({
+    revision: 2,
+    status: "DONE",
+    health: { acceptance: "explicit" },
+  });
+  const saved = h.monitor.checkpoint() as {
+    monitor: {
+      healthCards: {
+        taskId: string;
+        revision: number;
+        provenance: { observation: { entryId: string } };
+      }[];
+    };
+  };
+  expect(
+    saved.monitor.healthCards.find((card) => card.taskId === "task:1"),
+  ).toMatchObject({
+    revision: 2,
+    provenance: { observation: { entryId: "extra" } },
+  });
 });

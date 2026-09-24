@@ -572,10 +572,14 @@ it("does not label a single live append after restoration as historical catch-up
     h.reader,
   );
   h.monitor.turnOn("/nonexistent-hybrid-test");
+  const callsAfterHealthRecovery = h.fetch.mock.calls.length;
   h.fetch.mockImplementationOnce(() => new Promise<never>(() => {}));
   h.append("live-append", "Acknowledged.", "user");
   await vi.advanceTimersByTimeAsync(5);
-  expect(h.fetch).toHaveBeenCalledTimes(1);
+  expect(h.fetch).toHaveBeenCalledTimes(callsAfterHealthRecovery + 1);
+  expect(
+    JSON.parse(String(h.fetch.mock.calls.at(-1)?.[1]?.body)).questions,
+  ).toHaveProperty("gate");
   expect(JSON.stringify(h.monitor.presentationSnapshot())).not.toMatch(
     /catching up history/i,
   );

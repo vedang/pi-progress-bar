@@ -3766,6 +3766,8 @@ export class Monitor {
   ) {
     if (!this.enabled) return;
     this.wakeHealth(kind, reviveTerminal);
+    this.pruneHealthJobs();
+    if (!this.state.tasks.some((task) => task.included)) return;
     const cursor = this.state.cursor;
     const observation =
       cursor && pass.observation(cursor.id)?.hash === cursor.hash

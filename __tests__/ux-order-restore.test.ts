@@ -178,7 +178,7 @@ describe("rejected storage never resets or rebills history", () => {
     expect(h.extract).not.toHaveBeenCalled();
     expect(data).toEqual(before);
   });
-  it.each([0, 5, 6, 7, 9, 99])(
+  it.each([0, 5, 6, 7, 8, 10, 99])(
     "blocks unsupported version %s before save or dispatch",
     async (version) => {
       const h = fixture();

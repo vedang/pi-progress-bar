@@ -11,8 +11,8 @@ const MAX_CANONICAL_PAGE_MESSAGES = 64;
 const MAX_CANONICAL_PAGE_BYTES = 256 * 1024;
 const MAX_PRECEDING_BYTES = 4 * 1024;
 /** Health preserves whole reports, never truncates them into evidence. */
-export const MAX_HEALTH_REPORT_OBSERVATIONS = 16;
-export const MAX_HEALTH_REPORT_BYTES = 4 * 1024;
+const MAX_HEALTH_REPORT_OBSERVATIONS = 16;
+const MAX_HEALTH_REPORT_BYTES = 4 * 1024;
 /** Exploratory payloads yield after the same bounded message quantum as a page. */
 const MAX_EXPLORATORY_HEADERS = MAX_CANONICAL_PAGE_MESSAGES;
 
@@ -116,7 +116,7 @@ export interface CanonicalPreceding {
  * report through `target` was retained. Any bounded gap is explicit so a
  * consumer cannot turn omitted evidence into a negative finding.
  */
-export interface CanonicalHealthCoverage {
+interface CanonicalHealthCoverage {
   target: ObservationRef;
   references: ObservationRef[];
   complete: boolean;

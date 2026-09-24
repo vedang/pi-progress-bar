@@ -63,7 +63,7 @@ it("refreshes task health from a later explicit report without requiring a scope
   );
 });
 
-it("qualifies the last health card as retained when its focused task completes", async () => {
+it("retains completed task health while selecting the oldest open task without invented focus", async () => {
   const h = fixture();
   h.start();
   await h.settle("goal");
@@ -91,9 +91,17 @@ it("qualifies the last health card as retained when its focused task completes",
   await h.settle("focused-done");
   expect(h.monitor.state.tasks[0]?.status).toBe("done");
   expect(h.monitor.state.focusTaskId).toBeUndefined();
+  expect(
+    h.monitor
+      .boardSnapshot()
+      .tasks.find((task) => task.taskId === before?.taskId),
+  ).toMatchObject({ status: "DONE", provenance: { state: "retained" } });
+  expect(h.monitor.boardSnapshot().currentTask).toMatchObject({
+    taskId: "task:2",
+    status: "OPEN",
+  });
   expect(h.monitor.presentationSnapshot().card).toMatchObject({
-    taskId: before?.taskId,
-    label: before?.label,
+    taskId: "task:2",
     retained: true,
     replacementPending: false,
   });

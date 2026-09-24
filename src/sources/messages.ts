@@ -1,10 +1,18 @@
 import { createHash } from "node:crypto";
 
-import type { Observation, ObservationRole } from "../core/hybrid-state";
+import {
+  type Observation,
+  type ObservationRef,
+  type ObservationRole,
+  observationRef,
+} from "../core/hybrid-state";
 
 const MAX_CANONICAL_PAGE_MESSAGES = 64;
 const MAX_CANONICAL_PAGE_BYTES = 256 * 1024;
 const MAX_PRECEDING_BYTES = 4 * 1024;
+/** Health preserves whole reports, never truncates them into evidence. */
+export const MAX_HEALTH_REPORT_OBSERVATIONS = 16;
+export const MAX_HEALTH_REPORT_BYTES = 4 * 1024;
 /** Exploratory payloads yield after the same bounded message quantum as a page. */
 const MAX_EXPLORATORY_HEADERS = MAX_CANONICAL_PAGE_MESSAGES;
 
@@ -101,6 +109,20 @@ export interface CanonicalPreceding {
   /** Caller-supplied partial context was structurally stale and was dropped. */
   invalidated?: true;
   frontier?: CanonicalFrontier;
+}
+
+/**
+ * Detached bounded health-report evidence. `complete` means every canonical
+ * report through `target` was retained. Any bounded gap is explicit so a
+ * consumer cannot turn omitted evidence into a negative finding.
+ */
+export interface CanonicalHealthReportContext {
+  target: ObservationRef;
+  reports: Observation[];
+  references: ObservationRef[];
+  complete: boolean;
+  omissions: string[];
+  coverageDigest: string;
 }
 
 /**
@@ -201,6 +223,70 @@ export class CanonicalPass {
   private exploratory(header: CanonicalHeader) {
     this.exploratoryReads++;
     return this.observation(header.id);
+  }
+
+  /**
+   * Selects chronological newest-fitting canonical reports through one target.
+   * This is a bounded exploratory read: at most 16 retained reports, 4 KiB of
+   * serialized report references/text, and one canonical page of headers.
+   */
+  healthReportContext(
+    entryId: string,
+  ): CanonicalHealthReportContext | undefined {
+    const targetIndex = this.indexOf(entryId);
+    const target = targetIndex < 0 ? undefined : this.observation(entryId);
+    if (!target) return;
+    const reports: Observation[] = [];
+    const omissions: string[] = [];
+    let bytes = 0;
+    let index = targetIndex;
+    while (index >= 0) {
+      if (reports.length >= MAX_HEALTH_REPORT_OBSERVATIONS) {
+        omissions.push(
+          `Older canonical reports omitted after ${MAX_HEALTH_REPORT_OBSERVATIONS} retained observations`,
+        );
+        break;
+      }
+      if (this.exploratoryReads >= MAX_EXPLORATORY_HEADERS) {
+        omissions.push(
+          "Canonical report coverage scan reached bounded page limit",
+        );
+        break;
+      }
+      const header = this.headers[index];
+      index--;
+      if (!header) continue;
+      const observation = this.exploratory(header);
+      if (!observation) continue;
+      const size = Buffer.byteLength(JSON.stringify(observation));
+      if (bytes + size > MAX_HEALTH_REPORT_BYTES) {
+        omissions.push(
+          reports.length
+            ? "Older canonical report omitted because full report context exceeded 4 KiB"
+            : "Target canonical report omitted because it exceeded 4 KiB",
+        );
+        break;
+      }
+      reports.unshift(observation);
+      bytes += size;
+    }
+    const references = reports.map(observationRef);
+    const complete = omissions.length === 0 && index < 0;
+    return {
+      target: observationRef(target),
+      reports: reports.map((report) => ({ ...report })),
+      references,
+      complete,
+      omissions,
+      coverageDigest: hash(
+        JSON.stringify({
+          target: observationRef(target),
+          references,
+          complete,
+          omissions,
+        }),
+      ),
+    };
   }
 
   precedingResult(

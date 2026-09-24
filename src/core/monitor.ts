@@ -53,7 +53,11 @@ import {
   readBeadsExport,
 } from "../sources/beads";
 import { EvidenceStore, redEvidenceLabel } from "../sources/evidence";
-import { type CanonicalFrontier, CanonicalPass } from "../sources/messages";
+import {
+  type CanonicalFrontier,
+  type CanonicalHealthReportContext,
+  CanonicalPass,
+} from "../sources/messages";
 import {
   type BoardDetailRecord,
   type BoardSnapshot,
@@ -134,10 +138,24 @@ interface PresentationCard extends RetainedCard {
   beads?: BeadsPresentation;
 }
 
+/** Runtime-only exact optional-health input; never checkpointed before `.6`. */
 interface HealthWork {
   observation: Observation;
+  reports: CanonicalHealthReportContext;
   taskId: string;
   revision: number;
+  taskSource: HybridTask["source"];
+  /** Only a just-completed task may replace an already valid terminal card. */
+  terminal: boolean;
+  epoch: number;
+  evidenceGeneration: string;
+}
+
+interface HealthFlight {
+  epoch: number;
+  token: number;
+  taskId: string;
+  work: HealthWork;
 }
 
 interface CorrectionFact extends CorrectionRedFact {
@@ -362,7 +380,6 @@ const presentationCard = (
   ...(beads ? { beads: { ...beads } } : {}),
 });
 const MAX_HEALTH_REQUIREMENTS_BYTES = 4 * 1024;
-const MAX_HEALTH_REPORT_BYTES = 4 * 1024;
 const MAX_CORRECTION_FACTS = 20;
 
 const boundedHealthText = (text: string, maxBytes: number) => {
@@ -481,8 +498,9 @@ export class Monitor {
   private latchHistoricalCatchup = false;
   private epoch = 0;
   private extractionController?: AbortController;
-  private healthObservation?: HealthWork;
-  private healthFlight?: { epoch: number; token: number; taskId: string };
+  /** Insertion-ordered, task-keyed optional jobs; one successor per flight task. */
+  private healthQueue: HealthWork[] = [];
+  private healthFlight?: HealthFlight;
   private detailFlight?: { epoch: number; token: number; taskId: string };
   private nextDetailToken = 0;
   /** Durable optional task records; never part of semantic state. */
@@ -997,7 +1015,7 @@ export class Monitor {
     this.extractionController?.abort();
     this.cancelHealth();
     this.invalidateCorrections();
-    this.healthObservation = undefined;
+    this.healthQueue = [];
     this.gateway.pause();
     this.healthGateway.pause();
     this.activityGateway.pause();
@@ -1295,7 +1313,7 @@ export class Monitor {
         this.state.scopeUnresolved,
       currentHealthTaskId: this.currentHealthTaskId,
       pendingHealthTaskId:
-        this.healthObservation?.taskId ?? this.healthFlight?.taskId,
+        this.healthFlight?.taskId ?? this.healthQueue[0]?.taskId,
       lastDisplayedTaskId: this.idleDoneInvalidated
         ? undefined
         : this.lastDisplayedTaskId,
@@ -1613,7 +1631,7 @@ export class Monitor {
     this.cardHealthIdentity = undefined;
     this.clearRuntimeContext();
     this.queued = [];
-    this.healthObservation = undefined;
+    this.healthQueue = [];
     this.clearActivity(false);
     this.blockedPending = undefined;
     this.activeObservation = undefined;
@@ -1964,7 +1982,7 @@ export class Monitor {
       !!focus &&
       selected.taskId === focus.id &&
       this.currentHealthTaskId === selected.taskId &&
-      !this.healthObservation &&
+      !this.healthQueue.length &&
       !this.healthFlight;
     this.card = this.presentationCardFor(
       selected,
@@ -2221,15 +2239,17 @@ export class Monitor {
         messageHash: observation.hash,
         role: observation.role,
       })),
-      ...(this.healthObservation
-        ? [
-            {
-              entryId: this.healthObservation.observation.id,
-              messageHash: this.healthObservation.observation.hash,
-              role: this.healthObservation.observation.role,
-            },
-          ]
-        : []),
+      ...[
+        ...this.healthQueue,
+        ...(this.healthFlight ? [this.healthFlight.work] : []),
+      ].flatMap((work) => [
+        {
+          entryId: work.observation.id,
+          messageHash: work.observation.hash,
+          role: work.observation.role,
+        },
+        ...work.reports.references,
+      ]),
       ...(this.catchupTarget
         ? [
             {
@@ -3084,13 +3104,14 @@ export class Monitor {
       void this.processDetails(detail, flight);
       return;
     }
-    const healthWork = this.healthObservation;
-    if (!healthWork || this.healthFlight) return;
-    this.healthObservation = undefined;
-    const flight = {
-      epoch: this.epoch,
+    if (this.healthFlight) return;
+    const healthWork = this.healthQueue.shift();
+    if (!healthWork) return;
+    const flight: HealthFlight = {
+      epoch: healthWork.epoch,
       token: ++this.nextHealthToken,
       taskId: healthWork.taskId,
+      work: healthWork,
     };
     this.healthFlight = flight;
     void this.processHealth(healthWork, flight);
@@ -3115,13 +3136,8 @@ export class Monitor {
 
   private async processOne(active: ActiveWork) {
     const { observation, epoch, requestContext } = active;
+    const priorTasks = this.state.tasks.map((task) => structuredClone(task));
     try {
-      const healthTarget = this.state.tasks.find(
-        (task) =>
-          task.id === this.state.focusTaskId &&
-          task.included &&
-          task.status !== "done",
-      );
       const next = await processObservation(
         this.state,
         observation,
@@ -3134,24 +3150,6 @@ export class Monitor {
         requestContext,
       );
       if (!this.enabled || epoch !== this.epoch) return;
-      const completedHealthTarget =
-        healthTarget &&
-        next.tasks.find(
-          (task) =>
-            task.id === healthTarget.id &&
-            task.revision === healthTarget.revision &&
-            task.included &&
-            task.status === "done",
-        );
-      const focusedHealthTarget = next.tasks.find(
-        (task) =>
-          task.id === next.focusTaskId &&
-          task.included &&
-          task.status !== "done",
-      );
-      const hasOpenTasks = next.tasks.some(
-        (task) => task.included && task.status !== "done",
-      );
       this.commit(next);
       if (next.capacity === "limit") {
         this.blockedPending = { id: observation.id, hash: observation.hash };
@@ -3185,13 +3183,7 @@ export class Monitor {
         else {
           if (next.scopeFailure === "invalid")
             this.note("invalid-scope-result");
-          // A newly selected open focus is current. A completed prior focus is
-          // health-eligible only for the all-done retained-card path.
-          this.scheduleHealth(
-            observation,
-            focusedHealthTarget ??
-              (!hasOpenTasks ? completedHealthTarget : undefined),
-          );
+          this.scheduleHealth(observation, priorTasks);
         }
         return;
       }
@@ -3452,32 +3444,160 @@ export class Monitor {
     }
   }
 
-  /** New semantic observations replace stale optional health work. */
-  private scheduleHealth(observation: Observation, task?: HybridTask) {
-    const target =
-      task ??
-      this.state.tasks.find(
-        (item) =>
-          item.id === this.state.focusTaskId &&
-          item.included &&
-          item.status !== "done",
+  private healthEvidenceGeneration() {
+    return sha256(
+      JSON.stringify([this.evidence.snapshot(), this.evidence.codeRevision()]),
+    );
+  }
+
+  private healthCardMatchesTask(
+    card: HealthCard | undefined,
+    task: HybridTask,
+  ) {
+    return (
+      !!card &&
+      card.taskId === task.id &&
+      card.revision === task.revision &&
+      card.label === task.label &&
+      sameSource(card.provenance.taskSource, task.source)
+    );
+  }
+
+  /** Exact task identity is independent of semantic/display focus. */
+  private healthTaskForWork(work: HealthWork) {
+    if (work.epoch !== this.epoch) return;
+    const task = this.state.tasks.find(
+      (item) =>
+        item.id === work.taskId &&
+        item.revision === work.revision &&
+        item.included &&
+        sameSource(item.source, work.taskSource),
+    );
+    if (!task) return;
+    // A valid terminal card is final until lifecycle/source/card loss changes it.
+    if (
+      task.status === "done" &&
+      !work.terminal &&
+      this.healthCardMatchesTask(this.healthCards.get(task.id), task)
+    )
+      return;
+    return task;
+  }
+
+  private healthWorkCurrent(work: HealthWork, pass: CanonicalPass) {
+    const task = this.healthTaskForWork(work);
+    if (!task || work.evidenceGeneration !== this.healthEvidenceGeneration())
+      return;
+    const target = pass.observation(work.observation.id);
+    if (
+      !target ||
+      target.hash !== work.observation.hash ||
+      target.role !== work.observation.role ||
+      work.reports.target.entryId !== work.observation.id ||
+      work.reports.target.messageHash !== work.observation.hash ||
+      work.reports.target.role !== work.observation.role ||
+      !work.reports.references.every((reference) => {
+        const report = pass.observation(reference.entryId);
+        return (
+          !!report &&
+          report.hash === reference.messageHash &&
+          report.role === reference.role
+        );
+      })
+    )
+      return;
+    return task;
+  }
+
+  private healthTasksForCommit(priorTasks: readonly HybridTask[]) {
+    return this.state.tasks.filter((task) => {
+      if (!task.included) return false;
+      if (task.status !== "done") return true;
+      const prior = priorTasks.find((item) => item.id === task.id);
+      return (
+        !this.healthCardMatchesTask(this.healthCards.get(task.id), task) ||
+        (!!prior && prior.included && prior.status !== "done")
       );
-    if (!target) return;
-    // New report supersedes live proof before optional work begins.
-    this.correctionFacts.delete(target.id);
-    this.currentHealthTaskId = undefined;
-    this.healthObservation = {
-      observation: { ...observation },
-      taskId: target.id,
-      revision: target.revision,
-    };
+    });
+  }
+
+  private pruneHealthQueue() {
+    const queued = new Set<string>();
+    this.healthQueue = this.healthQueue.filter((work) => {
+      const current = !!this.healthTaskForWork(work);
+      if (!current || queued.has(work.taskId)) return false;
+      queued.add(work.taskId);
+      return true;
+    });
+  }
+
+  /** Same-task coalescing replaces input in place; a flight gets one successor. */
+  private enqueueHealth(work: HealthWork) {
+    const index = this.healthQueue.findIndex(
+      (candidate) => candidate.taskId === work.taskId,
+    );
+    if (index >= 0) {
+      this.healthQueue[index] = work;
+      return;
+    }
+    const taskIds = new Set([
+      ...this.healthQueue.map((candidate) => candidate.taskId),
+      ...(this.healthFlight ? [this.healthFlight.taskId] : []),
+    ]);
+    if (!taskIds.has(work.taskId) && taskIds.size >= 20) return;
+    this.healthQueue.push(work);
+  }
+
+  /** Every committed observation refreshes open tasks without requiring focus. */
+  private scheduleHealth(
+    observation: Observation,
+    priorTasks: readonly HybridTask[] = [],
+  ) {
+    const pass = this.beginCanonicalPass();
+    const reports = pass.healthReportContext(observation.id);
+    if (
+      !reports ||
+      reports.target.messageHash !== observation.hash ||
+      reports.target.role !== observation.role
+    )
+      return;
+    this.pruneHealthQueue();
+    const evidenceGeneration = this.healthEvidenceGeneration();
+    for (const task of this.healthTasksForCommit(priorTasks)) {
+      const prior = priorTasks.find((item) => item.id === task.id);
+      // Replacement invalidates only this task's advisory fact.
+      this.correctionFacts.delete(task.id);
+      this.currentHealthTaskId = undefined;
+      this.enqueueHealth({
+        observation: { ...observation },
+        reports: {
+          ...reports,
+          target: { ...reports.target },
+          reports: reports.reports.map((report) => ({ ...report })),
+          references: reports.references.map((reference) => ({ ...reference })),
+          omissions: [...reports.omissions],
+        },
+        taskId: task.id,
+        revision: task.revision,
+        taskSource: { ...task.source },
+        terminal:
+          task.status === "done" &&
+          !!prior &&
+          prior.included &&
+          prior.status !== "done",
+        epoch: this.epoch,
+        evidenceGeneration,
+      });
+    }
     this.syncPresentationCard();
   }
 
-  private async processHealth(
-    work: HealthWork,
-    flight: { epoch: number; token: number; taskId: string },
-  ) {
+  private requeueHealth(work: HealthWork) {
+    if (!this.healthQueue.some((candidate) => candidate.taskId === work.taskId))
+      this.healthQueue.unshift(work);
+  }
+
+  private async processHealth(work: HealthWork, flight: HealthFlight) {
     try {
       const pass = this.beginCanonicalPass();
       const authority = this.reconcileAuthority(pass);
@@ -3486,7 +3606,7 @@ export class Monitor {
         return;
       }
       if (authority === "incomplete") {
-        this.healthObservation = work;
+        this.requeueHealth(work);
         this.scheduleCanonicalWake();
         return;
       }
@@ -3657,7 +3777,7 @@ export class Monitor {
       this.taskDetails.size > 0 ||
       !!this.card ||
       !!this.currentHealthTaskId ||
-      !!this.healthObservation ||
+      this.healthQueue.length > 0 ||
       !!this.healthFlight;
     this.healthCards.clear();
     this.taskDetails.clear();
@@ -3670,7 +3790,7 @@ export class Monitor {
     this.currentHealthTaskId = undefined;
     this.cardHealthIdentity = undefined;
     this.card = undefined;
-    this.healthObservation = undefined;
+    this.healthQueue = [];
     if (this.healthFlight) {
       this.healthFlight = undefined;
       this.healthGateway.invalidate();
@@ -4074,7 +4194,7 @@ export class Monitor {
 
   private projectedHealth(
     task: HybridTask,
-    observation: Observation,
+    work: HealthWork,
     pass: CanonicalPass,
   ): HealthSnapshot | undefined {
     const source = this.resolveObservation(pass, task.source.entryId);
@@ -4121,57 +4241,62 @@ export class Monitor {
           requirements,
           MAX_HEALTH_REQUIREMENTS_BYTES,
         )}`,
-        `Latest canonical ${observation.role} report:\n${boundedHealthText(
-          observation.text,
-          MAX_HEALTH_REPORT_BYTES,
-        )}`,
+        `Canonical report coverage: ${
+          work.reports.complete
+            ? "complete"
+            : `incomplete; ${work.reports.omissions.join("; ")}`
+        }`,
+        ...work.reports.reports.map(
+          (report) =>
+            `Canonical ${report.role} report ${JSON.stringify(report.id)}:\n${report.text}`,
+        ),
       ],
       this.evidence.snapshot(),
       this.evidence.codeRevision(),
     );
   }
 
-  private cardIsCurrent(task: HybridTask, healthIdentity: string) {
+  /** Accepted results dedupe by exact task-local input, never widget selection. */
+  private hasAcceptedHealthSnapshot(
+    task: HybridTask,
+    work: HealthWork,
+    snapshot: HealthSnapshot,
+  ) {
+    const card = this.healthCards.get(task.id);
     return (
-      !!this.card &&
-      !this.card.retained &&
-      this.card.taskId === task.id &&
-      this.card.revision === task.revision &&
-      this.card.label === task.label &&
-      this.cardHealthIdentity === healthIdentity
+      !!card &&
+      this.healthCardMatchesTask(card, task) &&
+      card.provenance.observation.entryId === work.observation.id &&
+      card.provenance.observation.messageHash === work.observation.hash &&
+      card.provenance.observation.role === work.observation.role &&
+      card.provenance.snapshotHash === sha256(snapshot.identity) &&
+      card.provenance.evidenceHash ===
+        sha256(JSON.stringify(this.evidence.snapshot())) &&
+      card.provenance.codeRevision === this.evidence.codeRevision()
     );
-  }
-
-  /** Health follows exact open focus, except all-done retained assessment. */
-  private healthTaskForCurrentFocus(work: HealthWork) {
-    const task = this.state.tasks.find(
-      (item) =>
-        item.id === work.taskId &&
-        item.revision === work.revision &&
-        item.included,
-    );
-    if (!task) return;
-    const hasOpenTasks = this.state.tasks.some(
-      (item) => item.included && item.status !== "done",
-    );
-    if (task.status === "done") return hasOpenTasks ? undefined : task;
-    return this.state.focusTaskId === task.id ? task : undefined;
   }
 
   private async assessHealth(
     epoch: number,
     work: HealthWork,
-    flight: { epoch: number; token: number; taskId: string },
+    flight: HealthFlight,
     pass: CanonicalPass,
   ) {
-    const task = this.healthTaskForCurrentFocus(work);
+    const task = this.healthWorkCurrent(work, pass);
     if (!task) return;
-    const snapshot = this.projectedHealth(task, work.observation, pass);
-    if (!snapshot || this.cardIsCurrent(task, snapshot.identity)) return;
+    const snapshot = this.projectedHealth(task, work, pass);
+    if (!snapshot || this.hasAcceptedHealthSnapshot(task, work, snapshot))
+      return;
     if (!this.admitHealth(task, work.observation, snapshot.requests.length))
       return;
     let combined: ValidatedResult | undefined;
     for (const request of snapshot.requests) {
+      const currentPass = this.beginCanonicalPass();
+      const currentTask = this.healthWorkCurrent(work, currentPass);
+      const current = currentTask
+        ? this.projectedHealth(currentTask, work, currentPass)
+        : undefined;
+      if (!current || current.identity !== snapshot.identity) return;
       const result = await this.evaluateJev(
         request,
         epoch,
@@ -4201,9 +4326,7 @@ export class Monitor {
       this.healthFlight !== flight
     )
       return;
-    // Evidence and code revision are part of the snapshot identity. Never admit
-    // a response that raced a passive-fact change.
-    const currentTask = this.healthTaskForCurrentFocus(work);
+    // Exact epoch/task/source/target/context/evidence checks gate all fields.
     const currentPass = this.beginCanonicalPass();
     const authority = this.reconcileAuthority(currentPass);
     if (authority === "amended") {
@@ -4211,11 +4334,13 @@ export class Monitor {
       return;
     }
     if (authority === "incomplete") {
+      this.requeueHealth(work);
       this.scheduleCanonicalWake();
       return;
     }
+    const currentTask = this.healthWorkCurrent(work, currentPass);
     const current = currentTask
-      ? this.projectedHealth(currentTask, work.observation, currentPass)
+      ? this.projectedHealth(currentTask, work, currentPass)
       : undefined;
     if (!current || current.identity !== snapshot.identity) return;
     const acceptance = combined.answers.acceptance;
@@ -4234,19 +4359,26 @@ export class Monitor {
               applicability.choice === "not-needed"
             ? "Not needed"
             : "Unknown",
-      redEvidence: redEvidenceLabel({
-        applicability:
-          applicability?.type === "choice" &&
-          (applicability.choice === "needed" ||
-            applicability.choice === "not-needed" ||
-            applicability.choice === "unknown")
-            ? applicability.choice
-            : undefined,
-        reported:
-          reported?.type === "choice" && reported.choice === "reported-red",
-        contradiction:
-          reported?.type === "choice" && reported.choice === "contradicted",
-      }),
+      redEvidence:
+        !work.reports.complete &&
+        reported?.type === "choice" &&
+        reported.choice === "not-found"
+          ? "Unknown"
+          : redEvidenceLabel({
+              applicability:
+                applicability?.type === "choice" &&
+                (applicability.choice === "needed" ||
+                  applicability.choice === "not-needed" ||
+                  applicability.choice === "unknown")
+                  ? applicability.choice
+                  : undefined,
+              reported:
+                reported?.type === "choice" &&
+                reported.choice === "reported-red",
+              contradiction:
+                reported?.type === "choice" &&
+                reported.choice === "contradicted",
+            }),
       implementation: (() => {
         const implementation = implementationFromResult(
           [task.label],

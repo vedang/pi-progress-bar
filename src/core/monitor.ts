@@ -151,12 +151,32 @@ interface HealthWork {
   evidenceGeneration: string;
 }
 
+type HealthWorkState = "ready" | "in-flight" | "parked" | "terminal";
+
+/** One task identity owns one bounded job plus at most one in-flight successor. */
+interface HealthJob {
+  work: HealthWork;
+  identity: string;
+  state: HealthWorkState;
+  /** Retry deadline is inert until a later named wake observes it elapsed. */
+  parkedUntil?: number;
+  /** A job state prevents a second attempt until another named wake changes it. */
+  lastAttemptWake?: number;
+  /** Coalesced input that arrived while this exact identity was in flight. */
+  successor?: HealthWork;
+}
+
 interface HealthFlight {
   epoch: number;
   token: number;
   taskId: string;
   work: HealthWork;
 }
+
+type HealthAttempt =
+  | { kind: "terminal" }
+  | { kind: "parked"; until: number }
+  | { kind: "paused" };
 
 interface CorrectionFact extends CorrectionRedFact {
   epoch: number;
@@ -498,9 +518,12 @@ export class Monitor {
   private latchHistoricalCatchup = false;
   private epoch = 0;
   private extractionController?: AbortController;
-  /** Insertion-ordered, task-keyed optional jobs; one successor per flight task. */
-  private healthQueue: HealthWork[] = [];
+  /** Insertion-ordered explicit health lifecycle states, capped at 20 tasks. */
+  private healthJobs = new Map<string, HealthJob>();
   private healthFlight?: HealthFlight;
+  private healthWake = 0;
+  /** Gateway backoff expires inertly; later named wake is still required. */
+  private healthBackoffWake?: number;
   private detailFlight?: { epoch: number; token: number; taskId: string };
   private nextDetailToken = 0;
   /** Durable optional task records; never part of semantic state. */
@@ -670,10 +693,12 @@ export class Monitor {
         : { isError };
     this.evidence.finish(callId, toolName, value, Date.now());
     if (JSON.stringify(this.evidence.snapshot()) !== evidence) {
-      // Passive facts can change task health truth but never semantic state.
+      // Validated passive evidence is a named health wake, never semantic work.
       this.currentHealthTaskId = undefined;
+      this.wakeHealthFromCurrent("evidence");
       this.syncPresentationCard();
       this.publish();
+      this.drain();
     }
   }
 
@@ -880,6 +905,7 @@ export class Monitor {
       this.clearActivity(false);
       this.gateway.enable(this.identity());
       this.healthGateway.enable(this.identity());
+      this.wakeHealthFromCurrent("control", true, pass);
       this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
       this.correctionGateway.enable(this.identity());
@@ -1015,7 +1041,8 @@ export class Monitor {
     this.extractionController?.abort();
     this.cancelHealth();
     this.invalidateCorrections();
-    this.healthQueue = [];
+    this.healthJobs.clear();
+    this.healthBackoffWake = undefined;
     this.gateway.pause();
     this.healthGateway.pause();
     this.activityGateway.pause();
@@ -1179,6 +1206,7 @@ export class Monitor {
     this.epoch++;
     this.gateway.enable(this.identity());
     this.healthGateway.enable(this.identity());
+    this.wakeHealthFromCurrent("control", true, pass);
     this.activityGateway.enable(this.identity());
     this.detailGateway.enable(this.identity());
     this.correctionGateway.enable(this.identity());
@@ -1313,7 +1341,7 @@ export class Monitor {
         this.state.scopeUnresolved,
       currentHealthTaskId: this.currentHealthTaskId,
       pendingHealthTaskId:
-        this.healthFlight?.taskId ?? this.healthQueue[0]?.taskId,
+        this.healthFlight?.taskId ?? this.nextPendingHealthJob()?.work.taskId,
       lastDisplayedTaskId: this.idleDoneInvalidated
         ? undefined
         : this.lastDisplayedTaskId,
@@ -1631,7 +1659,7 @@ export class Monitor {
     this.cardHealthIdentity = undefined;
     this.clearRuntimeContext();
     this.queued = [];
-    this.healthQueue = [];
+    this.healthJobs.clear();
     this.clearActivity(false);
     this.blockedPending = undefined;
     this.activeObservation = undefined;
@@ -1982,7 +2010,7 @@ export class Monitor {
       !!focus &&
       selected.taskId === focus.id &&
       this.currentHealthTaskId === selected.taskId &&
-      !this.healthQueue.length &&
+      !this.hasPendingHealthWork() &&
       !this.healthFlight;
     this.card = this.presentationCardFor(
       selected,
@@ -2080,9 +2108,25 @@ export class Monitor {
 
   private cancelHealth() {
     this.currentHealthTaskId = undefined;
-    if (!this.healthFlight) {
+    const flight = this.healthFlight;
+    if (!flight) {
       this.syncPresentationCard();
       return;
+    }
+    const job = this.healthJobs.get(flight.taskId);
+    if (
+      job?.state === "in-flight" &&
+      job.identity === this.healthWorkIdentity(flight.work)
+    ) {
+      if (job.successor) {
+        const successor = job.successor;
+        this.healthJobs.delete(flight.taskId);
+        this.healthJobs.set(flight.taskId, {
+          work: successor,
+          identity: this.healthWorkIdentity(successor),
+          state: "ready",
+        });
+      } else job.state = "ready";
     }
     this.healthFlight = undefined;
     this.healthGateway.invalidate();
@@ -2239,17 +2283,16 @@ export class Monitor {
         messageHash: observation.hash,
         role: observation.role,
       })),
-      ...[
-        ...this.healthQueue,
-        ...(this.healthFlight ? [this.healthFlight.work] : []),
-      ].flatMap((work) => [
-        {
-          entryId: work.observation.id,
-          messageHash: work.observation.hash,
-          role: work.observation.role,
-        },
-        ...work.reports.references,
-      ]),
+      ...[...this.healthJobs.values()]
+        .flatMap((job) => [job.work, ...(job.successor ? [job.successor] : [])])
+        .flatMap((work) => [
+          {
+            entryId: work.observation.id,
+            messageHash: work.observation.hash,
+            role: work.observation.role,
+          },
+          ...work.reports.references,
+        ]),
       ...(this.catchupTarget
         ? [
             {
@@ -3093,6 +3136,23 @@ export class Monitor {
       return;
     }
     this.drainVisibility();
+    // Ready health is older than optional details. Parked/paused health is not.
+    const health = this.nextReadyHealthJob();
+    if (health && !this.healthFlight) {
+      health.state = "in-flight";
+      health.lastAttemptWake = this.healthWake;
+      const healthWork = health.work;
+      const flight: HealthFlight = {
+        epoch: healthWork.epoch,
+        token: ++this.nextHealthToken,
+        taskId: healthWork.taskId,
+        work: healthWork,
+      };
+      this.healthFlight = flight;
+      void this.processHealth(healthWork, flight);
+      return;
+    }
+    if (this.healthFlight) return;
     const detail = this.nextDetailWork();
     if (detail && !this.detailFlight) {
       const flight = {
@@ -3102,19 +3162,7 @@ export class Monitor {
       };
       this.detailFlight = flight;
       void this.processDetails(detail, flight);
-      return;
     }
-    if (this.healthFlight) return;
-    const healthWork = this.healthQueue.shift();
-    if (!healthWork) return;
-    const flight: HealthFlight = {
-      epoch: healthWork.epoch,
-      token: ++this.nextHealthToken,
-      taskId: healthWork.taskId,
-      work: healthWork,
-    };
-    this.healthFlight = flight;
-    void this.processHealth(healthWork, flight);
   }
 
   private rememberPreceding(
@@ -3521,31 +3569,185 @@ export class Monitor {
     });
   }
 
-  private pruneHealthQueue() {
-    const queued = new Set<string>();
-    this.healthQueue = this.healthQueue.filter((work) => {
-      const current = !!this.healthTaskForWork(work);
-      if (!current || queued.has(work.taskId)) return false;
-      queued.add(work.taskId);
-      return true;
-    });
+  private healthWorkIdentity(work: HealthWork) {
+    return sha256(
+      JSON.stringify([
+        work.epoch,
+        work.taskId,
+        work.revision,
+        work.taskSource,
+        observationRef(work.observation),
+        work.reports.coverageDigest,
+        work.terminal,
+        work.evidenceGeneration,
+      ]),
+    );
   }
 
-  /** Same-task coalescing replaces input in place; a flight gets one successor. */
-  private enqueueHealth(work: HealthWork) {
-    const index = this.healthQueue.findIndex(
-      (candidate) => candidate.taskId === work.taskId,
+  private hasPendingHealthWork() {
+    return [...this.healthJobs.values()].some(
+      (job) => job.state !== "terminal",
     );
-    if (index >= 0) {
-      this.healthQueue[index] = work;
+  }
+
+  private nextPendingHealthJob() {
+    return [...this.healthJobs.values()].find(
+      (job) => job.state !== "terminal",
+    );
+  }
+
+  /** Parked jobs and real gateway-wide backoff yield to optional details. */
+  private nextReadyHealthJob() {
+    if (
+      this.healthGateway.isPaused ||
+      this.healthGateway.retryPending ||
+      this.healthBackoffWake === this.healthWake
+    )
+      return;
+    return [...this.healthJobs.values()].find(
+      (job) => job.state === "ready" && job.lastAttemptWake !== this.healthWake,
+    );
+  }
+
+  /** A wake is explicit input, never a health retry timer or polling tick. */
+  private wakeHealth(
+    _kind: "canonical" | "evidence" | "control",
+    reviveTerminal = false,
+  ) {
+    this.healthWake++;
+    const now = Date.now();
+    if (this.healthBackoffWake !== undefined) {
+      // A pre-deadline event does not consume required post-deadline wake.
+      this.healthBackoffWake = this.healthGateway.retryPending
+        ? this.healthWake
+        : undefined;
+    }
+    for (const job of this.healthJobs.values()) {
+      if (job.state === "parked" && now >= (job.parkedUntil ?? Infinity)) {
+        job.state = "ready";
+        job.parkedUntil = undefined;
+      } else if (
+        reviveTerminal &&
+        job.state === "terminal" &&
+        this.healthTaskForWork(job.work) &&
+        !this.healthCardMatchesTask(
+          this.healthCards.get(job.work.taskId),
+          this.healthTaskForWork(job.work) as HybridTask,
+        )
+      ) {
+        job.state = "ready";
+      }
+    }
+  }
+
+  /** Rebuild only health still required by current semantic state on control/evidence wakes. */
+  private wakeHealthFromCurrent(
+    kind: "evidence" | "control",
+    reviveTerminal = false,
+    pass = this.beginCanonicalPass(),
+  ) {
+    if (!this.enabled) return;
+    this.wakeHealth(kind, reviveTerminal);
+    const tasks = this.state.tasks.filter((task) => {
+      if (!task.included || task.status === "done") return false;
+      const job = this.healthJobs.get(task.id);
+      const missingCard = !this.healthCardMatchesTask(
+        this.healthCards.get(task.id),
+        task,
+      );
+      return (
+        kind === "evidence" ||
+        missingCard ||
+        (!!job && job.state !== "terminal")
+      );
+    });
+    if (!tasks.length) return;
+    const cursor = this.state.cursor;
+    const observation =
+      cursor && pass.observation(cursor.id)?.hash === cursor.hash
+        ? pass.observation(cursor.id)
+        : undefined;
+    if (!observation) return;
+    const reports = pass.healthReportContext(observation.id);
+    if (
+      !reports ||
+      reports.target.messageHash !== observation.hash ||
+      reports.target.role !== observation.role
+    )
+      return;
+    this.pruneHealthJobs();
+    const evidenceGeneration = this.healthEvidenceGeneration();
+    for (const task of tasks) {
+      this.enqueueHealth(
+        this.healthWork(task, observation, reports, false, evidenceGeneration),
+      );
+    }
+    this.syncPresentationCard();
+  }
+
+  private healthWork(
+    task: HybridTask,
+    observation: Observation,
+    reports: CanonicalHealthReportContext,
+    terminal: boolean,
+    evidenceGeneration: string,
+  ): HealthWork {
+    return {
+      observation: { ...observation },
+      reports: {
+        ...reports,
+        target: { ...reports.target },
+        reports: reports.reports.map((report) => ({ ...report })),
+        references: reports.references.map((reference) => ({ ...reference })),
+        omissions: [...reports.omissions],
+      },
+      taskId: task.id,
+      revision: task.revision,
+      taskSource: { ...task.source },
+      terminal,
+      epoch: this.epoch,
+      evidenceGeneration,
+    };
+  }
+
+  private pruneHealthJobs() {
+    for (const [taskId, job] of this.healthJobs) {
+      const task = this.state.tasks.find(
+        (item) =>
+          item.id === taskId &&
+          item.revision === job.work.revision &&
+          item.included &&
+          sameSource(item.source, job.work.taskSource),
+      );
+      if (!task || job.work.epoch !== this.epoch)
+        this.healthJobs.delete(taskId);
+    }
+  }
+
+  /** Queued work keeps its position; a successor to a flight is placed after peers. */
+  private enqueueHealth(work: HealthWork) {
+    const identity = this.healthWorkIdentity(work);
+    const existing = this.healthJobs.get(work.taskId);
+    if (existing) {
+      if (existing.state === "in-flight") {
+        if (existing.identity !== identity) existing.successor = work;
+        return;
+      }
+      if (existing.identity === identity) return;
+      const remainsParked =
+        existing.state === "parked" &&
+        Number.isFinite(existing.parkedUntil) &&
+        Date.now() < (existing.parkedUntil ?? Infinity);
+      existing.work = work;
+      existing.identity = identity;
+      if (remainsParked) return;
+      existing.state = "ready";
+      existing.parkedUntil = undefined;
+      existing.lastAttemptWake = undefined;
       return;
     }
-    const taskIds = new Set([
-      ...this.healthQueue.map((candidate) => candidate.taskId),
-      ...(this.healthFlight ? [this.healthFlight.taskId] : []),
-    ]);
-    if (!taskIds.has(work.taskId) && taskIds.size >= 20) return;
-    this.healthQueue.push(work);
+    if (this.healthJobs.size >= 20) return;
+    this.healthJobs.set(work.taskId, { work, identity, state: "ready" });
   }
 
   /** Every committed observation refreshes open tasks without requiring focus. */
@@ -3553,6 +3755,8 @@ export class Monitor {
     observation: Observation,
     priorTasks: readonly HybridTask[] = [],
   ) {
+    const tasks = this.healthTasksForCommit(priorTasks);
+    if (!tasks.length) return;
     const pass = this.beginCanonicalPass();
     const reports = pass.healthReportContext(observation.id);
     if (
@@ -3561,43 +3765,56 @@ export class Monitor {
       reports.target.role !== observation.role
     )
       return;
-    this.pruneHealthQueue();
+    this.wakeHealth("canonical");
+    this.pruneHealthJobs();
     const evidenceGeneration = this.healthEvidenceGeneration();
-    for (const task of this.healthTasksForCommit(priorTasks)) {
+    for (const task of tasks) {
       const prior = priorTasks.find((item) => item.id === task.id);
       // Replacement invalidates only this task's advisory fact.
       this.correctionFacts.delete(task.id);
       this.currentHealthTaskId = undefined;
-      this.enqueueHealth({
-        observation: { ...observation },
-        reports: {
-          ...reports,
-          target: { ...reports.target },
-          reports: reports.reports.map((report) => ({ ...report })),
-          references: reports.references.map((reference) => ({ ...reference })),
-          omissions: [...reports.omissions],
-        },
-        taskId: task.id,
-        revision: task.revision,
-        taskSource: { ...task.source },
-        terminal:
+      this.enqueueHealth(
+        this.healthWork(
+          task,
+          observation,
+          reports,
           task.status === "done" &&
-          !!prior &&
-          prior.included &&
-          prior.status !== "done",
-        epoch: this.epoch,
-        evidenceGeneration,
-      });
+            !!prior &&
+            prior.included &&
+            prior.status !== "done",
+          evidenceGeneration,
+        ),
+      );
     }
     this.syncPresentationCard();
   }
 
-  private requeueHealth(work: HealthWork) {
-    if (!this.healthQueue.some((candidate) => candidate.taskId === work.taskId))
-      this.healthQueue.unshift(work);
+  private settleHealth(flight: HealthFlight, attempt: HealthAttempt) {
+    if (this.healthFlight !== flight) return;
+    this.healthFlight = undefined;
+    const job = this.healthJobs.get(flight.taskId);
+    if (
+      job?.state !== "in-flight" ||
+      job.identity !== this.healthWorkIdentity(flight.work)
+    )
+      return;
+    if (job.successor) {
+      const successor = job.successor;
+      // A flight's successor is new work, so fair peers run before it.
+      this.healthJobs.delete(flight.taskId);
+      this.healthJobs.set(flight.taskId, {
+        work: successor,
+        identity: this.healthWorkIdentity(successor),
+        state: "ready",
+      });
+      return;
+    }
+    job.state = attempt.kind === "parked" ? "parked" : "terminal";
+    job.parkedUntil = attempt.kind === "parked" ? attempt.until : undefined;
   }
 
   private async processHealth(work: HealthWork, flight: HealthFlight) {
+    let attempt: HealthAttempt = { kind: "terminal" };
     try {
       const pass = this.beginCanonicalPass();
       const authority = this.reconcileAuthority(pass);
@@ -3606,22 +3823,21 @@ export class Monitor {
         return;
       }
       if (authority === "incomplete") {
-        this.requeueHealth(work);
+        attempt = { kind: "parked", until: Infinity };
         this.scheduleCanonicalWake();
         return;
       }
       this.reconcileHealthCards(pass);
-      await this.assessHealth(flight.epoch, work, flight, pass);
+      attempt = await this.assessHealth(flight.epoch, work, flight, pass);
     } catch (error) {
       if (this.healthFlight !== flight) return;
       if (error instanceof RetryableJevError) this.note("jev-unavailable");
-      else if (error instanceof RetryableProviderError) {
-        // Optional health is never allowed to hold semantic queue progress.
+      else if (error instanceof RetryableProviderError)
         this.note("model-unavailable");
-      } else this.note("invalid-scope-result");
+      else this.note("invalid-scope-result");
     } finally {
       if (this.healthFlight === flight) {
-        this.healthFlight = undefined;
+        this.settleHealth(flight, attempt);
         this.syncPresentationCard();
         this.activity = "Idle";
         this.publish();
@@ -3777,7 +3993,7 @@ export class Monitor {
       this.taskDetails.size > 0 ||
       !!this.card ||
       !!this.currentHealthTaskId ||
-      this.healthQueue.length > 0 ||
+      this.healthJobs.size > 0 ||
       !!this.healthFlight;
     this.healthCards.clear();
     this.taskDetails.clear();
@@ -3790,7 +4006,7 @@ export class Monitor {
     this.currentHealthTaskId = undefined;
     this.cardHealthIdentity = undefined;
     this.card = undefined;
-    this.healthQueue = [];
+    this.healthJobs.clear();
     if (this.healthFlight) {
       this.healthFlight = undefined;
       this.healthGateway.invalidate();
@@ -4143,6 +4359,55 @@ export class Monitor {
     return result;
   }
 
+  /** Optional health classifies an undefined gateway result before queue policy. */
+  private async evaluateHealth(
+    request: EvaluationRequest,
+    epoch: number,
+  ): Promise<{ result: ValidatedResult } | HealthAttempt> {
+    this.assertActiveAuthority(epoch);
+    this.activity = "Assessing progress";
+    this.publish();
+    const result = await this.healthGateway.evaluate(
+      request,
+      this.identity(),
+      true,
+    );
+    this.assertActiveAuthority(epoch);
+    if (!result) {
+      if (
+        this.healthGateway.lastOutcome === "retryable" ||
+        this.healthGateway.lastOutcome === "backoff"
+      ) {
+        this.healthBackoffWake = this.healthWake;
+        return {
+          kind: "parked",
+          until: Date.now() + Math.max(0, this.healthGateway.retryDelayMs ?? 0),
+        };
+      }
+      if (this.healthGateway.lastOutcome === "invalid") {
+        // Invalid local/validated data is terminal for this exact health input.
+        // Release only optional-health backoff so later task identities flow.
+        this.healthGateway.dismissInvalidOutcome();
+        return { kind: "terminal" };
+      }
+      return this.healthGateway.lastOutcome === "permanent" ||
+        this.healthGateway.lastOutcome === "paused"
+        ? { kind: "paused" }
+        : { kind: "terminal" };
+    }
+    this.usage.jev.inputTokens = saturatingAdd(
+      this.usage.jev.inputTokens,
+      result.usage.input_tokens,
+    );
+    this.usage.jev.outputTokens = saturatingAdd(
+      this.usage.jev.outputTokens,
+      result.usage.output_tokens,
+    );
+    this.save();
+    this.publish();
+    return { result };
+  }
+
   private async extract(
     input: ExtractionInput,
     epoch: number,
@@ -4281,14 +4546,16 @@ export class Monitor {
     work: HealthWork,
     flight: HealthFlight,
     pass: CanonicalPass,
-  ) {
+  ): Promise<HealthAttempt> {
     const task = this.healthWorkCurrent(work, pass);
-    if (!task) return;
+    if (!task) return { kind: "terminal" };
     const snapshot = this.projectedHealth(task, work, pass);
     if (!snapshot || this.hasAcceptedHealthSnapshot(task, work, snapshot))
-      return;
+      return { kind: "terminal" };
+    // Capacity denial is terminal for this exact task/input until a named
+    // canonical/evidence/control wake changes its identity or capacity proof.
     if (!this.admitHealth(task, work.observation, snapshot.requests.length))
-      return;
+      return { kind: "terminal" };
     let combined: ValidatedResult | undefined;
     for (const request of snapshot.requests) {
       const currentPass = this.beginCanonicalPass();
@@ -4296,14 +4563,12 @@ export class Monitor {
       const current = currentTask
         ? this.projectedHealth(currentTask, work, currentPass)
         : undefined;
-      if (!current || current.identity !== snapshot.identity) return;
-      const result = await this.evaluateJev(
-        request,
-        epoch,
-        undefined,
-        this.healthGateway,
-      );
+      if (!current || current.identity !== snapshot.identity)
+        return { kind: "terminal" };
+      const evaluated = await this.evaluateHealth(request, epoch);
+      if ("kind" in evaluated) return evaluated;
       if (this.healthFlight !== flight) throw new RetryableProviderError();
+      const result = evaluated.result;
       combined = {
         model: result.model,
         answers: { ...(combined?.answers ?? {}), ...result.answers },
@@ -4325,24 +4590,24 @@ export class Monitor {
       epoch !== this.epoch ||
       this.healthFlight !== flight
     )
-      return;
+      return { kind: "terminal" };
     // Exact epoch/task/source/target/context/evidence checks gate all fields.
     const currentPass = this.beginCanonicalPass();
     const authority = this.reconcileAuthority(currentPass);
     if (authority === "amended") {
       this.resetForCanonicalAmendment();
-      return;
+      return { kind: "terminal" };
     }
     if (authority === "incomplete") {
-      this.requeueHealth(work);
       this.scheduleCanonicalWake();
-      return;
+      return { kind: "parked", until: Infinity };
     }
     const currentTask = this.healthWorkCurrent(work, currentPass);
     const current = currentTask
       ? this.projectedHealth(currentTask, work, currentPass)
       : undefined;
-    if (!current || current.identity !== snapshot.identity) return;
+    if (!current || current.identity !== snapshot.identity)
+      return { kind: "terminal" };
     const acceptance = combined.answers.acceptance;
     const applicability = combined.answers.redApplicability;
     const reported = combined.answers.redReport;
@@ -4440,7 +4705,7 @@ export class Monitor {
       this.idleDoneInvalidated = previousDisplay.idleDoneInvalidated;
       this.note("health-capacity-skipped");
       this.publish();
-      return;
+      return { kind: "terminal" };
     }
     this.healthCards = candidateCards;
     this.currentHealthTaskId = task.id;
@@ -4448,5 +4713,6 @@ export class Monitor {
     this.syncPresentationCard();
     this.save();
     this.publish();
+    return { kind: "terminal" };
   }
 }

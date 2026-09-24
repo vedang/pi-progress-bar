@@ -40,6 +40,23 @@ export interface ValidatedResult {
   answers: Record<string, Answer>;
   usage: { input_tokens: number; output_tokens: number };
 }
+
+/** Last evaluation classification. Callers may safely park optional work. */
+export type GatewayOutcome =
+  | "idle"
+  | "in-flight"
+  | "success"
+  | "retryable"
+  | "invalid"
+  | "permanent"
+  | "paused"
+  | "backoff"
+  | "unavailable"
+  | "suppressed"
+  | "busy";
+
+class InvalidGatewayResponseError extends Error {}
+
 interface Options {
   fetch: (url: string, init?: RequestInit) => Promise<Response>;
   getApiKey: () => string | undefined;
@@ -78,11 +95,11 @@ function validate(value: unknown, request: EvaluationRequest): ValidatedResult {
     !keysEqual(value.answers, Object.keys(request.questions)) ||
     !record(value.usage)
   )
-    throw new Error("Invalid response");
+    throw new InvalidGatewayResponseError("Invalid response");
   for (const field of ["input_tokens", "output_tokens"]) {
     const n = value.usage[field];
     if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0)
-      throw new Error("Invalid usage");
+      throw new InvalidGatewayResponseError("Invalid usage");
   }
   for (const [id, question] of Object.entries(request.questions)) {
     const answer = value.answers[id];
@@ -92,7 +109,7 @@ function validate(value: unknown, request: EvaluationRequest): ValidatedResult {
       !unit(answer.confidence) ||
       !record(answer.probabilities)
     )
-      throw new Error("Invalid answer");
+      throw new InvalidGatewayResponseError("Invalid answer");
     const keys = Object.keys(question.criteria);
     const probabilities = answer.probabilities;
     const values = Object.values(probabilities) as number[];
@@ -102,14 +119,14 @@ function validate(value: unknown, request: EvaluationRequest): ValidatedResult {
       Math.abs(values.reduce((sum, probability) => sum + probability, 0) - 1) >
         distributionTolerance(values)
     )
-      throw new Error("Invalid distribution");
+      throw new InvalidGatewayResponseError("Invalid distribution");
     if (question.type === "choice") {
       if (
         typeof answer.choice !== "string" ||
         !keys.includes(answer.choice) ||
         (probabilities[answer.choice] as number) < Math.max(...values)
       )
-        throw new Error("Invalid choice");
+        throw new InvalidGatewayResponseError("Invalid choice");
     } else {
       if (
         typeof answer.score !== "number" ||
@@ -119,10 +136,10 @@ function validate(value: unknown, request: EvaluationRequest): ValidatedResult {
         !record(answer.legend) ||
         !keysEqual(answer.legend, keys)
       )
-        throw new Error("Invalid score");
+        throw new InvalidGatewayResponseError("Invalid score");
       const legend = answer.legend;
       if (!question.criteria.every((label, i) => legend[String(i)] === label))
-        throw new Error("Invalid legend");
+        throw new InvalidGatewayResponseError("Invalid legend");
     }
   }
   return value as unknown as ValidatedResult;
@@ -154,7 +171,11 @@ async function readBounded(
       if (bytes > MAX_RESPONSE_BYTES) throw new Error("Oversized response");
       chunks.push(part.value);
     }
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    try {
+      return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      throw new InvalidGatewayResponseError("Invalid JSON response");
+    }
   } finally {
     signal.removeEventListener("abort", cancel);
     cancel();
@@ -181,6 +202,7 @@ export class JevGateway {
   }
   private identity?: string;
   private paused = true;
+  private outcome: GatewayOutcome = "idle";
   private generation = 0;
   private failures = 0;
   /** Direct gateway callers suppress only a bounded recent identity set. */
@@ -192,6 +214,20 @@ export class JevGateway {
   constructor(private readonly options: Options) {
     this.now = options.now ?? Date.now;
   }
+  get lastOutcome(): GatewayOutcome {
+    return this.outcome;
+  }
+  get isPaused() {
+    return this.paused;
+  }
+  /** Optional callers may release only an invalid-response backoff. */
+  dismissInvalidOutcome() {
+    if (this.outcome !== "invalid" || this.paused) return;
+    this.failures = 0;
+    this.nextAttempt = -Infinity;
+    this.retryAfter = -Infinity;
+    this.status = "Ready";
+  }
   enable(identity: string) {
     this.pause();
     this.identity = identity;
@@ -202,6 +238,7 @@ export class JevGateway {
     this.retryAfter = -Infinity;
     this.seen.clear();
     this.status = "Ready";
+    this.outcome = "idle";
   }
   invalidate() {
     this.generation++;
@@ -214,19 +251,27 @@ export class JevGateway {
     this.invalidate();
     this.paused = true;
     this.status = "Paused";
+    this.outcome = "paused";
   }
   resume() {
     if (!this.identity) return;
     this.paused = false;
     this.status = "Ready";
+    this.outcome = "idle";
   }
   async evaluate(
     request: EvaluationRequest,
     identity: string,
     allowDuplicate = false,
   ): Promise<ValidatedResult | undefined> {
-    if (this.paused || identity !== this.identity) return;
-    if (this.flight) return;
+    if (this.paused || identity !== this.identity) {
+      this.outcome = "paused";
+      return;
+    }
+    if (this.flight) {
+      this.outcome = "busy";
+      return;
+    }
     let body: string;
     try {
       body = JSON.stringify(request);
@@ -256,26 +301,33 @@ export class JevGateway {
         throw new Error("Invalid request");
     } catch {
       this.status = "Unknown: invalid or oversized evidence/questions";
+      this.outcome = "invalid";
       return;
     }
     const hash = createHash("sha256")
       .update(identity)
       .update(body)
       .digest("hex");
-    if (!allowDuplicate && this.seen.has(hash)) return;
+    if (!allowDuplicate && this.seen.has(hash)) {
+      this.outcome = "suppressed";
+      return;
+    }
     let key: string | undefined;
     try {
       key = this.options.getApiKey()?.trim();
     } catch {
       this.status = "Offline: API key unavailable";
+      this.outcome = "unavailable";
       return;
     }
     if (!key) {
       this.status = "Offline: missing TYPESAFE_API_KEY";
+      this.outcome = "unavailable";
       return;
     }
     if (this.now() < Math.max(this.nextAttempt, this.retryAfter)) {
       this.status = "Pending: retry backoff / cooldown / Retry-After";
+      this.outcome = "backoff";
       return;
     }
     const generation = this.generation;
@@ -287,6 +339,7 @@ export class JevGateway {
     const flight = { controller, cancel };
     this.flight = flight;
     this.status = "Pending";
+    this.outcome = "in-flight";
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
@@ -329,6 +382,7 @@ export class JevGateway {
                 ? "OFF: TYPESAFE_API_KEY was rejected"
                 : `OFF: permanent Jev request/model error (${response.status})`;
             this.paused = true;
+            this.outcome = "permanent";
             this.options.onPermanentError?.(this.status);
             void response.body?.cancel().catch(() => {});
             return;
@@ -362,10 +416,15 @@ export class JevGateway {
         this.nextAttempt = -Infinity;
         this.retryAfter = -Infinity;
         this.status = "Current";
+        this.outcome = "success";
       }
       return result;
-    } catch {
+    } catch (error) {
       if (generation === this.generation) {
+        this.outcome =
+          error instanceof InvalidGatewayResponseError
+            ? "invalid"
+            : "retryable";
         this.failures++;
         if (this.retryAfter > this.now()) {
           this.nextAttempt = -Infinity;

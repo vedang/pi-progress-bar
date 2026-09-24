@@ -239,6 +239,7 @@ export class CanonicalPass {
     const reports: Observation[] = [];
     const omissions: string[] = [];
     let bytes = 0;
+    let scanned = 0;
     let index = targetIndex;
     while (index >= 0) {
       if (reports.length >= MAX_HEALTH_REPORT_OBSERVATIONS) {
@@ -247,7 +248,7 @@ export class CanonicalPass {
         );
         break;
       }
-      if (this.exploratoryReads >= MAX_EXPLORATORY_HEADERS) {
+      if (scanned >= MAX_EXPLORATORY_HEADERS) {
         omissions.push(
           "Canonical report coverage scan reached bounded page limit",
         );
@@ -255,8 +256,11 @@ export class CanonicalPass {
       }
       const header = this.headers[index];
       index--;
+      scanned++;
       if (!header) continue;
-      const observation = this.exploratory(header);
+      // Health coverage has its own bounded read allowance. Its answer must
+      // not depend on preceding exploratory page/preceding-context reads.
+      const observation = this.observation(header.id);
       if (!observation) continue;
       const size = Buffer.byteLength(JSON.stringify(observation));
       if (bytes + size > MAX_HEALTH_REPORT_BYTES) {

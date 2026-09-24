@@ -14,9 +14,15 @@ export function taskHealthHarness(count = 3) {
         ? "Document parser"
         : `Research option ${i}`,
   );
-  const goal = labels.join("; ");
-  patches.set("goal", addPatch(observation("goal", goal), labels));
-  const h = monitorHarness([branchEntry("goal", goal)], {
+  const entries = [];
+  for (let start = 0; start < labels.length; start += 6) {
+    const id = start === 0 ? "goal" : `goal-${start}`;
+    const batch = labels.slice(start, start + 6);
+    const text = batch.join("; ");
+    patches.set(id, addPatch(observation(id, text), batch));
+    entries.push(branchEntry(id, text));
+  }
+  const h = monitorHarness(entries, {
     extractionText: (input) => JSON.stringify(patches.get(input.latest.id)),
   });
   let focus = "none";
@@ -70,6 +76,7 @@ export function taskHealthHarness(count = 3) {
   });
   return Object.assign(h, {
     patches,
+    initialTarget: entries.at(-1)?.id ?? "goal",
     completed,
     focus: (value: string, certainty = 1) => {
       focus = value;

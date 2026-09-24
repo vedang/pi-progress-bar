@@ -186,6 +186,22 @@ it("durably admits jobs before cursor, but dispatches only after cursor commits"
   await vi.advanceTimersByTimeAsync(100);
   expect(savedDetails(h.monitor.checkpoint())[0]?.receipts).toHaveLength(1);
 });
+it("dispatches ready task health before optional detail enrichment", async () => {
+  const h = fixture();
+  const transport = required(h.fetch.getMockImplementation());
+  const order: string[] = [];
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body));
+    if (request.questions.clarity) order.push("health");
+    if (isDetailRequest(request)) order.push("details");
+    return transport(url, init);
+  });
+  h.start();
+  await h.settle("goal");
+  expect(order[0]).toBe("health");
+  expect(order).toContain("details");
+});
+
 it("accepted receipt and usage share save; restoring a covered job never rebills", async () => {
   const h = await ready();
   const record = required(savedDetails(h.monitor.checkpoint())[0]);

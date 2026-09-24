@@ -81,6 +81,7 @@ import {
   checkpointStorageStatus,
   encodeCheckpoint,
   type HealthCard,
+  type HealthCoverage,
   type HealthFields,
   MAX_CHECKPOINT_BYTES,
   type MonitorCheckpointMetadata,
@@ -380,6 +381,45 @@ const copyCard = (card: RetainedCard): RetainedCard => ({
 });
 const copyDetailRecord = (record: TaskDetailRecord): TaskDetailRecord =>
   structuredClone(record);
+const copyHealthCoverage = (coverage: HealthCoverage): HealthCoverage => ({
+  target: { ...coverage.target },
+  references: coverage.references.map((reference) => ({ ...reference })),
+  complete: coverage.complete,
+  omissions: [...coverage.omissions],
+  coverageDigest: coverage.coverageDigest,
+});
+const coverageFor = (
+  reports: CanonicalHealthReportContext,
+): HealthCoverage => ({
+  target: { ...reports.target },
+  references: reports.references.map((reference) => ({ ...reference })),
+  complete: reports.complete,
+  omissions: [...reports.omissions],
+  coverageDigest: reports.coverageDigest,
+});
+const sameObservation = (
+  left: { entryId: string; messageHash: string; role: string },
+  right: { entryId: string; messageHash: string; role: string },
+) =>
+  left.entryId === right.entryId &&
+  left.messageHash === right.messageHash &&
+  left.role === right.role;
+const sameHealthCoverage = (
+  left: HealthCoverage,
+  right: CanonicalHealthReportContext,
+) =>
+  sameObservation(left.target, right.target) &&
+  left.complete === right.complete &&
+  left.coverageDigest === right.coverageDigest &&
+  left.omissions.length === right.omissions.length &&
+  left.omissions.every(
+    (omission, index) => omission === right.omissions[index],
+  ) &&
+  left.references.length === right.references.length &&
+  left.references.every((reference, index) => {
+    const candidate = right.references[index];
+    return !!candidate && sameObservation(reference, candidate);
+  });
 const copyHealthCard = (card: HealthCard): HealthCard => ({
   ...card,
   health: { ...card.health },
@@ -387,6 +427,7 @@ const copyHealthCard = (card: HealthCard): HealthCard => ({
     ...card.provenance,
     taskSource: { ...card.provenance.taskSource },
     observation: { ...card.provenance.observation },
+    coverage: copyHealthCoverage(card.provenance.coverage),
     requestHashes: [...card.provenance.requestHashes],
   },
 });
@@ -1867,14 +1908,16 @@ export class Monitor {
         item.label === card.label &&
         sameSource(item.source, card.provenance.taskSource),
     );
-    if (!task) return false;
-    const observation = pass?.observation(card.provenance.observation.entryId);
-    return (
-      !pass ||
-      (!!observation &&
-        observation.hash === card.provenance.observation.messageHash &&
-        observation.role === card.provenance.observation.role)
-    );
+    if (!task || !pass) return !!task;
+    const observation = pass.observation(card.provenance.observation.entryId);
+    if (
+      !observation ||
+      observation.hash !== card.provenance.observation.messageHash ||
+      observation.role !== card.provenance.observation.role
+    )
+      return false;
+    const coverage = pass.healthReportContext(observation.id);
+    return !!coverage && sameHealthCoverage(card.provenance.coverage, coverage);
   }
 
   private cachedObservation(entryId: string) {
@@ -3611,21 +3654,13 @@ export class Monitor {
     if (!task || work.evidenceGeneration !== this.healthEvidenceGeneration())
       return;
     const target = pass.observation(work.observation.id);
+    const coverage = target ? pass.healthReportContext(target.id) : undefined;
     if (
       !target ||
       target.hash !== work.observation.hash ||
       target.role !== work.observation.role ||
-      work.reports.target.entryId !== work.observation.id ||
-      work.reports.target.messageHash !== work.observation.hash ||
-      work.reports.target.role !== work.observation.role ||
-      !work.reports.references.every((reference) => {
-        const report = pass.observation(reference.entryId);
-        return (
-          !!report &&
-          report.hash === reference.messageHash &&
-          report.role === reference.role
-        );
-      })
+      !coverage ||
+      !sameHealthCoverage(coverageFor(work.reports), coverage)
     )
       return;
     return task;
@@ -3715,7 +3750,25 @@ export class Monitor {
     }
   }
 
-  /** Rebuild only health still required by current semantic state on control/evidence wakes. */
+  /** Exact terminal evidence comes from the accepted completion event, never cursor drift. */
+  private completionObservationFor(task: HybridTask, pass: CanonicalPass) {
+    const event = [...this.state.events]
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.kind === "complete" &&
+          candidate.taskId === task.id &&
+          candidate.revision === task.revision,
+      );
+    if (!event) return;
+    const observation = pass.observation(event.source.entryId);
+    return observation &&
+      sameObservation(observationRef(observation), event.source)
+      ? observation
+      : undefined;
+  }
+
+  /** Rebuild only recoverable task-local health on named evidence/control wakes. */
   private wakeHealthFromCurrent(
     kind: "evidence" | "control",
     reviveTerminal = false,
@@ -3723,39 +3776,78 @@ export class Monitor {
   ) {
     if (!this.enabled) return;
     this.wakeHealth(kind, reviveTerminal);
-    const tasks = this.state.tasks.filter((task) => {
-      if (!task.included || task.status === "done") return false;
-      const job = this.healthJobs.get(task.id);
-      const missingCard = !this.healthCardMatchesTask(
-        this.healthCards.get(task.id),
-        task,
-      );
-      return (
-        kind === "evidence" ||
-        missingCard ||
-        (!!job && job.state !== "terminal")
-      );
-    });
-    if (!tasks.length) return;
     const cursor = this.state.cursor;
     const observation =
       cursor && pass.observation(cursor.id)?.hash === cursor.hash
         ? pass.observation(cursor.id)
         : undefined;
-    if (!observation) return;
-    const reports = pass.healthReportContext(observation.id);
-    if (
-      !reports ||
-      reports.target.messageHash !== observation.hash ||
-      reports.target.role !== observation.role
-    )
-      return;
+    const reports = observation
+      ? pass.healthReportContext(observation.id)
+      : undefined;
     this.pruneHealthJobs();
     const evidenceGeneration = this.healthEvidenceGeneration();
-    for (const task of tasks) {
-      this.enqueueHealth(
-        this.healthWork(task, observation, reports, false, evidenceGeneration),
-      );
+    if (
+      observation &&
+      reports &&
+      reports.target.messageHash === observation.hash &&
+      reports.target.role === observation.role
+    ) {
+      for (const task of this.state.tasks) {
+        if (!task.included || task.status === "done") continue;
+        const card = this.healthCards.get(task.id);
+        const job = this.healthJobs.get(task.id);
+        const staleCursorCard =
+          !!card &&
+          !sameObservation(
+            card.provenance.observation,
+            observationRef(observation),
+          );
+        if (
+          kind === "evidence" ||
+          !this.healthCardMatchesTask(card, task) ||
+          staleCursorCard ||
+          (!!job && job.state !== "terminal")
+        )
+          this.enqueueHealth(
+            this.healthWork(
+              task,
+              observation,
+              reports,
+              false,
+              evidenceGeneration,
+            ),
+          );
+      }
+    }
+    // A terminal card is fresh only when its coverage validates against exact
+    // completion evidence. Lost queues, stale coverage and absent cards repair
+    // from that event rather than a later unrelated cursor.
+    for (const task of this.state.tasks) {
+      if (!task.included || task.status !== "done") continue;
+      const terminal = this.completionObservationFor(task, pass);
+      if (!terminal) continue;
+      const card = this.healthCards.get(task.id);
+      if (
+        this.healthCardMatchesTask(card, task) &&
+        card &&
+        sameObservation(card.provenance.observation, observationRef(terminal))
+      )
+        continue;
+      const terminalReports = pass.healthReportContext(terminal.id);
+      if (
+        terminalReports &&
+        terminalReports.target.messageHash === terminal.hash &&
+        terminalReports.target.role === terminal.role
+      )
+        this.enqueueHealth(
+          this.healthWork(
+            task,
+            terminal,
+            terminalReports,
+            true,
+            evidenceGeneration,
+          ),
+        );
     }
     this.syncPresentationCard();
   }
@@ -4152,7 +4244,9 @@ export class Monitor {
   private maximumHealthCard(
     task: HybridTask,
     observation: Observation,
+    coverage = this.beginCanonicalPass().healthReportContext(observation.id),
   ): HealthCard {
+    if (!coverage) throw new Error("Missing canonical health coverage");
     const maximum = Number.MAX_SAFE_INTEGER;
     return {
       taskId: task.id,
@@ -4170,6 +4264,9 @@ export class Monitor {
         taskSource: { ...task.source },
         // Triggering IDs are host-controlled and have no structural length cap.
         observation: observationRef(observation),
+        // Preserve the exact selector footprint; requests/labels below model
+        // longest legal receipt values without dropping bounded coverage bytes.
+        coverage: coverageFor(coverage),
         snapshotHash: "f".repeat(64),
         requestHashes: Array.from({ length: 20 }, () => "f".repeat(64)),
         evidenceHash: "f".repeat(64),
@@ -4183,11 +4280,21 @@ export class Monitor {
     task: HybridTask,
     observation: Observation,
     requests: number,
+    coverage = this.beginCanonicalPass().healthReportContext(observation.id),
   ) {
-    if (this.state.capacity === "limit" || requests <= 0) return false;
-    const prospective = this.maximumHealthCard(task, observation);
+    if (this.state.capacity === "limit" || requests <= 0 || !coverage)
+      return false;
+    const prospective = this.maximumHealthCard(task, observation, coverage);
     const candidateCards = new Map(this.healthCards);
     candidateCards.set(task.id, prospective);
+    const prospectiveIdleDoneTaskId =
+      task.status === "done" &&
+      this.state.tasks.length > 0 &&
+      this.state.tasks
+        .filter((item) => item.included)
+        .every((item) => item.status === "done")
+        ? task.id
+        : undefined;
     try {
       if (
         this.capacityEnvelope(
@@ -4197,6 +4304,7 @@ export class Monitor {
           0,
           requests,
           candidateCards,
+          prospectiveIdleDoneTaskId,
         ).maximum <= MAX_CHECKPOINT_BYTES
       )
         return true;
@@ -4628,7 +4736,14 @@ export class Monitor {
       return { kind: "terminal" };
     // Capacity denial is terminal for this exact task/input until a named
     // canonical/evidence/control wake changes its identity or capacity proof.
-    if (!this.admitHealth(task, work.observation, snapshot.requests.length))
+    if (
+      !this.admitHealth(
+        task,
+        work.observation,
+        snapshot.requests.length,
+        work.reports,
+      )
+    )
       return { kind: "terminal" };
     let combined: ValidatedResult | undefined;
     for (const request of snapshot.requests) {
@@ -4737,6 +4852,7 @@ export class Monitor {
       provenance: {
         taskSource: { ...task.source },
         observation: observationRef(work.observation),
+        coverage: coverageFor(work.reports),
         // snapshot.identity contains task/context JSON. Persist only its digest.
         snapshotHash: sha256(snapshot.identity),
         requestHashes: snapshot.requests.map((request) =>
@@ -4748,18 +4864,39 @@ export class Monitor {
     };
     const candidateCards = new Map(this.healthCards);
     candidateCards.set(task.id, card);
+    const previousDisplay = {
+      lastDisplayedTaskId: this.lastDisplayedTaskId,
+      idleDoneInvalidated: this.idleDoneInvalidated,
+    };
+    const establishesIdleDone =
+      task.status === "done" &&
+      this.state.tasks.length > 0 &&
+      this.state.tasks
+        .filter((item) => item.included)
+        .every((item) => item.status === "done");
+    if (establishesIdleDone) {
+      // All-done display is semantic; receipt capacity preflight above reserves
+      // its selector before this terminal task can retain that display.
+      this.lastDisplayedTaskId = task.id;
+      this.idleDoneInvalidated = false;
+    }
     try {
-      // Health receipt persists task-local fact only; it never changes selector.
       encodeCheckpoint(
         this.state,
         this.metadata(this.enabled, candidateCards, this.state),
       );
     } catch {
+      this.lastDisplayedTaskId = previousDisplay.lastDisplayedTaskId;
+      this.idleDoneInvalidated = previousDisplay.idleDoneInvalidated;
       this.note("health-capacity-skipped");
       this.publish();
       return { kind: "terminal" };
     }
-    if (!this.healthFlightCurrent(flight, work)) return { kind: "terminal" };
+    if (!this.healthFlightCurrent(flight, work)) {
+      this.lastDisplayedTaskId = previousDisplay.lastDisplayedTaskId;
+      this.idleDoneInvalidated = previousDisplay.idleDoneInvalidated;
+      return { kind: "terminal" };
+    }
     this.healthCards = candidateCards;
     this.currentHealthProofs.set(task.id, snapshot.identity);
     // Advisory authority follows the same exact task-local receipt.

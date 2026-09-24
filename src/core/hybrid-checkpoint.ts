@@ -48,12 +48,19 @@ import {
   taskLabelIsValid,
 } from "./hybrid-state";
 
-const VERSION = 8;
+const VERSION = 9;
 const MAX_TASKS = 200;
 const MAX_ACTIVE_TASKS = 20;
 const MAX_EVENTS = 1000;
 export const MAX_CHECKPOINT_BYTES = 512 * 1024;
 const MAX_COMPLETIONS = 20;
+const MAX_HEALTH_COVERAGE_REFERENCES = 16;
+const healthCoverageOmissions = new Set([
+  "Older canonical reports omitted after 16 retained observations",
+  "Canonical report coverage scan reached bounded page limit",
+  "Older canonical report omitted because full report context exceeded 4 KiB",
+  "Target canonical report omitted because it exceeded 4 KiB",
+]);
 const focusSpecialChoices = new Set(["none", "concurrent", "uncertain"]);
 
 export interface HealthFields {
@@ -62,6 +69,18 @@ export interface HealthFields {
   newRedTest: string;
   redEvidence: string;
   implementation: string;
+}
+
+/**
+ * Durable bounded report-coverage receipt. It binds detached canonical refs and
+ * selector outcome, never report text or the runtime report array.
+ */
+export interface HealthCoverage {
+  target: ObservationRef;
+  references: ObservationRef[];
+  complete: boolean;
+  omissions: string[];
+  coverageDigest: string;
 }
 
 /** Durable task-local assessment fact. Raw prompts, answers and evidence stay out. */
@@ -74,6 +93,7 @@ export interface HealthCard {
   provenance: {
     taskSource: SourceRef;
     observation: ObservationRef;
+    coverage: HealthCoverage;
     snapshotHash: string;
     requestHashes: string[];
     evidenceHash: string;
@@ -878,6 +898,40 @@ function validMonitorMetadata(
   );
 }
 
+function validHealthCoverage(value: unknown): value is HealthCoverage {
+  return (
+    record(value) &&
+    exactKeys(value, [
+      "target",
+      "references",
+      "complete",
+      "omissions",
+      "coverageDigest",
+    ]) &&
+    validObservationRef(value.target) &&
+    Array.isArray(value.references) &&
+    value.references.length <= MAX_HEALTH_COVERAGE_REFERENCES &&
+    value.references.every(validObservationRef) &&
+    new Set(
+      value.references.map(
+        (reference) =>
+          `${reference.entryId}:${reference.messageHash}:${reference.role}`,
+      ),
+    ).size === value.references.length &&
+    typeof value.complete === "boolean" &&
+    Array.isArray(value.omissions) &&
+    value.omissions.every(
+      (omission) =>
+        typeof omission === "string" && healthCoverageOmissions.has(omission),
+    ) &&
+    value.omissions.length <= 1 &&
+    (value.complete
+      ? value.omissions.length === 0
+      : value.omissions.length > 0) &&
+    hashIsValid(value.coverageDigest)
+  );
+}
+
 function validHealthCard(value: unknown): value is HealthCard {
   if (
     !record(value) ||
@@ -906,6 +960,7 @@ function validHealthCard(value: unknown): value is HealthCard {
     !exactKeys(value.provenance, [
       "taskSource",
       "observation",
+      "coverage",
       "snapshotHash",
       "requestHashes",
       "evidenceHash",
@@ -913,6 +968,7 @@ function validHealthCard(value: unknown): value is HealthCard {
     ]) ||
     !validSourceRef(value.provenance.taskSource) ||
     !validObservationRef(value.provenance.observation) ||
+    !validHealthCoverage(value.provenance.coverage) ||
     !hashIsValid(value.provenance.snapshotHash) ||
     !Array.isArray(value.provenance.requestHashes) ||
     value.provenance.requestHashes.length < 1 ||
@@ -1092,7 +1148,7 @@ function checkpointState(state: HybridState): HybridState {
   return snapshot;
 }
 
-/** Exact encoded bytes after strict v8 shape validation, before capacity denial. */
+/** Exact encoded bytes after strict v9 shape validation, before capacity denial. */
 export function checkpointBytes(
   state: HybridState,
   monitor?: MonitorCheckpointMetadata,
@@ -1114,7 +1170,7 @@ export function encodeCheckpoint(
   monitor?: MonitorCheckpointMetadata,
 ): Checkpoint {
   if (checkpointBytes(state, monitor) > MAX_CHECKPOINT_BYTES)
-    throw new Error("Hybrid checkpoint exceeds v8 bounds");
+    throw new Error("Hybrid checkpoint exceeds v9 bounds");
   return JSON.parse(
     JSON.stringify({
       version: VERSION,

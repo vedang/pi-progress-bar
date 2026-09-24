@@ -116,13 +116,17 @@ export interface CanonicalPreceding {
  * report through `target` was retained. Any bounded gap is explicit so a
  * consumer cannot turn omitted evidence into a negative finding.
  */
-export interface CanonicalHealthReportContext {
+export interface CanonicalHealthCoverage {
   target: ObservationRef;
-  reports: Observation[];
   references: ObservationRef[];
   complete: boolean;
   omissions: string[];
   coverageDigest: string;
+}
+
+export interface CanonicalHealthReportContext extends CanonicalHealthCoverage {
+  /** Runtime-only report text. Durable cards retain only CanonicalHealthCoverage. */
+  reports: Observation[];
 }
 
 /**
@@ -237,12 +241,21 @@ export class CanonicalPass {
     const target = targetIndex < 0 ? undefined : this.observation(entryId);
     if (!target) return;
     const reports: Observation[] = [];
+    // Digest every observation inspected by the selector, including one that
+    // could not fit. This detects an amendment at an omitted count/byte
+    // boundary without durable report text or unbounded history reads.
+    const examined: ObservationRef[] = [];
     const omissions: string[] = [];
     let bytes = 0;
     let scanned = 0;
     let index = targetIndex;
     while (index >= 0) {
       if (reports.length >= MAX_HEALTH_REPORT_OBSERVATIONS) {
+        const boundary = this.headers[index];
+        const observation = boundary
+          ? this.observation(boundary.id)
+          : undefined;
+        if (observation) examined.push(observationRef(observation));
         omissions.push(
           `Older canonical reports omitted after ${MAX_HEALTH_REPORT_OBSERVATIONS} retained observations`,
         );
@@ -262,6 +275,8 @@ export class CanonicalPass {
       // not depend on preceding exploratory page/preceding-context reads.
       const observation = this.observation(header.id);
       if (!observation) continue;
+      const reference = observationRef(observation);
+      examined.push(reference);
       const size = Buffer.byteLength(JSON.stringify(observation));
       if (bytes + size > MAX_HEALTH_REPORT_BYTES) {
         omissions.push(
@@ -276,16 +291,18 @@ export class CanonicalPass {
     }
     const references = reports.map(observationRef);
     const complete = omissions.length === 0 && index < 0;
+    const targetRef = observationRef(target);
     return {
-      target: observationRef(target),
+      target: targetRef,
       reports: reports.map((report) => ({ ...report })),
       references,
       complete,
       omissions,
       coverageDigest: hash(
         JSON.stringify({
-          target: observationRef(target),
+          target: targetRef,
           references,
+          examined,
           complete,
           omissions,
         }),

@@ -59,15 +59,15 @@ async function ready() {
   return h;
 }
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
-it("uses strict v8; v7 is unsupported without migration", async () => {
+it("uses strict v9; v8 is unsupported without migration", async () => {
   const state = await initial();
   const cp = encodeCheckpoint(
     state,
     detailMetadata([detailRecord(required(state.tasks[0]), initialMessage)]),
   );
-  expect(cp.version).toBe(8);
+  expect(cp.version).toBe(9);
   expect(checkpointStorageStatus(cp)).toBe("supported");
-  expect(checkpointStorageStatus({ ...cp, version: 7 })).toBe("unsupported");
+  expect(checkpointStorageStatus({ ...cp, version: 8 })).toBe("unsupported");
   expect(
     savedDetails(monitorCheckpointMetadata(cp) ? cp : undefined),
   ).toHaveLength(1);

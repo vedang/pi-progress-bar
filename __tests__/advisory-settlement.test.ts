@@ -206,7 +206,7 @@ it("restores semantic readiness without introducing checkpoint fields or paid re
   await h.monitor.restore("/nonexistent-hybrid-test", data, false, h.reader);
   await vi.advanceTimersByTimeAsync(50);
   expect(snapshot(h).reason).toBe("ready");
-  expect(h.monitor.checkpoint()).toMatchObject({ version: 8 });
+  expect(h.monitor.checkpoint()).toMatchObject({ version: 9 });
   expect(h.extract.mock.calls.length).toBe(extracts);
   // Optional health restoration may run; no semantic replay request is allowed.
   expect(

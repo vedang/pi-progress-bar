@@ -64,7 +64,7 @@ describe("integrated hybrid monitor", () => {
       enabled: true,
       progress: { done: 2, total: 3 },
     });
-    expect(h.monitor.checkpoint()).toMatchObject({ version: 8 });
+    expect(h.monitor.checkpoint()).toMatchObject({ version: 9 });
     expect(
       h.requests.every(
         (request) =>
@@ -273,11 +273,13 @@ describe("pure safe display publication groundwork", () => {
       const original = h.fetch.getMockImplementation();
       if (!original) throw new Error("Missing fetch");
       let release: (() => void) | undefined;
+      let hold = true;
       h.fetch.mockImplementation(async (url, init) => {
         const request = JSON.parse(String(init?.body));
-        if (request.questions.clarity)
+        if (request.questions.clarity && hold)
           return new Promise<Response>((resolve) => {
             release = () => {
+              hold = false;
               void original(url, init).then(resolve);
             };
           });

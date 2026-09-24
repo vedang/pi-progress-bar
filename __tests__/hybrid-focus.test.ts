@@ -190,7 +190,7 @@ describe("Jev-selected current task focus", () => {
   it("uses a strict new checkpoint schema without legacy focus protocol branches", async () => {
     const state = await captured();
     const checkpoint = encodeCheckpoint(state);
-    expect(checkpoint.version).toBe(8);
+    expect(checkpoint.version).toBe(9);
     expect(restore({ ...checkpoint, version: 5 })).toBeUndefined();
     expect(JSON.stringify(checkpoint)).not.toContain("focusProtocol");
   });

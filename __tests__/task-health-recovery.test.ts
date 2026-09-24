@@ -3,6 +3,7 @@ import {
   checkpointStorageStatus,
   MAX_CHECKPOINT_BYTES,
 } from "../src/core/hybrid-checkpoint";
+import { CanonicalPass } from "../src/sources/messages";
 import { noPatch } from "./fixtures/hybrid";
 import { branchEntry } from "./fixtures/hybrid-monitor";
 import { taskHealthHarness } from "./fixtures/task-health";
@@ -48,6 +49,19 @@ function hold(h: ReturnType<typeof taskHealthHarness>) {
   });
   return () => h.fetch.mockImplementation(transport);
 }
+
+it("coverage digest binds an examined but omitted boundary report", () => {
+  const context = (text: string) =>
+    new CanonicalPass([
+      branchEntry("old", text, "assistant"),
+      branchEntry("target", "Current report.", "assistant"),
+    ]).healthReportContext("target");
+  const before = context("a".repeat(5000));
+  const after = context("b".repeat(5000));
+  expect(before?.complete).toBe(false);
+  expect(before?.references).toEqual(after?.references);
+  expect(before?.coverageDigest).not.toBe(after?.coverageDigest);
+});
 
 it("writes a new version with bounded durable report coverage, never raw report text", async () => {
   const h = await ready();
@@ -99,6 +113,32 @@ it("matching accepted coverage reloads without health rebilling or current runti
   expect(h.cards()).toEqual(before);
   expect(h.fetch).toHaveBeenCalledTimes(calls);
   expect(h.extract).toHaveBeenCalledTimes(extracts);
+  expect(
+    h.monitor
+      .boardSnapshot()
+      .tasks.every((t) => t.provenance.state !== "current"),
+  ).toBe(true);
+});
+
+it("accepted coverage is not rebilled merely because runtime passive evidence was lost", async () => {
+  const h = await ready();
+  h.monitor.observeToolStart("edit", "edit", { path: "src/parser.ts" });
+  h.monitor.observeToolEnd(
+    "edit",
+    "edit",
+    { content: [{ type: "text", text: "Successfully edited src/parser.ts" }] },
+    false,
+  );
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.cards().every((c) => c.provenance.codeRevision > 0)).toBe(true);
+  const checkpoint = h.monitor.checkpoint();
+  const cards = h.cards();
+  const calls = h.fetch.mock.calls.length;
+  h.monitor.stop();
+  h.monitor.evidence.reset();
+  await reload(h, checkpoint);
+  expect(h.cards()).toEqual(cards);
+  expect(h.fetch).toHaveBeenCalledTimes(calls);
   expect(
     h.monitor
       .boardSnapshot()

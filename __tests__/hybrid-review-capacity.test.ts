@@ -228,7 +228,11 @@ it("denies gate dispatch when exact observation references alone exceed the 16Ki
   // each carry this exact ID; 24KiB growth exceeds the remaining 21KiB.
   h.append(`next-${"n".repeat(12 * 1024)}`, "Acknowledged.", "user");
   await vi.advanceTimersByTimeAsync(100);
-  expect(h.fetch).not.toHaveBeenCalled();
+  // ON may start missing-health repair before the oversized observation arrives.
+  expect(h.requests.length).toBeLessThanOrEqual(1);
+  expect(h.requests.every((request) => "clarity" in request.questions)).toBe(
+    true,
+  );
   expect(h.extract).not.toHaveBeenCalled();
   expect(h.monitor.state.cursor).toEqual(f.state.cursor);
   expect(h.monitor.checkpoint()).toHaveProperty("state.capacity", "limit");
@@ -238,7 +242,7 @@ it("denies gate dispatch when exact observation references alone exceed the 16Ki
   );
 });
 
-it("finalizes a fully accepted journal above 496KiB without rebilling providers", async () => {
+it("finalizes a fully accepted journal above 496KiB without rebilling semantic phases", async () => {
   const f = await settledAtBytes(499 * 1024);
   const latest = observation(
     "accepted-final",
@@ -270,9 +274,16 @@ it("finalizes a fully accepted journal above 496KiB without rebilling providers"
   await vi.advanceTimersByTimeAsync(100);
   expect(h.monitor.state.cursor?.id).toBe(latest.id);
   expect(h.monitor.state.pending).toBeUndefined();
-  expect(h.fetch).not.toHaveBeenCalled();
+  // Missing optional health may now be assessed; accepted semantic phases never repeat.
+  expect(h.requests.length).toBeLessThanOrEqual(3);
+  expect(h.requests.every((request) => "clarity" in request.questions)).toBe(
+    true,
+  );
   expect(h.extract).not.toHaveBeenCalled();
-  expect(size(h.monitor.checkpoint())).toBeLessThan(size(checkpoint));
+  expect(size(h.monitor.state)).toBeLessThan(size(checkpoint.state));
+  expect(h.save.mock.calls.every(([saved]) => size(saved) <= 512 * 1024)).toBe(
+    true,
+  );
 });
 
 it("persists a fixed-size capacity marker at the byte edge and retains the old card", async () => {
@@ -349,7 +360,10 @@ it("accepts a limit-marked large completed journal and clears the marker during 
   const h = await restored(f, checkpoint, latest);
   h.monitor.turnOn("/nonexistent-hybrid-test");
   await vi.advanceTimersByTimeAsync(100);
-  expect(h.fetch).not.toHaveBeenCalled();
+  expect(h.requests.length).toBeLessThanOrEqual(3);
+  expect(h.requests.every((request) => "clarity" in request.questions)).toBe(
+    true,
+  );
   expect(h.extract).not.toHaveBeenCalled();
   expect(h.monitor.state.pending).toBeUndefined();
   expect(h.monitor.state.cursor).toEqual({
@@ -358,7 +372,10 @@ it("accepts a limit-marked large completed journal and clears the marker during 
     role: latest.role,
   });
   expect(h.monitor.checkpoint()).toHaveProperty("state.capacity", "clear");
-  expect(size(h.monitor.checkpoint())).toBeLessThan(size(checkpoint));
+  expect(size(h.monitor.state)).toBeLessThan(size(checkpoint.state));
+  expect(h.save.mock.calls.every(([saved]) => size(saved) <= 512 * 1024)).toBe(
+    true,
+  );
 });
 
 it.each([480, 499])(
@@ -422,4 +439,6 @@ it.each([480, 499])(
       h.save.mock.calls.every(([value]) => size(value) <= 512 * 1024),
     ).toBe(true);
   },
+  // Twenty first-time health repairs now exercise many near-limit encodes.
+  20000,
 );

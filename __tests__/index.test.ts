@@ -234,7 +234,7 @@ it("uses canonical context rather than preappend message_end, through the host-s
   expect(args[2]).toMatchObject({ maxRetries: 0, maxTokens: 2048 });
   expect(args[2].signal).toBeInstanceOf(AbortSignal);
   expect(JSON.stringify(args[1])).not.toContain("offline-key");
-  expect(h.checkpoints.at(-1)).toMatchObject({ version: 8 });
+  expect(h.checkpoints.at(-1)).toMatchObject({ version: 9 });
   expect(JSON.stringify(h.checkpoints.at(-1))).toContain("Implement parser");
 });
 it("enables calibrated grounded details on the production extension path", async () => {
@@ -310,7 +310,7 @@ it("stays OFF without a key and does not invoke the selected model", async () =>
   expect(JSON.stringify(h.notify.mock.calls)).toMatch(/TYPESAFE_API_KEY/);
 });
 
-it.each([{ version: 7, state: {} }, { version: 8 }])(
+it.each([{ version: 8, state: {} }, { version: 9 }])(
   "preserves rejected stored checkpoint through host restore and progress on: %j",
   async (data) => {
     const h = fixture();

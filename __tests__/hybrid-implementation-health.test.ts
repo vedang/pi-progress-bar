@@ -343,7 +343,7 @@ it("drops passive facts when canonical task authority is reset", async () => {
   );
 });
 
-it("does not admit an implementation assessment after its code evidence changes in flight", async () => {
+it("rejects stale in-flight implementation proof but admits its current-evidence successor", async () => {
   const h = fixture();
   judgments(h, "supports");
   h.start();
@@ -355,6 +355,8 @@ it("does not admit an implementation assessment after its code evidence changes 
   const held = new Promise<void>((resolve) => {
     release = resolve;
   });
+  const oldRevision = h.monitor.evidence.codeRevision();
+  const savedBefore = h.save.mock.calls.length;
   let heldHealth = false;
   h.fetch.mockImplementation(async (url, init) => {
     const request = JSON.parse(String(init?.body));
@@ -373,7 +375,31 @@ it("does not admit an implementation assessment after its code evidence changes 
   h.monitor.observeToolEnd("new-parser-edit", "edit", { content: [] }, false);
   release();
   await vi.advanceTimersByTimeAsync(100);
-  expect(h.monitor.presentationSnapshot().card?.health.implementation).not.toBe(
+  const stale = h.save.mock.calls
+    .slice(savedBefore)
+    .flatMap(([saved]) => saved.monitor?.healthCards ?? [])
+    .filter(
+      (card) =>
+        card.provenance.observation.entryId === "health-report" &&
+        card.provenance.codeRevision === oldRevision,
+    );
+  expect(stale).toHaveLength(0);
+  const saved = h.monitor.checkpoint() as {
+    monitor: {
+      healthCards: {
+        taskId: string;
+        provenance: { codeRevision: number; observation: { entryId: string } };
+      }[];
+    };
+  };
+  expect(
+    saved.monitor.healthCards.find((card) => card.taskId === "task:1")
+      ?.provenance,
+  ).toMatchObject({
+    codeRevision: oldRevision + 1,
+    observation: { entryId: "health-report" },
+  });
+  expect(h.monitor.presentationSnapshot().card?.health.implementation).toBe(
     "appears complete",
   );
 });

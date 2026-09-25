@@ -261,11 +261,12 @@ const validBinding = (
   return { parent, group, report, reportSource, intent };
 };
 
+// Report identity must survive prior chunk status transitions. Receipts, not
+// mutable child status, determine whether a canonical chunk was already paid.
 const childState = (child: CoverageChild) => ({
   id: child.id,
   key: child.key,
   label: child.label,
-  status: child.status,
 });
 
 const coverageRubric =

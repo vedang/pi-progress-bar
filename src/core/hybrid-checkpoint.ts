@@ -106,6 +106,38 @@ export interface HealthCard {
   };
 }
 
+export interface CoverageReportJobCheckpoint {
+  version: 1;
+  identity: string;
+  parentTaskId: string;
+  parentRevision: number;
+  parentSourceDigest: string;
+  groupId: string;
+  inventoryRevision: number;
+  source: SourceRef;
+  state: "ready" | "parked" | "permanent" | "complete";
+  parkedUntil?: number;
+}
+
+export interface CoverageReportDispatchCheckpoint {
+  jobIdentity: string;
+  requestHash: string;
+  groupId: string;
+  inventoryRevision: number;
+  source: SourceRef;
+  childIds: string[];
+  assessments: Array<{
+    childId: string;
+    choice: "reviewed" | "retracted" | "blocked" | "unchanged" | "uncertain";
+    confidence: number;
+    probability: number;
+  }>;
+  dispatch: number;
+  at: number;
+  usage: { inputTokens: number; outputTokens: number };
+  outcome: "accepted";
+}
+
 interface CoverageCheckpointMetadata {
   state: CoverageCheckpoint;
   dispatches: number;
@@ -113,6 +145,8 @@ interface CoverageCheckpointMetadata {
     jev: { calls: number; inputTokens: number; outputTokens: number };
     extraction: { calls: number; inputTokens: number; outputTokens: number };
   };
+  jobs?: CoverageReportJobCheckpoint[];
+  reportReceipts?: CoverageReportDispatchCheckpoint[];
 }
 
 export interface MonitorCheckpointMetadata {
@@ -844,17 +878,147 @@ function validCoverageUsage(
   );
 }
 
+const coverageJobIdIsValid = (value: unknown): value is string =>
+  typeof value === "string" && /^coverage-group:[1-9]\d*$/.test(value);
+const coverageChildIdIsValid = (value: unknown): value is string =>
+  typeof value === "string" && /^coverage-child:[1-9]\d*$/.test(value);
+const coverageChoices = new Set([
+  "reviewed",
+  "retracted",
+  "blocked",
+  "unchanged",
+  "uncertain",
+]);
+
+function validCoverageReportJob(
+  value: unknown,
+): value is CoverageReportJobCheckpoint {
+  if (
+    !record(value) ||
+    !exactKeys(
+      value,
+      [
+        "version",
+        "identity",
+        "parentTaskId",
+        "parentRevision",
+        "parentSourceDigest",
+        "groupId",
+        "inventoryRevision",
+        "source",
+        "state",
+      ],
+      ["parkedUntil"],
+    ) ||
+    value.version !== 1 ||
+    !hashIsValid(value.identity) ||
+    !taskIdIsValid(value.parentTaskId) ||
+    !positiveInteger(value.parentRevision) ||
+    !hashIsValid(value.parentSourceDigest) ||
+    !coverageJobIdIsValid(value.groupId) ||
+    !positiveInteger(value.inventoryRevision) ||
+    !validSourceRef(value.source) ||
+    (value.state !== "ready" &&
+      value.state !== "parked" &&
+      value.state !== "permanent" &&
+      value.state !== "complete") ||
+    (Object.hasOwn(value, "parkedUntil") &&
+      (!nonNegativeInteger(value.parkedUntil) || value.state !== "parked"))
+  )
+    return false;
+  return value.state === "parked"
+    ? Object.hasOwn(value, "parkedUntil")
+    : !Object.hasOwn(value, "parkedUntil");
+}
+
+function validCoverageReportReceipt(
+  value: unknown,
+): value is CoverageReportDispatchCheckpoint {
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      "jobIdentity",
+      "requestHash",
+      "groupId",
+      "inventoryRevision",
+      "source",
+      "childIds",
+      "assessments",
+      "dispatch",
+      "at",
+      "usage",
+      "outcome",
+    ]) ||
+    !hashIsValid(value.jobIdentity) ||
+    !hashIsValid(value.requestHash) ||
+    !coverageJobIdIsValid(value.groupId) ||
+    !positiveInteger(value.inventoryRevision) ||
+    !validSourceRef(value.source) ||
+    !Array.isArray(value.childIds) ||
+    value.childIds.length < 1 ||
+    value.childIds.length > 20 ||
+    !value.childIds.every(coverageChildIdIsValid) ||
+    new Set(value.childIds).size !== value.childIds.length ||
+    !Array.isArray(value.assessments) ||
+    value.assessments.length !== value.childIds.length ||
+    !value.assessments.every(
+      (assessment, index) =>
+        record(assessment) &&
+        exactKeys(assessment, [
+          "childId",
+          "choice",
+          "confidence",
+          "probability",
+        ]) &&
+        assessment.childId === (value.childIds as unknown[])[index] &&
+        coverageChoices.has(assessment.choice as string) &&
+        unit(assessment.confidence) &&
+        unit(assessment.probability),
+    ) ||
+    !positiveInteger(value.dispatch) ||
+    value.dispatch > 1024 ||
+    !nonNegativeInteger(value.at) ||
+    !record(value.usage) ||
+    !exactKeys(value.usage, ["inputTokens", "outputTokens"]) ||
+    !nonNegativeInteger(value.usage.inputTokens) ||
+    !nonNegativeInteger(value.usage.outputTokens) ||
+    value.outcome !== "accepted"
+  )
+    return false;
+  return true;
+}
+
 function validCoverageMetadata(
   value: unknown,
 ): value is CoverageCheckpointMetadata {
   if (
     !record(value) ||
-    !exactKeys(value, ["state", "dispatches", "usage"]) ||
+    !exactKeys(
+      value,
+      ["state", "dispatches", "usage"],
+      ["jobs", "reportReceipts"],
+    ) ||
     !coverageCheckpointIsValid(value.state) ||
     byteLength(value) > MAX_COVERAGE_CHECKPOINT_BYTES ||
     !nonNegativeInteger(value.dispatches) ||
     value.dispatches > 1024 ||
     !validCoverageUsage(value.usage)
+  )
+    return false;
+  const jobs = value.jobs ?? [];
+  const receipts = value.reportReceipts ?? [];
+  if (
+    !Array.isArray(jobs) ||
+    jobs.length > 20 ||
+    !jobs.every(validCoverageReportJob) ||
+    new Set(jobs.map((job) => job.identity)).size !== jobs.length ||
+    new Set(jobs.map((job) => job.parentTaskId)).size !== jobs.length ||
+    !Array.isArray(receipts) ||
+    receipts.length > 20 ||
+    !receipts.every(validCoverageReportReceipt) ||
+    new Set(receipts.map((receipt) => receipt.requestHash)).size !==
+      receipts.length ||
+    receipts.some((receipt) => receipt.dispatch > (value.dispatches as number))
   )
     return false;
   return (

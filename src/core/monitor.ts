@@ -32,6 +32,11 @@ import {
   type CoverageIntentRequest,
   CoverageIntentRequests,
 } from "../analysis/coverage-intent";
+import {
+  type CoverageReportBatch,
+  coverageReportBatches,
+  coverageReportDecisions,
+} from "../analysis/coverage-report";
 import type { ExtractionInput } from "../analysis/extractor";
 import {
   type EvaluationRequest,
@@ -89,6 +94,8 @@ import {
   RetryableProviderError,
 } from "./hybrid";
 import {
+  type CoverageReportDispatchCheckpoint,
+  type CoverageReportJobCheckpoint,
   checkpointBytes,
   checkpointStorageStatus,
   encodeCheckpoint,
@@ -561,6 +568,8 @@ export class Monitor {
   private readonly activityGateway: JevGateway;
   /** Optional grounded details never share semantic/health retry state. */
   private readonly detailGateway: JevGateway;
+  /** Coverage report classification has isolated retries, accounting, and flight. */
+  private readonly coverageGateway: JevGateway;
   /** Optional corrective binding has its own one-flight transport authority. */
   private readonly correctionGateway: JevGateway;
   /** Visibility transport and spend are isolated from semantic/advisory telemetry. */
@@ -590,7 +599,29 @@ export class Monitor {
   private coverageAdapter = new CoverageAdapter();
   private coverageIntents = new CoverageIntentRequests();
   private coverageEpoch = 0;
-  private coverageIntentController?: AbortController;
+  /** One optional coverage transport owner across intent and report work. */
+  private coverageFlight?:
+    | {
+        kind: "intent";
+        epoch: number;
+        request: CoverageIntentRequest;
+        controller: AbortController;
+      }
+    | {
+        kind: "report";
+        epoch: number;
+        jobIdentity: string;
+        batch: CoverageReportBatch;
+      };
+  private queuedCoverageIntent?: CoverageIntentRequest;
+  /** One position-preserving report job per parent, bounded independently of health. */
+  private coverageJobs = new Map<string, CoverageReportJobCheckpoint>();
+  /** Full assessed chunks, content-free and durable, suppress rebilling. */
+  private coverageReportReceipts = new Map<
+    string,
+    CoverageReportDispatchCheckpoint
+  >();
+  private optionalTurn: "coverage" | "detail" = "coverage";
   private pendingCoverageInventories: CoverageInventory[] = [];
   private pendingCoverageAccess: ReturnType<
     CoverageAdapter["confirm"]
@@ -702,6 +733,13 @@ export class Monitor {
       onDispatch: (at) => this.recordJevDispatch(at),
       onPermanentError: () => this.note("detail-capacity-skipped"),
     });
+    this.coverageGateway = new JevGateway({
+      fetch: (url, init) => globalThis.fetch(url, init),
+      getApiKey: () => process.env.TYPESAFE_API_KEY,
+      // Durable coverage budget/job proof must exist before optional fetch.
+      beforeDispatch: (at) => this.recordCoverageJevDispatch(at),
+      onPermanentError: () => this.note("jev-unavailable"),
+    });
     this.correctionGateway = new JevGateway({
       fetch: (url, init) => globalThis.fetch(url, init),
       getApiKey: () => process.env.TYPESAFE_API_KEY,
@@ -763,10 +801,13 @@ export class Monitor {
     if (!this.enabled) return;
     const pass = new CanonicalPass(entries);
     this.reconcileCoverageCanonical(pass);
+    this.reconcileCoverageReportJournal(pass);
     const accepted = this.coverageAdapter.confirm(entries, this.coverageEpoch);
     this.prunePendingCoverage(pass);
     this.enqueueCoverageAdapterResult(accepted, pass);
     this.admitPendingCoverage();
+    this.wakeCoverage();
+    this.drain();
     this.publish();
   }
 
@@ -1084,6 +1125,8 @@ export class Monitor {
       this.healthGateway.pause();
       this.activityGateway.pause();
       this.detailGateway.pause();
+      this.coverageGateway.pause();
+      this.resetCoverageRuntime();
       this.correctionGateway.pause();
       this.dropVisibilityFlight();
       this.visibilityGateway.pause();
@@ -1093,8 +1136,10 @@ export class Monitor {
       this.wakeHealthFromCurrent("control", true, pass);
       this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
+      this.coverageGateway.enable(this.identity());
       this.correctionGateway.enable(this.identity());
       this.visibilityGateway.enable(this.visibilityIdentity());
+      this.wakeCoverage(true);
       this.waitingForWake = false;
       this.requeue(pass);
       this.drain();
@@ -1123,6 +1168,9 @@ export class Monitor {
       // Amendments can affect pending coverage without touching an older card.
       if (healthChanged || staleHealthWork)
         this.wakeHealthFromCurrent("canonical", false, pass);
+      this.reconcileCoverageCanonical(pass);
+      this.reconcileCoverageReportJournal(pass);
+      this.wakeCoverage();
       this.requeue(pass);
       if (this.queued.length) {
         this.idleDoneInvalidated = true;
@@ -1247,6 +1295,7 @@ export class Monitor {
     this.healthGateway.pause();
     this.activityGateway.pause();
     this.detailGateway.pause();
+    this.coverageGateway.pause();
     this.correctionGateway.pause();
     this.resetVisibility();
     this.resetCoverageRuntime();
@@ -1438,8 +1487,10 @@ export class Monitor {
     this.wakeHealthFromCurrent("control", true, pass);
     this.activityGateway.enable(this.identity());
     this.detailGateway.enable(this.identity());
+    this.coverageGateway.enable(this.identity());
     this.correctionGateway.enable(this.identity());
     this.visibilityGateway.enable(this.visibilityIdentity());
+    this.wakeCoverage();
     this.rememberVisibilityFrontier(pass);
     this.requeue(pass, true);
     if (this.queued.length) this.idleDoneInvalidated = true;
@@ -1892,6 +1943,8 @@ export class Monitor {
     this.state = emptyState(sourceId);
     this.coverage = new CoverageStore();
     this.resetCoverageRuntime();
+    this.coverageJobs.clear();
+    this.coverageReportReceipts.clear();
     this.card = undefined;
     this.healthCards.clear();
     this.taskDetails.clear();
@@ -1974,6 +2027,12 @@ export class Monitor {
       jev: validUsage(this.coverageUsage.jev),
       extraction: validUsage(this.coverageUsage.extraction),
     };
+    const jobs = [...this.coverageJobs.values()].map((job) =>
+      structuredClone(job),
+    );
+    const reportReceipts = [...this.coverageReportReceipts.values()].map(
+      (receipt) => structuredClone(receipt),
+    );
     if (
       state.groups.length === 0 &&
       state.nextGroupId === 1 &&
@@ -1984,10 +2043,18 @@ export class Monitor {
       usage.jev.outputTokens === 0 &&
       usage.extraction.calls === 0 &&
       usage.extraction.inputTokens === 0 &&
-      usage.extraction.outputTokens === 0
+      usage.extraction.outputTokens === 0 &&
+      jobs.length === 0 &&
+      reportReceipts.length === 0
     )
       return;
-    return { state, dispatches: this.coverageDispatches, usage };
+    return {
+      state,
+      dispatches: this.coverageDispatches,
+      usage,
+      ...(jobs.length ? { jobs } : {}),
+      ...(reportReceipts.length ? { reportReceipts } : {}),
+    };
   }
 
   private metadata(
@@ -2122,6 +2189,32 @@ export class Monitor {
         inputTokens: 0,
         outputTokens: 0,
       },
+    );
+    this.coverageJobs = new Map(
+      (savedCoverage?.jobs ?? [])
+        .filter((job) => this.coverageReportJobCurrent(job, pass))
+        .map((job) => [job.parentTaskId, structuredClone(job)]),
+    );
+    this.coverageReportReceipts = new Map(
+      (savedCoverage?.reportReceipts ?? [])
+        .filter((receipt) => {
+          const job = [...this.coverageJobs.values()].find(
+            (candidate) => candidate.identity === receipt.jobIdentity,
+          );
+          return !!(
+            job &&
+            this.coverageReportReceiptCurrent(receipt, pass) &&
+            this.coverageReportBatchesFor(job, pass).some(
+              (batch) =>
+                batch.requestHash === receipt.requestHash &&
+                batch.childIds.length === receipt.childIds.length &&
+                batch.childIds.every(
+                  (childId, index) => childId === receipt.childIds[index],
+                ),
+            )
+          );
+        })
+        .map((receipt) => [receipt.requestHash, structuredClone(receipt)]),
     );
     this.lastDisplayedTaskId = metadata?.idleDoneTaskId;
     this.idleDoneInvalidated = !this.lastDisplayedTaskId;
@@ -2364,10 +2457,8 @@ export class Monitor {
     return candidates.length === 1 ? candidates[0] : undefined;
   }
 
-  /** Persist optional coverage as one all-or-nothing checkpoint transition. */
-  private persistCoverageCandidate(candidate: CoverageStore) {
-    const previous = this.coverage;
-    this.coverage = candidate;
+  /** Persist current optional coverage state under both ON and OFF projections. */
+  private persistCoverageState() {
     try {
       encodeCheckpoint(
         this.state,
@@ -2380,10 +2471,18 @@ export class Monitor {
       this.persist(checkpoint);
       return true;
     } catch {
-      this.coverage = previous;
       this.note("saved-state-rejected");
       return false;
     }
+  }
+
+  /** Persist optional coverage as one all-or-nothing checkpoint transition. */
+  private persistCoverageCandidate(candidate: CoverageStore) {
+    const previous = this.coverage;
+    this.coverage = candidate;
+    if (this.persistCoverageState()) return true;
+    this.coverage = previous;
+    return false;
   }
 
   /** Admit only canonical inventory/access pending an already-grounded intent. */
@@ -2438,13 +2537,25 @@ export class Monitor {
     }
   }
 
-  /** Optional selected-model ingress has independent dispatch/usage accounting. */
+  /** Queue selected-model ingress only when no current group already owns parent work. */
   private scheduleCoverageIntent(observation: Observation) {
     if (
       !this.enabled ||
       !/\S+\.xlsx\b/iu.test(observation.text) ||
       this.coverageDispatches >= 1024 ||
-      this.coverageIntentController
+      this.queuedCoverageIntent ||
+      this.coverageFlight ||
+      this.coverage
+        .snapshot()
+        .groups.some(
+          (group) =>
+            group.parentRevision ===
+              this.state.tasks.find((task) => task.id === group.parentTaskId)
+                ?.revision &&
+            this.state.tasks.some(
+              (task) => task.id === group.parentTaskId && task.included,
+            ),
+        )
     )
       return;
     const request = this.coverageIntents.begin(
@@ -2453,9 +2564,276 @@ export class Monitor {
       this.coverageEpoch,
     );
     if (!request) return;
-    const controller = new AbortController();
-    this.coverageIntentController = controller;
-    void this.runCoverageIntent(request, controller, this.coverageEpoch);
+    this.queuedCoverageIntent = request;
+  }
+
+  /** Stable parent-keyed report work; a newer report replaces whole older work in place. */
+  private scheduleCoverageReports(observation: Observation) {
+    if (!this.enabled || this.coverageDispatches >= 1024) return;
+    const previousJobs = this.coverageJobs;
+    const previousReceipts = this.coverageReportReceipts;
+    const jobs = new Map(previousJobs);
+    const receipts = new Map(previousReceipts);
+    const pass = this.beginCanonicalPass();
+    let changed = false;
+    for (const group of this.coverage.snapshot().groups) {
+      const parent = this.state.tasks.find(
+        (task) =>
+          task.id === group.parentTaskId &&
+          task.revision === group.parentRevision &&
+          task.included,
+      );
+      if (!parent) continue;
+      const source = {
+        entryId: observation.id,
+        messageHash: observation.hash,
+        role: observation.role,
+        start: 0,
+        end: observation.text.length,
+        quoteHash: sha256(observation.text),
+      } as const;
+      if (!this.coverageSourceCurrent(source, pass)) continue;
+      const parentSourceDigest = visibilityTaskSourceDigest(parent);
+      const identity = sha256(
+        JSON.stringify([
+          1,
+          parent.id,
+          parent.revision,
+          parentSourceDigest,
+          group.id,
+          group.inventoryRevision,
+          source,
+        ]),
+      );
+      const existing = jobs.get(parent.id);
+      if (existing?.identity === identity) continue;
+      if (!existing && jobs.size >= 20) {
+        this.recordCoverageOmission();
+        continue;
+      }
+      if (existing)
+        for (const [key, receipt] of receipts)
+          if (receipt.jobIdentity === existing.identity) receipts.delete(key);
+      // Map#set preserves original parent position for a replacement key.
+      jobs.set(parent.id, {
+        version: 1,
+        identity,
+        parentTaskId: parent.id,
+        parentRevision: parent.revision,
+        parentSourceDigest,
+        groupId: group.id,
+        inventoryRevision: group.inventoryRevision,
+        source: { ...source },
+        state: "ready",
+      });
+      changed = true;
+    }
+    if (!changed) return;
+    this.coverageJobs = jobs;
+    this.coverageReportReceipts = receipts;
+    if (this.persistCoverageState()) return;
+    this.coverageJobs = previousJobs;
+    this.coverageReportReceipts = previousReceipts;
+  }
+
+  private coverageReportJobCurrent(
+    job: CoverageReportJobCheckpoint,
+    pass = this.beginCanonicalPass(),
+  ) {
+    const parent = this.state.tasks.find(
+      (task) =>
+        task.id === job.parentTaskId &&
+        task.revision === job.parentRevision &&
+        task.included &&
+        visibilityTaskSourceDigest(task) === job.parentSourceDigest,
+    );
+    const group = this.coverage
+      .snapshot()
+      .groups.find(
+        (candidate) =>
+          candidate.id === job.groupId &&
+          candidate.parentTaskId === job.parentTaskId &&
+          candidate.parentRevision === job.parentRevision &&
+          candidate.inventoryRevision === job.inventoryRevision,
+      );
+    const report = this.resolveObservation(pass, job.source.entryId);
+    const identity = parent
+      ? sha256(
+          JSON.stringify([
+            job.version,
+            parent.id,
+            parent.revision,
+            visibilityTaskSourceDigest(parent),
+            job.groupId,
+            job.inventoryRevision,
+            job.source,
+          ]),
+        )
+      : undefined;
+    return !!(
+      job.version === 1 &&
+      identity === job.identity &&
+      parent &&
+      group &&
+      report &&
+      report.hash === job.source.messageHash &&
+      report.role === job.source.role &&
+      job.source.start === 0 &&
+      job.source.end === report.text.length &&
+      job.source.quoteHash === report.hash &&
+      this.coverageSourceCurrent(job.source, pass)
+    );
+  }
+
+  private coverageReportReceiptCurrent(
+    receipt: CoverageReportDispatchCheckpoint,
+    pass = this.beginCanonicalPass(),
+  ) {
+    const group = this.coverage
+      .snapshot()
+      .groups.find(
+        (candidate) =>
+          candidate.id === receipt.groupId &&
+          candidate.inventoryRevision === receipt.inventoryRevision,
+      );
+    const report = this.resolveObservation(pass, receipt.source.entryId);
+    return !!(
+      group &&
+      report &&
+      report.hash === receipt.source.messageHash &&
+      report.role === receipt.source.role &&
+      receipt.source.start === 0 &&
+      receipt.source.end === report.text.length &&
+      receipt.source.quoteHash === report.hash &&
+      receipt.childIds.every((id) =>
+        group.children.some((child) => child.id === id),
+      ) &&
+      this.coverageSourceCurrent(receipt.source, pass)
+    );
+  }
+
+  /** Canonical amendment drops stale optional jobs/receipts before any resume. */
+  private reconcileCoverageReportJournal(pass = this.beginCanonicalPass()) {
+    const previousJobs = this.coverageJobs;
+    const previousReceipts = this.coverageReportReceipts;
+    const jobs = new Map(
+      [...previousJobs].filter(([, job]) =>
+        this.coverageReportJobCurrent(job, pass),
+      ),
+    );
+    const jobsByIdentity = new Map(
+      [...jobs.values()].map((job) => [job.identity, job]),
+    );
+    const receipts = new Map(
+      [...previousReceipts].filter(([, receipt]) => {
+        const job = jobsByIdentity.get(receipt.jobIdentity);
+        return !!(
+          job &&
+          this.coverageReportReceiptCurrent(receipt, pass) &&
+          this.coverageReportBatchesFor(job, pass).some(
+            (batch) =>
+              batch.requestHash === receipt.requestHash &&
+              batch.childIds.length === receipt.childIds.length &&
+              batch.childIds.every(
+                (childId, index) => childId === receipt.childIds[index],
+              ),
+          )
+        );
+      }),
+    );
+    if (
+      jobs.size === previousJobs.size &&
+      receipts.size === previousReceipts.size
+    )
+      return;
+    this.coverageJobs = jobs;
+    this.coverageReportReceipts = receipts;
+    if (this.persistCoverageState()) return;
+    this.coverageJobs = previousJobs;
+    this.coverageReportReceipts = previousReceipts;
+  }
+
+  private coverageReportBatchesFor(
+    job: CoverageReportJobCheckpoint,
+    pass = this.beginCanonicalPass(),
+  ) {
+    if (!this.coverageReportJobCurrent(job, pass)) return [];
+    const group = this.coverage
+      .snapshot()
+      .groups.find((candidate) => candidate.id === job.groupId);
+    const parent = this.state.tasks.find(
+      (task) => task.id === job.parentTaskId,
+    );
+    const report = this.resolveObservation(pass, job.source.entryId);
+    if (!group || !parent || !report) return [];
+    return coverageReportBatches({
+      parent,
+      group,
+      report,
+      resolve: (entryId) => this.resolveObservation(pass, entryId),
+    }).filter(
+      (batch) =>
+        batch.parentSourceDigest === job.parentSourceDigest &&
+        batch.groupId === job.groupId &&
+        batch.inventoryRevision === job.inventoryRevision &&
+        batch.source.entryId === job.source.entryId &&
+        batch.source.messageHash === job.source.messageHash,
+    );
+  }
+
+  /** Named canonical/control wake only; coverage owns no retry timer or poller. */
+  private wakeCoverage(revivePermanent = false) {
+    const now = Date.now();
+    for (const job of this.coverageJobs.values()) {
+      if (job.state === "parked" && now >= (job.parkedUntil ?? Infinity)) {
+        job.state = "ready";
+        delete job.parkedUntil;
+      } else if (revivePermanent && job.state === "permanent")
+        job.state = "ready";
+    }
+  }
+
+  private nextCoverageWork():
+    | { kind: "intent"; request: CoverageIntentRequest }
+    | {
+        kind: "report";
+        job: CoverageReportJobCheckpoint;
+        batch: CoverageReportBatch;
+      }
+    | undefined {
+    if (
+      !this.enabled ||
+      this.coverageFlight ||
+      this.coverageDispatches >= 1024 ||
+      this.coverageGateway.isPaused
+    )
+      return;
+    if (this.queuedCoverageIntent)
+      return { kind: "intent", request: this.queuedCoverageIntent };
+    if (!this.coverageJobs.size) return;
+    let pass: CanonicalPass;
+    try {
+      pass = this.beginCanonicalPass();
+    } catch {
+      // Only a later host wake may resume optional work after a stale reader.
+      return;
+    }
+    for (const [parentTaskId, job] of this.coverageJobs) {
+      if (!this.coverageReportJobCurrent(job, pass)) {
+        this.coverageJobs.delete(parentTaskId);
+        for (const [key, receipt] of this.coverageReportReceipts)
+          if (receipt.jobIdentity === job.identity)
+            this.coverageReportReceipts.delete(key);
+        continue;
+      }
+      if (job.state !== "ready") continue;
+      const batches = this.coverageReportBatchesFor(job, pass);
+      const batch = batches.find(
+        (candidate) => !this.coverageReportReceipts.has(candidate.requestHash),
+      );
+      if (batch) return { kind: "report", job, batch };
+      job.state = "complete";
+    }
   }
 
   private async runCoverageIntent(
@@ -2471,21 +2849,29 @@ export class Monitor {
       );
       if (
         controller.signal.aborted ||
+        this.coverageFlight?.kind !== "intent" ||
+        this.coverageFlight.request !== request ||
         !this.enabled ||
         epoch !== this.coverageEpoch ||
         !safeUsageValue(result.usage.inputTokens) ||
         !safeUsageValue(result.usage.outputTokens)
       )
         return;
+      const inputTokens = this.coverageUsage.extraction.inputTokens;
+      const outputTokens = this.coverageUsage.extraction.outputTokens;
       this.coverageUsage.extraction.inputTokens = saturatingAdd(
-        this.coverageUsage.extraction.inputTokens,
+        inputTokens,
         result.usage.inputTokens,
       );
       this.coverageUsage.extraction.outputTokens = saturatingAdd(
-        this.coverageUsage.extraction.outputTokens,
+        outputTokens,
         result.usage.outputTokens,
       );
-      if (!this.persistCoverageCandidate(this.coverage)) return;
+      if (!this.persistCoverageCandidate(this.coverage)) {
+        this.coverageUsage.extraction.inputTokens = inputTokens;
+        this.coverageUsage.extraction.outputTokens = outputTokens;
+        return;
+      }
       const completed = this.coverageIntents.finish(
         request,
         result.text,
@@ -2498,22 +2884,170 @@ export class Monitor {
       this.admitPendingCoverage();
       this.publish();
     } catch {
-      // Optional coverage has no retry and never changes mandatory availability.
       controller.abort();
     } finally {
-      // finish removes successful reservations. Every exceptional/preflight path
-      // must release its exact reservation so the bounded request pool recovers.
       this.coverageIntents.cancel(request);
-      if (this.coverageIntentController === controller)
-        this.coverageIntentController = undefined;
+      if (
+        this.coverageFlight?.kind === "intent" &&
+        this.coverageFlight.request === request
+      )
+        this.coverageFlight = undefined;
+      this.drain();
     }
   }
 
-  /** Durable optional dispatch receipt is required before transport may continue. */
+  /** Persist retry/permanent state without changing coverage children. */
+  private updateCoverageJob(
+    job: CoverageReportJobCheckpoint,
+    state: CoverageReportJobCheckpoint["state"],
+    parkedUntil?: number,
+  ) {
+    const previous = this.coverageJobs;
+    const jobs = new Map(previous);
+    const updated = structuredClone(job);
+    updated.state = state;
+    if (state === "parked" && parkedUntil !== undefined)
+      updated.parkedUntil = parkedUntil;
+    else delete updated.parkedUntil;
+    jobs.set(updated.parentTaskId, updated);
+    this.coverageJobs = jobs;
+    if (this.persistCoverageState()) return true;
+    this.coverageJobs = previous;
+    return false;
+  }
+
+  private async runCoverageReport(
+    job: CoverageReportJobCheckpoint,
+    batch: CoverageReportBatch,
+    epoch: number,
+  ) {
+    try {
+      const result = await this.coverageGateway.evaluate(
+        batch.request,
+        this.identity(),
+        true,
+      );
+      if (
+        this.coverageFlight?.kind !== "report" ||
+        this.coverageFlight.jobIdentity !== job.identity ||
+        this.coverageFlight.batch !== batch ||
+        !this.enabled ||
+        epoch !== this.coverageEpoch
+      )
+        return;
+      if (!result) {
+        if (this.coverageGateway.lastOutcome === "permanent") {
+          this.updateCoverageJob(job, "permanent");
+        } else if (
+          this.coverageGateway.lastOutcome === "retryable" ||
+          this.coverageGateway.lastOutcome === "backoff"
+        ) {
+          this.updateCoverageJob(
+            job,
+            "parked",
+            Date.now() + (this.coverageGateway.retryDelayMs ?? 0),
+          );
+        }
+        return;
+      }
+      const pass = this.beginCanonicalPass();
+      const batches = this.coverageReportBatchesFor(job, pass);
+      const current = batches.find(
+        (candidate) => candidate.requestHash === batch.requestHash,
+      );
+      if (!current) return;
+      const group = this.coverage
+        .snapshot()
+        .groups.find((candidate) => candidate.id === job.groupId);
+      const parent = this.state.tasks.find(
+        (task) => task.id === job.parentTaskId,
+      );
+      const report = this.resolveObservation(pass, job.source.entryId);
+      if (!group || !parent || !report) return;
+      const decisions = coverageReportDecisions(current, result, {
+        parent,
+        group,
+        report,
+        resolve: (entryId) => this.resolveObservation(pass, entryId),
+      });
+      if (!decisions.receipt) return;
+      const candidate = this.clonedCoverage();
+      if (!candidate) return;
+      for (const reportFact of decisions.reports)
+        if (!candidate.report(reportFact).accepted) return;
+      const receipt: CoverageReportDispatchCheckpoint = {
+        jobIdentity: job.identity,
+        requestHash: current.requestHash,
+        groupId: job.groupId,
+        inventoryRevision: job.inventoryRevision,
+        source: { ...job.source },
+        childIds: [...decisions.receipt.childIds],
+        assessments: decisions.receipt.assessments.map((assessment) => ({
+          ...assessment,
+        })),
+        dispatch: this.coverageDispatches,
+        at: Date.now(),
+        usage: {
+          inputTokens: result.usage.input_tokens,
+          outputTokens: result.usage.output_tokens,
+        },
+        outcome: "accepted",
+      };
+      const previousCoverage = this.coverage;
+      const previousJobs = this.coverageJobs;
+      const previousReceipts = this.coverageReportReceipts;
+      const previousInputTokens = this.coverageUsage.jev.inputTokens;
+      const previousOutputTokens = this.coverageUsage.jev.outputTokens;
+      const receipts = new Map(previousReceipts);
+      receipts.set(receipt.requestHash, receipt);
+      const jobs = new Map(previousJobs);
+      const updated = structuredClone(job);
+      updated.state = batches.every(
+        (candidateBatch) =>
+          candidateBatch.requestHash === receipt.requestHash ||
+          receipts.has(candidateBatch.requestHash),
+      )
+        ? "complete"
+        : "ready";
+      delete updated.parkedUntil;
+      jobs.set(updated.parentTaskId, updated);
+      this.coverage = candidate;
+      this.coverageJobs = jobs;
+      this.coverageReportReceipts = receipts;
+      this.coverageUsage.jev.inputTokens = saturatingAdd(
+        previousInputTokens,
+        result.usage.input_tokens,
+      );
+      this.coverageUsage.jev.outputTokens = saturatingAdd(
+        previousOutputTokens,
+        result.usage.output_tokens,
+      );
+      if (!this.persistCoverageState()) {
+        this.coverage = previousCoverage;
+        this.coverageJobs = previousJobs;
+        this.coverageReportReceipts = previousReceipts;
+        this.coverageUsage.jev.inputTokens = previousInputTokens;
+        this.coverageUsage.jev.outputTokens = previousOutputTokens;
+        return;
+      }
+      this.publish();
+    } finally {
+      if (
+        this.coverageFlight?.kind === "report" &&
+        this.coverageFlight.jobIdentity === job.identity &&
+        this.coverageFlight.batch === batch
+      )
+        this.coverageFlight = undefined;
+      this.drain();
+    }
+  }
+
+  /** Durable optional dispatch receipt is required before selected-model transport. */
   private recordCoverageExtractionDispatch(epoch: number) {
     if (
       !this.enabled ||
       epoch !== this.coverageEpoch ||
+      this.coverageFlight?.kind !== "intent" ||
       this.coverageDispatches >= 1024
     )
       throw new CoverageDispatchRejected();
@@ -2531,10 +3065,119 @@ export class Monitor {
     throw new CoverageDispatchRejected();
   }
 
+  /** Prove worst legal receipt/status footprint before report transport spends. */
+  private coverageReportDurabilityFits(
+    job: CoverageReportJobCheckpoint,
+    batch: CoverageReportBatch,
+  ) {
+    const candidate = this.clonedCoverage();
+    if (
+      !candidate?.report({
+        groupId: job.groupId,
+        inventoryRevision: job.inventoryRevision,
+        childIds: [...batch.childIds],
+        source: { ...batch.source },
+        status: "reported-blocked",
+      }).accepted
+    )
+      return false;
+    const previousCoverage = this.coverage;
+    const previousReceipts = this.coverageReportReceipts;
+    const previousDispatches = this.coverageDispatches;
+    const previousCalls = this.coverageUsage.jev.calls;
+    const previousInputTokens = this.coverageUsage.jev.inputTokens;
+    const previousOutputTokens = this.coverageUsage.jev.outputTokens;
+    const receipts = new Map(previousReceipts);
+    receipts.set(batch.requestHash, {
+      jobIdentity: job.identity,
+      requestHash: batch.requestHash,
+      groupId: job.groupId,
+      inventoryRevision: job.inventoryRevision,
+      source: { ...job.source },
+      childIds: [...batch.childIds],
+      assessments: batch.childIds.map((childId) => ({
+        childId,
+        choice: "uncertain" as const,
+        confidence: 0.0000012345678901234567,
+        probability: 0.0000012345678901234567,
+      })),
+      dispatch: this.coverageDispatches + 1,
+      at: Number.MAX_SAFE_INTEGER,
+      usage: {
+        inputTokens: Number.MAX_SAFE_INTEGER,
+        outputTokens: Number.MAX_SAFE_INTEGER,
+      },
+      outcome: "accepted" as const,
+    });
+    try {
+      this.coverage = candidate;
+      this.coverageReportReceipts = receipts;
+      this.coverageDispatches = this.coverageDispatches + 1;
+      this.coverageUsage.jev.calls = this.coverageUsage.jev.calls + 1;
+      this.coverageUsage.jev.inputTokens = Number.MAX_SAFE_INTEGER;
+      this.coverageUsage.jev.outputTokens = Number.MAX_SAFE_INTEGER;
+      encodeCheckpoint(
+        this.state,
+        this.metadata(false, this.healthCards, this.state),
+      );
+      encodeCheckpoint(
+        this.state,
+        this.metadata(this.enabled, this.healthCards, this.state),
+      );
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.coverage = previousCoverage;
+      this.coverageReportReceipts = previousReceipts;
+      this.coverageDispatches = previousDispatches;
+      this.coverageUsage.jev.calls = previousCalls;
+      this.coverageUsage.jev.inputTokens = previousInputTokens;
+      this.coverageUsage.jev.outputTokens = previousOutputTokens;
+    }
+  }
+
+  /** Return false before fetch when report accounting/job proof cannot persist. */
+  private recordCoverageJevDispatch(_at: number) {
+    const flight = this.coverageFlight;
+    const job =
+      flight?.kind === "report"
+        ? [...this.coverageJobs.values()].find(
+            (candidate) => candidate.identity === flight.jobIdentity,
+          )
+        : undefined;
+    if (
+      !this.enabled ||
+      !flight ||
+      flight.kind !== "report" ||
+      flight.epoch !== this.coverageEpoch ||
+      this.coverageDispatches >= 1024 ||
+      !job ||
+      !this.coverageReportJobCurrent(job) ||
+      !this.coverageReportDurabilityFits(job, flight.batch)
+    )
+      return false;
+    const dispatches = this.coverageDispatches;
+    const calls = this.coverageUsage.jev.calls;
+    try {
+      this.coverageDispatches = saturatingAdd(dispatches, 1);
+      this.coverageUsage.jev.calls = saturatingAdd(calls, 1);
+      if (this.persistCoverageCandidate(this.coverage)) return true;
+    } catch {
+      // Revert local accounting when no durable pre-network receipt exists.
+    }
+    this.coverageDispatches = dispatches;
+    this.coverageUsage.jev.calls = calls;
+    return false;
+  }
+
   private resetCoverageRuntime() {
     this.coverageEpoch++;
-    this.coverageIntentController?.abort();
-    this.coverageIntentController = undefined;
+    this.coverageFlight?.kind === "intent" &&
+      this.coverageFlight.controller.abort();
+    this.coverageFlight = undefined;
+    this.queuedCoverageIntent = undefined;
+    this.coverageGateway.invalidate();
     this.coverageAdapter.reset(this.coverageEpoch);
     this.coverageIntents = new CoverageIntentRequests();
     this.pendingCoverageInventories = [];
@@ -3219,8 +3862,10 @@ export class Monitor {
       this.healthGateway.enable(this.identity());
       this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
+      this.coverageGateway.enable(this.identity());
       this.correctionGateway.enable(this.identity());
       this.visibilityGateway.enable(this.visibilityIdentity());
+      this.wakeCoverage();
       // Rebuild from current canonical branch after discarding stale semantics.
       this.requeue(this.beginCanonicalPass(), true);
       this.drain();
@@ -3908,8 +4553,41 @@ export class Monitor {
       return;
     }
     if (this.healthFlight) return;
+    const coverage = this.nextCoverageWork();
     const detail = this.nextDetailWork();
+    if (coverage && (!detail || this.optionalTurn === "coverage")) {
+      this.optionalTurn = "detail";
+      if (coverage.kind === "intent") {
+        this.queuedCoverageIntent = undefined;
+        const controller = new AbortController();
+        this.coverageFlight = {
+          kind: "intent",
+          epoch: this.coverageEpoch,
+          request: coverage.request,
+          controller,
+        };
+        void this.runCoverageIntent(
+          coverage.request,
+          controller,
+          this.coverageEpoch,
+        );
+      } else {
+        this.coverageFlight = {
+          kind: "report",
+          epoch: this.coverageEpoch,
+          jobIdentity: coverage.job.identity,
+          batch: coverage.batch,
+        };
+        void this.runCoverageReport(
+          coverage.job,
+          coverage.batch,
+          this.coverageEpoch,
+        );
+      }
+      return;
+    }
     if (detail && !this.detailFlight) {
+      this.optionalTurn = "coverage";
       const flight = {
         epoch: this.epoch,
         token: ++this.nextDetailToken,
@@ -3974,9 +4652,12 @@ export class Monitor {
         // Coverage intent is an independently bounded optional request. It never
         // reruns mandatory extraction or changes this committed semantic state.
         this.scheduleCoverageIntent(observation);
+        if (observation.role === "assistant")
+          this.scheduleCoverageReports(observation);
         // A named committed cursor wake permits parked optional jobs. It occurs
         // before `finally` drains, never while semantic `processing` is true.
         this.parkedDetails.clear();
+        this.wakeCoverage();
         this.rebuildDetailValues();
         if (
           this.catchupTarget?.id === observation.id &&

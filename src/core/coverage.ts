@@ -880,10 +880,11 @@ export class CoverageStore {
     store.nextChildId = data.nextChildId;
     store.groups = data.groups.flatMap((group) => {
       const parent = parents.get(group.parentTaskId);
+      // Admission source digest is immutable provenance, not a mutable wording
+      // scope gate. Parent requirements revision remains the authority fence.
       if (
         !parent ||
         parent.revision !== group.parentRevision ||
-        sourceDigest(parent.source) !== group.parentSourceDigest ||
         !sourceCurrent(group.intent) ||
         !sourceCurrent(group.inventorySource)
       )

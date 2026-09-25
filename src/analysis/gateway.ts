@@ -63,6 +63,8 @@ interface Options {
   now?: () => number;
   /** Called at transport admission, including eventual failures. */
   onDispatch?: (at: number) => void;
+  /** Return false to fence optional transport before fetch. */
+  beforeDispatch?: (at: number) => boolean;
   onPermanentError?: (message: string) => void;
 }
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -352,6 +354,17 @@ export class JevGateway {
         // This is transport truth: update immediately before fetch, so failed
         // HTTP responses, throws and timeouts remain visible as real attempts.
         this.lastDispatchAt = this.now();
+        try {
+          if (this.options.beforeDispatch?.(this.lastDispatchAt) === false) {
+            this.status = "Paused: optional dispatch rejected";
+            this.outcome = "suppressed";
+            return;
+          }
+        } catch {
+          this.status = "Paused: optional dispatch rejected";
+          this.outcome = "suppressed";
+          return;
+        }
         try {
           this.options.onDispatch?.(this.lastDispatchAt);
         } catch {

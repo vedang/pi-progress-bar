@@ -162,46 +162,87 @@ async function fixture(details = false, failIntent = false) {
       h.monitor.checkpoint() as ReturnType<typeof encodeCheckpoint>,
   };
 }
+async function addUncoveredParent(h: Awaited<ReturnType<typeof fixture>>) {
+  const extract = h.extract.getMockImplementation();
+  if (!extract) throw new Error("Missing extractor");
+  const quote = "Also summarize the second workbook.";
+  h.extract.mockImplementation(async (input, signal, onDispatch) => {
+    if (
+      input.latest.id !== "extra" ||
+      input.instructions.includes("parentIndices")
+    )
+      return extract(input, signal, onDispatch);
+    onDispatch?.(Date.now());
+    return {
+      text: JSON.stringify({
+        add: [
+          {
+            label: "Second workbook summary",
+            kind: "response",
+            basis: "explicit",
+            quote,
+          },
+        ],
+        revise: [],
+        archive: [],
+        restore: [],
+        unresolved: false,
+      }),
+      provider: "offline",
+      model: "fixture",
+      usage: { inputTokens: 3, outputTokens: 2 },
+    };
+  });
+  h.append("extra", quote, "user");
+  await h.settle("extra");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.state.tasks).toHaveLength(2);
+  h.extract.mockImplementation(extract);
+}
 it("explicit model recovery resumes a failed paid intent without mandatory re-extraction", async () => {
   await fixture(false, true);
 });
-it("coalesces a same-parent resource backlog before optional dispatch", async () => {
-  const h = await fixture();
-  h.setChoice("unchanged");
-  const extract = h.extract.getMockImplementation();
-  if (!extract) throw new Error("Missing extractor");
-  h.extract.mockImplementation(async (input, signal, onDispatch) => {
-    if (input.instructions.includes("parentIndices")) {
-      onDispatch?.(Date.now());
-      return {
-        text: '{"intents":[]}',
-        provider: "offline",
-        model: "fixture",
-        usage: { inputTokens: 1, outputTokens: 1 },
-      };
-    }
-    return extract(input, signal, onDispatch);
-  });
-  h.replace([
-    ...h.reader(),
-    ...[0, 1, 2].map((i) =>
-      branchEntry(
-        `burst-${i}`,
-        `Review all tabs in docs/second.xlsx. Updated instruction ${i}.`,
+it.each([false, true])(
+  "coalesces a same-parent resource backlog before optional dispatch (vary resource=%s)",
+  async (varyResource) => {
+    const h = await fixture();
+    h.setChoice("unchanged");
+    await addUncoveredParent(h);
+    const extract = h.extract.getMockImplementation();
+    if (!extract) throw new Error("Missing extractor");
+    h.extract.mockImplementation(async (input, signal, onDispatch) => {
+      if (input.instructions.includes("parentIndices")) {
+        onDispatch?.(Date.now());
+        return {
+          text: '{"intents":[]}',
+          provider: "offline",
+          model: "fixture",
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      }
+      return extract(input, signal, onDispatch);
+    });
+    h.replace([
+      ...h.reader(),
+      ...[0, 1, 2].map((i) =>
+        branchEntry(
+          `burst-${i}`,
+          `Review all tabs in docs/second-${varyResource ? i : "shared"}.xlsx. Updated instruction ${i}.`,
+        ),
       ),
-    ),
-  ]);
-  await h.settle("burst-2");
-  await vi.advanceTimersByTimeAsync(200);
-  expect(
-    h.extract.mock.calls.filter(
-      ([input]) =>
-        input.instructions.includes("parentIndices") &&
-        input.latest.id.startsWith("burst-"),
-    ),
-  ).toHaveLength(1);
-  expect(h.monitor.coverageSnapshot().omissions).toBeGreaterThanOrEqual(2);
-});
+    ]);
+    await h.settle("burst-2");
+    await vi.advanceTimersByTimeAsync(200);
+    expect(
+      h.extract.mock.calls.filter(
+        ([input]) =>
+          input.instructions.includes("parentIndices") &&
+          input.latest.id.startsWith("burst-"),
+      ),
+    ).toHaveLength(1);
+    expect(h.monitor.coverageSnapshot().omissions).toBeGreaterThanOrEqual(2);
+  },
+);
 it("never resumes an older report from the semantic-commit supersession crash window", async () => {
   const h = await fixture();
   h.setTransport(() => new Promise<Response>(() => {}));
@@ -304,6 +345,7 @@ it("retains content-free per-dispatch proof for selected-model intent", async ()
 it("journal saturation either admits later intent or exposes an explicit omission", async () => {
   const h = await fixture();
   h.setChoice("unchanged");
+  await addUncoveredParent(h);
   const extract = h.extract.getMockImplementation();
   if (!extract) throw new Error("Missing extractor");
   h.extract.mockImplementation(async (input, signal, onDispatch) => {
@@ -327,6 +369,138 @@ it("journal saturation either admits later intent or exposes an explicit omissio
     input.instructions.includes("parentIndices"),
   ).length;
   expect(calls === 22 || h.monitor.coverageSnapshot().omissions > 0).toBe(true);
+});
+it("later intent does not leapfrog an earlier report queue position", async () => {
+  const h = await fixture();
+  h.setChoice("unchanged");
+  await addUncoveredParent(h);
+  const order: string[] = [];
+  const extract = h.extract.getMockImplementation();
+  if (!extract) throw new Error("Missing extractor");
+  h.extract.mockImplementation(async (input, signal, onDispatch) => {
+    if (!input.instructions.includes("parentIndices"))
+      return extract(input, signal, onDispatch);
+    order.push("intent");
+    onDispatch?.(Date.now());
+    return {
+      text: '{"intents":[]}',
+      provider: "offline",
+      model: "fixture",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+  });
+  h.setTransport(async (request) => {
+    order.push("report");
+    return answer(request, "unchanged");
+  });
+  h.replace([
+    ...h.reader(),
+    branchEntry("early-report", "I reviewed Overview.", "assistant"),
+    branchEntry("later-intent", "Review all tabs in docs/second.xlsx."),
+  ]);
+  await h.settle("later-intent");
+  await vi.advanceTimersByTimeAsync(200);
+  expect(order).toContain("intent");
+  expect(order[0]).toBe("report");
+});
+it("newer report fences dispatch1024 even when replacement cannot dispatch", async () => {
+  const h = await fixture();
+  const saved = h.checkpoint();
+  if (!saved.monitor?.coverage) throw new Error("Missing coverage");
+  saved.monitor.coverage.dispatches = 1023;
+  saved.monitor.coverage.usage.jev.calls =
+    1023 - saved.monitor.coverage.usage.extraction.calls;
+  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  let release: (() => void) | undefined;
+  h.setTransport(
+    (request) =>
+      new Promise<Response>((resolve) => {
+        release = () => resolve(answer(request, "reviewed"));
+      }),
+  );
+  h.append("older", reportText);
+  await h.settle("older");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(1);
+  h.append("newer", "I retract all prior workbook review claims.");
+  await h.settle("newer");
+  release?.();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(1);
+  expect(
+    h.monitor
+      .coverageSnapshot()
+      .groups[0].children.every((child) => child.status === "pending"),
+  ).toBe(true);
+});
+it("oversized canonical report records one durable omission without a provider call", async () => {
+  const h = await fixture();
+  const before = h.monitor.coverageSnapshot().omissions;
+  h.append("oversized-report", `I reviewed Overview. ${"x".repeat(13000)}`);
+  await h.settle("oversized-report");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(0);
+  expect(h.monitor.coverageSnapshot().omissions).toBe(before + 1);
+  const saved = h.checkpoint();
+  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  h.observe();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.coverageSnapshot().omissions).toBe(before + 1);
+});
+it("rejects cached stale intent before spending after a queued parent revision", async () => {
+  const h = await fixture();
+  h.setChoice("unchanged");
+  await addUncoveredParent(h);
+  const extract = h.extract.getMockImplementation();
+  if (!extract) throw new Error("Missing extractor");
+  const quote = "Change the second summary to a risk register.";
+  h.extract.mockImplementation(async (input, signal, onDispatch) => {
+    if (input.instructions.includes("parentIndices")) {
+      onDispatch?.(Date.now());
+      return {
+        text: '{"intents":[]}',
+        provider: "offline",
+        model: "fixture",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+    }
+    if (input.latest.id !== "secret") return extract(input, signal, onDispatch);
+    onDispatch?.(Date.now());
+    return {
+      text: JSON.stringify({
+        add: [],
+        revise: [
+          {
+            id: "task:2",
+            label: "Second risk register",
+            requirementsChanged: true,
+            quote,
+          },
+        ],
+        archive: [],
+        restore: [],
+        unresolved: false,
+      }),
+      provider: "offline",
+      model: "fixture",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+  });
+  h.replace([
+    ...h.reader(),
+    branchEntry("stale-intent", "Review every tab in docs/second.xlsx."),
+    branchEntry("secret", quote),
+  ]);
+  await h.settle("secret");
+  await vi.advanceTimersByTimeAsync(200);
+  expect(h.monitor.state.tasks[1].revision).toBe(2);
+  expect(
+    h.extract.mock.calls.filter(
+      ([input]) =>
+        input.instructions.includes("parentIndices") &&
+        input.latest.id === "stale-intent",
+    ),
+  ).toHaveLength(0);
 });
 it("schedules20+2report judgments after semantics/readyhealth with isolated usage", async () => {
   const h = await fixture();
@@ -670,6 +844,7 @@ it("parks rejected pre-network admission without a synchronous redispatch loop",
   await vi.advanceTimersByTimeAsync(100);
   expect(h.calls).toHaveLength(0);
   expect(attempts).toBe(1);
+  expect(h.monitor.coverageSnapshot().omissions).toBeGreaterThan(0);
 });
 it("restores accepted intent before inventory arrives without re-extraction", async () => {
   const h = await fixture();

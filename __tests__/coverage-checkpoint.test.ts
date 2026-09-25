@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CoverageStore } from "../src/core/coverage";
+import { CoverageStore, coverageCheckpointIsValid } from "../src/core/coverage";
 import {
   checkpointStorageStatus,
   encodeCheckpoint,
@@ -210,6 +210,38 @@ describe("strictv10 optional coverage metadata", () => {
       }),
     ).toThrow();
     expect(state).toEqual(before);
+  });
+  it("counts the entire optional metadata envelope toward64KiB", async () => {
+    const state = await initial();
+    const store = new CoverageStore();
+    for (const parent of state.tasks.slice(0, 2)) {
+      expect(
+        store.admit({
+          parent,
+          intent: parent.source,
+          inventory: coverageInventory(
+            Array.from({ length: 40 }, (_, i) => `${i}-${"x".repeat(180)}`),
+          ),
+        }).accepted,
+      ).toBe(true);
+    }
+    const payload = store.checkpoint();
+    const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+    const target = 65536 - 64;
+    for (const group of payload.groups) {
+      while (group.omissions.length < 64 && target - bytes(payload) > 3) {
+        group.omissions.push(
+          "x".repeat(Math.min(512, target - bytes(payload) - 3)),
+        );
+      }
+    }
+    expect(coverageCheckpointIsValid(payload)).toBe(true);
+    expect(bytes(payload)).toBeLessThanOrEqual(65536);
+    const coverage = { state: payload, dispatches: 0, usage: usage() };
+    expect(bytes(coverage)).toBeGreaterThan(65536);
+    expect(() =>
+      encodeCheckpoint(state, { enabled: true, usage: usage(), coverage }),
+    ).toThrow();
   });
   it("validates coverage dispatch cap and exact provider counters", async () => {
     const { state, metadata } = await checkpointFixture();

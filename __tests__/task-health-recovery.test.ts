@@ -71,7 +71,7 @@ it("writes a new version with bounded durable report coverage, never raw report 
     version: number;
     monitor: { healthCards: { provenance: Record<string, unknown> }[] };
   };
-  expect(saved.version).toBe(9);
+  expect(saved.version).toBe(10);
   expect(checkpointStorageStatus(saved)).toBe("supported");
   for (const card of saved.monitor.healthCards) {
     expect(card.provenance.coverage).toMatchObject({
@@ -355,7 +355,7 @@ it.each(["raw-text", "too-many-refs", "wrong-complete", "unknown-field"])(
       version: number;
       monitor: { healthCards: { provenance: Record<string, unknown> }[] };
     };
-    expect(saved.version).toBe(9);
+    expect(saved.version).toBe(10);
     const coverage = saved.monitor.healthCards[0].provenance.coverage as Record<
       string,
       unknown

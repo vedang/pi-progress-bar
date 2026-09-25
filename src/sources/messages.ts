@@ -139,6 +139,9 @@ export class CanonicalPass {
   readonly headers: readonly CanonicalHeader[];
   private readonly byId = new Map<string, CanonicalHeader>();
   private readonly duplicateIds = new Set<string>();
+  /** Full-branch ID metadata index; payload stays lazy until exact lookup. */
+  private readonly entryById = new Map<string, unknown>();
+  private readonly duplicateEntryIds = new Set<string>();
   private readonly materialized = new Map<string, Observation | undefined>();
   private exploratoryReads = 0;
 
@@ -149,6 +152,18 @@ export class CanonicalPass {
       if (this.byId.has(header.id)) this.duplicateIds.add(header.id);
       else this.byId.set(header.id, header);
     }
+    for (const entry of this.entries) {
+      if (!record(entry)) continue;
+      const id = entry.id;
+      if (typeof id !== "string" || !id) continue;
+      if (this.entryById.has(id)) this.duplicateEntryIds.add(id);
+      else this.entryById.set(id, entry);
+    }
+  }
+
+  /** Exact active-branch entry lookup; duplicate IDs fail closed. */
+  entry(id: string): unknown | undefined {
+    return this.duplicateEntryIds.has(id) ? undefined : this.entryById.get(id);
   }
 
   observation(id: string): Observation | undefined {

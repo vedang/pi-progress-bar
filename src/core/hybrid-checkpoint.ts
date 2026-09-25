@@ -9,6 +9,12 @@ import type {
   TaskDetailRecord,
 } from "../analysis/task-details";
 import {
+  type CoverageCheckpoint,
+  coverageCheckpointBytes,
+  coverageCheckpointIsValid,
+  MAX_COVERAGE_CHECKPOINT_BYTES,
+} from "./coverage";
+import {
   acceptedCompletionIds,
   applyCompletionRecord,
   applyFocusRecord,
@@ -48,7 +54,7 @@ import {
   taskLabelIsValid,
 } from "./hybrid-state";
 
-const VERSION = 9;
+const VERSION = 10;
 const MAX_TASKS = 200;
 const MAX_ACTIVE_TASKS = 20;
 const MAX_EVENTS = 1000;
@@ -101,6 +107,15 @@ export interface HealthCard {
   };
 }
 
+interface CoverageCheckpointMetadata {
+  state: CoverageCheckpoint;
+  dispatches: number;
+  usage: {
+    jev: { calls: number; inputTokens: number; outputTokens: number };
+    extraction: { calls: number; inputTokens: number; outputTokens: number };
+  };
+}
+
 export interface MonitorCheckpointMetadata {
   enabled: boolean;
   usage: {
@@ -116,6 +131,8 @@ export interface MonitorCheckpointMetadata {
   /** Optional exact source spans and normalized field assessments; never quote text. */
   /** Validated at storage boundary; public type stays broad for checkpoint readers. */
   taskDetails?: unknown[];
+  /** Optional durable coverage state; no host ingress or classifier result is implied. */
+  coverage?: CoverageCheckpointMetadata;
 }
 
 interface Checkpoint {
@@ -814,6 +831,38 @@ function validTaskDetailRecord(value: unknown): value is TaskDetailRecord {
   );
 }
 
+function validCoverageUsage(
+  value: unknown,
+): value is CoverageCheckpointMetadata["usage"] {
+  if (!record(value) || !exactKeys(value, ["jev", "extraction"])) return false;
+  return [value.jev, value.extraction].every(
+    (item) =>
+      record(item) &&
+      exactKeys(item, ["calls", "inputTokens", "outputTokens"]) &&
+      nonNegativeInteger(item.calls) &&
+      nonNegativeInteger(item.inputTokens) &&
+      nonNegativeInteger(item.outputTokens),
+  );
+}
+
+function validCoverageMetadata(
+  value: unknown,
+): value is CoverageCheckpointMetadata {
+  if (
+    !record(value) ||
+    !exactKeys(value, ["state", "dispatches", "usage"]) ||
+    !coverageCheckpointIsValid(value.state) ||
+    coverageCheckpointBytes(value.state) > MAX_COVERAGE_CHECKPOINT_BYTES ||
+    !nonNegativeInteger(value.dispatches) ||
+    value.dispatches > 1024 ||
+    !validCoverageUsage(value.usage)
+  )
+    return false;
+  return (
+    value.dispatches === value.usage.jev.calls + value.usage.extraction.calls
+  );
+}
+
 function validMonitorMetadata(
   value: unknown,
   state: HybridState,
@@ -829,6 +878,7 @@ function validMonitorMetadata(
         "idleDoneTaskId",
         "healthCards",
         "taskDetails",
+        "coverage",
       ],
     ) ||
     typeof value.enabled !== "boolean" ||
@@ -848,6 +898,11 @@ function validMonitorMetadata(
       !nonNegativeInteger(value.lastExtractionCallAt)) ||
     (Object.hasOwn(value, "idleDoneTaskId") &&
       !taskIdIsValid(value.idleDoneTaskId))
+  )
+    return false;
+  if (
+    Object.hasOwn(value, "coverage") &&
+    !validCoverageMetadata(value.coverage)
   )
     return false;
   if (Object.hasOwn(value, "healthCards")) {
@@ -1148,7 +1203,7 @@ function checkpointState(state: HybridState): HybridState {
   return snapshot;
 }
 
-/** Exact encoded bytes after strict v9 shape validation, before capacity denial. */
+/** Exact encoded bytes after strict v10 shape validation, before capacity denial. */
 export function checkpointBytes(
   state: HybridState,
   monitor?: MonitorCheckpointMetadata,
@@ -1170,7 +1225,7 @@ export function encodeCheckpoint(
   monitor?: MonitorCheckpointMetadata,
 ): Checkpoint {
   if (checkpointBytes(state, monitor) > MAX_CHECKPOINT_BYTES)
-    throw new Error("Hybrid checkpoint exceeds v9 bounds");
+    throw new Error("Hybrid checkpoint exceeds v10 bounds");
   return JSON.parse(
     JSON.stringify({
       version: VERSION,

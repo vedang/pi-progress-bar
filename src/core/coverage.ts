@@ -6,7 +6,11 @@ const MAX_RETAINED_CHILDREN = 200;
 const MAX_GROUPS = 200;
 const MAX_LABEL_SCALARS = 240;
 const MAX_INVENTORY_BYTES = 32 * 1024;
+export const MAX_COVERAGE_CHECKPOINT_BYTES = 64 * 1024;
+const CHECKPOINT_VERSION = 1;
 const digest = /^[a-f0-9]{64}$/;
+const groupId = /^coverage-group:([1-9]\d*)$/;
+const childId = /^coverage-child:([1-9]\d*)$/;
 
 type CoverageChildStatus = "pending" | "reported-reviewed" | "reported-blocked";
 
@@ -71,15 +75,46 @@ export interface CoverageSnapshot {
   groups: CoverageGroupSnapshot[];
 }
 
+interface InventorySourceReceipt {
+  entryId: string;
+  messageHash: string;
+  callIdDigest: string;
+}
+
 interface CoverageReportReceipt {
   inventoryRevision: number;
   status: CoverageChildStatus;
   source: SourceRef;
 }
 
+interface CoverageCheckpointChild extends CoverageChildSnapshot {}
+
+interface CoverageCheckpointReport extends CoverageReportReceipt {
+  childId: string;
+}
+
+interface CoverageCheckpointGroup extends CoverageGroupSnapshot {
+  inventorySource: InventorySourceReceipt;
+  reports: CoverageCheckpointReport[];
+}
+
+export interface CoverageCheckpoint {
+  version: typeof CHECKPOINT_VERSION;
+  nextGroupId: number;
+  nextChildId: number;
+  groups: CoverageCheckpointGroup[];
+}
+
+export type CoverageRestoreReference = SourceRef | InventorySourceReceipt;
+
+export interface CoverageRestoreOptions {
+  parents: readonly HybridTask[];
+  sourceCurrent: (reference: CoverageRestoreReference) => boolean;
+}
+
 interface CoverageGroup extends CoverageGroupSnapshot {
   included: boolean;
-  inventorySource: CoverageInventory["source"];
+  inventorySource: InventorySourceReceipt;
   inventorySignature: string;
   /** One latest receipt per child keeps report provenance bounded by group size. */
   reportReceipts: Map<string, CoverageReportReceipt>;
@@ -103,6 +138,9 @@ const safeText = (
 
 const validHash = (value: unknown): value is string =>
   typeof value === "string" && digest.test(value);
+
+const positiveInteger = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && (value as number) >= 1;
 
 const validSourceRef = (value: unknown): value is SourceRef => {
   if (
@@ -205,6 +243,17 @@ const sourceDigest = (source: SourceRef) =>
     )
     .digest("hex");
 
+const callIdDigest = (callId: string) =>
+  createHash("sha256").update(callId).digest("hex");
+
+const inventorySource = (
+  source: CoverageInventory["source"],
+): InventorySourceReceipt => ({
+  entryId: source.entryId,
+  messageHash: source.messageHash,
+  callIdDigest: callIdDigest(source.callId),
+});
+
 const inventorySignature = (inventory: CoverageInventory) =>
   JSON.stringify({
     resourceKey: inventory.resourceKey,
@@ -213,15 +262,23 @@ const inventorySignature = (inventory: CoverageInventory) =>
     ...(inventory.knownTotal === undefined
       ? {}
       : { knownTotal: inventory.knownTotal }),
-    ...(inventory.replacement ? { replacement: true } : {}),
-    source: {
-      entryId: inventory.source.entryId,
-      messageHash: inventory.source.messageHash,
-      callId: inventory.source.callId,
-    },
+    source: inventorySource(inventory.source),
     items: inventory.items.map((item) => ({
       key: item.key,
       label: item.label,
+    })),
+  });
+
+const checkpointInventorySignature = (group: CoverageCheckpointGroup) =>
+  JSON.stringify({
+    resourceKey: group.resourceKey,
+    revision: group.inventoryRevision,
+    complete: group.complete,
+    ...(group.knownTotal === undefined ? {} : { knownTotal: group.knownTotal }),
+    source: group.inventorySource,
+    items: group.children.map((child) => ({
+      key: child.key,
+      label: child.label,
     })),
   });
 
@@ -235,6 +292,199 @@ const inventoryOmissions = (inventory: CoverageInventory) => {
     );
   }
   return omissions;
+};
+
+const statusIsValid = (value: unknown): value is CoverageChildStatus =>
+  value === "pending" ||
+  value === "reported-reviewed" ||
+  value === "reported-blocked";
+
+const validInventorySourceReceipt = (
+  value: unknown,
+): value is InventorySourceReceipt =>
+  record(value) &&
+  hasExactKeys(value, ["entryId", "messageHash", "callIdDigest"]) &&
+  safeText(value.entryId, 512) &&
+  validHash(value.messageHash) &&
+  validHash(value.callIdDigest);
+
+const validCheckpointChild = (
+  value: unknown,
+): value is CoverageCheckpointChild =>
+  record(value) &&
+  hasExactKeys(value, ["id", "key", "label", "status"]) &&
+  typeof value.id === "string" &&
+  childId.test(value.id) &&
+  safeText(value.key, 512) &&
+  safeText(value.label) &&
+  statusIsValid(value.status);
+
+const validCheckpointReport = (
+  value: unknown,
+): value is CoverageCheckpointReport =>
+  record(value) &&
+  hasExactKeys(value, ["childId", "inventoryRevision", "status", "source"]) &&
+  typeof value.childId === "string" &&
+  childId.test(value.childId) &&
+  positiveInteger(value.inventoryRevision) &&
+  statusIsValid(value.status) &&
+  validSourceRef(value.source);
+
+const validCheckpointGroup = (
+  value: unknown,
+): value is CoverageCheckpointGroup => {
+  if (
+    !record(value) ||
+    !exactGroupKeys(value) ||
+    typeof value.id !== "string" ||
+    !groupId.test(value.id) ||
+    !safeText(value.parentTaskId, 512) ||
+    !positiveInteger(value.parentRevision) ||
+    !validHash(value.parentSourceDigest) ||
+    !validSourceRef(value.intent) ||
+    !safeText(value.resourceKey, 1024) ||
+    !positiveInteger(value.inventoryRevision) ||
+    typeof value.complete !== "boolean" ||
+    !validInventorySourceReceipt(value.inventorySource) ||
+    !Array.isArray(value.children) ||
+    value.children.length > MAX_CHILDREN_PER_GROUP ||
+    !value.children.every(validCheckpointChild) ||
+    !Array.isArray(value.omissions) ||
+    value.omissions.length > MAX_CHILDREN_PER_GROUP ||
+    !value.omissions.every((omission) => safeText(omission, 512)) ||
+    !Array.isArray(value.reports) ||
+    value.reports.length > value.children.length ||
+    !value.reports.every(validCheckpointReport)
+  )
+    return false;
+  const knownTotal = value.knownTotal;
+  if (
+    knownTotal !== undefined &&
+    (typeof knownTotal !== "number" ||
+      !Number.isSafeInteger(knownTotal) ||
+      knownTotal < 0 ||
+      knownTotal > MAX_CHILDREN_PER_GROUP)
+  )
+    return false;
+  if (
+    value.complete &&
+    knownTotal !== undefined &&
+    knownTotal !== value.children.length
+  )
+    return false;
+  if (
+    !value.complete &&
+    knownTotal !== undefined &&
+    knownTotal < value.children.length
+  )
+    return false;
+  const children = new Map(value.children.map((child) => [child.id, child]));
+  if (children.size !== value.children.length) return false;
+  const keys = new Set(value.children.map((child) => child.key));
+  if (keys.size !== value.children.length) return false;
+  const reports = new Set(value.reports.map((report) => report.childId));
+  if (reports.size !== value.reports.length) return false;
+  return (
+    value.reports.every((report) => {
+      const child = children.get(report.childId);
+      return (
+        !!child &&
+        report.inventoryRevision === value.inventoryRevision &&
+        report.status === child.status
+      );
+    }) &&
+    value.children.every(
+      (child) => child.status === "pending" || reports.has(child.id),
+    )
+  );
+};
+
+const exactGroupKeys = (value: Record<string, unknown>) =>
+  hasExactKeys(value, [
+    "id",
+    "parentTaskId",
+    "parentRevision",
+    "parentSourceDigest",
+    "intent",
+    "resourceKey",
+    "inventoryRevision",
+    "complete",
+    "children",
+    "omissions",
+    "inventorySource",
+    "reports",
+  ]) ||
+  hasExactKeys(value, [
+    "id",
+    "parentTaskId",
+    "parentRevision",
+    "parentSourceDigest",
+    "intent",
+    "resourceKey",
+    "inventoryRevision",
+    "complete",
+    "knownTotal",
+    "children",
+    "omissions",
+    "inventorySource",
+    "reports",
+  ]);
+
+const validCoverageCheckpointShape = (
+  value: unknown,
+): value is CoverageCheckpoint => {
+  if (
+    !record(value) ||
+    !hasExactKeys(value, ["version", "nextGroupId", "nextChildId", "groups"]) ||
+    value.version !== CHECKPOINT_VERSION ||
+    !positiveInteger(value.nextGroupId) ||
+    !positiveInteger(value.nextChildId) ||
+    !Array.isArray(value.groups) ||
+    value.groups.length > MAX_GROUPS ||
+    !value.groups.every(validCheckpointGroup)
+  )
+    return false;
+  const groups = value.groups;
+  const groupIds = new Set(groups.map((group) => group.id));
+  if (groupIds.size !== groups.length) return false;
+  const parents = new Set(
+    groups.map((group) => `${group.parentTaskId}:${group.parentRevision}`),
+  );
+  if (parents.size !== groups.length) return false;
+  const children = groups.flatMap((group) => group.children);
+  if (
+    children.length > MAX_RETAINED_CHILDREN ||
+    new Set(children.map((child) => child.id)).size !== children.length
+  )
+    return false;
+  const highestGroup = Math.max(
+    0,
+    ...groups.map((group) => Number(group.id.match(groupId)?.[1] ?? 0)),
+  );
+  const highestChild = Math.max(
+    0,
+    ...children.map((child) => Number(child.id.match(childId)?.[1] ?? 0)),
+  );
+  return value.nextGroupId > highestGroup && value.nextChildId > highestChild;
+};
+
+export const coverageCheckpointBytes = (value: unknown) => {
+  if (!validCoverageCheckpointShape(value))
+    throw new Error("Invalid coverage checkpoint");
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+};
+
+export const coverageCheckpointIsValid = (
+  value: unknown,
+): value is CoverageCheckpoint => {
+  try {
+    return (
+      validCoverageCheckpointShape(value) &&
+      coverageCheckpointBytes(value) <= MAX_COVERAGE_CHECKPOINT_BYTES
+    );
+  } catch {
+    return false;
+  }
 };
 
 /**
@@ -335,7 +585,7 @@ export class CoverageStore {
             resourceKey: inventory.resourceKey,
             inventoryRevision: inventory.revision,
             complete: inventory.complete,
-            inventorySource: { ...inventory.source },
+            inventorySource: inventorySource(inventory.source),
             reportReceipts,
             ...(inventory.knownTotal === undefined
               ? { knownTotal: undefined }
@@ -432,6 +682,125 @@ export class CoverageStore {
     };
   }
 
+  checkpoint(): CoverageCheckpoint {
+    const checkpoint: CoverageCheckpoint = {
+      version: CHECKPOINT_VERSION,
+      nextGroupId: this.nextGroupId,
+      nextChildId: this.nextChildId,
+      groups: this.groups.map((group) => ({
+        id: group.id,
+        parentTaskId: group.parentTaskId,
+        parentRevision: group.parentRevision,
+        parentSourceDigest: group.parentSourceDigest,
+        intent: { ...group.intent },
+        resourceKey: group.resourceKey,
+        inventoryRevision: group.inventoryRevision,
+        complete: group.complete,
+        ...(group.knownTotal === undefined
+          ? {}
+          : { knownTotal: group.knownTotal }),
+        children: group.children.map((child) => ({ ...child })),
+        omissions: [...group.omissions],
+        inventorySource: { ...group.inventorySource },
+        reports: group.children.flatMap((child) => {
+          const receipt = group.reportReceipts.get(child.id);
+          return receipt
+            ? [
+                {
+                  childId: child.id,
+                  inventoryRevision: receipt.inventoryRevision,
+                  status: receipt.status,
+                  source: { ...receipt.source },
+                },
+              ]
+            : [];
+        }),
+      })),
+    };
+    if (!coverageCheckpointIsValid(checkpoint))
+      throw new Error("Coverage checkpoint exceeds v10 bounds");
+    return structuredClone(checkpoint);
+  }
+
+  static restore(
+    data: unknown,
+    options: CoverageRestoreOptions,
+  ): CoverageStore | undefined {
+    if (
+      !coverageCheckpointIsValid(data) ||
+      !record(options) ||
+      !hasExactKeys(options, ["parents", "sourceCurrent"]) ||
+      !Array.isArray(options.parents) ||
+      typeof options.sourceCurrent !== "function"
+    )
+      return;
+    const parents = new Map<string, HybridTask>();
+    for (const parent of options.parents) {
+      if (validParentRecord(parent)) parents.set(parent.id, parent);
+    }
+    const sourceCurrent = (reference: CoverageRestoreReference) => {
+      try {
+        return options.sourceCurrent(reference) === true;
+      } catch {
+        return false;
+      }
+    };
+    const store = new CoverageStore();
+    store.nextGroupId = data.nextGroupId;
+    store.nextChildId = data.nextChildId;
+    store.groups = data.groups.flatMap((group) => {
+      const parent = parents.get(group.parentTaskId);
+      if (
+        !parent ||
+        parent.revision !== group.parentRevision ||
+        sourceDigest(parent.source) !== group.parentSourceDigest ||
+        !sourceCurrent(group.intent) ||
+        !sourceCurrent(group.inventorySource)
+      )
+        return [];
+      const reports = new Map(
+        group.reports
+          .filter((report) => sourceCurrent(report.source))
+          .map((report) => [
+            report.childId,
+            {
+              inventoryRevision: report.inventoryRevision,
+              status: report.status,
+              source: { ...report.source },
+            } satisfies CoverageReportReceipt,
+          ]),
+      );
+      const children = group.children.map((child) => {
+        const receipt = reports.get(child.id);
+        return receipt
+          ? { ...child }
+          : { ...child, status: "pending" as const };
+      });
+      return [
+        {
+          id: group.id,
+          parentTaskId: group.parentTaskId,
+          parentRevision: group.parentRevision,
+          parentSourceDigest: group.parentSourceDigest,
+          intent: { ...group.intent },
+          resourceKey: group.resourceKey,
+          inventoryRevision: group.inventoryRevision,
+          complete: group.complete,
+          ...(group.knownTotal === undefined
+            ? {}
+            : { knownTotal: group.knownTotal }),
+          children,
+          omissions: [...group.omissions],
+          included: parent.included,
+          inventorySource: { ...group.inventorySource },
+          inventorySignature: checkpointInventorySignature(group),
+          reportReceipts: reports,
+        } satisfies CoverageGroup,
+      ];
+    });
+    return store;
+  }
+
   private admitGroup(
     parent: HybridTask,
     intent: SourceRef,
@@ -465,7 +834,7 @@ export class CoverageStore {
         children: this.newChildren(inventory.items),
         omissions: inventoryOmissions(inventory),
         included: parent.included,
-        inventorySource: { ...inventory.source },
+        inventorySource: inventorySource(inventory.source),
         inventorySignature: inventorySignature(inventory),
         reportReceipts: new Map(),
       },

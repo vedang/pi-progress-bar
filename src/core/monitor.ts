@@ -64,6 +64,7 @@ import {
   projectBoard,
   visibilityTaskSourceDigest,
 } from "./board-projection";
+import { type CoverageRestoreReference, CoverageStore } from "./coverage";
 import {
   type ExecutionVisibilitySnapshot,
   ExecutionVisibilityStore,
@@ -259,6 +260,10 @@ interface ActiveWork {
 interface Telemetry {
   sourceId: string;
   usage: { jev: ProviderUsage; extraction: ProviderUsage };
+  coverage: {
+    dispatches: number;
+    usage: { jev: ProviderUsage; extraction: ProviderUsage };
+  };
   lastJevCallAt?: number;
   lastExtractionCallAt?: number;
 }
@@ -497,6 +502,24 @@ const assistantVisibleText = (message: unknown) => {
   return text.join("");
 };
 
+const MAX_COVERAGE_TOOL_RESULT_BYTES = 32 * 1024;
+
+/** Matches the bounded text-block join used by passive tool adapters. */
+const coverageToolResultText = (message: Record<string, unknown>) => {
+  if (!Array.isArray(message.content)) return;
+  const text = message.content
+    .flatMap((part) => {
+      const value = record(part);
+      return value?.type === "text" && typeof value.text === "string"
+        ? [value.text]
+        : [];
+    })
+    .join("\n");
+  return Buffer.byteLength(text, "utf8") <= MAX_COVERAGE_TOOL_RESULT_BYTES
+    ? text
+    : undefined;
+};
+
 /**
  * Atomic host runtime for hybrid transactions. Display reads receive copied
  * projections only; focus is never evidence or tool-ownership authority.
@@ -535,6 +558,13 @@ export class Monitor {
   private correctionEpoch = 0;
   readonly evidence = new EvidenceStore();
   readonly usage = {
+    jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
+    extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
+  };
+  /** Durable coverage is inert until later optional intent/adapter wiring. */
+  private coverage = new CoverageStore();
+  private coverageDispatches = 0;
+  private readonly coverageUsage = {
     jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
     extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
   };
@@ -1062,6 +1092,13 @@ export class Monitor {
         jev: copyUsage(this.usage.jev),
         extraction: copyUsage(this.usage.extraction),
       },
+      coverage: {
+        dispatches: this.coverageDispatches,
+        usage: {
+          jev: copyUsage(this.coverageUsage.jev),
+          extraction: copyUsage(this.coverageUsage.extraction),
+        },
+      },
       ...(this.lastJevCallAt ? { lastJevCallAt: this.lastJevCallAt } : {}),
       ...(this.lastExtractionCallAt
         ? { lastExtractionCallAt: this.lastExtractionCallAt }
@@ -1143,6 +1180,34 @@ export class Monitor {
     this.usage.extraction.outputTokens = Math.max(
       this.usage.extraction.outputTokens,
       work.telemetry.usage.extraction.outputTokens,
+    );
+    this.coverageDispatches = Math.max(
+      this.coverageDispatches,
+      work.telemetry.coverage.dispatches,
+    );
+    this.coverageUsage.jev.calls = Math.max(
+      this.coverageUsage.jev.calls,
+      work.telemetry.coverage.usage.jev.calls,
+    );
+    this.coverageUsage.jev.inputTokens = Math.max(
+      this.coverageUsage.jev.inputTokens,
+      work.telemetry.coverage.usage.jev.inputTokens,
+    );
+    this.coverageUsage.jev.outputTokens = Math.max(
+      this.coverageUsage.jev.outputTokens,
+      work.telemetry.coverage.usage.jev.outputTokens,
+    );
+    this.coverageUsage.extraction.calls = Math.max(
+      this.coverageUsage.extraction.calls,
+      work.telemetry.coverage.usage.extraction.calls,
+    );
+    this.coverageUsage.extraction.inputTokens = Math.max(
+      this.coverageUsage.extraction.inputTokens,
+      work.telemetry.coverage.usage.extraction.inputTokens,
+    );
+    this.coverageUsage.extraction.outputTokens = Math.max(
+      this.coverageUsage.extraction.outputTokens,
+      work.telemetry.coverage.usage.extraction.outputTokens,
     );
     this.lastJevCallAt =
       Math.max(this.lastJevCallAt ?? 0, work.telemetry.lastJevCallAt ?? 0) ||
@@ -1714,6 +1779,7 @@ export class Monitor {
   private resetState(sourceId: string, resetTelemetry = true) {
     this.invalidateCorrections();
     this.state = emptyState(sourceId);
+    this.coverage = new CoverageStore();
     this.card = undefined;
     this.healthCards.clear();
     this.taskDetails.clear();
@@ -1745,6 +1811,13 @@ export class Monitor {
     this.usage.extraction.calls = 0;
     this.usage.extraction.inputTokens = 0;
     this.usage.extraction.outputTokens = 0;
+    this.coverageDispatches = 0;
+    this.coverageUsage.jev = { calls: 0, inputTokens: 0, outputTokens: 0 };
+    this.coverageUsage.extraction = {
+      calls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    };
   }
 
   /** Reject only persisted shape; canonical amendments remain normal restore reconciliation. */
@@ -1811,6 +1884,14 @@ export class Monitor {
       ...(this.options.richDetailsEnabled && taskDetails.size
         ? { taskDetails: [...taskDetails.values()].map(copyDetailRecord) }
         : {}),
+      coverage: {
+        state: this.coverage.checkpoint(),
+        dispatches: this.coverageDispatches,
+        usage: {
+          jev: validUsage(this.coverageUsage.jev),
+          extraction: validUsage(this.coverageUsage.extraction),
+        },
+      },
     };
   }
 
@@ -1894,6 +1975,26 @@ export class Monitor {
     );
     this.parkedDetails.clear();
     this.rebuildDetailValues(pass);
+    const savedCoverage = metadata?.coverage;
+    const restoredCoverage = savedCoverage
+      ? CoverageStore.restore(savedCoverage.state, {
+          parents: this.state.tasks,
+          sourceCurrent: (reference) =>
+            this.coverageSourceCurrent(reference, pass),
+        })
+      : undefined;
+    this.coverage = restoredCoverage ?? new CoverageStore();
+    this.coverageDispatches = savedCoverage?.dispatches ?? 0;
+    this.coverageUsage.jev = validUsage(
+      savedCoverage?.usage.jev ?? { calls: 0, inputTokens: 0, outputTokens: 0 },
+    );
+    this.coverageUsage.extraction = validUsage(
+      savedCoverage?.usage.extraction ?? {
+        calls: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+      },
+    );
     this.lastDisplayedTaskId = metadata?.idleDoneTaskId;
     this.idleDoneInvalidated = !this.lastDisplayedTaskId;
     this.syncPresentationCard();
@@ -1906,6 +2007,44 @@ export class Monitor {
     this.usage.extraction.calls = usage?.extraction.calls ?? 0;
     this.usage.extraction.inputTokens = usage?.extraction.inputTokens ?? 0;
     this.usage.extraction.outputTokens = usage?.extraction.outputTokens ?? 0;
+  }
+
+  private coverageSourceCurrent(
+    reference: CoverageRestoreReference,
+    pass?: CanonicalPass,
+  ) {
+    if (!pass) return false;
+    if ("role" in reference) {
+      const observation = pass.observation(reference.entryId);
+      return !!(
+        observation &&
+        observation.hash === reference.messageHash &&
+        observation.role === reference.role &&
+        reference.start >= 0 &&
+        reference.end <= observation.text.length &&
+        sha256(observation.text.slice(reference.start, reference.end)) ===
+          reference.quoteHash
+      );
+    }
+    const entry = record(pass.entry(reference.entryId));
+    const message =
+      entry && entry.type === "message" ? record(entry.message) : undefined;
+    if (!message) return false;
+    if (
+      message.role !== "toolResult" ||
+      typeof message.toolName !== "string" ||
+      !message.toolName ||
+      typeof message.toolCallId !== "string" ||
+      message.isError === true ||
+      message.excludeFromContext === true
+    )
+      return false;
+    const text = coverageToolResultText(message);
+    return !!(
+      text !== undefined &&
+      sha256(text) === reference.messageHash &&
+      sha256(message.toolCallId) === reference.callIdDigest
+    );
   }
 
   private healthCardMatchesCanonical(card: HealthCard, pass?: CanonicalPass) {

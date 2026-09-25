@@ -3,6 +3,7 @@ import type { HybridTask, SourceRef } from "./hybrid-state";
 
 const MAX_CHILDREN_PER_GROUP = 64;
 const MAX_RETAINED_CHILDREN = 200;
+const MAX_GROUPS = 200;
 const MAX_LABEL_SCALARS = 240;
 const MAX_INVENTORY_BYTES = 32 * 1024;
 const digest = /^[a-f0-9]{64}$/;
@@ -87,6 +88,10 @@ interface CoverageGroup extends CoverageGroupSnapshot {
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
 
+const hasExactKeys = (value: Record<string, unknown>, keys: string[]) =>
+  Object.keys(value).length === keys.length &&
+  keys.every((key) => Object.hasOwn(value, key));
+
 const safeText = (
   value: unknown,
   maxScalars = MAX_LABEL_SCALARS,
@@ -100,7 +105,18 @@ const validHash = (value: unknown): value is string =>
   typeof value === "string" && digest.test(value);
 
 const validSourceRef = (value: unknown): value is SourceRef => {
-  if (!record(value)) return false;
+  if (
+    !record(value) ||
+    !hasExactKeys(value, [
+      "entryId",
+      "messageHash",
+      "role",
+      "start",
+      "end",
+      "quoteHash",
+    ])
+  )
+    return false;
   return (
     safeText(value.entryId, 512) &&
     validHash(value.messageHash) &&
@@ -127,7 +143,12 @@ const validParent = (value: unknown): value is HybridTask => {
 };
 
 const validInventory = (value: unknown): value is CoverageInventory => {
-  if (!record(value) || !record(value.source) || !Array.isArray(value.items))
+  if (
+    !record(value) ||
+    !record(value.source) ||
+    !hasExactKeys(value.source, ["entryId", "messageHash", "callId"]) ||
+    !Array.isArray(value.items)
+  )
     return false;
   if (
     !safeText(value.resourceKey, 1024) ||
@@ -237,12 +258,24 @@ export class CoverageStore {
       return { accepted: false, reason: "capacity" };
 
     const { parent, intent, inventory } = input;
-    const group = this.groups.find(
-      (candidate) =>
-        candidate.parentTaskId === parent.id &&
-        candidate.parentRevision === parent.revision,
+    const parentGroups = this.groups.filter(
+      (candidate) => candidate.parentTaskId === parent.id,
     );
-    if (!group) return this.admitGroup(parent, intent, inventory);
+    if (
+      parentGroups.some(
+        (candidate) => candidate.parentRevision > parent.revision,
+      )
+    )
+      return { accepted: false, reason: "stale" };
+    const group = parentGroups.find(
+      (candidate) => candidate.parentRevision === parent.revision,
+    );
+    if (!group) {
+      const superseded = parentGroups.filter(
+        (candidate) => candidate.parentRevision < parent.revision,
+      );
+      return this.admitGroup(parent, intent, inventory, superseded);
+    }
     if (group.resourceKey !== inventory.resourceKey && !inventory.replacement)
       return { accepted: false, reason: "invalid" };
     if (inventory.revision < group.inventoryRevision)
@@ -403,15 +436,20 @@ export class CoverageStore {
     parent: HybridTask,
     intent: SourceRef,
     inventory: CoverageInventory,
+    superseded: readonly CoverageGroup[] = [],
   ): CoverageAdmissionResult {
-    if (
-      this.retainedChildren() + inventory.items.length >
-      MAX_RETAINED_CHILDREN
-    )
+    const supersededSet = new Set(superseded);
+    const retainedChildren =
+      this.retainedChildren() -
+      superseded.reduce((total, group) => total + group.children.length, 0);
+    if (retainedChildren + inventory.items.length > MAX_RETAINED_CHILDREN)
       return { accepted: false, reason: "capacity" };
+    if (this.groups.length - superseded.length >= MAX_GROUPS)
+      return { accepted: false, reason: "capacity" };
+
     const id = `coverage-group:${this.nextGroupId++}`;
     this.groups = [
-      ...this.groups,
+      ...this.groups.filter((group) => !supersededSet.has(group)),
       {
         id,
         parentTaskId: parent.id,

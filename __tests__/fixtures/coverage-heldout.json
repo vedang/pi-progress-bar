@@ -1,0 +1,107 @@
+{
+  "provenance": "Synthetic corpus frozen before coverage implementation, 2026-09-25. Not verbatim private transcript. Do not use held-out failures for tuning without new held-out gate.",
+  "thresholds": { "confidence": 0.5, "probability": 0.8 },
+  "cases": [
+    {
+      "id": "h01",
+      "text": "Read each worksheet in docs/plan.xlsx and summarize the findings.",
+      "kind": "intent",
+      "expected": "accepted"
+    },
+    {
+      "id": "h02",
+      "text": "If you want, I could review each worksheet later.",
+      "kind": "intent",
+      "expected": "abstain"
+    },
+    {
+      "id": "h03",
+      "text": "The client should review all worksheets.",
+      "kind": "intent",
+      "expected": "abstain"
+    },
+    {
+      "id": "h04",
+      "text": "Example request: read all worksheets. Do not do this now.",
+      "kind": "intent",
+      "expected": "abstain"
+    },
+    {
+      "id": "h05",
+      "text": "I finished reading every one of the 22 worksheets in docs/plan.xlsx, including comments.",
+      "kind": "report",
+      "expected": "reviewed-all"
+    },
+    {
+      "id": "h06",
+      "text": "The script exported all22 worksheets; I have not reviewed them yet.",
+      "kind": "report",
+      "expected": "no-advance"
+    },
+    {
+      "id": "h07",
+      "text": "The sample final answer says: 'I read all22 worksheets'. This is only a template.",
+      "kind": "report",
+      "expected": "no-advance"
+    },
+    {
+      "id": "h08",
+      "text": "I finished reviewing Delivery Plan and Dashboard; Client View is next.",
+      "kind": "report",
+      "expected": "reviewed-named",
+      "items": ["Delivery Plan", "Dashboard"]
+    },
+    {
+      "id": "h09",
+      "text": "Correction: my earlier claim was wrong; Dashboard remains unreviewed.",
+      "kind": "report",
+      "expected": "retracted",
+      "items": ["Dashboard"]
+    },
+    {
+      "id": "h10",
+      "text": "I cannot review Setup Calendar until its missing rows are supplied.",
+      "kind": "report",
+      "expected": "blocked",
+      "items": ["Setup Calendar"]
+    },
+    {
+      "id": "h11",
+      "text": "The second workbook's Dashboard is reviewed, not the first workbook's Dashboard.",
+      "kind": "report",
+      "expected": "no-advance-first-resource"
+    },
+    {
+      "id": "h12",
+      "text": "All worksheets will be reviewed before I answer.",
+      "kind": "report",
+      "expected": "no-advance"
+    },
+    {
+      "id": "h13",
+      "text": "README lists22worksheets. Only Overview was reviewed so far.",
+      "kind": "report",
+      "expected": "reviewed-named",
+      "items": ["Overview"]
+    },
+    {
+      "id": "h14",
+      "text": "Review all chapters in the supplied manual.",
+      "kind": "intent",
+      "expected": "accepted"
+    },
+    {
+      "id": "h15",
+      "text": "Chapter One and Chapter Two have been reviewed; Chapter Three is pending.",
+      "kind": "report",
+      "expected": "reviewed-named",
+      "items": ["Chapter One", "Chapter Two"]
+    },
+    {
+      "id": "h16",
+      "text": "Done with that one.",
+      "kind": "report",
+      "expected": "abstain-with-ambiguous-items"
+    }
+  ]
+}

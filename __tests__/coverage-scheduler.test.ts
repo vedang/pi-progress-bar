@@ -326,77 +326,91 @@ it("accepts canonical user review reports through the same isolated pipeline", a
       ),
   ).toBe(true);
 });
-it("existing coverage on one parent does not block a second workbook intent", async () => {
-  const h = await fixture();
-  const second = "Review every tab in docs/second.xlsx and summarize it.";
-  h.extract.mockImplementation(async (input, _signal, onDispatch) => {
-    onDispatch?.(Date.now());
-    return {
-      text: JSON.stringify(
-        input.instructions.includes("parentIndices")
-          ? {
-              intents: [
-                {
-                  parentIndices: [1],
-                  quote: second,
-                  resource: "docs/second.xlsx",
-                  kind: "unconditional-enumerable",
-                },
-              ],
-            }
-          : {
-              add: [
-                {
-                  label: "Second workbook summary",
-                  kind: "response",
-                  basis: "explicit",
-                  quote: second,
-                },
-              ],
-              revise: [],
-              archive: [],
-              restore: [],
-              unresolved: false,
+it.each([false, true])(
+  "existing coverage does not block a second workbook intent (in-flight=%s)",
+  async (inFlight) => {
+    const h = await fixture();
+    if (inFlight) {
+      h.setTransport((request) =>
+        (request.state as { report: { id: string } }).report.id === "older"
+          ? new Promise<Response>(() => {})
+          : Promise.resolve(answer(request, "unchanged")),
+      );
+      h.append("older", reportText);
+      await h.settle("older");
+      await vi.advanceTimersByTimeAsync(100);
+      expect(h.calls).toHaveLength(1);
+    }
+    const second = "Review every tab in docs/second.xlsx and summarize it.";
+    h.extract.mockImplementation(async (input, _signal, onDispatch) => {
+      onDispatch?.(Date.now());
+      return {
+        text: JSON.stringify(
+          input.instructions.includes("parentIndices")
+            ? {
+                intents: [
+                  {
+                    parentIndices: [1],
+                    quote: second,
+                    resource: "docs/second.xlsx",
+                    kind: "unconditional-enumerable",
+                  },
+                ],
+              }
+            : {
+                add: [
+                  {
+                    label: "Second workbook summary",
+                    kind: "response",
+                    basis: "explicit",
+                    quote: second,
+                  },
+                ],
+                revise: [],
+                archive: [],
+                restore: [],
+                unresolved: false,
+              },
+        ),
+        provider: "offline",
+        model: "fixture",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+    });
+    h.append("extra", second, "user");
+    await h.settle("extra");
+    await vi.advanceTimersByTimeAsync(100);
+    h.monitor.observeCoverageToolStart("second", "bash", {
+      command: "unzip -p docs/second.xlsx xl/workbook.xml",
+    });
+    h.monitor.observeCoverageToolEnd("second", "bash");
+    h.replace([
+      ...h.reader(),
+      {
+        type: "message",
+        id: "second-result",
+        message: {
+          role: "toolResult",
+          toolCallId: "second",
+          toolName: "bash",
+          isError: false,
+          content: [
+            {
+              type: "text",
+              text: '<workbook><sheets><sheet name="Overview"/></sheets></workbook>',
             },
-      ),
-      provider: "offline",
-      model: "fixture",
-      usage: { inputTokens: 1, outputTokens: 1 },
-    };
-  });
-  h.append("extra", second, "user");
-  await h.settle("extra");
-  await vi.advanceTimersByTimeAsync(100);
-  h.monitor.observeCoverageToolStart("second", "bash", {
-    command: "unzip -p docs/second.xlsx xl/workbook.xml",
-  });
-  h.monitor.observeCoverageToolEnd("second", "bash");
-  h.replace([
-    ...h.reader(),
-    {
-      type: "message",
-      id: "second-result",
-      message: {
-        role: "toolResult",
-        toolCallId: "second",
-        toolName: "bash",
-        isError: false,
-        content: [
-          {
-            type: "text",
-            text: '<workbook><sheets><sheet name="Overview"/></sheets></workbook>',
-          },
-        ],
+          ],
+        },
       },
-    },
-  ]);
-  h.monitor.confirmCoverageBranch(h.reader());
-  await vi.advanceTimersByTimeAsync(100);
-  expect(h.monitor.state.tasks).toHaveLength(2);
-  expect(
-    h.monitor.coverageSnapshot().groups.map((group) => group.parentTaskId),
-  ).toEqual(["task:1", "task:2"]);
-});
+    ]);
+    h.monitor.confirmCoverageBranch(h.reader());
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.monitor.state.tasks).toHaveLength(2);
+    expect(
+      h.monitor.coverageSnapshot().groups.map((group) => group.parentTaskId),
+    ).toEqual(["task:1", "task:2"]);
+  },
+);
 it("a newer same-parent report fences late old results and exposes coalescing omissions", async () => {
   const h = await fixture();
   let release: (() => void) | undefined;

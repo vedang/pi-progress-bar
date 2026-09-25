@@ -53,6 +53,62 @@ function fixture() {
   }
   return { adapter, entries, start, run, map };
 }
+it("accepts normal OOXML workbook metadata around the direct sheets element", () => {
+  const f = fixture();
+  const body =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><fileVersion appName="xl"/><workbookPr/><bookViews><workbookView activeTab="0"/></bookViews><sheets><sheet name="One" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="example">Sheet1!$A$1</definedName></definedNames><calcPr calcId="191029"/></workbook>';
+  const projected = f.run(
+    "manifest",
+    "bash",
+    { command: "unzip -p docs/one.xlsx xl/workbook.xml" },
+    body,
+  );
+  expect(projected.inventories[0]?.items.map((item) => item.label)).toEqual([
+    "One",
+  ]);
+  expect(JSON.stringify(projected)).not.toContain("Sheet1!$A$1");
+});
+it("does not impose an undocumented64-call lifetime cap on local reads", () => {
+  const f = fixture();
+  f.map();
+  for (let i = 0; i < 80; i++) {
+    expect(
+      f.run(`cat-${i}`, "bash", { command: "cat extracted/one.txt" }, "cell")
+        .access,
+    ).toHaveLength(1);
+  }
+});
+it("rejects duplicate canonical entry IDs even when call IDs differ", () => {
+  const f = fixture();
+  f.entries.push({ ...result("unrelated", "ignored"), id: "result-manifest" });
+  expect(
+    f.run(
+      "manifest",
+      "bash",
+      { command: "unzip -p docs/one.xlsx xl/workbook.xml" },
+      xml,
+    ).inventories,
+  ).toEqual([]);
+});
+it("stops payload scanning at the byte bound rather than reading remaining parts", () => {
+  const f = fixture();
+  f.start("manifest", "bash", {
+    command: "unzip -p docs/one.xlsx xl/workbook.xml",
+  });
+  f.adapter.end({ toolCallId: "manifest", toolName: "bash" }, 1);
+  const oversized = result("manifest", "x".repeat(32769));
+  let laterReads = 0;
+  const later = {
+    type: "text",
+    get text() {
+      laterReads++;
+      return "never needed";
+    },
+  };
+  oversized.message.content.push(later);
+  expect(f.adapter.confirm([oversized], 1).inventories).toEqual([]);
+  expect(laterReads).toBe(0);
+});
 it("recognizes a single-file literal sed read", () => {
   const f = fixture();
   f.map();

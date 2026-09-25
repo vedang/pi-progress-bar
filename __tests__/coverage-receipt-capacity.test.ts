@@ -16,6 +16,19 @@ it("fits all21 assessment receipts for20 legal parents and40children", async () 
     id: `task:${i + 1}`,
   }));
   state.nextTaskId = 21;
+  state.events = state.tasks.map((task, index) => ({
+    id: `event:${index + 1}`,
+    kind: "create",
+    taskId: task.id,
+    revision: task.revision,
+    source: {
+      entryId: task.source.entryId,
+      messageHash: task.source.messageHash,
+      role: task.source.role,
+    },
+  }));
+  // Validate the parent fixture independently before exercising coverage limits.
+  expect(() => encodeCheckpoint(state)).not.toThrow();
   const store = new CoverageStore();
   for (const [i, parent] of state.tasks.entries()) {
     expect(

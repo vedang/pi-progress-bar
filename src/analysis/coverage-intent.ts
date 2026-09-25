@@ -12,6 +12,7 @@ const MAX_INPUT_BYTES = 24 * 1024;
 const MAX_RESULT_BYTES = 32 * 1024;
 const MAX_INCLUDED_PARENTS = 20;
 const MAX_ACCEPTED_RECEIPTS = 200;
+const MAX_IN_FLIGHT_REQUESTS = 20;
 const MAX_INTENTS_PER_RESULT = 20;
 const digest = /^[a-f0-9]{64}$/;
 
@@ -90,6 +91,12 @@ const bytes = (value: unknown) => {
   } catch {
     return;
   }
+};
+
+const deepFreeze = <Value>(value: Value): Value => {
+  if (!value || typeof value !== "object") return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
 };
 
 const copyObservation = (value: Observation): Observation => ({ ...value });
@@ -272,7 +279,12 @@ export class CoverageIntentRequests {
       const identity = identityFor(state.sourceId, latest, parents);
       if (this.flights.has(identity) || this.acceptedIdentities.has(identity))
         return;
-      if (this.receipts.size >= MAX_ACCEPTED_RECEIPTS) return;
+      if (
+        this.flights.size >= MAX_IN_FLIGHT_REQUESTS ||
+        this.receipts.size >= MAX_ACCEPTED_RECEIPTS ||
+        this.acceptedIdentities.size >= MAX_ACCEPTED_RECEIPTS
+      )
+        return;
       const input: ExtractionInput = {
         instructions: coverageIntentInstructions,
         latest,
@@ -281,7 +293,10 @@ export class CoverageIntentRequests {
         omittedArchivedTasks: state.tasks.length - supplied.parents.length,
       };
       if ((bytes(input) ?? Infinity) > MAX_INPUT_BYTES) return;
-      const request = { identity, input: structuredClone(input) };
+      const request = deepFreeze({
+        identity,
+        input: structuredClone(input),
+      });
       const flight: Flight = {
         request,
         epoch,
@@ -403,7 +418,7 @@ export class CoverageIntentRequests {
         );
         this.receipts.set(key, { identity: request.identity, ...intent });
       }
-      if (intents.length) this.acceptedIdentities.add(request.identity);
+      this.acceptedIdentities.add(request.identity);
       return {
         status: "accepted",
         intents: intents.map((intent) => ({

@@ -461,6 +461,71 @@ it("parks rejected pre-network admission without a synchronous redispatch loop",
   expect(h.calls).toHaveLength(0);
   expect(attempts).toBe(1);
 });
+it("restores accepted intent before inventory arrives without re-extraction", async () => {
+  const h = await fixture();
+  const saved = h.save.mock.calls
+    .map(([value]) => value as ReturnType<typeof encodeCheckpoint>)
+    .filter(
+      (checkpoint) =>
+        checkpoint.monitor?.coverage?.state.groups.length === 0 &&
+        (checkpoint.monitor.coverage.usage.extraction.outputTokens ?? 0) > 0,
+    )
+    .at(-1);
+  if (!saved) throw new Error("Missing accepted pre-inventory checkpoint");
+  h.replace([branchEntry("goal", text)]);
+  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  const extracts = h.extract.mock.calls.length;
+  h.monitor.observeCoverageToolStart("later-manifest", "bash", {
+    command: "unzip -p docs/plan.xlsx xl/workbook.xml",
+  });
+  h.monitor.observeCoverageToolEnd("later-manifest", "bash");
+  h.replace([
+    ...h.reader(),
+    {
+      type: "message",
+      id: "later-result",
+      message: {
+        role: "toolResult",
+        toolCallId: "later-manifest",
+        toolName: "bash",
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: `<workbook><sheets>${coverageNames.map((name) => `<sheet name="${name}"/>`).join("")}</sheets></workbook>`,
+          },
+        ],
+      },
+    },
+  ]);
+  h.monitor.confirmCoverageBranch(h.reader());
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.coverageSnapshot().groups[0]?.children).toHaveLength(22);
+  expect(h.extract.mock.calls.length).toBe(extracts);
+});
+it("parks a post-response receipt write failure instead of immediately rebilling", async () => {
+  const h = await fixture();
+  let rejected = 0;
+  h.save.mockImplementation((value) => {
+    if (
+      (value as ReturnType<typeof encodeCheckpoint>).monitor?.coverage
+        ?.reportReceipts?.length
+    ) {
+      rejected++;
+      if (rejected >= 2) h.monitor.stop(); // Bound the bad retry loop.
+      throw new Error("receipt storage denied");
+    }
+  });
+  h.append("report", reportText);
+  await h.settle("report");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(1);
+  expect(
+    h.monitor
+      .coverageSnapshot()
+      .groups[0].children.every((child) => child.status === "pending"),
+  ).toBe(true);
+});
 it("optional coverage flight never blocks advisory readiness and OFF fences its late result", async () => {
   const h = await fixture();
   let release: (() => void) | undefined;

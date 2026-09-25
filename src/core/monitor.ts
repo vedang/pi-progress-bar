@@ -374,6 +374,9 @@ const diagnosticLabels: Record<string, string> = {
 
 class RetryableJevError extends RetryableProviderError {}
 
+/** Optional transport must stop before selected-model network dispatch. */
+class CoverageDispatchRejected extends Error {}
+
 const copyUsage = (usage: ProviderUsage): ProviderUsage => ({ ...usage });
 const sha256 = (value: string) =>
   createHash("sha256").update(value).digest("hex");
@@ -2362,7 +2365,7 @@ export class Monitor {
         this.coverageUsage.extraction.outputTokens,
         result.usage.outputTokens,
       );
-      this.persistCoverageCandidate(this.coverage);
+      if (!this.persistCoverageCandidate(this.coverage)) return;
       const completed = this.coverageIntents.finish(
         request,
         result.text,
@@ -2376,26 +2379,36 @@ export class Monitor {
       this.publish();
     } catch {
       // Optional coverage has no retry and never changes mandatory availability.
+      controller.abort();
     } finally {
+      // finish removes successful reservations. Every exceptional/preflight path
+      // must release its exact reservation so the bounded request pool recovers.
+      this.coverageIntents.cancel(request);
       if (this.coverageIntentController === controller)
         this.coverageIntentController = undefined;
     }
   }
 
+  /** Durable optional dispatch receipt is required before transport may continue. */
   private recordCoverageExtractionDispatch(epoch: number) {
     if (
       !this.enabled ||
       epoch !== this.coverageEpoch ||
       this.coverageDispatches >= 1024
     )
-      return;
-    this.coverageDispatches++;
-    this.coverageUsage.extraction.calls = saturatingAdd(
-      this.coverageUsage.extraction.calls,
-      1,
-    );
-    // Dispatch accounting is durable but cannot make a semantic transition fail.
-    this.persistCoverageCandidate(this.coverage);
+      throw new CoverageDispatchRejected();
+    const dispatches = this.coverageDispatches;
+    const calls = this.coverageUsage.extraction.calls;
+    try {
+      this.coverageDispatches = saturatingAdd(dispatches, 1);
+      this.coverageUsage.extraction.calls = saturatingAdd(calls, 1);
+      if (this.persistCoverageCandidate(this.coverage)) return;
+    } catch {
+      // Revert local accounting when no durable pre-network receipt exists.
+    }
+    this.coverageDispatches = dispatches;
+    this.coverageUsage.extraction.calls = calls;
+    throw new CoverageDispatchRejected();
   }
 
   private resetCoverageRuntime() {

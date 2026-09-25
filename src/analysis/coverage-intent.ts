@@ -311,6 +311,14 @@ export class CoverageIntentRequests {
     }
   }
 
+  /** Drop one exact in-flight reservation after local transport/preflight failure. */
+  cancel(request: CoverageIntentRequest): boolean {
+    const flight = this.flights.get(request.identity);
+    if (!flight || flight.request !== request) return false;
+    this.flights.delete(request.identity);
+    return true;
+  }
+
   finish(
     request: CoverageIntentRequest,
     rawSelectedModelOutput: string,

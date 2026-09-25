@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { completionRequest } from "../analysis/completion";
-import type { CoverageIntentJournal } from "../analysis/coverage-intent";
+import type {
+  CoverageIntentDispatchReceipt,
+  CoverageIntentJob,
+  CoverageIntentJournal,
+} from "../analysis/coverage-intent";
 import { extractionInput } from "../analysis/extractor";
 import { gateRequest } from "../analysis/gate";
 import type {
@@ -146,7 +150,11 @@ interface CoverageCheckpointMetadata {
     jev: { calls: number; inputTokens: number; outputTokens: number };
     extraction: { calls: number; inputTokens: number; outputTokens: number };
   };
+  /** Durable optional omissions; never infer semantic scope from them. */
+  omissions?: number;
   intents?: CoverageIntentJournal;
+  intentJobs?: CoverageIntentJob[];
+  intentReceipts?: CoverageIntentDispatchReceipt[];
   jobs?: CoverageReportJobCheckpoint[];
   reportReceipts?: CoverageReportDispatchCheckpoint[];
 }
@@ -891,6 +899,10 @@ const coverageChoices = new Set([
   "unchanged",
   "uncertain",
 ]);
+const MAX_COVERAGE_PENDING_JOBS = 20;
+/** 20 groups, 200 children, 20 questions per request: max 29 chunks. */
+const MAX_COVERAGE_REPORT_RECEIPTS = 29;
+const MAX_COVERAGE_INTENT_RECEIPTS = 40;
 
 function validCoverageIntentJournal(
   value: unknown,
@@ -950,6 +962,69 @@ function validCoverageIntentJournal(
     negative.add(receipt.identity);
   }
   return ![...acceptedIdentities].some((identity) => negative.has(identity));
+}
+
+function validCoverageIntentJob(value: unknown): value is CoverageIntentJob {
+  if (
+    !record(value) ||
+    !exactKeys(
+      value,
+      ["version", "identity", "targetKey", "source", "parents", "state"],
+      ["parkedUntil"],
+    ) ||
+    value.version !== 1 ||
+    !hashIsValid(value.identity) ||
+    !hashIsValid(value.targetKey) ||
+    !validObservationRef(value.source) ||
+    !Array.isArray(value.parents) ||
+    value.parents.length < 1 ||
+    value.parents.length > 20 ||
+    !value.parents.every(
+      (parent) =>
+        record(parent) &&
+        exactKeys(parent, ["id", "revision", "sourceDigest"]) &&
+        taskIdIsValid(parent.id) &&
+        positiveInteger(parent.revision) &&
+        hashIsValid(parent.sourceDigest),
+    ) ||
+    new Set(value.parents.map((parent) => parent.id)).size !==
+      value.parents.length ||
+    (value.state !== "ready" &&
+      value.state !== "parked" &&
+      value.state !== "permanent") ||
+    (Object.hasOwn(value, "parkedUntil") &&
+      (!nonNegativeInteger(value.parkedUntil) || value.state !== "parked"))
+  )
+    return false;
+  return value.state === "parked"
+    ? Object.hasOwn(value, "parkedUntil")
+    : !Object.hasOwn(value, "parkedUntil");
+}
+
+function validCoverageIntentReceipt(
+  value: unknown,
+): value is CoverageIntentDispatchReceipt {
+  return !!(
+    record(value) &&
+    exactKeys(value, [
+      "identity",
+      "requestHash",
+      "dispatch",
+      "at",
+      "usage",
+      "outcome",
+    ]) &&
+    hashIsValid(value.identity) &&
+    hashIsValid(value.requestHash) &&
+    positiveInteger(value.dispatch) &&
+    value.dispatch <= 1024 &&
+    nonNegativeInteger(value.at) &&
+    record(value.usage) &&
+    exactKeys(value.usage, ["inputTokens", "outputTokens"]) &&
+    nonNegativeInteger(value.usage.inputTokens) &&
+    nonNegativeInteger(value.usage.outputTokens) &&
+    (value.outcome === "dispatched" || value.outcome === "accepted")
+  );
 }
 
 function validCoverageReportJob(
@@ -1058,7 +1133,14 @@ function validCoverageMetadata(
     !exactKeys(
       value,
       ["state", "dispatches", "usage"],
-      ["intents", "jobs", "reportReceipts"],
+      [
+        "omissions",
+        "intents",
+        "intentJobs",
+        "intentReceipts",
+        "jobs",
+        "reportReceipts",
+      ],
     ) ||
     !coverageCheckpointIsValid(value.state) ||
     byteLength(value) > MAX_COVERAGE_CHECKPOINT_BYTES ||
@@ -1068,21 +1150,41 @@ function validCoverageMetadata(
   )
     return false;
   const intents = value.intents;
+  const intentJobs = value.intentJobs ?? [];
+  const intentReceipts = value.intentReceipts ?? [];
   const jobs = value.jobs ?? [];
   const receipts = value.reportReceipts ?? [];
   if (
+    (value.omissions !== undefined && !nonNegativeInteger(value.omissions)) ||
     (intents !== undefined && !validCoverageIntentJournal(intents)) ||
+    !Array.isArray(intentJobs) ||
+    intentJobs.length > MAX_COVERAGE_PENDING_JOBS ||
+    !intentJobs.every(validCoverageIntentJob) ||
+    new Set(intentJobs.map((job) => job.targetKey)).size !==
+      intentJobs.length ||
+    !Array.isArray(intentReceipts) ||
+    intentReceipts.length > MAX_COVERAGE_INTENT_RECEIPTS ||
+    !intentReceipts.every(validCoverageIntentReceipt) ||
+    new Set(intentReceipts.map((receipt) => receipt.identity)).size !==
+      intentReceipts.length ||
+    intentReceipts.some(
+      (receipt) => receipt.dispatch > (value.dispatches as number),
+    ) ||
     !Array.isArray(jobs) ||
-    jobs.length > 20 ||
+    jobs.length > MAX_COVERAGE_PENDING_JOBS ||
     !jobs.every(validCoverageReportJob) ||
     new Set(jobs.map((job) => job.identity)).size !== jobs.length ||
     new Set(jobs.map((job) => job.parentTaskId)).size !== jobs.length ||
     !Array.isArray(receipts) ||
-    receipts.length > 20 ||
+    receipts.length > MAX_COVERAGE_REPORT_RECEIPTS ||
     !receipts.every(validCoverageReportReceipt) ||
     new Set(receipts.map((receipt) => receipt.requestHash)).size !==
       receipts.length ||
-    receipts.some((receipt) => receipt.dispatch > (value.dispatches as number))
+    receipts.some(
+      (receipt) => receipt.dispatch > (value.dispatches as number),
+    ) ||
+    intentJobs.length + jobs.filter((job) => job.state !== "complete").length >
+      MAX_COVERAGE_PENDING_JOBS
   )
     return false;
   return (

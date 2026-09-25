@@ -38,6 +38,35 @@ export interface CoverageIntentReceipt extends CoverageIntent {
   identity: string;
 }
 
+/** Exact supplied parent binding, retained without parent prose. */
+interface CoverageIntentParentBinding {
+  id: string;
+  revision: number;
+  sourceDigest: string;
+}
+
+/** Durable optional selected-model work; input is rebuilt only from current canonical refs. */
+export interface CoverageIntentJob {
+  version: 1;
+  identity: string;
+  /** Hash of all ungrounded parent/resource candidates; never proves association. */
+  targetKey: string;
+  source: ObservationRef;
+  parents: CoverageIntentParentBinding[];
+  state: "ready" | "parked" | "permanent";
+  parkedUntil?: number;
+}
+
+/** Content-free provider dispatch proof for one selected-model intent job. */
+export interface CoverageIntentDispatchReceipt {
+  identity: string;
+  requestHash: string;
+  dispatch: number;
+  at: number;
+  usage: { inputTokens: number; outputTokens: number };
+  outcome: "dispatched" | "accepted";
+}
+
 /** Content-free completed no-intent decision for one exact canonical observation. */
 export interface CoverageIntentNegativeReceipt {
   identity: string;
@@ -67,18 +96,12 @@ export type CoverageIntentResult =
       code: CoverageIntentAbstentionCode;
     };
 
-interface ParentBinding {
-  id: string;
-  revision: number;
-  sourceDigest: string;
-}
-
 interface Flight {
   request: CoverageIntentRequest;
   epoch: number;
   sourceId: string;
   latest: Observation;
-  parents: ParentBinding[];
+  parents: CoverageIntentParentBinding[];
 }
 
 interface IntentProposal {
@@ -136,6 +159,16 @@ const validObservation = (value: unknown): value is Observation =>
   typeof value.text === "string" &&
   digest.test(value.hash as string) &&
   sha256(value.text) === value.hash;
+
+const validObservationRef = (value: unknown): value is ObservationRef =>
+  record(value) &&
+  exactKeys(value, ["entryId", "messageHash", "role"]) &&
+  typeof value.entryId === "string" &&
+  !!value.entryId &&
+  digest.test(value.messageHash as string) &&
+  (value.role === "user" ||
+    value.role === "assistant" ||
+    value.role === "intercom");
 
 const sameObservation = (left: Observation, right: Observation) =>
   left.id === right.id &&
@@ -205,7 +238,7 @@ const parentBindings = (state: HybridState) => {
 const identityFor = (
   sourceId: string,
   latest: Observation,
-  parents: readonly ParentBinding[],
+  parents: readonly CoverageIntentParentBinding[],
 ) =>
   sha256(
     JSON.stringify({
@@ -469,6 +502,143 @@ export class CoverageIntentRequests {
     }
   }
 
+  /** True only for retained journal capacity, never malformed canonical input. */
+  get journalAtCapacity() {
+    return (
+      this.receipts.size >= MAX_DURABLE_INTENT_RECEIPTS ||
+      this.negativeReceipts.size >= MAX_DURABLE_INTENT_RECEIPTS ||
+      this.acceptedIdentities.size >= MAX_DURABLE_INTENT_RECEIPTS * 2
+    );
+  }
+
+  /** Content-free durable job reference for a live selected-model reservation. */
+  jobSnapshot(
+    request: CoverageIntentRequest,
+    targetKey: string,
+  ): CoverageIntentJob | undefined {
+    const flight = this.flights.get(request.identity);
+    if (
+      !flight ||
+      flight.request !== request ||
+      !digest.test(targetKey) ||
+      !Number.isSafeInteger(flight.epoch) ||
+      flight.epoch < 0
+    )
+      return;
+    return {
+      version: 1,
+      identity: request.identity,
+      targetKey,
+      source: {
+        entryId: flight.latest.id,
+        messageHash: flight.latest.hash,
+        role: flight.latest.role,
+      },
+      parents: flight.parents.map((parent) => ({ ...parent })),
+      state: "ready",
+    };
+  }
+
+  /** Stable hash of frozen selected-model input; input text never persists. */
+  static requestHash(request: CoverageIntentRequest) {
+    return sha256(JSON.stringify(request.input));
+  }
+
+  /** Check durable work against current canonical source and its original supplied parents. */
+  static jobCurrent(
+    job: CoverageIntentJob,
+    state: HybridState,
+    resolve: (entryId: string) => Observation | undefined,
+  ) {
+    if (
+      job.version !== 1 ||
+      !digest.test(job.identity) ||
+      !digest.test(job.targetKey) ||
+      !validObservationRef(job.source) ||
+      !job.parents.length ||
+      job.parents.length > MAX_INCLUDED_PARENTS ||
+      new Set(job.parents.map((parent) => parent.id)).size !==
+        job.parents.length ||
+      !job.parents.every(
+        (parent) =>
+          !!parent.id &&
+          Number.isSafeInteger(parent.revision) &&
+          parent.revision > 0 &&
+          digest.test(parent.sourceDigest),
+      )
+    )
+      return false;
+    const latest = resolve(job.source.entryId);
+    if (
+      !validObservation(latest) ||
+      latest.hash !== job.source.messageHash ||
+      latest.role !== job.source.role
+    )
+      return false;
+    const tasks = new Map(state.tasks.map((task) => [task.id, task]));
+    if (
+      job.parents.some((binding) => {
+        const parent = tasks.get(binding.id);
+        return (
+          !parent?.included ||
+          parent.revision !== binding.revision ||
+          sourceDigest(parent.source) !== binding.sourceDigest
+        );
+      })
+    )
+      return false;
+    return identityFor(state.sourceId, latest, job.parents) === job.identity;
+  }
+
+  /** Rebuild a frozen request only when original canonical binding remains exact. */
+  resume(
+    job: CoverageIntentJob,
+    state: HybridState,
+    resolve: (entryId: string) => Observation | undefined,
+    epoch: number,
+  ): CoverageIntentRequest | undefined {
+    try {
+      if (
+        !Number.isSafeInteger(epoch) ||
+        epoch < 0 ||
+        this.flights.has(job.identity) ||
+        this.acceptedIdentities.has(job.identity) ||
+        !CoverageIntentRequests.jobCurrent(job, state, resolve)
+      )
+        return;
+      const latest = resolve(job.source.entryId);
+      if (!validObservation(latest)) return;
+      const tasks = new Map(state.tasks.map((task) => [task.id, task]));
+      const parents = job.parents.flatMap((binding) => {
+        const parent = tasks.get(binding.id);
+        return parent ? [parent] : [];
+      });
+      if (parents.length !== job.parents.length) return;
+      const input: ExtractionInput = {
+        instructions: coverageIntentInstructions,
+        latest: copyObservation(latest),
+        earlier: [],
+        tasks: parents.map(suppliedTask),
+        omittedArchivedTasks: state.tasks.length - parents.length,
+      };
+      if ((bytes(input) ?? Infinity) > MAX_INPUT_BYTES) return;
+      const request = deepFreeze({
+        identity: job.identity,
+        input: structuredClone(input),
+      });
+      this.flights.set(job.identity, {
+        request,
+        epoch,
+        sourceId: state.sourceId,
+        latest: copyObservation(latest),
+        parents: job.parents.map((parent) => ({ ...parent })),
+      });
+      return request;
+    } catch {
+      return;
+    }
+  }
+
   /** Detached accepted receipts used for passive inventory admission. */
   snapshot(): CoverageIntentReceipt[] {
     return [...this.receipts.values()].map((receipt) => ({
@@ -526,7 +696,6 @@ export class CoverageIntentRequests {
       });
       if (
         !latest ||
-        identityFor(state.sourceId, latest, supplied.bindings) !== identity ||
         receipts.some((receipt) => {
           const parent = parentMap.get(receipt.parentTaskId);
           const source = receipt.source;

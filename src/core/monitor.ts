@@ -140,7 +140,7 @@ interface PresentationCard extends RetainedCard {
   beads?: BeadsPresentation;
 }
 
-/** Runtime-only exact optional-health input; never checkpointed before `.6`. */
+/** Runtime-only exact optional-health input; only bounded coverage receipts persist. */
 interface HealthWork {
   observation: Observation;
   reports: CanonicalHealthReportContext;
@@ -975,6 +975,14 @@ export class Monitor {
     else if (authority === "incomplete") this.scheduleCanonicalWake();
     else {
       const healthChanged = this.reconcileHealthCards(pass);
+      const staleHealthWork = [...this.healthJobs.values()].some(
+        (job) =>
+          job.state !== "terminal" &&
+          !this.healthWorkCurrent(job.successor ?? job.work, pass),
+      );
+      // Amendments can affect pending coverage without touching an older card.
+      if (healthChanged || staleHealthWork)
+        this.wakeHealthFromCurrent("canonical", false, pass);
       this.requeue(pass);
       if (this.queued.length) {
         this.idleDoneInvalidated = true;
@@ -2243,7 +2251,12 @@ export class Monitor {
           identity: this.healthWorkIdentity(successor),
           state: "ready",
         });
-      } else job.state = "ready";
+      } else {
+        job.state = "ready";
+        // A preempted attempt still yields its position to unattempted peers.
+        this.healthJobs.delete(flight.taskId);
+        this.healthJobs.set(flight.taskId, job);
+      }
     }
     this.healthFlight = undefined;
     this.healthGateway.invalidate();
@@ -3760,7 +3773,7 @@ export class Monitor {
 
   /** Rebuild only recoverable task-local health on named evidence/control wakes. */
   private wakeHealthFromCurrent(
-    kind: "evidence" | "control",
+    kind: "canonical" | "evidence" | "control",
     reviveTerminal = false,
     pass = this.beginCanonicalPass(),
   ) {
@@ -3776,8 +3789,15 @@ export class Monitor {
     const reports = observation
       ? pass.healthReportContext(observation.id)
       : undefined;
-    this.pruneHealthJobs();
     const evidenceGeneration = this.healthEvidenceGeneration();
+    const runtimeEvidence = this.evidence.snapshot();
+    const runtimeRevision = this.evidence.codeRevision();
+    // [tag:health_runtime_evidence_recovery] Explicit recovery retries changed
+    // live evidence, but an empty post-reload store cannot invalidate receipts.
+    const runtimeEvidenceHash =
+      kind === "control" && (runtimeEvidence.length > 0 || runtimeRevision > 0)
+        ? sha256(JSON.stringify(runtimeEvidence))
+        : undefined;
     if (
       observation &&
       reports &&
@@ -3798,6 +3818,10 @@ export class Monitor {
           kind === "evidence" ||
           !this.healthCardMatchesTask(card, task) ||
           staleCursorCard ||
+          (!!card &&
+            runtimeEvidenceHash !== undefined &&
+            (card.provenance.evidenceHash !== runtimeEvidenceHash ||
+              card.provenance.codeRevision !== runtimeRevision)) ||
           (!!job && job.state !== "terminal")
         )
           this.enqueueHealth(
@@ -3935,6 +3959,9 @@ export class Monitor {
     observation: Observation,
     priorTasks: readonly HybridTask[] = [],
   ) {
+    // Even an all-done commit is a named wake for parked terminal repair.
+    this.wakeHealth("canonical");
+    this.pruneHealthJobs();
     const tasks = this.healthTasksForCommit(priorTasks);
     if (!tasks.length) return;
     const pass = this.beginCanonicalPass();
@@ -3945,20 +3972,25 @@ export class Monitor {
       reports.target.role !== observation.role
     )
       return;
-    this.wakeHealth("canonical");
-    this.pruneHealthJobs();
     const evidenceGeneration = this.healthEvidenceGeneration();
     for (const task of tasks) {
-      const prior = priorTasks.find((item) => item.id === task.id);
+      // A missing terminal card keeps its completion context across preemption.
+      const target =
+        task.status === "done"
+          ? this.completionObservationFor(task, pass)
+          : observation;
+      if (!target) continue;
+      const context =
+        target.id === observation.id
+          ? reports
+          : pass.healthReportContext(target.id);
+      if (!context) continue;
       this.enqueueHealth(
         this.healthWork(
           task,
-          observation,
-          reports,
-          task.status === "done" &&
-            !!prior &&
-            prior.included &&
-            prior.status !== "done",
+          target,
+          context,
+          task.status === "done",
           evidenceGeneration,
         ),
       );
@@ -3988,6 +4020,10 @@ export class Monitor {
     }
     job.state = attempt.kind === "parked" ? "parked" : "terminal";
     job.parkedUntil = attempt.kind === "parked" ? attempt.until : undefined;
+    // Completed/failed identities remain deduped, but new input must not let
+    // them jump ahead of peers that have not received their first attempt.
+    this.healthJobs.delete(flight.taskId);
+    this.healthJobs.set(flight.taskId, job);
   }
 
   private async processHealth(work: HealthWork, flight: HealthFlight) {

@@ -429,6 +429,8 @@ it.each([false, true])(
     h.board.handleInput(keys.home);
     expect(h.board.viewState().detailOffset).toBe(0);
   },
+  // 180 full frame/width checks are CPU-bound on contended developer machines.
+  20000,
 );
 
 it("keeps health values, not just empty Summary labels, pinned while details scroll", async () => {

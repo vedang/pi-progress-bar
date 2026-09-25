@@ -377,7 +377,7 @@ describe("task source provenance", () => {
   });
 
   it.each(["amend", "remove"])(
-    "invalidates a retained card when its health-only report is %s",
+    "invalidates then repairs a retained card when its health-only report is %s",
     async (change) => {
       const h = fixture();
       h.start();
@@ -409,12 +409,20 @@ describe("task source provenance", () => {
             ];
       });
       const publications = h.published.mock.calls.length;
+      const gates = h.requests.filter(
+        (request) => "gate" in request.questions,
+      ).length;
       h.replace(entries);
+      // Stale health disappears synchronously, before any repair can answer.
+      expect(task(h.monitor, "task:1").health).toEqual(unassessed);
       await vi.advanceTimersByTimeAsync(100);
       expect(h.published.mock.calls.length).toBeGreaterThan(publications);
-      expect(task(h.monitor, "task:1").health).toEqual(unassessed);
+      expect(task(h.monitor, "task:1").health.acceptance).toBe("explicit");
       expect(h.monitor.state).toEqual(before);
-      expect(h.fetch).toHaveBeenCalledTimes(calls);
+      expect(h.fetch).toHaveBeenCalledTimes(calls + 3);
+      expect(
+        h.requests.filter((request) => "gate" in request.questions),
+      ).toHaveLength(gates);
     },
   );
 

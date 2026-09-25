@@ -246,7 +246,8 @@ export class CanonicalPass {
     // boundary without durable report text or unbounded history reads.
     const examined: ObservationRef[] = [];
     const omissions: string[] = [];
-    let bytes = 0;
+    // Include the serialized array brackets and each subsequent separator.
+    let bytes = 2;
     let scanned = 0;
     let index = targetIndex;
     while (index >= 0) {
@@ -277,7 +278,9 @@ export class CanonicalPass {
       if (!observation) continue;
       const reference = observationRef(observation);
       examined.push(reference);
-      const size = Buffer.byteLength(JSON.stringify(observation));
+      const size =
+        Buffer.byteLength(JSON.stringify(observation)) +
+        (reports.length ? 1 : 0);
       if (bytes + size > MAX_HEALTH_REPORT_BYTES) {
         omissions.push(
           reports.length

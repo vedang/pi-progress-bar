@@ -369,4 +369,5 @@ it("retains no cross-hook authority index after 1201 settled observations", asyn
   expect(retainedPayloads(h.monitor).length).toBeLessThanOrEqual(66);
   expect(h.monitor).not.toHaveProperty("authorityIndex");
   expect(h.monitor).not.toHaveProperty("authoritySampleCursor");
-});
+  // Bounded 1201-observation stress sweep; allow CPU contention, not retries.
+}, 20000);

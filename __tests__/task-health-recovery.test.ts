@@ -267,14 +267,73 @@ it("repairs optional-only coverage amendment live without semantic replay", asyn
   const calls = h.healthRequests().length;
   const extracts = h.extract.mock.calls.length;
   const gates = h.requests.filter((r) => "gate" in r.questions).length;
-  h.replace(h.reader().map((entry) => (entry as { id: string }).id === "earlier"
-    ? branchEntry("earlier", "Previous failing report withdrawn.") : entry));
+  h.replace(
+    h
+      .reader()
+      .map((entry) =>
+        (entry as { id: string }).id === "earlier"
+          ? branchEntry("earlier", "Previous failing report withdrawn.")
+          : entry,
+      ),
+  );
   await vi.advanceTimersByTimeAsync(200);
   expect(h.healthRequests().length).toBeGreaterThan(calls);
   expect(h.cards()).toHaveLength(3);
-  expect(h.cards().find((card) => card.taskId === "task:1")?.health.redEvidence).not.toBe("Reported red");
+  expect(
+    h.cards().find((card) => card.taskId === "task:1")?.health.redEvidence,
+  ).not.toBe("Reported red");
   expect(h.monitor.state).toEqual(before);
   expect(h.extract).toHaveBeenCalledTimes(extracts);
+  expect(h.requests.filter((r) => "gate" in r.questions)).toHaveLength(gates);
+});
+
+it("repairs amended in-flight coverage even when the older accepted card is unaffected", async () => {
+  const h = await ready();
+  const transport = h.fetch.getMockImplementation();
+  if (!transport) throw new Error("transport");
+  const releases: (() => void)[] = [];
+  let holding = true;
+  h.fetch.mockImplementation(async (url, init) => {
+    const response = await transport(url, init);
+    if (holding && JSON.parse(String(init?.body)).questions.clarity)
+      await new Promise<void>((resolve) => releases.push(resolve));
+    return response;
+  });
+  const release = () => {
+    holding = false;
+    for (const resume of releases) resume();
+  };
+  h.append("earlier", "PARSER_RED_REPORT failing regression.");
+  await h.settle("earlier");
+  for (let i = 0; i < 4; i++) {
+    h.append(`later-${i}`, `Documentation progress ${i}`);
+    await h.settle(`later-${i}`);
+  }
+  expect(
+    h.cards().every((card) => card.provenance.observation.entryId === "goal"),
+  ).toBe(true);
+  const before = structuredClone(h.monitor.state);
+  const gates = h.requests.filter((r) => "gate" in r.questions).length;
+  h.replace(
+    h
+      .reader()
+      .map((entry) =>
+        (entry as { id: string }).id === "earlier"
+          ? branchEntry("earlier", "Previous failing report withdrawn.")
+          : entry,
+      ),
+  );
+  release();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(
+    h
+      .cards()
+      .every((card) => card.provenance.observation.entryId === "later-3"),
+  ).toBe(true);
+  expect(
+    h.cards().find((card) => card.taskId === "task:1")?.health.redEvidence,
+  ).not.toBe("Reported red");
+  expect(h.monitor.state).toEqual(before);
   expect(h.requests.filter((r) => "gate" in r.questions)).toHaveLength(gates);
 });
 

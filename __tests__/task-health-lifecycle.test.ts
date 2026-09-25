@@ -143,6 +143,44 @@ it("invalid health response cannot spin or head-block healthy tasks", async () =
   expect(h.cards()).toHaveLength(3);
 });
 
+// [ref:health_runtime_evidence_recovery]
+it.each(["model", "off-on"])(
+  "%s recovery retries failed evidence replacement without a new report",
+  async (recovery) => {
+    const h = fixture();
+    h.start();
+    await h.settle("goal");
+    const transport = h.fetch.getMockImplementation();
+    if (!transport) throw new Error("transport");
+    let invalid = true;
+    h.fetch.mockImplementation(async (url, init) => {
+      if (invalid && JSON.parse(String(init?.body)).questions.clarity)
+        return Response.json({ invalid: true });
+      return transport(url, init);
+    });
+    editEvidence(h);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.cards().every((card) => card.provenance.codeRevision === 0)).toBe(
+      true,
+    );
+    invalid = false;
+    if (recovery === "model") h.monitor.modelSelected();
+    else {
+      h.monitor.turnOff();
+      h.monitor.turnOn("/nonexistent-hybrid-test");
+    }
+    await vi.advanceTimersByTimeAsync(200);
+    expect(
+      h
+        .cards()
+        .every(
+          (card) =>
+            card.provenance.codeRevision === h.monitor.evidence.codeRevision(),
+        ),
+    ).toBe(true);
+  },
+);
+
 it("permanent health failure stays paused until explicit model recovery", async () => {
   const h = fixture();
   const transport = h.fetch.getMockImplementation();
@@ -326,9 +364,18 @@ it("counts array punctuation inside the serialized report byte budget", () => {
   const goal = branchEntry("goal", "tiny");
   const empty = branchEntry("target", "x");
   const pass = new CanonicalPass([goal, empty]);
-  const overhead = ["goal", "target"].reduce((n, id) => n + Buffer.byteLength(JSON.stringify(pass.observation(id))), 0) - 1;
-  const context = new CanonicalPass([goal, branchEntry("target", "x".repeat(4095 - overhead))]).healthReportContext("target");
-  expect(Buffer.byteLength(JSON.stringify(context?.reports))).toBeLessThanOrEqual(4096);
+  const overhead =
+    ["goal", "target"].reduce(
+      (n, id) => n + Buffer.byteLength(JSON.stringify(pass.observation(id))),
+      0,
+    ) - 1;
+  const context = new CanonicalPass([
+    goal,
+    branchEntry("target", "x".repeat(4095 - overhead)),
+  ]).healthReportContext("target");
+  expect(
+    Buffer.byteLength(JSON.stringify(context?.reports)),
+  ).toBeLessThanOrEqual(4096);
 });
 
 it("keeps unattempted peers ahead of refreshed tasks after an evidence wake", async () => {
@@ -342,7 +389,9 @@ it("keeps unattempted peers ahead of refreshed tasks after an evidence wake", as
     const response = await transport(url, init);
     if (hold && request.questions.clarity && taskId(request) === "task:2") {
       hold = false;
-      await new Promise<void>((resolve) => { release = resolve; });
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
     }
     return response;
   });
@@ -352,7 +401,11 @@ it("keeps unattempted peers ahead of refreshed tasks after an evidence wake", as
   editEvidence(h);
   release?.();
   await vi.advanceTimersByTimeAsync(200);
-  expect(h.healthRequests().map(taskId).slice(0, 3)).toEqual(["task:1", "task:2", "task:3"]);
+  expect(h.healthRequests().map(taskId).slice(0, 3)).toEqual([
+    "task:1",
+    "task:2",
+    "task:3",
+  ]);
   expect(h.cards()).toHaveLength(3);
 });
 
@@ -368,8 +421,14 @@ it("preserves the terminal target when a cardless task is preempted by later pro
   await h.settle("later");
   held.releaseAll();
   await vi.advanceTimersByTimeAsync(200);
-  expect(h.cards().find((card) => card.taskId === "task:1")?.provenance.observation.entryId).toBe("terminal");
-  expect(h.cards().find((card) => card.taskId === "task:2")?.provenance.observation.entryId).toBe("later");
+  expect(
+    h.cards().find((card) => card.taskId === "task:1")?.provenance.observation
+      .entryId,
+  ).toBe("terminal");
+  expect(
+    h.cards().find((card) => card.taskId === "task:2")?.provenance.observation
+      .entryId,
+  ).toBe("later");
 });
 
 it("report membership and coverage digest are independent of prior exploratory reads", () => {

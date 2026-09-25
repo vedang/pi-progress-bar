@@ -215,6 +215,47 @@ it("does not interpret whole-set claims as review of unknown/incomplete inventor
   for (const batch of coverageReportBatches(f))
     expect(coverageReportDecisions(batch, reply(batch), f).reports).toEqual([]);
 });
+it("receipts retain all assessed children even when no status transition is accepted", () => {
+  const f = fixture();
+  const batch = coverageReportBatches(f)[0];
+  for (const choice of ["unchanged", "uncertain"]) {
+    const decisions = coverageReportDecisions(batch, reply(batch, choice), f);
+    expect(decisions.reports).toEqual([]);
+    expect(decisions.receipt?.childIds).toEqual(batch.childIds);
+    expect(decisions.receipt?.assessments).toHaveLength(batch.childIds.length);
+  }
+});
+it("preserves wording-only parent revisions without rewriting original group provenance", () => {
+  const f = fixture();
+  const wording = observation(
+    "wording",
+    "Summarize the same workbook after reviewing every tab.",
+  );
+  f.parent.label = "Workbook review summary";
+  f.parent.source = coverageSource(wording.id, wording.text);
+  const resolve = f.resolve;
+  f.resolve = (id) => (id === wording.id ? wording : resolve(id));
+  const batches = coverageReportBatches(f);
+  expect(batches).toHaveLength(2);
+  expect(
+    coverageReportDecisions(batches[0], reply(batches[0]), f).reports,
+  ).toHaveLength(20);
+});
+it("fits valid long canonical reports without silently discarding every child", () => {
+  const f = fixture(
+    `${"Context. ".repeat(1000)} I reviewed all tabs in docs/plan.xlsx.`,
+  );
+  const batches = coverageReportBatches(f);
+  expect(batches.flatMap((batch) => batch.childIds)).toEqual(
+    f.group.children.map((child) => child.id),
+  );
+  for (const batch of batches) {
+    expect(Object.keys(batch.request.questions).length).toBeLessThanOrEqual(20);
+    expect(
+      Buffer.byteLength(JSON.stringify(batch.request)),
+    ).toBeLessThanOrEqual(24576);
+  }
+});
 it("rejects oversized or noncanonical tool reports without provider input", () => {
   const f = fixture();
   expect(

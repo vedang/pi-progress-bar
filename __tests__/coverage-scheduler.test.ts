@@ -150,8 +150,9 @@ it("schedules20+2report judgments after semantics/readyhealth with isolated usag
   const first = h.all.findIndex((request) =>
     Object.keys(request.questions).some((key) => key.startsWith("coverage:")),
   );
-  const health = h.all.findLastIndex(
-    (request) => "clarity" in request.questions,
+  const health = h.all.reduce(
+    (last, request, index) => ("clarity" in request.questions ? index : last),
+    -1,
   );
   expect(health).toBeGreaterThanOrEqual(0);
   expect(first).toBeGreaterThan(health);

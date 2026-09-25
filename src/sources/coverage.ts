@@ -3,7 +3,6 @@ import type { CoverageInventory } from "../core/coverage";
 
 const MAX_PENDING = 16;
 const MAX_RETAINED_RECEIPTS = 16;
-const MAX_ACCEPTED_CALLS = 64;
 const MAX_MAPPINGS = 64;
 const MAX_METADATA_BYTES = 64 * 1024;
 const MAX_PAYLOAD_BYTES = 32 * 1024;
@@ -59,6 +58,18 @@ interface CanonicalResult {
   valid: boolean;
   content?: string;
   contentHash?: string;
+}
+
+interface CanonicalFrontier {
+  order: number;
+  prefix: string;
+}
+
+interface CanonicalIndex {
+  results: Map<string, CanonicalResult[]>;
+  duplicateEntryIds: ReadonlySet<string>;
+  prefixes: ReadonlyMap<number, string>;
+  terminal?: CanonicalFrontier;
 }
 
 interface ToolReceipt {
@@ -234,15 +245,17 @@ const contentReadCommand = (args: unknown) => {
 const textContent = (content: unknown): string | undefined => {
   if (!Array.isArray(content) || !content.length) return;
   const text: string[] = [];
+  let bytes = 0;
   for (const part of content) {
     if (!record(part) || part.type !== "text" || typeof part.text !== "string")
       return;
+    const nextBytes =
+      Buffer.byteLength(part.text, "utf8") + (text.length ? 1 : 0);
+    if (bytes + nextBytes > MAX_PAYLOAD_BYTES) return;
     text.push(part.text);
+    bytes += nextBytes;
   }
-  const joined = text.join("\n");
-  return Buffer.byteLength(joined, "utf8") <= MAX_PAYLOAD_BYTES
-    ? joined
-    : undefined;
+  return text.join("\n");
 };
 
 const resultHeader = (
@@ -300,16 +313,43 @@ const materializeResult = (header: CanonicalHeader): CanonicalResult => {
 const canonicalResults = (
   entries: readonly unknown[],
   targetCallIds: ReadonlySet<string>,
-) => {
-  const results = new Map<string, CanonicalResult[]>();
+  frontierOrder?: number,
+): CanonicalIndex => {
+  const duplicateEntryIds = new Set<string>();
+  const entryIds = new Set<string>();
+  const prefixes = new Map<number, string>();
+  const targetHeaders: CanonicalHeader[] = [];
+  let prefix = sha256("coverage-canonical-frontier/v1");
+  let terminal: CanonicalFrontier | undefined;
   for (const [order, entry] of entries.entries()) {
+    const value = record(entry) ? entry : undefined;
+    const id = typeof value?.id === "string" ? value.id : "";
+    if (id && entryIds.has(id)) duplicateEntryIds.add(id);
+    else if (id) entryIds.add(id);
+    prefix = sha256(JSON.stringify([prefix, id, value?.type ?? ""]));
+    terminal = { order, prefix };
+    if (
+      order === frontierOrder ||
+      targetCallIds.has(resultHeader(entry, order)?.callId ?? "")
+    )
+      prefixes.set(order, prefix);
     const header = resultHeader(entry, order);
-    if (!header || !targetCallIds.has(header.callId)) continue;
-    const matching = results.get(header.callId) ?? [];
-    matching.push(materializeResult(header));
-    results.set(header.callId, matching);
+    if (header && targetCallIds.has(header.callId)) targetHeaders.push(header);
   }
-  return results;
+  const results = new Map<string, CanonicalResult[]>();
+  for (const header of targetHeaders) {
+    const result = materializeResult(header);
+    if (duplicateEntryIds.has(result.entryId)) result.valid = false;
+    const matching = results.get(result.callId) ?? [];
+    matching.push(result);
+    results.set(result.callId, matching);
+  }
+  return {
+    results,
+    duplicateEntryIds,
+    prefixes,
+    ...(terminal ? { terminal } : {}),
+  };
 };
 
 const namedEntity = new Map([
@@ -368,35 +408,12 @@ const attributes = (value: string): Map<string, string> | undefined => {
   return found;
 };
 
-/**
- * Direct sheet-name manifests only. Relationship-heavy/alternate OOXML forms
- * abstain; this is deliberately not a general workbook XML parser.
- */
-const manifestNames = (body: string): string[] | undefined => {
-  if (Buffer.byteLength(body, "utf8") > MAX_PAYLOAD_BYTES || /<!/u.test(body))
-    return;
-  let xml = body.trim();
-  if (xml.startsWith("<?xml")) {
-    const end = xml.indexOf("?>");
-    if (
-      end < 0 ||
-      !/^<\?xml version="1\.0"(?: encoding="(?:UTF-8|utf-8)")?\?>$/u.test(
-        xml.slice(0, end + 2),
-      )
-    )
-      return;
-    xml = xml.slice(end + 2).trimStart();
-  }
-  const outer =
-    /^<workbook((?:\s+[A-Za-z_][\w:.-]*="[^"<]*")*)><sheets>([\s\S]*)<\/sheets><\/workbook>$/u.exec(
-      xml,
-    );
-  if (!outer) return;
-  const rootAttributes = attributes(outer[1]);
-  if (!rootAttributes) return;
-  for (const key of rootAttributes.keys())
-    if (key !== "xmlns" && key !== "xmlns:r") return;
-  const sheets = outer[2];
+const boundedAttributes = (value: string) => {
+  const parsed = attributes(value);
+  return parsed && parsed.size <= 16 ? parsed : undefined;
+};
+
+const sheetNames = (sheets: string): string[] | undefined => {
   const names: string[] = [];
   const sheet = /\s*<sheet((?:\s+[A-Za-z_][\w:.-]*="[^"<]*")*)\s*\/>/gy;
   let index = 0;
@@ -407,9 +424,8 @@ const manifestNames = (body: string): string[] | undefined => {
       if (/^\s*$/u.test(sheets.slice(index))) break;
       return;
     }
-    const values = attributes(match[1]);
-    if (!values) return;
-    if (!values.has("name")) return;
+    const values = boundedAttributes(match[1]);
+    if (!values?.has("name")) return;
     for (const key of values.keys())
       if (!["name", "sheetId", "state", "r:id"].includes(key)) return;
     const name = values.get("name");
@@ -424,6 +440,109 @@ const manifestNames = (body: string): string[] | undefined => {
     index = sheet.lastIndex;
   }
   return names.length ? names : undefined;
+};
+
+const workbookViewsAreValid = (body: string) => {
+  const view = /\s*<workbookView((?:\s+[A-Za-z_][\w:.-]*="[^"<]*")*)\s*\/>/gy;
+  let index = 0;
+  let count = 0;
+  while (index < body.length) {
+    view.lastIndex = index;
+    const match = view.exec(body);
+    if (!match || match.index !== index)
+      return /^\s*$/u.test(body.slice(index)) && count > 0;
+    if (!boundedAttributes(match[1])) return false;
+    count++;
+    if (count > MAX_SHEETS) return false;
+    index = view.lastIndex;
+  }
+  return count > 0;
+};
+
+const definedNamesAreValid = (body: string) => {
+  const name =
+    /\s*<definedName((?:\s+[A-Za-z_][\w:.-]*="[^"<]*")*)>([^<]*)<\/definedName>/gy;
+  let index = 0;
+  let count = 0;
+  while (index < body.length) {
+    name.lastIndex = index;
+    const match = name.exec(body);
+    if (!match || match.index !== index)
+      return /^\s*$/u.test(body.slice(index));
+    const values = boundedAttributes(match[1]);
+    if (!values?.has("name") || decodeXml(match[2]) === undefined) return false;
+    count++;
+    if (count > MAX_SHEETS) return false;
+    index = name.lastIndex;
+  }
+  return true;
+};
+
+/**
+ * Direct sheet names plus bounded normal OOXML workbook metadata only. Formula,
+ * defined-name, relationship, and view bodies are validated then discarded.
+ */
+const manifestNames = (body: string): string[] | undefined => {
+  if (Buffer.byteLength(body, "utf8") > MAX_PAYLOAD_BYTES || /<!/u.test(body))
+    return;
+  let xml = body.trim();
+  if (xml.startsWith("<?xml")) {
+    const end = xml.indexOf("?>");
+    if (
+      end < 0 ||
+      !/^<\?xml version="1\.0"(?: encoding="(?:UTF-8|utf-8)")?(?: standalone="(?:yes|no)")?\?>$/u.test(
+        xml.slice(0, end + 2),
+      )
+    )
+      return;
+    xml = xml.slice(end + 2).trimStart();
+  }
+  const outer =
+    /^<workbook((?:\s+[A-Za-z_][\w:.-]*="[^"<]*")*)>([\s\S]*)<\/workbook>$/u.exec(
+      xml,
+    );
+  if (!outer) return;
+  const rootAttributes = boundedAttributes(outer[1]);
+  if (!rootAttributes) return;
+  for (const key of rootAttributes.keys())
+    if (key !== "xmlns" && key !== "xmlns:r") return;
+  const children = outer[2];
+  const seen = new Set<string>();
+  let names: string[] | undefined;
+  let index = 0;
+  const selfClosing =
+    /<(fileVersion|workbookPr|calcPr)((?:\s+[A-Za-z_][\w:.-]*="[^"<]*")*)\s*\/>/y;
+  while (index < children.length) {
+    const whitespace = /^\s*/u.exec(children.slice(index))?.[0] ?? "";
+    index += whitespace.length;
+    if (index === children.length) break;
+    selfClosing.lastIndex = index;
+    const simple = selfClosing.exec(children);
+    if (simple && simple.index === index) {
+      if (seen.has(simple[1]) || !boundedAttributes(simple[2])) return;
+      seen.add(simple[1]);
+      index = selfClosing.lastIndex;
+      continue;
+    }
+    const known = ["bookViews", "sheets", "definedNames"].find((tag) =>
+      children.startsWith(`<${tag}>`, index),
+    );
+    if (!known || seen.has(known)) return;
+    const start = index + known.length + 2;
+    const end = children.indexOf(`</${known}>`, start);
+    if (end < 0) return;
+    const inner = children.slice(start, end);
+    let valid: boolean;
+    if (known === "sheets") {
+      names = sheetNames(inner);
+      valid = !!names;
+    } else if (known === "bookViews") valid = workbookViewsAreValid(inner);
+    else valid = definedNamesAreValid(inner);
+    if (!valid) return;
+    seen.add(known);
+    index = end + known.length + 3;
+  }
+  return seen.has("sheets") ? names : undefined;
 };
 
 const listingRecords = (
@@ -477,13 +596,11 @@ const receipt = (
       }
     : undefined;
 
-const sameReceipt = (
-  value: ToolReceipt,
-  results: ReadonlyMap<string, readonly CanonicalResult[]>,
-) => {
-  const matching = results.get(value.callId);
+const sameReceipt = (value: ToolReceipt, index: CanonicalIndex) => {
+  const matching = index.results.get(value.callId);
   const current = matching?.length === 1 ? matching[0] : undefined;
-  if (!current?.valid) return false;
+  if (!current?.valid || index.duplicateEntryIds.has(value.entryId))
+    return false;
   return (
     current.toolName === value.toolName &&
     current.entryId === value.entryId &&
@@ -500,11 +617,8 @@ export class CoverageAdapter {
   private omissions = 0;
   private nextStartOrder = 1;
   private readonly pending = new Map<string, Candidate>();
-  /** Bounded duplicate-call frontier; never grows with arbitrary branch history. */
-  private readonly acceptedCalls = new Map<
-    string,
-    { entryId: string; contentHash: string }
-  >();
+  /** One hash-bound canonical frontier blocks reacceptance without call-ID history. */
+  private frontier: CanonicalFrontier | undefined;
   private readonly manifests = new Map<string, Manifest>();
   private readonly declarations = new Map<string, ScriptDeclaration>();
   private readonly scriptReads = new Map<string, ScriptRead>();
@@ -517,11 +631,7 @@ export class CoverageAdapter {
 
   start(input: CoverageToolStart, epoch: number) {
     if (!this.acceptsEpoch(epoch) || !safeText(input.toolCallId, 512)) return;
-    if (
-      this.pending.has(input.toolCallId) ||
-      this.acceptedCalls.has(input.toolCallId)
-    )
-      return;
+    if (this.pending.has(input.toolCallId)) return;
     const candidate = this.candidate(input, this.nextStartOrder++);
     if (!candidate) return;
     if (this.pending.size >= MAX_PENDING || !this.fitsAdditional(candidate)) {
@@ -540,8 +650,16 @@ export class CoverageAdapter {
 
   confirm(entries: readonly unknown[], epoch: number): CoverageAdapterResult {
     if (epoch !== this.epoch) return this.result();
-    const results = canonicalResults(entries, this.targetCallIds());
-    this.revalidate(results);
+    const index = canonicalResults(
+      entries,
+      this.targetCallIds(),
+      this.frontier?.order,
+    );
+    if (!this.frontierCurrent(index)) {
+      this.clearAuthority(index);
+      return this.result();
+    }
+    this.revalidate(index);
     const accepted: CoverageAdapterResult = {
       inventories: [],
       access: [],
@@ -549,7 +667,7 @@ export class CoverageAdapter {
     };
     for (const [callId, candidate] of [...this.pending]) {
       if (!candidate.ended) continue;
-      const matching = results.get(callId);
+      const matching = index.results.get(callId);
       if (!matching?.length) continue; // preappend: terminal listener has no canonical result yet.
       this.pending.delete(callId);
       const current = matching.length === 1 ? matching[0] : undefined;
@@ -557,7 +675,7 @@ export class CoverageAdapter {
         this.omissions++;
         continue;
       }
-      this.accept(candidate, current, accepted);
+      this.accept(candidate, current, index, accepted);
     }
     accepted.omissions = this.omissions;
     return accepted;
@@ -586,7 +704,7 @@ export class CoverageAdapter {
     this.omissions = 0;
     this.nextStartOrder = 1;
     this.pending.clear();
-    this.acceptedCalls.clear();
+    this.frontier = undefined;
     this.manifests.clear();
     this.declarations.clear();
     this.scriptReads.clear();
@@ -688,13 +806,14 @@ export class CoverageAdapter {
   private accept(
     candidate: Candidate,
     result: CanonicalResult,
+    index: CanonicalIndex,
     accepted: CoverageAdapterResult,
   ) {
     if (candidate.kind === "manifest") {
       const names = result.content ? manifestNames(result.content) : undefined;
       if (!names) return this.omit();
       const resourceKey = sha256(candidate.resourcePath);
-      if (!this.canAcceptCall(result)) return this.omit();
+      if (!this.canAcceptCall(result, index)) return this.omit();
       const prior = this.manifests.get(candidate.resourcePath);
       const nextReceipt = receipt(result, candidate.startOrder, [
         "workbook-manifest-xml/v1",
@@ -717,7 +836,7 @@ export class CoverageAdapter {
       )
         return this.omit();
       this.manifests.set(candidate.resourcePath, next);
-      this.rememberAcceptedCall(result);
+      this.rememberAcceptedCall(result, index);
       this.listings.delete(candidate.resourcePath);
       this.rebuildMappings();
       accepted.inventories.push({
@@ -734,7 +853,7 @@ export class CoverageAdapter {
       return;
     }
     if (candidate.kind === "script-write") {
-      if (!this.canAcceptCall(result)) return this.omit();
+      if (!this.canAcceptCall(result, index)) return this.omit();
       const prior = this.declarations.get(candidate.scriptPath);
       const nextReceipt = receipt(result, candidate.startOrder, [
         "worksheet-extraction-list/v1",
@@ -753,7 +872,7 @@ export class CoverageAdapter {
       )
         return this.omit();
       this.declarations.set(candidate.scriptPath, next);
-      this.rememberAcceptedCall(result);
+      this.rememberAcceptedCall(result, index);
       this.scriptReads.delete(candidate.scriptPath);
       for (const [resourcePath, listing] of this.listings)
         if (listing.scriptPath === candidate.scriptPath)
@@ -769,7 +888,7 @@ export class CoverageAdapter {
         sha256(result.content) !== declaration.contentDigest ||
         declaration.order >= result.order ||
         declaration.startOrder >= candidate.startOrder ||
-        !this.canAcceptCall(result)
+        !this.canAcceptCall(result, index)
       )
         return this.omit();
       const prior = this.scriptReads.get(candidate.scriptPath);
@@ -790,7 +909,7 @@ export class CoverageAdapter {
       )
         return this.omit();
       this.scriptReads.set(candidate.scriptPath, next);
-      this.rememberAcceptedCall(result);
+      this.rememberAcceptedCall(result, index);
       for (const [resourcePath, listing] of this.listings)
         if (listing.scriptPath === candidate.scriptPath)
           this.listings.delete(resourcePath);
@@ -812,7 +931,7 @@ export class CoverageAdapter {
         declaration.startOrder >= scriptRead.startOrder ||
         scriptRead.order >= result.order ||
         scriptRead.startOrder >= candidate.startOrder ||
-        !this.canAcceptCall(result)
+        !this.canAcceptCall(result, index)
       )
         return this.omit();
       const files = result.content
@@ -844,7 +963,7 @@ export class CoverageAdapter {
       };
       if (!this.fitsReplacement(prior, next)) return this.omit();
       this.listings.set(candidate.resourcePath, next);
-      this.rememberAcceptedCall(result);
+      this.rememberAcceptedCall(result, index);
       this.rebuildMappings();
       accepted.access.push({
         resourceKey: manifest.resourceKey,
@@ -858,7 +977,7 @@ export class CoverageAdapter {
     if (
       !listing ||
       !this.contentActivityCurrent(candidate) ||
-      !this.canAcceptCall(result) ||
+      !this.canAcceptCall(result, index) ||
       !candidate.activity.files.every((path, index) => {
         const mapping = this.fileMappings.get(path);
         return (
@@ -869,22 +988,22 @@ export class CoverageAdapter {
       })
     )
       return this.omit();
-    this.rememberAcceptedCall(result);
+    this.rememberAcceptedCall(result, index);
     accepted.access.push({
       resourceKey: candidate.activity.resourceKey,
       itemKeys: [...candidate.activity.itemKeys],
     });
   }
 
-  private revalidate(results: ReadonlyMap<string, readonly CanonicalResult[]>) {
+  private revalidate(index: CanonicalIndex) {
     for (const [path, manifest] of this.manifests)
-      if (!sameReceipt(manifest, results)) this.manifests.delete(path);
+      if (!sameReceipt(manifest, index)) this.manifests.delete(path);
     for (const [path, declaration] of this.declarations)
-      if (!sameReceipt(declaration, results)) this.declarations.delete(path);
+      if (!sameReceipt(declaration, index)) this.declarations.delete(path);
     for (const [path, scriptRead] of this.scriptReads) {
       const declaration = this.declarations.get(path);
       if (
-        !sameReceipt(scriptRead, results) ||
+        !sameReceipt(scriptRead, index) ||
         !declaration ||
         scriptRead.declarationDigest !== declaration.bindingDigest ||
         declaration.order >= scriptRead.order ||
@@ -896,7 +1015,7 @@ export class CoverageAdapter {
       const manifest = this.manifests.get(resourcePath);
       const scriptRead = this.scriptReads.get(listing.scriptPath);
       if (
-        !sameReceipt(listing, results) ||
+        !sameReceipt(listing, index) ||
         !manifest ||
         !scriptRead ||
         listing.manifestDigest !== manifest.bindingDigest ||
@@ -977,31 +1096,44 @@ export class CoverageAdapter {
     ]);
   }
 
-  private canAcceptCall(result: CanonicalResult) {
-    if (!result.contentHash || this.acceptedCalls.has(result.callId))
-      return false;
+  private frontierCurrent(index: CanonicalIndex) {
     return (
-      this.acceptedCalls.size < MAX_ACCEPTED_CALLS &&
-      this.fitsAdditional({
-        callId: result.callId,
-        entryId: result.entryId,
-        contentHash: result.contentHash,
-      })
+      !this.frontier ||
+      index.prefixes.get(this.frontier.order) === this.frontier.prefix
     );
   }
 
-  private rememberAcceptedCall(result: CanonicalResult) {
-    if (!result.contentHash) return;
-    this.acceptedCalls.set(result.callId, {
-      entryId: result.entryId,
-      contentHash: result.contentHash,
-    });
+  private clearAuthority(index: CanonicalIndex) {
+    this.pending.clear();
+    this.manifests.clear();
+    this.declarations.clear();
+    this.scriptReads.clear();
+    this.listings.clear();
+    this.fileMappings.clear();
+    this.ambiguousFiles.clear();
+    this.frontier = index.terminal;
+    this.omit();
+  }
+
+  private canAcceptCall(result: CanonicalResult, index: CanonicalIndex) {
+    if (
+      !result.contentHash ||
+      index.duplicateEntryIds.has(result.entryId) ||
+      !this.frontierCurrent(index)
+    )
+      return false;
+    return !this.frontier || result.order > this.frontier.order;
+  }
+
+  private rememberAcceptedCall(result: CanonicalResult, index: CanonicalIndex) {
+    const prefix = index.prefixes.get(result.order);
+    if (prefix) this.frontier = { order: result.order, prefix };
   }
 
   private metadataBytes() {
     return byteLength({
       pending: [...this.pending.values()],
-      acceptedCalls: [...this.acceptedCalls.entries()],
+      ...(this.frontier ? { frontier: this.frontier } : {}),
       manifests: [...this.manifests.values()],
       declarations: [...this.declarations.values()],
       scriptReads: [...this.scriptReads.values()],

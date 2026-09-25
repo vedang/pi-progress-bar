@@ -2,6 +2,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { encodeCheckpoint } from "../src/core/hybrid-checkpoint";
 import { createBoard } from "../src/ui/board";
+import { renderWidget } from "../src/ui/widget";
 import { coverageNames } from "./fixtures/coverage";
 import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
 
@@ -293,6 +294,33 @@ it("enforces one16-candidate limit shared by pending inventories and access", as
   expect(h.monitor.coverageSnapshot().pendingCount).toBeLessThanOrEqual(16);
   expect(h.monitor.coverageSnapshot().omissions).toBeGreaterThan(0);
   expect(h.monitor.coverageSnapshot().groups).toEqual([]);
+});
+it("shows omitted coverage even before any group exists", async () => {
+  const h = await ready();
+  const snapshot = {
+    presentation: h.monitor.presentationSnapshot(),
+    board: h.monitor.boardSnapshot(),
+    coverage: { ...h.monitor.coverageSnapshot(), groups: [], omissions: 3 },
+  };
+  const theme = {
+    fg: (_: string, t: string) => t,
+    bg: (_: string, t: string) => t,
+    bold: (t: string) => t,
+  } as Theme;
+  const board = await createBoard(snapshot, {
+    theme,
+    screenRows: () => 40,
+    isFocused: () => true,
+    onClose: () => {},
+    requestRender: () => {},
+  });
+  expect(board.render(120).join("\n")).toContain(
+    "3 optional candidates omitted",
+  );
+  expect(renderWidget(snapshot, true, 120, theme).join("\n")).toMatch(
+    /Coverage incomplete.*3 optional candidates omitted/,
+  );
+  expect(h.monitor.state.tasks).toHaveLength(1);
 });
 it("renders minimal read-only coverage on the selected parent board", async () => {
   const h = await mapped();

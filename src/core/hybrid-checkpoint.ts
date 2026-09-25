@@ -10,7 +10,6 @@ import type {
 } from "../analysis/task-details";
 import {
   type CoverageCheckpoint,
-  coverageCheckpointBytes,
   coverageCheckpointIsValid,
   MAX_COVERAGE_CHECKPOINT_BYTES,
 } from "./coverage";
@@ -852,7 +851,7 @@ function validCoverageMetadata(
     !record(value) ||
     !exactKeys(value, ["state", "dispatches", "usage"]) ||
     !coverageCheckpointIsValid(value.state) ||
-    coverageCheckpointBytes(value.state) > MAX_COVERAGE_CHECKPOINT_BYTES ||
+    byteLength(value) > MAX_COVERAGE_CHECKPOINT_BYTES ||
     !nonNegativeInteger(value.dispatches) ||
     value.dispatches > 1024 ||
     !validCoverageUsage(value.usage)

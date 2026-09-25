@@ -468,7 +468,7 @@ const validCoverageCheckpointShape = (
   return value.nextGroupId > highestGroup && value.nextChildId > highestChild;
 };
 
-export const coverageCheckpointBytes = (value: unknown) => {
+const coverageCheckpointBytes = (value: unknown) => {
   if (!validCoverageCheckpointShape(value))
     throw new Error("Invalid coverage checkpoint");
   return Buffer.byteLength(JSON.stringify(value), "utf8");

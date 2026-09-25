@@ -1856,6 +1856,28 @@ export class Monitor {
       : undefined;
   }
 
+  private durableCoverageMetadata() {
+    const state = this.coverage.checkpoint();
+    const usage = {
+      jev: validUsage(this.coverageUsage.jev),
+      extraction: validUsage(this.coverageUsage.extraction),
+    };
+    if (
+      state.groups.length === 0 &&
+      state.nextGroupId === 1 &&
+      state.nextChildId === 1 &&
+      this.coverageDispatches === 0 &&
+      usage.jev.calls === 0 &&
+      usage.jev.inputTokens === 0 &&
+      usage.jev.outputTokens === 0 &&
+      usage.extraction.calls === 0 &&
+      usage.extraction.inputTokens === 0 &&
+      usage.extraction.outputTokens === 0
+    )
+      return;
+    return { state, dispatches: this.coverageDispatches, usage };
+  }
+
   private metadata(
     enabled = this.enabled,
     healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
@@ -1867,6 +1889,7 @@ export class Monitor {
       state,
       prospectiveIdleDoneTaskId,
     );
+    const coverage = this.durableCoverageMetadata();
     return {
       enabled,
       usage: {
@@ -1884,14 +1907,7 @@ export class Monitor {
       ...(this.options.richDetailsEnabled && taskDetails.size
         ? { taskDetails: [...taskDetails.values()].map(copyDetailRecord) }
         : {}),
-      coverage: {
-        state: this.coverage.checkpoint(),
-        dispatches: this.coverageDispatches,
-        usage: {
-          jev: validUsage(this.coverageUsage.jev),
-          extraction: validUsage(this.coverageUsage.extraction),
-        },
-      },
+      ...(coverage ? { coverage } : {}),
     };
   }
 

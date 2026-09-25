@@ -109,6 +109,16 @@ it("stops payload scanning at the byte bound rather than reading remaining parts
   expect(f.adapter.confirm([oversized], 1).inventories).toEqual([]);
   expect(laterReads).toBe(0);
 });
+it("confirms concurrent manifests in canonical result order, not start order", () => {
+  const f = fixture();
+  f.start("a", "bash", { command: "unzip -p docs/a.xlsx xl/workbook.xml" });
+  f.start("b", "bash", { command: "unzip -p docs/b.xlsx xl/workbook.xml" });
+  f.adapter.end({ toolCallId: "b", toolName: "bash" }, 1);
+  f.adapter.end({ toolCallId: "a", toolName: "bash" }, 1);
+  f.entries.push(result("b", xml), result("a", xml));
+  expect(f.adapter.confirm(f.entries, 1).inventories).toHaveLength(2);
+  expect(f.adapter.confirm(f.entries, 1).inventories).toEqual([]);
+});
 it("recognizes a single-file literal sed read", () => {
   const f = fixture();
   f.map();

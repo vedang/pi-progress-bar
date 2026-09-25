@@ -43,8 +43,9 @@ function answer(request: EvaluationRequest, choice: string) {
     ),
   });
 }
-async function fixture() {
+async function fixture(details = false) {
   const h = monitorHarness([branchEntry("goal", text)], {
+    richDetailsEnabled: details,
     extractionText: (input) =>
       input.instructions.includes("parentIndices")
         ? JSON.stringify({
@@ -66,6 +67,7 @@ async function fixture() {
                     kind: "response",
                     basis: "explicit",
                     quote: text,
+                    ...(details ? { details: { title: { quote: text } } } : {}),
                   },
                 ],
             revise: [],
@@ -270,6 +272,45 @@ it("enforces1024dispatch cap including failures and leaves incomplete child stat
   h.observe();
   await vi.advanceTimersByTimeAsync(60000);
   expect(h.calls).toHaveLength(1);
+});
+it("gives ready detail work an opportunity between coverage chunks after finite higher-priority work", async () => {
+  const h = await fixture(true);
+  h.setTransport(() => new Promise<Response>(() => {}));
+  h.append("report", reportText);
+  await h.settle("report");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(1);
+  const saved = h.checkpoint();
+  const details = saved.monitor?.taskDetails as
+    | { candidates: { key: string }[]; receipts: unknown[] }[]
+    | undefined;
+  expect(details?.length).toBeGreaterThan(0);
+  if (!details) throw new Error("Missing details");
+  for (const record of details) {
+    record.receipts = [];
+    record.candidates[0].key = "description";
+  }
+  h.setTransport(undefined);
+  h.all.splice(0);
+  h.calls.splice(0);
+  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  await vi.advanceTimersByTimeAsync(300);
+  const optional = h.all.filter((request) =>
+    Object.keys(request.questions).some(
+      (key) => key.startsWith("coverage:") || key.startsWith("detail:"),
+    ),
+  );
+  const secondCoverage = optional.flatMap((request, index) =>
+    Object.keys(request.questions).some((key) => key.startsWith("coverage:"))
+      ? [index]
+      : [],
+  )[1];
+  const detail = optional.findIndex((request) =>
+    Object.keys(request.questions).some((key) => key.startsWith("detail:")),
+  );
+  expect(detail).toBeGreaterThanOrEqual(0);
+  expect(secondCoverage).toBeGreaterThan(detail);
+  expect(h.calls).toHaveLength(2);
 });
 it("accepts canonical user review reports through the same isolated pipeline", async () => {
   const h = await fixture();

@@ -2,6 +2,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { BoardSnapshot } from "../core/board-projection";
+import type { CoverageSnapshot } from "../core/coverage";
 import type { ExecutionVisibilitySnapshot } from "../core/execution-visibility";
 import type { PresentationSnapshot } from "../core/monitor";
 
@@ -10,6 +11,8 @@ export interface WidgetSnapshot {
   board: BoardSnapshot;
   /** Optional while old host/test projections have no runtime visibility data. */
   visibility?: ExecutionVisibilitySnapshot;
+  /** Optional read-only coverage sidecar; never task-board authority. */
+  coverage?: CoverageSnapshot;
 }
 
 /** Existing safe health-label utility; board owns where it is displayed. */

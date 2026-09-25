@@ -359,6 +359,7 @@ class TaskBoard implements BoardComponent {
           ]),
       ...this.wrapLines(`Task: ${task.label}`, width),
       ...this.wrapLines(`Assessment: ${this.provenance(task)}`, width),
+      ...this.coverageLines(task, width),
       ...this.detailValueLines("Task Title", task.details?.title, width),
       ...this.detailValueLines("Description", task.details?.description, width),
       ...(task.details?.acceptanceCriteria?.length
@@ -395,6 +396,38 @@ class TaskBoard implements BoardComponent {
         : this.wrapLines("• No task-local transitions", width, "dim")),
     );
     return { pinned, body, actions: visibility.actions };
+  }
+
+  /** Coverage is a read-only optional sidecar under its exact semantic parent. */
+  private coverageLines(task: BoardTask, width: number) {
+    const groups = this.snapshot.coverage?.groups.filter(
+      (group) =>
+        group.parentTaskId === task.taskId &&
+        group.parentRevision === task.revision,
+    );
+    if (!groups?.length) return [];
+    const lines = [...this.wrapLines("Coverage:", width)];
+    for (const group of groups) {
+      const accessed = group.children.filter((child) => child.accessed).length;
+      lines.push(
+        ...this.wrapLines(
+          `• ${group.children.length} known · ${accessed} accessed`,
+          width,
+          "dim",
+        ),
+      );
+      for (const child of group.children)
+        lines.push(
+          ...this.wrapLines(
+            `• ${child.label} · ${child.accessed ? "accessed" : "not accessed"}`,
+            width,
+            "dim",
+          ),
+        );
+      for (const omission of group.omissions)
+        lines.push(...this.wrapLines(`• ${omission}`, width, "warning"));
+    }
+    return lines;
   }
 
   private sameVisibilityTask(

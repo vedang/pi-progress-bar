@@ -90,7 +90,22 @@ interface CoverageReport {
 }
 ```
 
-`report(...status: "pending")` is the explicit accepted retraction shape. It does not delete receipt history. C01 may add the separately documented access reducer only after Main supplies its red test; it must not change these signatures or overload `report` with access.
+`report(...status: "pending")` is the explicit accepted retraction shape. It does not delete receipt history. C05 adds separate atomic `access`, never overloads `report`, and keeps its canonical tool receipt content-free after hashing the runtime call ID:
+
+```ts
+interface CoverageAccess {
+  groupId: string;
+  inventoryRevision: number;
+  childIds: string[];
+  source: { entryId: string; messageHash: string; callId: string };
+}
+
+type CoverageAccessResult =
+  | { accepted: true }
+  | { accepted: false; reason: "invalid" | "stale" | "foreign" };
+```
+
+Mixed foreign/stale child batches reject before any access mutation. Access only sets the separate observed flag; it cannot alter reported status or a parent.
 
 ### Frozen data shape and identity
 
@@ -122,6 +137,8 @@ interface CoverageChildSnapshot {
   key: string;
   label: string;
   status: CoverageChildStatus;
+  /** Separate canonical observed-access receipt, never a review claim. */
+  accessed: boolean;
 }
 
 interface CoverageGroupSnapshot {
@@ -181,7 +198,7 @@ A report must name a current group, its exact current inventory revision, and on
 
 Every accepted report stores a bounded receipt: group ID, inventory revision, exact child IDs, transition, canonical `SourceRef`, accepted assessment/request hash when later classifier wiring exists, and a content-free receipt digest. Report text, prompts, model envelopes, and reasoning do not enter the store/checkpoint.
 
-Access is separate from this transition table: observed read/extraction, partial/unknown mapping, and failed attempt are access facts. Access may identify an item/batch in runtime UI but cannot call `report`, advance child status, or affect a parent.
+Access is separate from this transition table: observed read/extraction, partial/unknown mapping, and failed attempt are access facts. Access may identify an item/batch in runtime UI but cannot call `report`, advance child status, or affect a parent. C05 persists at most one canonical hashed tool receipt per accessed child; reload revalidates that receipt and clears only `accessed` when its source is stale. Inventory/source loss still drops its whole optional group.
 
 ### C01 frozen test compatibility
 

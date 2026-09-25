@@ -50,11 +50,28 @@ export type CoverageReportResult =
   | { accepted: true }
   | { accepted: false; reason: "invalid" | "stale" | "foreign" };
 
+/** Canonical tool result identity; raw runtime call IDs never persist. */
+export interface CoverageAccess {
+  groupId: string;
+  inventoryRevision: number;
+  childIds: string[];
+  source: {
+    entryId: string;
+    messageHash: string;
+    callId: string;
+  };
+}
+
+export type CoverageAccessResult =
+  | { accepted: true }
+  | { accepted: false; reason: "invalid" | "stale" | "foreign" };
+
 export interface CoverageChildSnapshot {
   id: string;
   key: string;
   label: string;
   status: CoverageChildStatus;
+  accessed: boolean;
 }
 
 interface CoverageGroupSnapshot {
@@ -93,9 +110,16 @@ interface CoverageCheckpointReport extends CoverageReportReceipt {
   childId: string;
 }
 
+interface CoverageCheckpointAccess {
+  childId: string;
+  inventoryRevision: number;
+  source: InventorySourceReceipt;
+}
+
 interface CoverageCheckpointGroup extends CoverageGroupSnapshot {
   inventorySource: InventorySourceReceipt;
   reports: CoverageCheckpointReport[];
+  accesses: CoverageCheckpointAccess[];
 }
 
 export interface CoverageCheckpoint {
@@ -118,6 +142,8 @@ interface CoverageGroup extends CoverageGroupSnapshot {
   inventorySignature: string;
   /** One latest receipt per child keeps report provenance bounded by group size. */
   reportReceipts: Map<string, CoverageReportReceipt>;
+  /** Separate access receipts cannot imply a reported review state. */
+  accessReceipts: Map<string, Omit<CoverageCheckpointAccess, "childId">>;
 }
 
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -223,6 +249,13 @@ const validInventory = (value: unknown): value is CoverageInventory => {
   return knownTotal === undefined || knownTotal >= value.items.length;
 };
 
+const validAccessSource = (value: unknown): value is CoverageAccess["source"] =>
+  record(value) &&
+  hasExactKeys(value, ["entryId", "messageHash", "callId"]) &&
+  safeText(value.entryId, 512) &&
+  validHash(value.messageHash) &&
+  safeText(value.callId, 512);
+
 const inventoryCapacityExceeded = (inventory: CoverageInventory) =>
   inventory.items.length > MAX_CHILDREN_PER_GROUP ||
   (inventory.knownTotal !== undefined &&
@@ -312,12 +345,13 @@ const validCheckpointChild = (
   value: unknown,
 ): value is CoverageCheckpointChild =>
   record(value) &&
-  hasExactKeys(value, ["id", "key", "label", "status"]) &&
+  hasExactKeys(value, ["id", "key", "label", "status", "accessed"]) &&
   typeof value.id === "string" &&
   childId.test(value.id) &&
   safeText(value.key, 512) &&
   safeText(value.label) &&
-  statusIsValid(value.status);
+  statusIsValid(value.status) &&
+  typeof value.accessed === "boolean";
 
 const validCheckpointReport = (
   value: unknown,
@@ -329,6 +363,16 @@ const validCheckpointReport = (
   positiveInteger(value.inventoryRevision) &&
   statusIsValid(value.status) &&
   validSourceRef(value.source);
+
+const validCheckpointAccess = (
+  value: unknown,
+): value is CoverageCheckpointAccess =>
+  record(value) &&
+  hasExactKeys(value, ["childId", "inventoryRevision", "source"]) &&
+  typeof value.childId === "string" &&
+  childId.test(value.childId) &&
+  positiveInteger(value.inventoryRevision) &&
+  validInventorySourceReceipt(value.source);
 
 const validCheckpointGroup = (
   value: unknown,
@@ -354,7 +398,10 @@ const validCheckpointGroup = (
     !value.omissions.every((omission) => safeText(omission, 512)) ||
     !Array.isArray(value.reports) ||
     value.reports.length > value.children.length ||
-    !value.reports.every(validCheckpointReport)
+    !value.reports.every(validCheckpointReport) ||
+    !Array.isArray(value.accesses) ||
+    value.accesses.length > value.children.length ||
+    !value.accesses.every(validCheckpointAccess)
   )
     return false;
   const knownTotal = value.knownTotal;
@@ -383,7 +430,12 @@ const validCheckpointGroup = (
   const keys = new Set(value.children.map((child) => child.key));
   if (keys.size !== value.children.length) return false;
   const reports = new Set(value.reports.map((report) => report.childId));
-  if (reports.size !== value.reports.length) return false;
+  const accesses = new Set(value.accesses.map((access) => access.childId));
+  if (
+    reports.size !== value.reports.length ||
+    accesses.size !== value.accesses.length
+  )
+    return false;
   return (
     value.reports.every((report) => {
       const child = children.get(report.childId);
@@ -393,8 +445,18 @@ const validCheckpointGroup = (
         report.status === child.status
       );
     }) &&
+    value.accesses.every((access) => {
+      const child = children.get(access.childId);
+      return (
+        !!child &&
+        access.inventoryRevision === value.inventoryRevision &&
+        child.accessed === true
+      );
+    }) &&
     value.children.every(
-      (child) => child.status === "pending" || reports.has(child.id),
+      (child) =>
+        (child.status === "pending" || reports.has(child.id)) &&
+        (child.accessed === false || accesses.has(child.id)),
     )
   );
 };
@@ -413,6 +475,7 @@ const exactGroupKeys = (value: Record<string, unknown>) =>
     "omissions",
     "inventorySource",
     "reports",
+    "accesses",
   ]) ||
   hasExactKeys(value, [
     "id",
@@ -428,6 +491,7 @@ const exactGroupKeys = (value: Record<string, unknown>) =>
     "omissions",
     "inventorySource",
     "reports",
+    "accesses",
   ]);
 
 const validCoverageCheckpointShape = (
@@ -577,6 +641,11 @@ export class CoverageStore {
             childIds.has(childId),
           ),
         );
+    // A newer inventory revision invalidates prior item-to-result access facts.
+    const accessReceipts = new Map<
+      string,
+      Omit<CoverageCheckpointAccess, "childId">
+    >();
 
     this.groups = this.groups.map((candidate) =>
       candidate === group
@@ -587,6 +656,7 @@ export class CoverageStore {
             complete: inventory.complete,
             inventorySource: inventorySource(inventory.source),
             reportReceipts,
+            accessReceipts,
             ...(inventory.knownTotal === undefined
               ? { knownTotal: undefined }
               : { knownTotal: inventory.knownTotal }),
@@ -644,6 +714,54 @@ export class CoverageStore {
         reportReceipts,
         children: candidate.children.map((child) =>
           selected.has(child.id) ? { ...child, status: input.status } : child,
+        ),
+      };
+    });
+    return { accepted: true };
+  }
+
+  /** Record canonical access without changing reported review state. */
+  access(input: CoverageAccess): CoverageAccessResult {
+    if (
+      !record(input) ||
+      !safeText(input.groupId, 512) ||
+      !Number.isSafeInteger(input.inventoryRevision) ||
+      (input.inventoryRevision as number) < 1 ||
+      !Array.isArray(input.childIds) ||
+      !validAccessSource(input.source)
+    )
+      return { accepted: false, reason: "invalid" };
+    const group = this.groups.find(
+      (candidate) => candidate.id === input.groupId,
+    );
+    if (!group) return { accepted: false, reason: "foreign" };
+    if (!group.included || input.inventoryRevision !== group.inventoryRevision)
+      return { accepted: false, reason: "stale" };
+    const childIds = new Set(input.childIds);
+    if (!childIds.size || childIds.size !== input.childIds.length)
+      return { accepted: false, reason: "invalid" };
+    if (
+      !input.childIds.every((id) =>
+        group.children.some((child) => child.id === id),
+      )
+    )
+      return { accepted: false, reason: "foreign" };
+
+    const selected = new Set(input.childIds);
+    const source = inventorySource(input.source);
+    this.groups = this.groups.map((candidate) => {
+      if (candidate !== group) return candidate;
+      const accessReceipts = new Map(candidate.accessReceipts);
+      for (const childId of selected)
+        accessReceipts.set(childId, {
+          inventoryRevision: input.inventoryRevision,
+          source: { ...source },
+        });
+      return {
+        ...candidate,
+        accessReceipts,
+        children: candidate.children.map((child) =>
+          selected.has(child.id) ? { ...child, accessed: true } : child,
         ),
       };
     });
@@ -715,6 +833,18 @@ export class CoverageStore {
               ]
             : [];
         }),
+        accesses: group.children.flatMap((child) => {
+          const receipt = group.accessReceipts.get(child.id);
+          return receipt
+            ? [
+                {
+                  childId: child.id,
+                  inventoryRevision: receipt.inventoryRevision,
+                  source: { ...receipt.source },
+                },
+              ]
+            : [];
+        }),
       })),
     };
     if (!coverageCheckpointIsValid(checkpoint))
@@ -770,11 +900,25 @@ export class CoverageStore {
             } satisfies CoverageReportReceipt,
           ]),
       );
+      const accesses = new Map(
+        group.accesses
+          .filter((access) => sourceCurrent(access.source))
+          .map((access) => [
+            access.childId,
+            {
+              inventoryRevision: access.inventoryRevision,
+              source: { ...access.source },
+            } satisfies Omit<CoverageCheckpointAccess, "childId">,
+          ]),
+      );
       const children = group.children.map((child) => {
-        const receipt = reports.get(child.id);
-        return receipt
-          ? { ...child }
-          : { ...child, status: "pending" as const };
+        const report = reports.get(child.id);
+        const access = accesses.get(child.id);
+        return {
+          ...child,
+          status: report ? child.status : ("pending" as const),
+          accessed: !!access,
+        };
       });
       return [
         {
@@ -795,6 +939,7 @@ export class CoverageStore {
           inventorySource: { ...group.inventorySource },
           inventorySignature: checkpointInventorySignature(group),
           reportReceipts: reports,
+          accessReceipts: accesses,
         } satisfies CoverageGroup,
       ];
     });
@@ -837,6 +982,7 @@ export class CoverageStore {
         inventorySource: inventorySource(inventory.source),
         inventorySignature: inventorySignature(inventory),
         reportReceipts: new Map(),
+        accessReceipts: new Map(),
       },
     ];
     return { accepted: true };
@@ -852,6 +998,7 @@ export class CoverageStore {
       key,
       label,
       status: "pending",
+      accessed: false,
     };
   }
 

@@ -23,6 +23,12 @@ export interface CoverageToolEnd {
 interface CoverageAccess {
   resourceKey: string;
   itemKeys: string[];
+  /** Final canonical result only; source bodies/paths remain adapter-local. */
+  source: {
+    entryId: string;
+    messageHash: string;
+    callId: string;
+  };
 }
 
 export interface CoverageActivity {
@@ -972,6 +978,11 @@ export class CoverageAdapter {
       accepted.access.push({
         resourceKey: manifest.resourceKey,
         itemKeys: files.map((file) => file.itemKey),
+        source: {
+          entryId: result.entryId,
+          messageHash: result.contentHash ?? "",
+          callId: result.callId,
+        },
       });
       return;
     }
@@ -996,6 +1007,11 @@ export class CoverageAdapter {
     accepted.access.push({
       resourceKey: candidate.activity.resourceKey,
       itemKeys: [...candidate.activity.itemKeys],
+      source: {
+        entryId: result.entryId,
+        messageHash: result.contentHash ?? "",
+        callId: result.callId,
+      },
     });
   }
 

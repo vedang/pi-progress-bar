@@ -28,6 +28,10 @@ import {
   readLabelSelections,
   type VisibilityTask,
 } from "../analysis/activity-label";
+import {
+  type CoverageIntentRequest,
+  CoverageIntentRequests,
+} from "../analysis/coverage-intent";
 import type { ExtractionInput } from "../analysis/extractor";
 import {
   type EvaluationRequest,
@@ -52,6 +56,7 @@ import {
   beadsPresentation,
   readBeadsExport,
 } from "../sources/beads";
+import { CoverageAdapter } from "../sources/coverage";
 import { EvidenceStore, redEvidenceLabel } from "../sources/evidence";
 import {
   type CanonicalFrontier,
@@ -64,7 +69,13 @@ import {
   projectBoard,
   visibilityTaskSourceDigest,
 } from "./board-projection";
-import { type CoverageRestoreReference, CoverageStore } from "./coverage";
+import {
+  type CoverageAccess,
+  type CoverageInventory,
+  type CoverageRestoreReference,
+  type CoverageSnapshot,
+  CoverageStore,
+} from "./coverage";
 import {
   type ExecutionVisibilitySnapshot,
   ExecutionVisibilityStore,
@@ -308,6 +319,11 @@ export interface DebugSnapshot {
   processing: "idle" | "processing" | "waiting";
   service: { code: string; label: string };
   diagnostics: { code: string; label: string; count: number }[];
+}
+
+/** Detached optional coverage display; current reads remain runtime-only. */
+export interface CoverageMonitorSnapshot extends CoverageSnapshot {
+  current: Array<{ groupId: string; childIds: string[] }>;
 }
 
 export type AdvisorySettlementReason =
@@ -561,8 +577,16 @@ export class Monitor {
     jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
     extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
   };
-  /** Durable coverage is inert until later optional intent/adapter wiring. */
+  /** Optional coverage never participates in semantic task reduction. */
   private coverage = new CoverageStore();
+  private coverageAdapter = new CoverageAdapter();
+  private coverageIntents = new CoverageIntentRequests();
+  private coverageEpoch = 0;
+  private coverageIntentController?: AbortController;
+  private pendingCoverageInventories: CoverageInventory[] = [];
+  private pendingCoverageAccess: ReturnType<
+    CoverageAdapter["confirm"]
+  >["access"] = [];
   private coverageDispatches = 0;
   private readonly coverageUsage = {
     jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
@@ -693,6 +717,74 @@ export class Monitor {
   /** Display focus never establishes tool evidence authority. */
   evidenceLink() {
     return undefined;
+  }
+
+  /** Runtime tool start is candidate-only until later canonical confirmation. */
+  observeCoverageToolStart(
+    callId: string,
+    toolName: string,
+    args: unknown,
+  ): void {
+    if (!this.enabled) return;
+    this.coverageAdapter.start(
+      { toolCallId: callId, toolName, args },
+      this.coverageEpoch,
+    );
+    this.publish();
+  }
+
+  /** Runtime tool end clears only its exact optional candidate. */
+  observeCoverageToolEnd(callId: string, toolName: string): void {
+    if (!this.enabled) return;
+    this.coverageAdapter.end(
+      { toolCallId: callId, toolName },
+      this.coverageEpoch,
+    );
+    this.publish();
+  }
+
+  /**
+   * Re-read active canonical branch after host append. Tool listener payloads
+   * remain unauthoritative; admitted inventory/access is persisted atomically.
+   */
+  confirmCoverageBranch(entries: readonly unknown[]): void {
+    if (!this.enabled) return;
+    const pass = new CanonicalPass(entries);
+    this.reconcileCoverageCanonical(pass);
+    const accepted = this.coverageAdapter.confirm(entries, this.coverageEpoch);
+    this.prunePendingCoverage(pass);
+    this.enqueueCoverageAdapterResult(accepted, pass);
+    this.admitPendingCoverage();
+    this.publish();
+  }
+
+  /** Detached optional projection. Runtime reads do not enter checkpoints. */
+  coverageSnapshot(): CoverageMonitorSnapshot {
+    const snapshot = this.coverage.snapshot();
+    const groups = snapshot.groups;
+    const current = this.coverageAdapter.activity().flatMap((activity) => {
+      const matching = groups.filter(
+        (group) =>
+          group.resourceKey === activity.resourceKey &&
+          group.complete &&
+          this.state.tasks.some(
+            (task) =>
+              task.id === group.parentTaskId &&
+              task.revision === group.parentRevision &&
+              task.included,
+          ),
+      );
+      if (matching.length !== 1) return [];
+      const group = matching[0];
+      const childIds = activity.itemKeys.flatMap((key) => {
+        const child = group.children.find((item) => item.key === key);
+        return child ? [child.id] : [];
+      });
+      return childIds.length === activity.itemKeys.length
+        ? [{ groupId: group.id, childIds }]
+        : [];
+    });
+    return { ...snapshot, current };
   }
 
   /** Provisional declared calls dispatch immediately; final reconciliation is turn-bound. */
@@ -1139,6 +1231,7 @@ export class Monitor {
     this.detailGateway.pause();
     this.correctionGateway.pause();
     this.resetVisibility();
+    this.resetCoverageRuntime();
     this.clearActivity(false);
     this.evidence.clearPending();
   }
@@ -1780,6 +1873,7 @@ export class Monitor {
     this.invalidateCorrections();
     this.state = emptyState(sourceId);
     this.coverage = new CoverageStore();
+    this.resetCoverageRuntime();
     this.card = undefined;
     this.healthCards.clear();
     this.taskDetails.clear();
@@ -2061,6 +2155,257 @@ export class Monitor {
       sha256(text) === reference.messageHash &&
       sha256(message.toolCallId) === reference.callIdDigest
     );
+  }
+
+  /** Drop optional receipts whose canonical source no longer validates. */
+  private reconcileCoverageCanonical(pass: CanonicalPass) {
+    const current = CoverageStore.restore(this.coverage.checkpoint(), {
+      parents: this.state.tasks,
+      sourceCurrent: (reference) => this.coverageSourceCurrent(reference, pass),
+    });
+    if (current) this.coverage = current;
+  }
+
+  private coverageToolSourceCurrent(
+    source: { entryId: string; messageHash: string; callId: string },
+    pass: CanonicalPass,
+  ) {
+    return this.coverageSourceCurrent(
+      {
+        entryId: source.entryId,
+        messageHash: source.messageHash,
+        callIdDigest: sha256(source.callId),
+      },
+      pass,
+    );
+  }
+
+  private prunePendingCoverage(pass: CanonicalPass) {
+    this.pendingCoverageInventories = this.pendingCoverageInventories.filter(
+      (inventory) => this.coverageToolSourceCurrent(inventory.source, pass),
+    );
+    this.pendingCoverageAccess = this.pendingCoverageAccess.filter((access) =>
+      this.coverageToolSourceCurrent(access.source, pass),
+    );
+  }
+
+  private enqueueCoverageAdapterResult(
+    result: ReturnType<CoverageAdapter["confirm"]>,
+    pass: CanonicalPass,
+  ) {
+    for (const inventory of result.inventories) {
+      if (!this.coverageToolSourceCurrent(inventory.source, pass)) continue;
+      const existing = this.pendingCoverageInventories.findIndex(
+        (candidate) =>
+          candidate.resourceKey === inventory.resourceKey &&
+          candidate.revision === inventory.revision &&
+          candidate.source.entryId === inventory.source.entryId,
+      );
+      if (existing >= 0) this.pendingCoverageInventories[existing] = inventory;
+      else if (this.pendingCoverageInventories.length < 16)
+        this.pendingCoverageInventories.push(inventory);
+    }
+    for (const access of result.access) {
+      if (!this.coverageToolSourceCurrent(access.source, pass)) continue;
+      const existing = this.pendingCoverageAccess.findIndex(
+        (candidate) => candidate.source.entryId === access.source.entryId,
+      );
+      if (existing >= 0) this.pendingCoverageAccess[existing] = access;
+      else if (this.pendingCoverageAccess.length < 16)
+        this.pendingCoverageAccess.push(access);
+    }
+  }
+
+  /** Clone through bounded checkpoint validation before an optional transaction. */
+  private clonedCoverage() {
+    return CoverageStore.restore(this.coverage.checkpoint(), {
+      parents: this.state.tasks,
+      sourceCurrent: () => true,
+    });
+  }
+
+  private currentCoverageIntent(resourceKey: string) {
+    const candidates = this.coverageIntents
+      .snapshot()
+      .filter((intent) => intent.resourceKey === resourceKey)
+      .flatMap((intent) => {
+        const parent = this.state.tasks.find(
+          (task) =>
+            task.id === intent.parentTaskId &&
+            task.revision === intent.parentRevision &&
+            task.included &&
+            visibilityTaskSourceDigest(task) === intent.parentSourceDigest,
+        );
+        return parent ? [{ parent, intent }] : [];
+      });
+    return candidates.length === 1 ? candidates[0] : undefined;
+  }
+
+  /** Persist optional coverage as one all-or-nothing checkpoint transition. */
+  private persistCoverageCandidate(candidate: CoverageStore) {
+    const previous = this.coverage;
+    this.coverage = candidate;
+    try {
+      encodeCheckpoint(
+        this.state,
+        this.metadata(false, this.healthCards, this.state),
+      );
+      const checkpoint = encodeCheckpoint(
+        this.state,
+        this.metadata(this.enabled, this.healthCards, this.state),
+      );
+      this.persist(checkpoint);
+      return true;
+    } catch {
+      this.coverage = previous;
+      this.note("saved-state-rejected");
+      return false;
+    }
+  }
+
+  /** Admit only canonical inventory/access pending an already-grounded intent. */
+  private admitPendingCoverage() {
+    this.prunePendingCoverage(this.beginCanonicalPass());
+    const candidate = this.clonedCoverage();
+    if (!candidate) return;
+    const before = JSON.stringify(candidate.checkpoint());
+    const retainedInventories: CoverageInventory[] = [];
+    for (const inventory of this.pendingCoverageInventories) {
+      const binding = this.currentCoverageIntent(inventory.resourceKey);
+      if (!binding) {
+        retainedInventories.push(inventory);
+        continue;
+      }
+      const accepted = candidate.admit({
+        parent: binding.parent,
+        intent: binding.intent.source,
+        inventory,
+      });
+      if (!accepted.accepted && accepted.reason === "stale") continue;
+      if (!accepted.accepted) continue;
+    }
+    const retainedAccess: ReturnType<CoverageAdapter["confirm"]>["access"] = [];
+    for (const access of this.pendingCoverageAccess) {
+      const matches = candidate
+        .snapshot()
+        .groups.filter((group) => group.resourceKey === access.resourceKey);
+      if (matches.length !== 1) {
+        retainedAccess.push(access);
+        continue;
+      }
+      const group = matches[0];
+      const childIds = access.itemKeys.flatMap((key) => {
+        const child = group.children.find((item) => item.key === key);
+        return child ? [child.id] : [];
+      });
+      if (childIds.length !== access.itemKeys.length) continue;
+      const accepted = candidate.access({
+        groupId: group.id,
+        inventoryRevision: group.inventoryRevision,
+        childIds,
+        source: access.source,
+      } satisfies CoverageAccess);
+      if (!accepted.accepted && accepted.reason === "stale") continue;
+      if (!accepted.accepted) continue;
+    }
+    const changed = JSON.stringify(candidate.checkpoint()) !== before;
+    if (!changed || this.persistCoverageCandidate(candidate)) {
+      this.pendingCoverageInventories = retainedInventories;
+      this.pendingCoverageAccess = retainedAccess;
+    }
+  }
+
+  /** Optional selected-model ingress has independent dispatch/usage accounting. */
+  private scheduleCoverageIntent(observation: Observation) {
+    if (
+      !this.enabled ||
+      !/\S+\.xlsx\b/iu.test(observation.text) ||
+      this.coverageDispatches >= 1024 ||
+      this.coverageIntentController
+    )
+      return;
+    const request = this.coverageIntents.begin(
+      this.state,
+      observation,
+      this.coverageEpoch,
+    );
+    if (!request) return;
+    const controller = new AbortController();
+    this.coverageIntentController = controller;
+    void this.runCoverageIntent(request, controller, this.coverageEpoch);
+  }
+
+  private async runCoverageIntent(
+    request: CoverageIntentRequest,
+    controller: AbortController,
+    epoch: number,
+  ) {
+    try {
+      const result = await this.options.extract(
+        request.input,
+        controller.signal,
+        () => this.recordCoverageExtractionDispatch(epoch),
+      );
+      if (
+        controller.signal.aborted ||
+        !this.enabled ||
+        epoch !== this.coverageEpoch ||
+        !safeUsageValue(result.usage.inputTokens) ||
+        !safeUsageValue(result.usage.outputTokens)
+      )
+        return;
+      this.coverageUsage.extraction.inputTokens = saturatingAdd(
+        this.coverageUsage.extraction.inputTokens,
+        result.usage.inputTokens,
+      );
+      this.coverageUsage.extraction.outputTokens = saturatingAdd(
+        this.coverageUsage.extraction.outputTokens,
+        result.usage.outputTokens,
+      );
+      this.persistCoverageCandidate(this.coverage);
+      const completed = this.coverageIntents.finish(
+        request,
+        result.text,
+        this.state,
+        (entryId) =>
+          this.resolveObservation(this.beginCanonicalPass(), entryId),
+        epoch,
+      );
+      if (completed.status !== "accepted") return;
+      this.admitPendingCoverage();
+      this.publish();
+    } catch {
+      // Optional coverage has no retry and never changes mandatory availability.
+    } finally {
+      if (this.coverageIntentController === controller)
+        this.coverageIntentController = undefined;
+    }
+  }
+
+  private recordCoverageExtractionDispatch(epoch: number) {
+    if (
+      !this.enabled ||
+      epoch !== this.coverageEpoch ||
+      this.coverageDispatches >= 1024
+    )
+      return;
+    this.coverageDispatches++;
+    this.coverageUsage.extraction.calls = saturatingAdd(
+      this.coverageUsage.extraction.calls,
+      1,
+    );
+    // Dispatch accounting is durable but cannot make a semantic transition fail.
+    this.persistCoverageCandidate(this.coverage);
+  }
+
+  private resetCoverageRuntime() {
+    this.coverageEpoch++;
+    this.coverageIntentController?.abort();
+    this.coverageIntentController = undefined;
+    this.coverageAdapter.reset(this.coverageEpoch);
+    this.coverageIntents = new CoverageIntentRequests();
+    this.pendingCoverageInventories = [];
+    this.pendingCoverageAccess = [];
   }
 
   private healthCardMatchesCanonical(card: HealthCard, pass?: CanonicalPass) {
@@ -3491,6 +3836,9 @@ export class Monitor {
           this.retryObservation = undefined;
         // Cursor progression, including overflow, owns bounded context parity.
         this.rememberPreceding(requestContext, observation);
+        // Coverage intent is an independently bounded optional request. It never
+        // reruns mandatory extraction or changes this committed semantic state.
+        this.scheduleCoverageIntent(observation);
         // A named committed cursor wake permits parked optional jobs. It occurs
         // before `finally` drains, never while semantic `processing` is true.
         this.parkedDetails.clear();

@@ -68,14 +68,9 @@ it("coalesces identical in-flight requests before dispatch", () => {
 });
 it("offers intent after unchanged mandatory scope without mandatory re-extraction", async () => {
   const { state, requests } = fixture();
-  let calls = 0;
   const providers = backend(noPatch(), { gate: "unchanged" });
-  providers.extract = async () => {
-    calls++;
-    return JSON.stringify(noPatch());
-  };
   const settled = await processObservation(state, latest, providers);
-  expect(calls).toBe(0);
+  expect(providers.extract).not.toHaveBeenCalled();
   expect(requests.begin(settled, latest, 1)).toBeDefined();
   expect(settled.tasks).toHaveLength(1);
 });

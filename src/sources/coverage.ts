@@ -665,6 +665,7 @@ export class CoverageAdapter {
       access: [],
       omissions: this.omissions,
     };
+    const ready: Array<{ candidate: Candidate; result: CanonicalResult }> = [];
     for (const [callId, candidate] of [...this.pending]) {
       if (!candidate.ended) continue;
       const matching = index.results.get(callId);
@@ -675,8 +676,11 @@ export class CoverageAdapter {
         this.omissions++;
         continue;
       }
-      this.accept(candidate, current, index, accepted);
+      ready.push({ candidate, result: current });
     }
+    ready.sort((left, right) => left.result.order - right.result.order);
+    for (const item of ready)
+      this.accept(item.candidate, item.result, index, accepted);
     accepted.omissions = this.omissions;
     return accepted;
   }

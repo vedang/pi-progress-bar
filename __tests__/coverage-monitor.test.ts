@@ -107,6 +107,36 @@ async function mapped() {
   );
   return h;
 }
+it("does not dispatch optional extraction when its pre-network budget checkpoint fails", async () => {
+  const h = fixture();
+  let optionalNetworkCalls = 0;
+  const extract = h.extract.getMockImplementation();
+  if (!extract) throw new Error("Missing transport");
+  h.extract.mockImplementation(async (input, signal, onDispatch) => {
+    if (!input.instructions.includes("parentIndices"))
+      return extract(input, signal, onDispatch);
+    onDispatch?.(Date.now());
+    if (signal.aborted) throw new Error("cancelled");
+    optionalNetworkCalls++;
+    return {
+      text: '{"intents":[]}',
+      provider: "offline",
+      model: "fixture",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+  });
+  h.save.mockImplementation((value) => {
+    const checkpoint = value as ReturnType<typeof encodeCheckpoint>;
+    if ((checkpoint.monitor?.coverage?.dispatches ?? 0) > 0)
+      throw new Error("budget write denied");
+  });
+  h.start();
+  await h.settle("goal");
+  await vi.advanceTimersByTimeAsync(200);
+  expect(optionalNetworkCalls).toBe(0);
+  expect(h.monitor.state.tasks).toHaveLength(1);
+  expect(h.monitor.state.cursor?.id).toBe("goal");
+});
 it("creates22pending children under1parent without changing parent health or billing on tools", async () => {
   const h = await ready();
   const tasks = structuredClone(h.monitor.state.tasks);

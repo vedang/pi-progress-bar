@@ -3,6 +3,7 @@ import type {
   HybridState,
   HybridTask,
   Observation,
+  ObservationRef,
   SourceRef,
 } from "../core/hybrid-state";
 import { type ExtractionInput, exactQuoteSource } from "./extractor";
@@ -11,7 +12,7 @@ const MAX_LATEST_BYTES = 12 * 1024;
 const MAX_INPUT_BYTES = 24 * 1024;
 const MAX_RESULT_BYTES = 32 * 1024;
 const MAX_INCLUDED_PARENTS = 20;
-const MAX_ACCEPTED_RECEIPTS = 200;
+const MAX_DURABLE_INTENT_RECEIPTS = 20;
 const MAX_IN_FLIGHT_REQUESTS = 20;
 const MAX_INTENTS_PER_RESULT = 20;
 const digest = /^[a-f0-9]{64}$/;
@@ -35,6 +36,18 @@ export interface CoverageIntentRequest {
 
 export interface CoverageIntentReceipt extends CoverageIntent {
   identity: string;
+}
+
+/** Content-free completed no-intent decision for one exact canonical observation. */
+export interface CoverageIntentNegativeReceipt {
+  identity: string;
+  source: ObservationRef;
+}
+
+/** Bounded durable selected-model outcome journal; no prompts or raw output. */
+export interface CoverageIntentJournal {
+  accepted: CoverageIntentReceipt[];
+  negative: CoverageIntentNegativeReceipt[];
 }
 
 type CoverageIntentAbstentionCode =
@@ -254,6 +267,10 @@ const parseProposals = (raw: string): IntentProposal[] | undefined => {
 export class CoverageIntentRequests {
   private readonly flights = new Map<string, Flight>();
   private readonly receipts = new Map<string, CoverageIntentReceipt>();
+  private readonly negativeReceipts = new Map<
+    string,
+    CoverageIntentNegativeReceipt
+  >();
   private readonly acceptedIdentities = new Set<string>();
 
   begin(
@@ -281,8 +298,9 @@ export class CoverageIntentRequests {
         return;
       if (
         this.flights.size >= MAX_IN_FLIGHT_REQUESTS ||
-        this.receipts.size >= MAX_ACCEPTED_RECEIPTS ||
-        this.acceptedIdentities.size >= MAX_ACCEPTED_RECEIPTS
+        this.receipts.size >= MAX_DURABLE_INTENT_RECEIPTS ||
+        this.negativeReceipts.size >= MAX_DURABLE_INTENT_RECEIPTS ||
+        this.acceptedIdentities.size >= MAX_DURABLE_INTENT_RECEIPTS * 2
       )
         return;
       const input: ExtractionInput = {
@@ -407,7 +425,7 @@ export class CoverageIntentRequests {
           source,
         });
       }
-      if (this.receipts.size + intents.length > MAX_ACCEPTED_RECEIPTS)
+      if (this.receipts.size + intents.length > MAX_DURABLE_INTENT_RECEIPTS)
         return abstained("capacity");
       for (const intent of intents) {
         const key = sha256(
@@ -426,6 +444,18 @@ export class CoverageIntentRequests {
         );
         this.receipts.set(key, { identity: request.identity, ...intent });
       }
+      if (!intents.length) {
+        if (this.negativeReceipts.size >= MAX_DURABLE_INTENT_RECEIPTS)
+          return abstained("capacity");
+        this.negativeReceipts.set(request.identity, {
+          identity: request.identity,
+          source: {
+            entryId: flight.latest.id,
+            messageHash: flight.latest.hash,
+            role: flight.latest.role,
+          },
+        });
+      }
       this.acceptedIdentities.add(request.identity);
       return {
         status: "accepted",
@@ -439,11 +469,127 @@ export class CoverageIntentRequests {
     }
   }
 
-  /** Detached, bounded durable-safe receipts; source and resource text stay runtime-only. */
+  /** Detached accepted receipts used for passive inventory admission. */
   snapshot(): CoverageIntentReceipt[] {
     return [...this.receipts.values()].map((receipt) => ({
       ...receipt,
       source: { ...receipt.source },
     }));
+  }
+
+  /** Bounded journal supports reload without canonical reconstruction or rebilling. */
+  journalSnapshot(): CoverageIntentJournal {
+    return {
+      accepted: this.snapshot(),
+      negative: [...this.negativeReceipts.values()].map((receipt) => ({
+        identity: receipt.identity,
+        source: { ...receipt.source },
+      })),
+    };
+  }
+
+  /** Restore only receipts whose exact canonical source and parent bindings remain. */
+  static restoreJournal(
+    journal: CoverageIntentJournal | undefined,
+    state: HybridState,
+    resolve: (entryId: string) => Observation | undefined,
+  ): CoverageIntentRequests {
+    const restored = new CoverageIntentRequests();
+    if (!journal) return restored;
+    const supplied = parentBindings(state);
+    if (!supplied) return restored;
+    const parentMap = new Map(
+      supplied.bindings.map((parent) => [parent.id, parent]),
+    );
+    const resolveLatest = (source: ObservationRef) => {
+      const latest = resolve(source.entryId);
+      return validObservation(latest) &&
+        latest.hash === source.messageHash &&
+        latest.role === source.role
+        ? latest
+        : undefined;
+    };
+    const identities = new Set<string>();
+    const accepted = new Map<string, CoverageIntentReceipt[]>();
+    for (const receipt of journal.accepted) {
+      const values = accepted.get(receipt.identity) ?? [];
+      values.push(receipt);
+      accepted.set(receipt.identity, values);
+    }
+    for (const [identity, receipts] of accepted) {
+      const first = receipts[0];
+      if (!first || !digest.test(identity)) continue;
+      const latest = resolveLatest({
+        entryId: first.source.entryId,
+        messageHash: first.source.messageHash,
+        role: first.source.role,
+      });
+      if (
+        !latest ||
+        identityFor(state.sourceId, latest, supplied.bindings) !== identity ||
+        receipts.some((receipt) => {
+          const parent = parentMap.get(receipt.parentTaskId);
+          const source = receipt.source;
+          if (
+            !parent ||
+            parent.revision !== receipt.parentRevision ||
+            parent.sourceDigest !== receipt.parentSourceDigest ||
+            !digest.test(receipt.resourceKey) ||
+            source.entryId !== latest.id ||
+            source.messageHash !== latest.hash ||
+            source.role !== latest.role ||
+            source.start < 0 ||
+            source.end > latest.text.length ||
+            source.end <= source.start ||
+            sha256(latest.text.slice(source.start, source.end)) !==
+              source.quoteHash
+          )
+            return true;
+          return false;
+        })
+      )
+        continue;
+      for (const receipt of receipts) {
+        const key = sha256(
+          JSON.stringify([
+            receipt.parentTaskId,
+            receipt.parentRevision,
+            receipt.parentSourceDigest,
+            receipt.resourceKey,
+            receipt.source.entryId,
+            receipt.source.messageHash,
+            receipt.source.role,
+            receipt.source.start,
+            receipt.source.end,
+            receipt.source.quoteHash,
+          ]),
+        );
+        if (restored.receipts.has(key)) continue;
+        restored.receipts.set(key, {
+          ...receipt,
+          source: { ...receipt.source },
+        });
+      }
+      identities.add(identity);
+    }
+    for (const receipt of journal.negative) {
+      if (identities.has(receipt.identity) || !digest.test(receipt.identity))
+        continue;
+      const latest = resolveLatest(receipt.source);
+      if (
+        latest &&
+        identityFor(state.sourceId, latest, supplied.bindings) ===
+          receipt.identity
+      ) {
+        restored.negativeReceipts.set(receipt.identity, {
+          identity: receipt.identity,
+          source: { ...receipt.source },
+        });
+        identities.add(receipt.identity);
+      }
+    }
+    for (const identity of identities)
+      restored.acceptedIdentities.add(identity);
+    return restored;
   }
 }

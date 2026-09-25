@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { completionRequest } from "../analysis/completion";
+import type { CoverageIntentJournal } from "../analysis/coverage-intent";
 import { extractionInput } from "../analysis/extractor";
 import { gateRequest } from "../analysis/gate";
 import type {
@@ -145,6 +146,7 @@ interface CoverageCheckpointMetadata {
     jev: { calls: number; inputTokens: number; outputTokens: number };
     extraction: { calls: number; inputTokens: number; outputTokens: number };
   };
+  intents?: CoverageIntentJournal;
   jobs?: CoverageReportJobCheckpoint[];
   reportReceipts?: CoverageReportDispatchCheckpoint[];
 }
@@ -890,6 +892,66 @@ const coverageChoices = new Set([
   "uncertain",
 ]);
 
+function validCoverageIntentJournal(
+  value: unknown,
+): value is CoverageIntentJournal {
+  if (
+    !record(value) ||
+    !exactKeys(value, ["accepted", "negative"]) ||
+    !Array.isArray(value.accepted) ||
+    value.accepted.length > 20 ||
+    !Array.isArray(value.negative) ||
+    value.negative.length > 20
+  )
+    return false;
+  const acceptedKeys = new Set<string>();
+  const acceptedIdentities = new Set<string>();
+  for (const receipt of value.accepted) {
+    if (
+      !record(receipt) ||
+      !exactKeys(receipt, [
+        "identity",
+        "parentTaskId",
+        "parentRevision",
+        "parentSourceDigest",
+        "resourceKey",
+        "source",
+      ]) ||
+      !hashIsValid(receipt.identity) ||
+      !taskIdIsValid(receipt.parentTaskId) ||
+      !positiveInteger(receipt.parentRevision) ||
+      !hashIsValid(receipt.parentSourceDigest) ||
+      !hashIsValid(receipt.resourceKey) ||
+      !validSourceRef(receipt.source)
+    )
+      return false;
+    const key = JSON.stringify([
+      receipt.identity,
+      receipt.parentTaskId,
+      receipt.parentRevision,
+      receipt.parentSourceDigest,
+      receipt.resourceKey,
+      receipt.source,
+    ]);
+    if (acceptedKeys.has(key)) return false;
+    acceptedKeys.add(key);
+    acceptedIdentities.add(receipt.identity);
+  }
+  const negative = new Set<string>();
+  for (const receipt of value.negative) {
+    if (
+      !record(receipt) ||
+      !exactKeys(receipt, ["identity", "source"]) ||
+      !hashIsValid(receipt.identity) ||
+      !validObservationRef(receipt.source) ||
+      negative.has(receipt.identity)
+    )
+      return false;
+    negative.add(receipt.identity);
+  }
+  return ![...acceptedIdentities].some((identity) => negative.has(identity));
+}
+
 function validCoverageReportJob(
   value: unknown,
 ): value is CoverageReportJobCheckpoint {
@@ -996,7 +1058,7 @@ function validCoverageMetadata(
     !exactKeys(
       value,
       ["state", "dispatches", "usage"],
-      ["jobs", "reportReceipts"],
+      ["intents", "jobs", "reportReceipts"],
     ) ||
     !coverageCheckpointIsValid(value.state) ||
     byteLength(value) > MAX_COVERAGE_CHECKPOINT_BYTES ||
@@ -1005,9 +1067,11 @@ function validCoverageMetadata(
     !validCoverageUsage(value.usage)
   )
     return false;
+  const intents = value.intents;
   const jobs = value.jobs ?? [];
   const receipts = value.reportReceipts ?? [];
   if (
+    (intents !== undefined && !validCoverageIntentJournal(intents)) ||
     !Array.isArray(jobs) ||
     jobs.length > 20 ||
     !jobs.every(validCoverageReportJob) ||

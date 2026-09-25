@@ -23,6 +23,172 @@ function fixture() {
 }
 
 describe("one-level coverage store", () => {
+  it("keeps count-only scope explicit without inventing children", () => {
+    const store = new CoverageStore();
+    expect(
+      store.admit({
+        parent: coverageParent(),
+        intent: coverageSource(),
+        inventory: {
+          ...coverageInventory([]),
+          complete: false,
+          knownTotal: 22,
+        },
+      }).accepted,
+    ).toBe(true);
+    expect(store.snapshot().groups[0]).toMatchObject({
+      children: [],
+      knownTotal: 22,
+      complete: false,
+    });
+    expect(store.snapshot().groups[0].omissions.length).toBeGreaterThan(0);
+  });
+  it("rejects conflicting count and complete inventory", () => {
+    const store = new CoverageStore();
+    expect(
+      store.admit({
+        parent: coverageParent(),
+        intent: coverageSource(),
+        inventory: { ...coverageInventory(), knownTotal: 23 },
+      }).accepted,
+    ).toBe(false);
+    expect(store.snapshot().groups).toEqual([]);
+  });
+  it("rejects competing resources under the same parent", () => {
+    const { store, parent } = fixture();
+    const before = store.snapshot();
+    expect(
+      store.admit({
+        parent,
+        intent: coverageSource(),
+        inventory: { ...coverageInventory(), resourceKey: "other.xlsx" },
+      }).accepted,
+    ).toBe(false);
+    expect(store.snapshot()).toEqual(before);
+  });
+  it("requires explicit removal and never completes a removed item", () => {
+    const { store, parent } = fixture();
+    const before = store.snapshot();
+    const inventory = {
+      ...coverageInventory(),
+      revision: 2,
+      items: coverageInventory().items.slice(1),
+    };
+    expect(
+      store.admit({ parent, intent: coverageSource(), inventory }).accepted,
+    ).toBe(false);
+    expect(store.snapshot()).toEqual(before);
+    expect(
+      store.admit({
+        parent,
+        intent: coverageSource(),
+        inventory: { ...inventory, replacement: true },
+      }).accepted,
+    ).toBe(true);
+    expect(
+      store.snapshot().groups[0].children.map((child) => child.id),
+    ).toEqual(before.groups[0].children.slice(1).map((child) => child.id));
+    expect(store.snapshot().groups[0].omissions.length).toBeGreaterThan(0);
+  });
+  it("resource replacement cannot transfer reviewed status or child IDs", () => {
+    const { store, parent } = fixture();
+    const group = store.snapshot().groups[0];
+    store.report({
+      groupId: group.id,
+      inventoryRevision: group.inventoryRevision,
+      childIds: [group.children[0].id],
+      source: coverageSource("report"),
+      status: "reported-reviewed",
+    });
+    expect(
+      store.admit({
+        parent,
+        intent: coverageSource(),
+        inventory: {
+          ...coverageInventory(),
+          resourceKey: "other.xlsx",
+          revision: 2,
+          replacement: true,
+        },
+      }).accepted,
+    ).toBe(true);
+    const next = store.snapshot().groups[0];
+    expect(next.children.every((child) => child.status === "pending")).toBe(
+      true,
+    );
+    expect(
+      next.children.some((child) =>
+        group.children.some((old) => old.id === child.id),
+      ),
+    ).toBe(false);
+  });
+  it("caps retained children at200across groups without evicting admitted work", () => {
+    const store = new CoverageStore();
+    for (let i = 1; i <= 4; i++) {
+      expect(
+        store.admit({
+          parent: { ...coverageParent(), id: `task:${i}` },
+          intent: coverageSource(),
+          inventory: coverageInventory(
+            Array.from({ length: 50 }, (_, j) => `Item ${j}`),
+          ),
+        }).accepted,
+      ).toBe(true);
+    }
+    const before = store.snapshot();
+    expect(
+      store.admit({
+        parent: { ...coverageParent(), id: "task:5" },
+        intent: coverageSource(),
+        inventory: coverageInventory(["overflow"]),
+      }),
+    ).toEqual({ accepted: false, reason: "capacity" });
+    expect(store.snapshot()).toEqual(before);
+  });
+  it("rejects241scalar labels and wrong-source hashes", () => {
+    const store = new CoverageStore();
+    expect(
+      store.admit({
+        parent: coverageParent(),
+        intent: coverageSource(),
+        inventory: coverageInventory(["a".repeat(241)]),
+      }).accepted,
+    ).toBe(false);
+    expect(
+      store.admit({
+        parent: coverageParent(),
+        intent: { ...coverageSource(), messageHash: "not-a-hash" },
+        inventory: coverageInventory(),
+      }).accepted,
+    ).toBe(false);
+    expect(store.snapshot().groups).toEqual([]);
+  });
+  it("rejects conflicting same-revision updates and aliases from input mutation", () => {
+    const store = new CoverageStore();
+    const parent = coverageParent();
+    const inventory = coverageInventory();
+    store.admit({ parent, intent: coverageSource(), inventory });
+    inventory.items[0].label = "changed";
+    expect(store.snapshot().groups[0].children[0].label).toBe("Overview");
+    expect(
+      store.admit({ parent, intent: coverageSource(), inventory }).accepted,
+    ).toBe(false);
+  });
+  it("archived parents keep facts but reject new reports until restored", () => {
+    const { store, parent } = fixture();
+    const group = store.snapshot().groups[0];
+    const report = {
+      groupId: group.id,
+      inventoryRevision: group.inventoryRevision,
+      childIds: [group.children[0].id],
+      source: coverageSource("report"),
+      status: "reported-blocked" as const,
+    };
+    store.reconcile([{ ...parent, included: false }]);
+    expect(store.report(report).accepted).toBe(false);
+    store.reconcile([parent]);
+    expect(store.report(report).accepted).toBe(true);
+  });
   it("admits22pending children without mutating its parent", () => {
     const parent = coverageParent();
     const before = structuredClone(parent);

@@ -3,6 +3,7 @@ import type { CoverageInventory } from "../core/coverage";
 
 const MAX_PENDING = 16;
 const MAX_RETAINED_RECEIPTS = 16;
+const MAX_ACCEPTED_CALLS = 64;
 const MAX_MAPPINGS = 64;
 const MAX_METADATA_BYTES = 64 * 1024;
 const MAX_PAYLOAD_BYTES = 32 * 1024;
@@ -42,10 +43,19 @@ export interface CoverageAdapterSnapshot {
   omissions: number;
 }
 
+interface CanonicalHeader {
+  entryId: string;
+  callId: string;
+  toolName: string;
+  order: number;
+  message: Record<string, unknown>;
+}
+
 interface CanonicalResult {
   entryId: string;
   callId: string;
   toolName: string;
+  order: number;
   valid: boolean;
   content?: string;
   contentHash?: string;
@@ -57,6 +67,8 @@ interface ToolReceipt {
   entryId: string;
   contentHash: string;
   bindingDigest: string;
+  order: number;
+  startOrder: number;
 }
 
 interface Manifest extends ToolReceipt {
@@ -91,44 +103,41 @@ interface ContentActivity {
   files: string[];
 }
 
+interface CandidateBase {
+  callId: string;
+  toolName: "bash" | "write" | "edit" | "read";
+  startOrder: number;
+  ended: boolean;
+}
+
 type Candidate =
-  | {
+  | (CandidateBase & {
       kind: "manifest";
-      callId: string;
       toolName: "bash";
       resourcePath: string;
-      ended: boolean;
-    }
-  | {
+    })
+  | (CandidateBase & {
       kind: "script-write";
-      callId: string;
       toolName: "write" | "edit";
       scriptPath: string;
       contentDigest: string;
-      ended: boolean;
-    }
-  | {
+    })
+  | (CandidateBase & {
       kind: "script-read";
-      callId: string;
       toolName: "read";
       scriptPath: string;
-      ended: boolean;
-    }
-  | {
+    })
+  | (CandidateBase & {
       kind: "listing";
-      callId: string;
       toolName: "bash";
       scriptPath: string;
       resourcePath: string;
-      ended: boolean;
-    }
-  | {
+    })
+  | (CandidateBase & {
       kind: "content-read";
-      callId: string;
       toolName: "bash";
       activity: ContentActivity;
-      ended: boolean;
-    };
+    });
 
 const sha256 = (value: string) =>
   createHash("sha256").update(value).digest("hex");
@@ -216,7 +225,7 @@ const contentReadCommand = (args: unknown) => {
   if (
     value[0] === "sed" &&
     value[1] === "-n" &&
-    value.length > 4 &&
+    value.length >= 4 &&
     /^'[1-9]\d*,[1-9]\d*p'$/u.test(value[2])
   )
     return value.slice(3);
@@ -236,7 +245,10 @@ const textContent = (content: unknown): string | undefined => {
     : undefined;
 };
 
-const resultFromEntry = (entry: unknown): CanonicalResult | undefined => {
+const resultHeader = (
+  entry: unknown,
+  order: number,
+): CanonicalHeader | undefined => {
   if (
     !record(entry) ||
     entry.type !== "message" ||
@@ -253,32 +265,49 @@ const resultFromEntry = (entry: unknown): CanonicalResult | undefined => {
     !message.toolName
   )
     return;
-  const details = record(message.details) ? message.details : undefined;
-  const truncation =
-    details && record(details.truncation) ? details.truncation : undefined;
-  const content = textContent(message.content);
-  const valid =
-    !message.isError &&
-    !message.excludeFromContext &&
-    truncation?.truncated !== true &&
-    content !== undefined;
   return {
     entryId: entry.id,
     callId: message.toolCallId,
     toolName: message.toolName,
+    order,
+    message,
+  };
+};
+
+/** Materializes only a pending or retained-receipt payload after header indexing. */
+const materializeResult = (header: CanonicalHeader): CanonicalResult => {
+  const details = record(header.message.details)
+    ? header.message.details
+    : undefined;
+  const truncation =
+    details && record(details.truncation) ? details.truncation : undefined;
+  const content = textContent(header.message.content);
+  const valid =
+    !header.message.isError &&
+    !header.message.excludeFromContext &&
+    truncation?.truncated !== true &&
+    content !== undefined;
+  return {
+    entryId: header.entryId,
+    callId: header.callId,
+    toolName: header.toolName,
+    order: header.order,
     valid,
     ...(content === undefined ? {} : { content, contentHash: sha256(content) }),
   };
 };
 
-const canonicalResults = (entries: readonly unknown[]) => {
+const canonicalResults = (
+  entries: readonly unknown[],
+  targetCallIds: ReadonlySet<string>,
+) => {
   const results = new Map<string, CanonicalResult[]>();
-  for (const entry of entries) {
-    const result = resultFromEntry(entry);
-    if (!result) continue;
-    const matching = results.get(result.callId) ?? [];
-    matching.push(result);
-    results.set(result.callId, matching);
+  for (const [order, entry] of entries.entries()) {
+    const header = resultHeader(entry, order);
+    if (!header || !targetCallIds.has(header.callId)) continue;
+    const matching = results.get(header.callId) ?? [];
+    matching.push(materializeResult(header));
+    results.set(header.callId, matching);
   }
   return results;
 };
@@ -339,7 +368,10 @@ const attributes = (value: string): Map<string, string> | undefined => {
   return found;
 };
 
-/** Full workbook/sheets/sheet hierarchy only; this is deliberately not XML generality. */
+/**
+ * Direct sheet-name manifests only. Relationship-heavy/alternate OOXML forms
+ * abstain; this is deliberately not a general workbook XML parser.
+ */
 const manifestNames = (body: string): string[] | undefined => {
   if (Buffer.byteLength(body, "utf8") > MAX_PAYLOAD_BYTES || /<!/u.test(body))
     return;
@@ -356,11 +388,15 @@ const manifestNames = (body: string): string[] | undefined => {
     xml = xml.slice(end + 2).trimStart();
   }
   const outer =
-    /^<workbook(?:\s+[^<>]*)?><sheets>([\s\S]*)<\/sheets><\/workbook>$/u.exec(
+    /^<workbook((?:\s+[A-Za-z_][\w:.-]*="[^"<]*")*)><sheets>([\s\S]*)<\/sheets><\/workbook>$/u.exec(
       xml,
     );
   if (!outer) return;
-  const sheets = outer[1];
+  const rootAttributes = attributes(outer[1]);
+  if (!rootAttributes) return;
+  for (const key of rootAttributes.keys())
+    if (key !== "xmlns" && key !== "xmlns:r") return;
+  const sheets = outer[2];
   const names: string[] = [];
   const sheet = /\s*<sheet((?:\s+[A-Za-z_][\w:.-]*="[^"<]*")*)\s*\/>/gy;
   let index = 0;
@@ -424,6 +460,7 @@ const listingRecords = (
 
 const receipt = (
   result: CanonicalResult,
+  startOrder: number,
   metadata: readonly string[],
 ): ToolReceipt | undefined =>
   result.contentHash
@@ -435,6 +472,8 @@ const receipt = (
         bindingDigest: sha256(
           JSON.stringify([result.callId, result.toolName, ...metadata]),
         ),
+        order: result.order,
+        startOrder,
       }
     : undefined;
 
@@ -459,7 +498,13 @@ const sameReceipt = (
 export class CoverageAdapter {
   private epoch: number | undefined;
   private omissions = 0;
+  private nextStartOrder = 1;
   private readonly pending = new Map<string, Candidate>();
+  /** Bounded duplicate-call frontier; never grows with arbitrary branch history. */
+  private readonly acceptedCalls = new Map<
+    string,
+    { entryId: string; contentHash: string }
+  >();
   private readonly manifests = new Map<string, Manifest>();
   private readonly declarations = new Map<string, ScriptDeclaration>();
   private readonly scriptReads = new Map<string, ScriptRead>();
@@ -468,11 +513,16 @@ export class CoverageAdapter {
     string,
     { resourceKey: string; itemKey: string; listingDigest: string }
   >();
+  private readonly ambiguousFiles = new Set<string>();
 
   start(input: CoverageToolStart, epoch: number) {
     if (!this.acceptsEpoch(epoch) || !safeText(input.toolCallId, 512)) return;
-    if (this.pending.has(input.toolCallId)) return;
-    const candidate = this.candidate(input);
+    if (
+      this.pending.has(input.toolCallId) ||
+      this.acceptedCalls.has(input.toolCallId)
+    )
+      return;
+    const candidate = this.candidate(input, this.nextStartOrder++);
     if (!candidate) return;
     if (this.pending.size >= MAX_PENDING || !this.fitsAdditional(candidate)) {
       this.omissions++;
@@ -490,7 +540,7 @@ export class CoverageAdapter {
 
   confirm(entries: readonly unknown[], epoch: number): CoverageAdapterResult {
     if (epoch !== this.epoch) return this.result();
-    const results = canonicalResults(entries);
+    const results = canonicalResults(entries, this.targetCallIds());
     this.revalidate(results);
     const accepted: CoverageAdapterResult = {
       inventories: [],
@@ -534,12 +584,15 @@ export class CoverageAdapter {
   reset(epoch: number) {
     this.epoch = epoch;
     this.omissions = 0;
+    this.nextStartOrder = 1;
     this.pending.clear();
+    this.acceptedCalls.clear();
     this.manifests.clear();
     this.declarations.clear();
     this.scriptReads.clear();
     this.listings.clear();
     this.fileMappings.clear();
+    this.ambiguousFiles.clear();
   }
 
   private acceptsEpoch(epoch: number) {
@@ -548,7 +601,10 @@ export class CoverageAdapter {
     return this.epoch === epoch;
   }
 
-  private candidate(input: CoverageToolStart): Candidate | undefined {
+  private candidate(
+    input: CoverageToolStart,
+    startOrder: number,
+  ): Candidate | undefined {
     if (input.toolName === "bash") {
       const resourcePath = manifestCommand(input.args);
       if (resourcePath)
@@ -556,6 +612,7 @@ export class CoverageAdapter {
           kind: "manifest",
           callId: input.toolCallId,
           toolName: "bash",
+          startOrder,
           resourcePath,
           ended: false,
         };
@@ -565,6 +622,7 @@ export class CoverageAdapter {
           kind: "listing",
           callId: input.toolCallId,
           toolName: "bash",
+          startOrder,
           ...listing,
           ended: false,
         };
@@ -584,6 +642,7 @@ export class CoverageAdapter {
         kind: "content-read",
         callId: input.toolCallId,
         toolName: "bash",
+        startOrder,
         activity: {
           resourceKey: mapped[0]?.resourceKey ?? "",
           itemKeys: mapped.flatMap((value) => (value ? [value.itemKey] : [])),
@@ -594,6 +653,8 @@ export class CoverageAdapter {
       };
     }
     if (input.toolName === "write" || input.toolName === "edit") {
+      // Standard edit patches do not declare complete final content, so only a
+      // whole-content declaration can attest a later exact script read.
       const args = record(input.args) ? input.args : undefined;
       const scriptPath = repoPath(args?.path);
       if (!scriptPath || typeof args?.content !== "string") return;
@@ -602,6 +663,7 @@ export class CoverageAdapter {
         kind: "script-write",
         callId: input.toolCallId,
         toolName: input.toolName,
+        startOrder,
         scriptPath,
         contentDigest: sha256(args.content),
         ended: false,
@@ -615,6 +677,7 @@ export class CoverageAdapter {
             kind: "script-read",
             callId: input.toolCallId,
             toolName: "read",
+            startOrder,
             scriptPath,
             ended: false,
           }
@@ -631,8 +694,9 @@ export class CoverageAdapter {
       const names = result.content ? manifestNames(result.content) : undefined;
       if (!names) return this.omit();
       const resourceKey = sha256(candidate.resourcePath);
+      if (!this.canAcceptCall(result)) return this.omit();
       const prior = this.manifests.get(candidate.resourcePath);
-      const nextReceipt = receipt(result, [
+      const nextReceipt = receipt(result, candidate.startOrder, [
         "workbook-manifest-xml/v1",
         resourceKey,
       ]);
@@ -653,6 +717,7 @@ export class CoverageAdapter {
       )
         return this.omit();
       this.manifests.set(candidate.resourcePath, next);
+      this.rememberAcceptedCall(result);
       this.listings.delete(candidate.resourcePath);
       this.rebuildMappings();
       accepted.inventories.push({
@@ -669,8 +734,9 @@ export class CoverageAdapter {
       return;
     }
     if (candidate.kind === "script-write") {
+      if (!this.canAcceptCall(result)) return this.omit();
       const prior = this.declarations.get(candidate.scriptPath);
-      const nextReceipt = receipt(result, [
+      const nextReceipt = receipt(result, candidate.startOrder, [
         "worksheet-extraction-list/v1",
         candidate.scriptPath,
         candidate.contentDigest,
@@ -687,6 +753,7 @@ export class CoverageAdapter {
       )
         return this.omit();
       this.declarations.set(candidate.scriptPath, next);
+      this.rememberAcceptedCall(result);
       this.scriptReads.delete(candidate.scriptPath);
       for (const [resourcePath, listing] of this.listings)
         if (listing.scriptPath === candidate.scriptPath)
@@ -699,11 +766,14 @@ export class CoverageAdapter {
       if (
         !declaration ||
         !result.content ||
-        sha256(result.content) !== declaration.contentDigest
+        sha256(result.content) !== declaration.contentDigest ||
+        declaration.order >= result.order ||
+        declaration.startOrder >= candidate.startOrder ||
+        !this.canAcceptCall(result)
       )
         return this.omit();
       const prior = this.scriptReads.get(candidate.scriptPath);
-      const nextReceipt = receipt(result, [
+      const nextReceipt = receipt(result, candidate.startOrder, [
         "worksheet-extraction-list/v1",
         candidate.scriptPath,
         declaration.bindingDigest,
@@ -720,6 +790,7 @@ export class CoverageAdapter {
       )
         return this.omit();
       this.scriptReads.set(candidate.scriptPath, next);
+      this.rememberAcceptedCall(result);
       for (const [resourcePath, listing] of this.listings)
         if (listing.scriptPath === candidate.scriptPath)
           this.listings.delete(resourcePath);
@@ -734,7 +805,14 @@ export class CoverageAdapter {
         !manifest ||
         !declaration ||
         !scriptRead ||
-        scriptRead.declarationDigest !== declaration.bindingDigest
+        scriptRead.declarationDigest !== declaration.bindingDigest ||
+        manifest.order >= result.order ||
+        manifest.startOrder >= candidate.startOrder ||
+        declaration.order >= scriptRead.order ||
+        declaration.startOrder >= scriptRead.startOrder ||
+        scriptRead.order >= result.order ||
+        scriptRead.startOrder >= candidate.startOrder ||
+        !this.canAcceptCall(result)
       )
         return this.omit();
       const files = result.content
@@ -743,7 +821,7 @@ export class CoverageAdapter {
       if (!files) return this.omit();
       const prior = this.listings.get(candidate.resourcePath);
       const currentMappings = this.mappingCount() - (prior?.files.length ?? 0);
-      const nextReceipt = receipt(result, [
+      const nextReceipt = receipt(result, candidate.startOrder, [
         "worksheet-extraction-list/v1",
         manifest.resourceKey,
         candidate.scriptPath,
@@ -766,6 +844,7 @@ export class CoverageAdapter {
       };
       if (!this.fitsReplacement(prior, next)) return this.omit();
       this.listings.set(candidate.resourcePath, next);
+      this.rememberAcceptedCall(result);
       this.rebuildMappings();
       accepted.access.push({
         resourceKey: manifest.resourceKey,
@@ -778,6 +857,8 @@ export class CoverageAdapter {
     );
     if (
       !listing ||
+      !this.contentActivityCurrent(candidate) ||
+      !this.canAcceptCall(result) ||
       !candidate.activity.files.every((path, index) => {
         const mapping = this.fileMappings.get(path);
         return (
@@ -788,6 +869,7 @@ export class CoverageAdapter {
       })
     )
       return this.omit();
+    this.rememberAcceptedCall(result);
     accepted.access.push({
       resourceKey: candidate.activity.resourceKey,
       itemKeys: [...candidate.activity.itemKeys],
@@ -804,7 +886,9 @@ export class CoverageAdapter {
       if (
         !sameReceipt(scriptRead, results) ||
         !declaration ||
-        scriptRead.declarationDigest !== declaration.bindingDigest
+        scriptRead.declarationDigest !== declaration.bindingDigest ||
+        declaration.order >= scriptRead.order ||
+        declaration.startOrder >= scriptRead.startOrder
       )
         this.scriptReads.delete(path);
     }
@@ -816,25 +900,61 @@ export class CoverageAdapter {
         !manifest ||
         !scriptRead ||
         listing.manifestDigest !== manifest.bindingDigest ||
-        listing.scriptReadDigest !== scriptRead.bindingDigest
+        listing.scriptReadDigest !== scriptRead.bindingDigest ||
+        manifest.order >= listing.order ||
+        manifest.startOrder >= listing.startOrder ||
+        scriptRead.order >= listing.order ||
+        scriptRead.startOrder >= listing.startOrder
       )
         this.listings.delete(resourcePath);
     }
     this.rebuildMappings();
+    this.clearInvalidPendingActivities();
   }
 
   private rebuildMappings() {
     this.fileMappings.clear();
+    this.ambiguousFiles.clear();
     for (const listing of this.listings.values()) {
       const manifest = this.manifests.get(listing.resourcePath);
       if (!manifest) continue;
-      for (const file of listing.files)
+      for (const file of listing.files) {
+        if (this.ambiguousFiles.has(file.path)) continue;
+        const current = this.fileMappings.get(file.path);
+        if (current && current.resourceKey !== manifest.resourceKey) {
+          this.fileMappings.delete(file.path);
+          this.ambiguousFiles.add(file.path);
+          continue;
+        }
         this.fileMappings.set(file.path, {
           resourceKey: manifest.resourceKey,
           itemKey: file.itemKey,
           listingDigest: listing.bindingDigest,
         });
+      }
     }
+  }
+
+  private contentActivityCurrent(
+    candidate: Extract<Candidate, { kind: "content-read" }>,
+  ) {
+    return candidate.activity.files.every((path, index) => {
+      const mapping = this.fileMappings.get(path);
+      return (
+        mapping?.resourceKey === candidate.activity.resourceKey &&
+        mapping.listingDigest === candidate.activity.listingDigest &&
+        mapping.itemKey === candidate.activity.itemKeys[index]
+      );
+    });
+  }
+
+  private clearInvalidPendingActivities() {
+    for (const [callId, candidate] of this.pending)
+      if (
+        candidate.kind === "content-read" &&
+        !this.contentActivityCurrent(candidate)
+      )
+        this.pending.delete(callId);
   }
 
   private mappingCount() {
@@ -844,9 +964,44 @@ export class CoverageAdapter {
     );
   }
 
+  /** Header index is whole-branch; only these bounded known calls read payload text. */
+  private targetCallIds() {
+    return new Set([
+      ...[...this.pending.values()]
+        .filter((candidate) => candidate.ended)
+        .map((candidate) => candidate.callId),
+      ...[...this.manifests.values()].map((receipt) => receipt.callId),
+      ...[...this.declarations.values()].map((receipt) => receipt.callId),
+      ...[...this.scriptReads.values()].map((receipt) => receipt.callId),
+      ...[...this.listings.values()].map((receipt) => receipt.callId),
+    ]);
+  }
+
+  private canAcceptCall(result: CanonicalResult) {
+    if (!result.contentHash || this.acceptedCalls.has(result.callId))
+      return false;
+    return (
+      this.acceptedCalls.size < MAX_ACCEPTED_CALLS &&
+      this.fitsAdditional({
+        callId: result.callId,
+        entryId: result.entryId,
+        contentHash: result.contentHash,
+      })
+    );
+  }
+
+  private rememberAcceptedCall(result: CanonicalResult) {
+    if (!result.contentHash) return;
+    this.acceptedCalls.set(result.callId, {
+      entryId: result.entryId,
+      contentHash: result.contentHash,
+    });
+  }
+
   private metadataBytes() {
     return byteLength({
       pending: [...this.pending.values()],
+      acceptedCalls: [...this.acceptedCalls.entries()],
       manifests: [...this.manifests.values()],
       declarations: [...this.declarations.values()],
       scriptReads: [...this.scriptReads.values()],

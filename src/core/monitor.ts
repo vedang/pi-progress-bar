@@ -2537,25 +2537,42 @@ export class Monitor {
     }
   }
 
-  /** Queue selected-model ingress only when no current group already owns parent work. */
+  /** True when an exact transient workbook candidate lacks a group for a parent. */
+  private coverageIntentNeeded(observation: Observation) {
+    const resources = [
+      ...new Set(
+        [
+          ...observation.text.matchAll(
+            /[^\s"'`]+\.(?:xls|xlsx|xlsm|xlsb|ods)\b/giu,
+          ),
+        ].map((match) => match[0]),
+      ),
+    ];
+    if (!resources.length) return false;
+    const groups = this.coverage.snapshot().groups;
+    return this.state.tasks.some(
+      (parent) =>
+        parent.included &&
+        resources.some(
+          (resource) =>
+            !groups.some(
+              (group) =>
+                group.parentTaskId === parent.id &&
+                group.parentRevision === parent.revision &&
+                group.resourceKey === sha256(resource),
+            ),
+        ),
+    );
+  }
+
+  /** Queue selected-model ingress only when a parent/resource pair remains uncovered. */
   private scheduleCoverageIntent(observation: Observation) {
     if (
       !this.enabled ||
-      !/\S+\.xlsx\b/iu.test(observation.text) ||
+      !this.coverageIntentNeeded(observation) ||
       this.coverageDispatches >= 1024 ||
       this.queuedCoverageIntent ||
-      this.coverageFlight ||
-      this.coverage
-        .snapshot()
-        .groups.some(
-          (group) =>
-            group.parentRevision ===
-              this.state.tasks.find((task) => task.id === group.parentTaskId)
-                ?.revision &&
-            this.state.tasks.some(
-              (task) => task.id === group.parentTaskId && task.included,
-            ),
-        )
+      this.coverageFlight
     )
       return;
     const request = this.coverageIntents.begin(
@@ -2611,9 +2628,19 @@ export class Monitor {
         this.recordCoverageOmission();
         continue;
       }
-      if (existing)
+      if (existing) {
+        if (existing.state !== "complete") this.recordCoverageOmission();
         for (const [key, receipt] of receipts)
           if (receipt.jobIdentity === existing.identity) receipts.delete(key);
+        if (
+          this.coverageFlight?.kind === "report" &&
+          this.coverageFlight.jobIdentity === existing.identity
+        ) {
+          // Newer canonical report owns this parent key before old transport settles.
+          this.coverageFlight = undefined;
+          this.coverageGateway.invalidate();
+        }
+      }
       // Map#set preserves original parent position for a replacement key.
       jobs.set(parent.id, {
         version: 1,
@@ -2913,6 +2940,15 @@ export class Monitor {
     this.coverageJobs = jobs;
     if (this.persistCoverageState()) return true;
     this.coverageJobs = previous;
+    // A storage failure cannot be retried synchronously. Keep a runtime-only
+    // recovery marker until changed canonical input or explicit recovery.
+    const transient = previous.get(job.parentTaskId);
+    if (transient?.identity === job.identity) {
+      transient.state = state;
+      if (state === "parked" && parkedUntil !== undefined)
+        transient.parkedUntil = parkedUntil;
+      else delete transient.parkedUntil;
+    }
     return false;
   }
 
@@ -2927,18 +2963,18 @@ export class Monitor {
         this.identity(),
         true,
       );
+      const live = this.coverageJobs.get(job.parentTaskId);
       if (
         this.coverageFlight?.kind !== "report" ||
         this.coverageFlight.jobIdentity !== job.identity ||
         this.coverageFlight.batch !== batch ||
+        live?.identity !== job.identity ||
         !this.enabled ||
         epoch !== this.coverageEpoch
       )
         return;
       if (!result) {
-        if (this.coverageGateway.lastOutcome === "permanent") {
-          this.updateCoverageJob(job, "permanent");
-        } else if (
+        if (
           this.coverageGateway.lastOutcome === "retryable" ||
           this.coverageGateway.lastOutcome === "backoff"
         ) {
@@ -2947,6 +2983,10 @@ export class Monitor {
             "parked",
             Date.now() + (this.coverageGateway.retryDelayMs ?? 0),
           );
+        } else {
+          // Suppressed preflight, invalid request, unavailable key, and
+          // permanent provider outcomes need changed input or explicit recovery.
+          this.updateCoverageJob(job, "permanent");
         }
         return;
       }
@@ -2970,7 +3010,12 @@ export class Monitor {
         report,
         resolve: (entryId) => this.resolveObservation(pass, entryId),
       });
-      if (!decisions.receipt) return;
+      if (!decisions.receipt) {
+        this.updateCoverageJob(job, "permanent");
+        return;
+      }
+      if (this.coverageJobs.get(job.parentTaskId)?.identity !== job.identity)
+        return;
       const candidate = this.clonedCoverage();
       if (!candidate) return;
       for (const reportFact of decisions.reports)
@@ -4652,8 +4697,7 @@ export class Monitor {
         // Coverage intent is an independently bounded optional request. It never
         // reruns mandatory extraction or changes this committed semantic state.
         this.scheduleCoverageIntent(observation);
-        if (observation.role === "assistant")
-          this.scheduleCoverageReports(observation);
+        this.scheduleCoverageReports(observation);
         // A named committed cursor wake permits parked optional jobs. It occurs
         // before `finally` drains, never while semantic `processing` is true.
         this.parkedDetails.clear();

@@ -271,6 +271,155 @@ it("enforces1024dispatch cap including failures and leaves incomplete child stat
   await vi.advanceTimersByTimeAsync(60000);
   expect(h.calls).toHaveLength(1);
 });
+it("accepts canonical user review reports through the same isolated pipeline", async () => {
+  const h = await fixture();
+  h.append("report", reportText, "user");
+  await h.settle("report");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(2);
+  expect(
+    h.monitor
+      .coverageSnapshot()
+      .groups[0].children.every(
+        (child) => child.status === "reported-reviewed",
+      ),
+  ).toBe(true);
+});
+it("existing coverage on one parent does not block a second workbook intent", async () => {
+  const h = await fixture();
+  const second = "Review every tab in docs/second.xlsx and summarize it.";
+  h.extract.mockImplementation(async (input, _signal, onDispatch) => {
+    onDispatch?.(Date.now());
+    return {
+      text: JSON.stringify(
+        input.instructions.includes("parentIndices")
+          ? {
+              intents: [
+                {
+                  parentIndices: [1],
+                  quote: second,
+                  resource: "docs/second.xlsx",
+                  kind: "unconditional-enumerable",
+                },
+              ],
+            }
+          : {
+              add: [
+                {
+                  label: "Second workbook summary",
+                  kind: "response",
+                  basis: "explicit",
+                  quote: second,
+                },
+              ],
+              revise: [],
+              archive: [],
+              restore: [],
+              unresolved: false,
+            },
+      ),
+      provider: "offline",
+      model: "fixture",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+  });
+  h.append("extra", second, "user");
+  await h.settle("extra");
+  await vi.advanceTimersByTimeAsync(100);
+  h.monitor.observeCoverageToolStart("second", "bash", {
+    command: "unzip -p docs/second.xlsx xl/workbook.xml",
+  });
+  h.monitor.observeCoverageToolEnd("second", "bash");
+  h.replace([
+    ...h.reader(),
+    {
+      type: "message",
+      id: "second-result",
+      message: {
+        role: "toolResult",
+        toolCallId: "second",
+        toolName: "bash",
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: '<workbook><sheets><sheet name="Overview"/></sheets></workbook>',
+          },
+        ],
+      },
+    },
+  ]);
+  h.monitor.confirmCoverageBranch(h.reader());
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.state.tasks).toHaveLength(2);
+  expect(
+    h.monitor.coverageSnapshot().groups.map((group) => group.parentTaskId),
+  ).toEqual(["task:1", "task:2"]);
+});
+it("a newer same-parent report fences late old results and exposes coalescing omissions", async () => {
+  const h = await fixture();
+  let release: (() => void) | undefined;
+  h.setTransport((request) =>
+    (request.state as { report: { id: string } }).report.id === "older"
+      ? new Promise<Response>((resolve) => {
+          release = () => resolve(answer(request, "reviewed"));
+        })
+      : Promise.resolve(answer(request, "retracted")),
+  );
+  h.append("older", reportText);
+  await h.settle("older");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(1);
+  h.append(
+    "newer",
+    "All previous review claims for this workbook are retracted; every tab remains unfinished.",
+  );
+  await h.settle("newer");
+  const beforeRelease = h.save.mock.calls.length;
+  release?.();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(h.monitor.coverageSnapshot().omissions).toBeGreaterThan(0);
+  expect(
+    h.monitor
+      .coverageSnapshot()
+      .groups[0].children.every((child) => child.status === "pending"),
+  ).toBe(true);
+  expect(
+    h.save.mock.calls
+      .slice(beforeRelease)
+      .every(
+        ([value]) =>
+          !(
+            value as ReturnType<typeof encodeCheckpoint>
+          ).monitor?.coverage?.state.groups.some((group) =>
+            group.children.some(
+              (child) => child.status === "reported-reviewed",
+            ),
+          ),
+      ),
+  ).toBe(true);
+});
+it("parks rejected pre-network admission without a synchronous redispatch loop", async () => {
+  const h = await fixture();
+  const spent = h.checkpoint().monitor?.coverage?.dispatches ?? 0;
+  let attempts = 0;
+  h.save.mockImplementation((value) => {
+    if (
+      ((value as ReturnType<typeof encodeCheckpoint>).monitor?.coverage
+        ?.dispatches ?? 0) > spent
+    ) {
+      attempts++;
+      // Bound the buggy microtask loop so this regression can fail without hanging CI.
+      if (attempts >= 3) h.monitor.stop();
+      throw new Error("coverage storage denied");
+    }
+  });
+  h.append("report", reportText);
+  await h.settle("report");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(0);
+  expect(attempts).toBe(1);
+});
 it("optional coverage flight never blocks advisory readiness and OFF fences its late result", async () => {
   const h = await fixture();
   let release: (() => void) | undefined;

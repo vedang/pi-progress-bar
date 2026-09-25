@@ -39,7 +39,7 @@ export interface CoverageIntentReceipt extends CoverageIntent {
 }
 
 /** Exact supplied parent binding, retained without parent prose. */
-interface CoverageIntentParentBinding {
+export interface CoverageIntentParentBinding {
   id: string;
   revision: number;
   sourceDigest: string;
@@ -52,6 +52,8 @@ export interface CoverageIntentJob {
   /** Hash of all ungrounded parent/resource candidates; never proves association. */
   targetKey: string;
   source: ObservationRef;
+  /** Candidate owners reserve queue position but do not prove resource association. */
+  owners: CoverageIntentParentBinding[];
   parents: CoverageIntentParentBinding[];
   state: "ready" | "parked" | "permanent";
   parkedUntil?: number;
@@ -515,12 +517,24 @@ export class CoverageIntentRequests {
   jobSnapshot(
     request: CoverageIntentRequest,
     targetKey: string,
+    owners: readonly CoverageIntentParentBinding[],
   ): CoverageIntentJob | undefined {
     const flight = this.flights.get(request.identity);
     if (
       !flight ||
       flight.request !== request ||
       !digest.test(targetKey) ||
+      !owners.length ||
+      owners.length > MAX_INCLUDED_PARENTS ||
+      owners.some(
+        (owner) =>
+          !flight.parents.some(
+            (parent) =>
+              parent.id === owner.id &&
+              parent.revision === owner.revision &&
+              parent.sourceDigest === owner.sourceDigest,
+          ),
+      ) ||
       !Number.isSafeInteger(flight.epoch) ||
       flight.epoch < 0
     )
@@ -534,6 +548,7 @@ export class CoverageIntentRequests {
         messageHash: flight.latest.hash,
         role: flight.latest.role,
       },
+      owners: owners.map((owner) => ({ ...owner })),
       parents: flight.parents.map((parent) => ({ ...parent })),
       state: "ready",
     };
@@ -555,6 +570,16 @@ export class CoverageIntentRequests {
       !digest.test(job.identity) ||
       !digest.test(job.targetKey) ||
       !validObservationRef(job.source) ||
+      !job.owners.length ||
+      job.owners.length > MAX_INCLUDED_PARENTS ||
+      new Set(job.owners.map((owner) => owner.id)).size !== job.owners.length ||
+      !job.owners.every(
+        (owner) =>
+          !!owner.id &&
+          Number.isSafeInteger(owner.revision) &&
+          owner.revision > 0 &&
+          digest.test(owner.sourceDigest),
+      ) ||
       !job.parents.length ||
       job.parents.length > MAX_INCLUDED_PARENTS ||
       new Set(job.parents.map((parent) => parent.id)).size !==
@@ -577,7 +602,7 @@ export class CoverageIntentRequests {
       return false;
     const tasks = new Map(state.tasks.map((task) => [task.id, task]));
     if (
-      job.parents.some((binding) => {
+      [...job.owners, ...job.parents].some((binding) => {
         const parent = tasks.get(binding.id);
         return (
           !parent?.included ||

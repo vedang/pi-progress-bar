@@ -124,6 +124,12 @@ export interface CoverageReportJobCheckpoint {
   parkedUntil?: number;
 }
 
+export interface CoverageQueueCheckpoint {
+  kind: "intent" | "report";
+  /** Intent uses a digest; report uses exact parent task ID. */
+  key: string;
+}
+
 export interface CoverageReportDispatchCheckpoint {
   jobIdentity: string;
   requestHash: string;
@@ -155,6 +161,7 @@ interface CoverageCheckpointMetadata {
   intents?: CoverageIntentJournal;
   intentJobs?: CoverageIntentJob[];
   intentReceipts?: CoverageIntentDispatchReceipt[];
+  queue?: CoverageQueueCheckpoint[];
   jobs?: CoverageReportJobCheckpoint[];
   reportReceipts?: CoverageReportDispatchCheckpoint[];
 }
@@ -900,8 +907,8 @@ const coverageChoices = new Set([
   "uncertain",
 ]);
 const MAX_COVERAGE_PENDING_JOBS = 20;
-/** 20 groups, 200 children, 20 questions per request: max 29 chunks. */
-const MAX_COVERAGE_REPORT_RECEIPTS = 29;
+/** Adaptive 24KiB requests can legally shrink to one of 200 retained children. */
+const MAX_COVERAGE_REPORT_RECEIPTS = 200;
 const MAX_COVERAGE_INTENT_RECEIPTS = 40;
 
 function validCoverageIntentJournal(
@@ -969,13 +976,35 @@ function validCoverageIntentJob(value: unknown): value is CoverageIntentJob {
     !record(value) ||
     !exactKeys(
       value,
-      ["version", "identity", "targetKey", "source", "parents", "state"],
+      [
+        "version",
+        "identity",
+        "targetKey",
+        "source",
+        "owners",
+        "parents",
+        "state",
+      ],
       ["parkedUntil"],
     ) ||
     value.version !== 1 ||
     !hashIsValid(value.identity) ||
     !hashIsValid(value.targetKey) ||
     !validObservationRef(value.source) ||
+    !Array.isArray(value.owners) ||
+    value.owners.length < 1 ||
+    value.owners.length > 20 ||
+    !value.owners.every(
+      (owner) =>
+        record(owner) &&
+        exactKeys(owner, ["id", "revision", "sourceDigest"]) &&
+        taskIdIsValid(owner.id) &&
+        positiveInteger(owner.revision) &&
+        hashIsValid(owner.sourceDigest),
+    ) ||
+    new Set(value.owners.map((owner) => owner.id)).size !==
+      value.owners.length ||
+    hash(JSON.stringify(value.owners)) !== value.targetKey ||
     !Array.isArray(value.parents) ||
     value.parents.length < 1 ||
     value.parents.length > 20 ||
@@ -989,6 +1018,21 @@ function validCoverageIntentJob(value: unknown): value is CoverageIntentJob {
     ) ||
     new Set(value.parents.map((parent) => parent.id)).size !==
       value.parents.length ||
+    value.owners.some(
+      (owner) =>
+        !(
+          value.parents as Array<{
+            id: unknown;
+            revision: unknown;
+            sourceDigest: unknown;
+          }>
+        ).some(
+          (parent) =>
+            parent.id === owner.id &&
+            parent.revision === owner.revision &&
+            parent.sourceDigest === owner.sourceDigest,
+        ),
+    ) ||
     (value.state !== "ready" &&
       value.state !== "parked" &&
       value.state !== "permanent") ||
@@ -1024,6 +1068,15 @@ function validCoverageIntentReceipt(
     nonNegativeInteger(value.usage.inputTokens) &&
     nonNegativeInteger(value.usage.outputTokens) &&
     (value.outcome === "dispatched" || value.outcome === "accepted")
+  );
+}
+
+function validCoverageQueue(value: unknown): value is CoverageQueueCheckpoint {
+  return !!(
+    record(value) &&
+    exactKeys(value, ["kind", "key"]) &&
+    ((value.kind === "intent" && hashIsValid(value.key)) ||
+      (value.kind === "report" && taskIdIsValid(value.key)))
   );
 }
 
@@ -1138,6 +1191,7 @@ function validCoverageMetadata(
         "intents",
         "intentJobs",
         "intentReceipts",
+        "queue",
         "jobs",
         "reportReceipts",
       ],
@@ -1152,6 +1206,7 @@ function validCoverageMetadata(
   const intents = value.intents;
   const intentJobs = value.intentJobs ?? [];
   const intentReceipts = value.intentReceipts ?? [];
+  const queue = value.queue ?? [];
   const jobs = value.jobs ?? [];
   const receipts = value.reportReceipts ?? [];
   if (
@@ -1170,6 +1225,11 @@ function validCoverageMetadata(
     intentReceipts.some(
       (receipt) => receipt.dispatch > (value.dispatches as number),
     ) ||
+    !Array.isArray(queue) ||
+    queue.length > MAX_COVERAGE_PENDING_JOBS ||
+    !queue.every(validCoverageQueue) ||
+    new Set(queue.map((item) => `${item.kind}:${item.key}`)).size !==
+      queue.length ||
     !Array.isArray(jobs) ||
     jobs.length > MAX_COVERAGE_PENDING_JOBS ||
     !jobs.every(validCoverageReportJob) ||
@@ -1180,13 +1240,45 @@ function validCoverageMetadata(
     !receipts.every(validCoverageReportReceipt) ||
     new Set(receipts.map((receipt) => receipt.requestHash)).size !==
       receipts.length ||
-    receipts.some(
-      (receipt) => receipt.dispatch > (value.dispatches as number),
-    ) ||
-    intentJobs.length + jobs.filter((job) => job.state !== "complete").length >
-      MAX_COVERAGE_PENDING_JOBS
+    receipts.some((receipt) => receipt.dispatch > (value.dispatches as number))
   )
     return false;
+  // Legacy v10 checkpoints may omit queue; restore reconstructs canonical order.
+  if (value.queue !== undefined) {
+    const queuedIntent = new Map(intentJobs.map((job) => [job.targetKey, job]));
+    const queuedReport = new Map(jobs.map((job) => [job.parentTaskId, job]));
+    const owners = new Set<string>();
+    for (const item of queue) {
+      const bindings =
+        item.kind === "intent"
+          ? queuedIntent.get(item.key)?.owners
+          : (() => {
+              const job = queuedReport.get(item.key);
+              return job
+                ? [
+                    {
+                      id: job.parentTaskId,
+                      revision: job.parentRevision,
+                      sourceDigest: job.parentSourceDigest,
+                    },
+                  ]
+                : undefined;
+            })();
+      if (
+        !bindings ||
+        (item.kind === "intent"
+          ? queuedIntent.get(item.key)?.state === "permanent"
+          : queuedReport.get(item.key)?.state === "permanent" ||
+            queuedReport.get(item.key)?.state === "complete")
+      )
+        return false;
+      for (const binding of bindings) {
+        const key = `${binding.id}:${binding.revision}:${binding.sourceDigest}`;
+        if (owners.has(key)) return false;
+        owners.add(key);
+      }
+    }
+  }
   return (
     value.dispatches === value.usage.jev.calls + value.usage.extraction.calls
   );

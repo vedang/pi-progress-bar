@@ -1,0 +1,296 @@
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { EvaluationRequest } from "../src/analysis/gateway";
+import type { encodeCheckpoint } from "../src/core/hybrid-checkpoint";
+import { coverageNames } from "./fixtures/coverage";
+import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
+
+const text = "Review every tab in docs/plan.xlsx and summarize the workbook.";
+const reportText =
+  "I reviewed all tabs in docs/plan.xlsx; synthesis is still pending.";
+const running: ReturnType<typeof monitorHarness>[] = [];
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.stubEnv("TYPESAFE_API_KEY", "offline");
+});
+afterEach(() => {
+  for (const h of running.splice(0)) h.monitor.stop();
+  vi.clearAllTimers();
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+});
+function answer(request: EvaluationRequest, choice: string) {
+  return Response.json({
+    model: request.model,
+    usage: { input_tokens: 7, output_tokens: 3 },
+    answers: Object.fromEntries(
+      Object.entries(request.questions).map(([key, question]) => {
+        if (question.type !== "choice") throw new Error("Expected choices");
+        return [
+          key,
+          {
+            type: "choice",
+            choice,
+            confidence: 1,
+            probabilities: Object.fromEntries(
+              Object.keys(question.criteria).map((value) => [
+                value,
+                value === choice ? 1 : 0,
+              ]),
+            ),
+          },
+        ];
+      }),
+    ),
+  });
+}
+async function fixture() {
+  const h = monitorHarness([branchEntry("goal", text)], {
+    extractionText: (input) =>
+      input.instructions.includes("parentIndices")
+        ? JSON.stringify({
+            intents: [
+              {
+                parentIndices: [0],
+                quote: text,
+                resource: "docs/plan.xlsx",
+                kind: "unconditional-enumerable",
+              },
+            ],
+          })
+        : JSON.stringify({
+            add: input.tasks.length
+              ? []
+              : [
+                  {
+                    label: "Summarize workbook",
+                    kind: "response",
+                    basis: "explicit",
+                    quote: text,
+                  },
+                ],
+            revise: [],
+            archive: [],
+            restore: [],
+            unresolved: false,
+          }),
+  });
+  running.push(h);
+  const calls: EvaluationRequest[] = [];
+  const all: EvaluationRequest[] = [];
+  let choice = "reviewed";
+  let transport:
+    | ((request: EvaluationRequest, init?: RequestInit) => Promise<Response>)
+    | undefined;
+  const original = h.fetch.getMockImplementation();
+  if (!original) throw new Error("Missing transport");
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+    all.push(request);
+    if (
+      !Object.keys(request.questions).some((key) => key.startsWith("coverage:"))
+    )
+      return original(url, init);
+    calls.push(request);
+    return transport ? transport(request, init) : answer(request, choice);
+  });
+  h.start();
+  await h.settle("goal");
+  await vi.advanceTimersByTimeAsync(200);
+  h.monitor.observeCoverageToolStart("manifest", "bash", {
+    command: "unzip -p docs/plan.xlsx xl/workbook.xml",
+  });
+  h.monitor.observeCoverageToolEnd("manifest", "bash");
+  h.replace([
+    ...h.reader(),
+    {
+      type: "message",
+      id: "manifest-result",
+      message: {
+        role: "toolResult",
+        toolCallId: "manifest",
+        toolName: "bash",
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: `<workbook><sheets>${coverageNames.map((name) => `<sheet name="${name}"/>`).join("")}</sheets></workbook>`,
+          },
+        ],
+      },
+    },
+  ]);
+  h.monitor.confirmCoverageBranch(h.reader());
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.coverageSnapshot().groups[0].children).toHaveLength(22);
+  calls.splice(0);
+  all.splice(0);
+  return {
+    ...h,
+    calls,
+    all,
+    setChoice: (value: string) => {
+      choice = value;
+    },
+    setTransport: (value: typeof transport) => {
+      transport = value;
+    },
+    checkpoint: () =>
+      h.monitor.checkpoint() as ReturnType<typeof encodeCheckpoint>,
+  };
+}
+it("schedules20+2report judgments after semantics/readyhealth with isolated usage", async () => {
+  const h = await fixture();
+  const before = h.checkpoint().monitor?.coverage;
+  h.append("report", reportText);
+  await h.settle("report");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls.map((call) => Object.keys(call.questions).length)).toEqual([
+    20, 2,
+  ]);
+  const first = h.all.findIndex((request) =>
+    Object.keys(request.questions).some((key) => key.startsWith("coverage:")),
+  );
+  const health = h.all.findLastIndex(
+    (request) => "clarity" in request.questions,
+  );
+  expect(health).toBeGreaterThanOrEqual(0);
+  expect(first).toBeGreaterThan(health);
+  expect(
+    h.monitor
+      .coverageSnapshot()
+      .groups[0].children.every(
+        (child) => child.status === "reported-reviewed",
+      ),
+  ).toBe(true);
+  expect(h.monitor.state.tasks[0].status).toBe("not-started");
+  const saved = h.checkpoint().monitor?.coverage;
+  expect(saved?.dispatches).toBe((before?.dispatches ?? 0) + 2);
+  expect(saved?.usage.jev.calls).toBe((before?.usage.jev.calls ?? 0) + 2);
+  expect(saved?.usage.jev.inputTokens).toBe(
+    (before?.usage.jev.inputTokens ?? 0) + 14,
+  );
+  expect(JSON.stringify(saved)).not.toContain(reportText);
+});
+it.each(["reviewed", "unchanged", "uncertain"])(
+  "does not rebill accepted %s chunks on redraw, wake, or reload",
+  async (choice) => {
+    const h = await fixture();
+    h.setChoice(choice);
+    h.append("report", reportText);
+    await h.settle("report");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.calls).toHaveLength(2);
+    const saved = h.checkpoint();
+    const before = h.calls.length;
+    for (let i = 0; i < 3; i++) {
+      h.monitor.coverageSnapshot();
+      h.monitor.boardSnapshot();
+      h.observe();
+    }
+    await vi.advanceTimersByTimeAsync(100);
+    await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.calls).toHaveLength(before);
+  },
+);
+it("resumes only unfinished report chunks after transport failure and reload", async () => {
+  const h = await fixture();
+  h.setTransport(async (request) =>
+    h.calls.length === 2
+      ? new Response("unavailable", { status: 503 })
+      : answer(request, "reviewed"),
+  );
+  h.append("report", reportText);
+  await h.settle("report");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(2);
+  expect(
+    h.monitor
+      .coverageSnapshot()
+      .groups[0].children.filter(
+        (child) => child.status === "reported-reviewed",
+      ),
+  ).toHaveLength(20);
+  const saved = h.checkpoint();
+  h.setTransport(undefined);
+  const before = h.calls.length;
+  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  await vi.advanceTimersByTimeAsync(11000);
+  h.observe();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(
+    h.calls
+      .slice(before)
+      .map((request) => Object.keys(request.questions).length),
+  ).toEqual([2]);
+  expect(
+    h.monitor
+      .coverageSnapshot()
+      .groups[0].children.every(
+        (child) => child.status === "reported-reviewed",
+      ),
+  ).toBe(true);
+});
+it("parks retryable failures until deadline AND a named wake, never timer-polls", async () => {
+  const h = await fixture();
+  h.setTransport(async () => new Response("unavailable", { status: 503 }));
+  h.append("report", reportText);
+  await h.settle("report");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(1);
+  const spent = h.checkpoint().monitor?.coverage?.dispatches;
+  await vi.advanceTimersByTimeAsync(60000);
+  expect(h.calls).toHaveLength(1);
+  h.observe();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(2);
+  expect(h.checkpoint().monitor?.coverage?.dispatches).toBe((spent ?? 0) + 1);
+});
+it("enforces1024dispatch cap including failures and leaves incomplete child statuses visible", async () => {
+  const h = await fixture();
+  const saved = h.checkpoint();
+  if (!saved.monitor?.coverage) throw new Error("Missing coverage");
+  saved.monitor.coverage.dispatches = 1023;
+  saved.monitor.coverage.usage.jev.calls =
+    1023 - saved.monitor.coverage.usage.extraction.calls;
+  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  h.append("report", reportText);
+  await h.settle("report");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(1);
+  expect(h.checkpoint().monitor?.coverage?.dispatches).toBe(1024);
+  const children = h.monitor.coverageSnapshot().groups[0].children;
+  expect(
+    children.filter((child) => child.status === "reported-reviewed"),
+  ).toHaveLength(20);
+  expect(children.filter((child) => child.status === "pending")).toHaveLength(
+    2,
+  );
+  h.observe();
+  await vi.advanceTimersByTimeAsync(60000);
+  expect(h.calls).toHaveLength(1);
+});
+it("optional coverage flight never blocks advisory readiness and OFF fences its late result", async () => {
+  const h = await fixture();
+  let release: (() => void) | undefined;
+  h.setTransport(
+    (request) =>
+      new Promise<Response>((resolve) => {
+        release = () => resolve(answer(request, "reviewed"));
+      }),
+  );
+  h.append("report", reportText);
+  await h.settle("report");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(1);
+  expect(h.monitor.advisorySettlementSnapshot().reason).toBe("ready");
+  h.monitor.turnOff();
+  release?.();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(
+    h.monitor
+      .coverageSnapshot()
+      .groups[0].children.every((child) => child.status === "pending"),
+  ).toBe(true);
+  expect(h.calls).toHaveLength(1);
+});

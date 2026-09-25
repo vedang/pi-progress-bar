@@ -43,7 +43,7 @@ function answer(request: EvaluationRequest, choice: string) {
     ),
   });
 }
-async function fixture(details = false) {
+async function fixture(details = false, failIntent = false) {
   const h = monitorHarness([branchEntry("goal", text)], {
     richDetailsEnabled: details,
     extractionText: (input) =>
@@ -95,9 +95,31 @@ async function fixture(details = false) {
     calls.push(request);
     return transport ? transport(request, init) : answer(request, choice);
   });
+  if (failIntent) {
+    const extract = h.extract.getMockImplementation();
+    let failed = false;
+    if (!extract) throw new Error("Missing extractor");
+    h.extract.mockImplementation(async (input, signal, onDispatch) => {
+      if (input.instructions.includes("parentIndices") && !failed) {
+        failed = true;
+        onDispatch?.(Date.now());
+        throw new Error("temporary extraction failure");
+      }
+      return extract(input, signal, onDispatch);
+    });
+  }
   h.start();
   await h.settle("goal");
   await vi.advanceTimersByTimeAsync(200);
+  if (failIntent) {
+    h.monitor.modelSelected();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(
+      h.extract.mock.calls.filter(([input]) =>
+        input.instructions.includes("parentIndices"),
+      ),
+    ).toHaveLength(2);
+  }
   h.monitor.observeCoverageToolStart("manifest", "bash", {
     command: "unzip -p docs/plan.xlsx xl/workbook.xml",
   });
@@ -140,6 +162,172 @@ async function fixture(details = false) {
       h.monitor.checkpoint() as ReturnType<typeof encodeCheckpoint>,
   };
 }
+it("explicit model recovery resumes a failed paid intent without mandatory re-extraction", async () => {
+  await fixture(false, true);
+});
+it("coalesces a same-parent resource backlog before optional dispatch", async () => {
+  const h = await fixture();
+  h.setChoice("unchanged");
+  const extract = h.extract.getMockImplementation();
+  if (!extract) throw new Error("Missing extractor");
+  h.extract.mockImplementation(async (input, signal, onDispatch) => {
+    if (input.instructions.includes("parentIndices")) {
+      onDispatch?.(Date.now());
+      return {
+        text: '{"intents":[]}',
+        provider: "offline",
+        model: "fixture",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+    }
+    return extract(input, signal, onDispatch);
+  });
+  h.replace([
+    ...h.reader(),
+    ...[0, 1, 2].map((i) =>
+      branchEntry(
+        `burst-${i}`,
+        `Review all tabs in docs/second.xlsx. Updated instruction ${i}.`,
+      ),
+    ),
+  ]);
+  await h.settle("burst-2");
+  await vi.advanceTimersByTimeAsync(200);
+  expect(
+    h.extract.mock.calls.filter(
+      ([input]) =>
+        input.instructions.includes("parentIndices") &&
+        input.latest.id.startsWith("burst-"),
+    ),
+  ).toHaveLength(1);
+  expect(h.monitor.coverageSnapshot().omissions).toBeGreaterThanOrEqual(2);
+});
+it("never resumes an older report from the semantic-commit supersession crash window", async () => {
+  const h = await fixture();
+  h.setTransport(() => new Promise<Response>(() => {}));
+  h.append("older", reportText);
+  await h.settle("older");
+  await vi.advanceTimersByTimeAsync(100);
+  h.append("newer", "I retract all earlier workbook review claims.");
+  await h.settle("newer");
+  await vi.advanceTimersByTimeAsync(100);
+  const saved = h.save.mock.calls
+    .map(([value]) => value as ReturnType<typeof encodeCheckpoint>)
+    .find(
+      (value) =>
+        value.state.cursor?.id === "newer" &&
+        value.monitor?.coverage?.jobs?.some(
+          (job) => job.source.entryId === "older",
+        ),
+    );
+  // Atomic supersession may eliminate this intermediate checkpoint altogether.
+  if (!saved) return;
+  h.setTransport(undefined);
+  h.calls.splice(0);
+  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  await vi.advanceTimersByTimeAsync(200);
+  expect(
+    h.calls.some(
+      (request) =>
+        (request.state as { report: { id: string } }).report.id === "older",
+    ),
+  ).toBe(false);
+});
+it("retains coalescing omissions through same-version reload", async () => {
+  const h = await fixture();
+  h.setTransport(() => new Promise<Response>(() => {}));
+  h.append("older", reportText);
+  await h.settle("older");
+  await vi.advanceTimersByTimeAsync(100);
+  h.append("newer", "I retract all earlier workbook review claims.");
+  await h.settle("newer");
+  await vi.advanceTimersByTimeAsync(100);
+  const omissions = h.monitor.coverageSnapshot().omissions;
+  expect(omissions).toBeGreaterThan(0);
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    h.checkpoint(),
+    false,
+    h.reader,
+  );
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.coverageSnapshot().omissions).toBe(omissions);
+});
+it("records report dispatch time rather than response completion time", async () => {
+  const h = await fixture();
+  let dispatched = 0;
+  let release: (() => void) | undefined;
+  h.setTransport((request) => {
+    dispatched = Date.now();
+    return new Promise<Response>((resolve) => {
+      release = () => resolve(answer(request, "reviewed"));
+    });
+  });
+  h.append("report", reportText);
+  await h.settle("report");
+  await vi.advanceTimersByTimeAsync(100);
+  const started = dispatched;
+  await vi.advanceTimersByTimeAsync(2000);
+  release?.();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.checkpoint().monitor?.coverage?.reportReceipts?.[0].at).toBe(
+    started,
+  );
+});
+it("retains content-free per-dispatch proof for selected-model intent", async () => {
+  const start = Date.now();
+  const h = await fixture();
+  function records(value: unknown): Record<string, unknown>[] {
+    if (!value || typeof value !== "object") return [];
+    return [
+      value as Record<string, unknown>,
+      ...Object.values(value).flatMap(records),
+    ];
+  }
+  const coverage = h.checkpoint().monitor?.coverage;
+  const receipt = records(coverage).find(
+    (record) => typeof record.requestHash === "string" && record.dispatch === 1,
+  );
+  expect(receipt).toMatchObject({
+    requestHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    dispatch: 1,
+    at: expect.any(Number),
+    usage: { inputTokens: 3, outputTokens: 2 },
+    outcome: "accepted",
+  });
+  expect(Number(receipt?.at)).toBeGreaterThanOrEqual(start);
+  expect(Number(receipt?.at)).toBeLessThanOrEqual(Date.now());
+  expect(receipt?.identity ?? receipt?.jobIdentity).toBe(
+    coverage?.intents?.accepted[0].identity,
+  );
+});
+it("journal saturation either admits later intent or exposes an explicit omission", async () => {
+  const h = await fixture();
+  h.setChoice("unchanged");
+  const extract = h.extract.getMockImplementation();
+  if (!extract) throw new Error("Missing extractor");
+  h.extract.mockImplementation(async (input, signal, onDispatch) => {
+    if (input.instructions.includes("parentIndices")) {
+      onDispatch?.(Date.now());
+      return {
+        text: '{"intents":[]}',
+        provider: "offline",
+        model: "fixture",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+    }
+    return extract(input, signal, onDispatch);
+  });
+  for (let i = 0; i < 21; i++) {
+    h.append(`candidate-${i}`, "Review all tabs in docs/second.xlsx.", "user");
+    await h.settle(`candidate-${i}`);
+    await vi.advanceTimersByTimeAsync(100);
+  }
+  const calls = h.extract.mock.calls.filter(([input]) =>
+    input.instructions.includes("parentIndices"),
+  ).length;
+  expect(calls === 22 || h.monitor.coverageSnapshot().omissions > 0).toBe(true);
+});
 it("schedules20+2report judgments after semantics/readyhealth with isolated usage", async () => {
   const h = await fixture();
   const before = h.checkpoint().monitor?.coverage;
@@ -269,6 +457,14 @@ it("enforces1024dispatch cap including failures and leaves incomplete child stat
   expect(children.filter((child) => child.status === "pending")).toHaveLength(
     2,
   );
+  expect(h.monitor.coverageSnapshot()).toMatchObject({ exhausted: true });
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    h.checkpoint(),
+    false,
+    h.reader,
+  );
+  expect(h.monitor.coverageSnapshot()).toMatchObject({ exhausted: true });
   h.observe();
   await vi.advanceTimersByTimeAsync(60000);
   expect(h.calls).toHaveLength(1);

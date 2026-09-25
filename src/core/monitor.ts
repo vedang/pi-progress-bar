@@ -324,6 +324,9 @@ export interface DebugSnapshot {
 /** Detached optional coverage display; current reads remain runtime-only. */
 export interface CoverageMonitorSnapshot extends CoverageSnapshot {
   current: Array<{ groupId: string; childIds: string[] }>;
+  pendingCount: number;
+  pendingBytes: number;
+  omissions: number;
 }
 
 export type AdvisorySettlementReason =
@@ -522,6 +525,8 @@ const assistantVisibleText = (message: unknown) => {
 };
 
 const MAX_COVERAGE_TOOL_RESULT_BYTES = 32 * 1024;
+const MAX_PENDING_COVERAGE_CANDIDATES = 16;
+const MAX_PENDING_COVERAGE_BYTES = 64 * 1024;
 
 /** Matches the bounded text-block join used by passive tool adapters. */
 const coverageToolResultText = (message: Record<string, unknown>) => {
@@ -590,6 +595,9 @@ export class Monitor {
   private pendingCoverageAccess: ReturnType<
     CoverageAdapter["confirm"]
   >["access"] = [];
+  /** Runtime-only rejected optional candidates; bounded and never checkpointed. */
+  private coverageOmissions = 0;
+  private coverageAdapterOmissions = 0;
   private coverageDispatches = 0;
   private readonly coverageUsage = {
     jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
@@ -733,6 +741,7 @@ export class Monitor {
       { toolCallId: callId, toolName, args },
       this.coverageEpoch,
     );
+    this.syncCoverageAdapterOmissions();
     this.publish();
   }
 
@@ -787,7 +796,13 @@ export class Monitor {
         ? [{ groupId: group.id, childIds }]
         : [];
     });
-    return { ...snapshot, current };
+    return {
+      ...snapshot,
+      current,
+      pendingCount: this.pendingCoverageCount(),
+      pendingBytes: this.pendingCoverageBytes(),
+      omissions: this.coverageOmissions,
+    };
   }
 
   /** Provisional declared calls dispatch immediately; final reconciliation is turn-bound. */
@@ -2183,6 +2198,125 @@ export class Monitor {
     );
   }
 
+  private pendingCoverageCount(
+    inventories: readonly CoverageInventory[] = this.pendingCoverageInventories,
+    access: readonly ReturnType<
+      CoverageAdapter["confirm"]
+    >["access"][number][] = this.pendingCoverageAccess,
+  ) {
+    return inventories.length + access.length;
+  }
+
+  /** Measure only projected candidate metadata; never tool result bodies or paths. */
+  private pendingCoverageBytes(
+    inventories: readonly CoverageInventory[] = this.pendingCoverageInventories,
+    access: readonly ReturnType<
+      CoverageAdapter["confirm"]
+    >["access"][number][] = this.pendingCoverageAccess,
+  ) {
+    if (!this.pendingCoverageCount(inventories, access)) return 0;
+    try {
+      return Buffer.byteLength(
+        JSON.stringify({
+          inventories: inventories.map((inventory) => ({
+            resourceKey: inventory.resourceKey,
+            revision: inventory.revision,
+            complete: inventory.complete,
+            ...(inventory.knownTotal === undefined
+              ? {}
+              : { knownTotal: inventory.knownTotal }),
+            ...(inventory.replacement ? { replacement: true } : {}),
+            source: {
+              entryId: inventory.source.entryId,
+              messageHash: inventory.source.messageHash,
+              callIdDigest: sha256(inventory.source.callId),
+            },
+            items: inventory.items.map((item) => ({
+              key: item.key,
+              label: item.label,
+            })),
+          })),
+          access: access.map((candidate) => ({
+            resourceKey: candidate.resourceKey,
+            itemKeys: [...candidate.itemKeys],
+            source: {
+              entryId: candidate.source.entryId,
+              messageHash: candidate.source.messageHash,
+              callIdDigest: sha256(candidate.source.callId),
+            },
+          })),
+        }),
+        "utf8",
+      );
+    } catch {
+      return Number.MAX_SAFE_INTEGER;
+    }
+  }
+
+  private recordCoverageOmission(count = 1) {
+    if (!Number.isSafeInteger(count) || count <= 0) return;
+    this.coverageOmissions = saturatingAdd(this.coverageOmissions, count);
+  }
+
+  /** Adapter omissions are cumulative; consume each advance once. */
+  private syncCoverageAdapterOmissions(
+    omissions = this.coverageAdapter.snapshot().omissions,
+  ) {
+    if (!Number.isSafeInteger(omissions) || omissions < 0) return;
+    if (omissions < this.coverageAdapterOmissions) {
+      this.coverageAdapterOmissions = omissions;
+      return;
+    }
+    this.recordCoverageOmission(omissions - this.coverageAdapterOmissions);
+    this.coverageAdapterOmissions = omissions;
+  }
+
+  private fitsPendingCoverage(
+    inventories: readonly CoverageInventory[],
+    access: readonly ReturnType<CoverageAdapter["confirm"]>["access"][number][],
+  ) {
+    return (
+      this.pendingCoverageCount(inventories, access) <=
+        MAX_PENDING_COVERAGE_CANDIDATES &&
+      this.pendingCoverageBytes(inventories, access) <=
+        MAX_PENDING_COVERAGE_BYTES
+    );
+  }
+
+  /** Candidate insert/replacement is atomic across one shared queue budget. */
+  private enqueuePendingInventory(inventory: CoverageInventory) {
+    const existing = this.pendingCoverageInventories.findIndex(
+      (candidate) =>
+        candidate.resourceKey === inventory.resourceKey &&
+        candidate.revision === inventory.revision &&
+        candidate.source.entryId === inventory.source.entryId,
+    );
+    const inventories = [...this.pendingCoverageInventories];
+    if (existing >= 0) inventories[existing] = inventory;
+    else inventories.push(inventory);
+    if (!this.fitsPendingCoverage(inventories, this.pendingCoverageAccess)) {
+      this.recordCoverageOmission();
+      return;
+    }
+    this.pendingCoverageInventories = inventories;
+  }
+
+  private enqueuePendingAccess(
+    access: ReturnType<CoverageAdapter["confirm"]>["access"][number],
+  ) {
+    const existing = this.pendingCoverageAccess.findIndex(
+      (candidate) => candidate.source.entryId === access.source.entryId,
+    );
+    const accesses = [...this.pendingCoverageAccess];
+    if (existing >= 0) accesses[existing] = access;
+    else accesses.push(access);
+    if (!this.fitsPendingCoverage(this.pendingCoverageInventories, accesses)) {
+      this.recordCoverageOmission();
+      return;
+    }
+    this.pendingCoverageAccess = accesses;
+  }
+
   private prunePendingCoverage(pass: CanonicalPass) {
     this.pendingCoverageInventories = this.pendingCoverageInventories.filter(
       (inventory) => this.coverageToolSourceCurrent(inventory.source, pass),
@@ -2196,27 +2330,13 @@ export class Monitor {
     result: ReturnType<CoverageAdapter["confirm"]>,
     pass: CanonicalPass,
   ) {
-    for (const inventory of result.inventories) {
-      if (!this.coverageToolSourceCurrent(inventory.source, pass)) continue;
-      const existing = this.pendingCoverageInventories.findIndex(
-        (candidate) =>
-          candidate.resourceKey === inventory.resourceKey &&
-          candidate.revision === inventory.revision &&
-          candidate.source.entryId === inventory.source.entryId,
-      );
-      if (existing >= 0) this.pendingCoverageInventories[existing] = inventory;
-      else if (this.pendingCoverageInventories.length < 16)
-        this.pendingCoverageInventories.push(inventory);
-    }
-    for (const access of result.access) {
-      if (!this.coverageToolSourceCurrent(access.source, pass)) continue;
-      const existing = this.pendingCoverageAccess.findIndex(
-        (candidate) => candidate.source.entryId === access.source.entryId,
-      );
-      if (existing >= 0) this.pendingCoverageAccess[existing] = access;
-      else if (this.pendingCoverageAccess.length < 16)
-        this.pendingCoverageAccess.push(access);
-    }
+    this.syncCoverageAdapterOmissions(result.omissions);
+    for (const inventory of result.inventories)
+      if (this.coverageToolSourceCurrent(inventory.source, pass))
+        this.enqueuePendingInventory(inventory);
+    for (const access of result.access)
+      if (this.coverageToolSourceCurrent(access.source, pass))
+        this.enqueuePendingAccess(access);
   }
 
   /** Clone through bounded checkpoint validation before an optional transaction. */
@@ -2419,6 +2539,8 @@ export class Monitor {
     this.coverageIntents = new CoverageIntentRequests();
     this.pendingCoverageInventories = [];
     this.pendingCoverageAccess = [];
+    this.coverageOmissions = 0;
+    this.coverageAdapterOmissions = 0;
   }
 
   private healthCardMatchesCanonical(card: HealthCard, pass?: CanonicalPass) {

@@ -405,9 +405,18 @@ class TaskBoard implements BoardComponent {
         group.parentTaskId === task.taskId &&
         group.parentRevision === task.revision,
     );
-    if (!groups?.length) return [];
+    const omissions = this.snapshot.coverage?.omissions ?? 0;
+    if (!groups?.length && omissions <= 0) return [];
     const lines = [...this.wrapLines("Coverage:", width)];
-    for (const group of groups) {
+    if (omissions > 0)
+      lines.push(
+        ...this.wrapLines(
+          `• Incomplete · ${omissions} optional candidates omitted`,
+          width,
+          "warning",
+        ),
+      );
+    for (const group of groups ?? []) {
       const accessed = group.children.filter((child) => child.accessed).length;
       lines.push(
         ...this.wrapLines(

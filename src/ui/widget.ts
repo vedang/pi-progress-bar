@@ -2,9 +2,11 @@ import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { BoardSnapshot } from "../core/board-projection";
-import type { CoverageSnapshot } from "../core/coverage";
 import type { ExecutionVisibilitySnapshot } from "../core/execution-visibility";
-import type { PresentationSnapshot } from "../core/monitor";
+import type {
+  CoverageMonitorSnapshot,
+  PresentationSnapshot,
+} from "../core/monitor";
 
 export interface WidgetSnapshot {
   presentation: PresentationSnapshot;
@@ -12,7 +14,7 @@ export interface WidgetSnapshot {
   /** Optional while old host/test projections have no runtime visibility data. */
   visibility?: ExecutionVisibilitySnapshot;
   /** Optional read-only coverage sidecar; never task-board authority. */
-  coverage?: CoverageSnapshot;
+  coverage?: CoverageMonitorSnapshot;
 }
 
 /** Existing safe health-label utility; board owns where it is displayed. */
@@ -275,11 +277,18 @@ export function renderWidget(
     snapshot.visibility?.budgetRemaining === 0
       ? "Visibility budget reached · history incomplete"
       : undefined;
+  const coverageWarning =
+    snapshot.coverage?.omissions && snapshot.coverage.omissions > 0
+      ? `Coverage incomplete · ${compact(snapshot.coverage.omissions)} optional candidates omitted`
+      : undefined;
   const lines: WidgetLine[] = [
     header,
     ...(current ? [{ text: current, wrap: true }] : []),
     ...(visibilityWarning
       ? [{ text: visibilityWarning, tone: "warning" as const }]
+      : []),
+    ...(coverageWarning
+      ? [{ text: coverageWarning, tone: "warning" as const, wrap: true }]
       : []),
     task,
     ...(selected

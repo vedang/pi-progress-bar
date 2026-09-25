@@ -243,6 +243,57 @@ it("canonical inventory amendment drops coverage without modifying parent or reb
     calls,
   );
 });
+it("bounds pending projected bytes across repeated unbound inventories and reports omissions", async () => {
+  const h = await ready();
+  const names = Array.from({ length: 52 }, (_, i) => `${i}-${"x".repeat(200)}`);
+  const body = `<workbook><sheets>${names.map((name) => `<sheet name="${name}"/>`).join("")}</sheets></workbook>`;
+  for (let i = 0; i < 8; i++)
+    await h.run(
+      `unbound-${i}`,
+      "bash",
+      { command: "unzip -p docs/other.xlsx xl/workbook.xml" },
+      body,
+    );
+  const snapshot = h.monitor.coverageSnapshot();
+  expect(snapshot.pendingBytes).toBeLessThanOrEqual(65536);
+  expect(snapshot.pendingCount).toBeGreaterThan(0);
+  expect(snapshot.omissions).toBeGreaterThan(0);
+  expect(snapshot.groups).toEqual([]);
+  expect(h.monitor.state.tasks).toHaveLength(1);
+  const before = h.monitor.coverageSnapshot();
+  h.monitor.confirmCoverageBranch(h.reader());
+  expect(h.monitor.coverageSnapshot()).toEqual(before);
+  h.monitor.turnOff();
+  expect(h.monitor.coverageSnapshot().pendingCount).toBe(0);
+  expect(h.monitor.coverageSnapshot().pendingBytes).toBe(0);
+});
+it("enforces one16-candidate limit shared by pending inventories and access", async () => {
+  const h = await ready();
+  await h.run(
+    "script-write",
+    "write",
+    { path: "foreign.sh", content: "script" },
+    "written",
+  );
+  await h.run("script-read", "read", { path: "foreign.sh" }, "script");
+  for (let i = 0; i < 10; i++) {
+    await h.run(
+      `foreign-manifest-${i}`,
+      "bash",
+      { command: `unzip -p docs/foreign-${i}.xlsx xl/workbook.xml` },
+      '<workbook><sheets><sheet name="One"/></sheets></workbook>',
+    );
+    await h.run(
+      `foreign-list-${i}`,
+      "bash",
+      { command: `bash foreign.sh docs/foreign-${i}.xlsx` },
+      `One rows 2 nonempty rows 1 file extracted/foreign-${i}.txt`,
+    );
+  }
+  expect(h.monitor.coverageSnapshot().pendingCount).toBeLessThanOrEqual(16);
+  expect(h.monitor.coverageSnapshot().omissions).toBeGreaterThan(0);
+  expect(h.monitor.coverageSnapshot().groups).toEqual([]);
+});
 it("renders minimal read-only coverage on the selected parent board", async () => {
   const h = await mapped();
   const snapshot = {

@@ -26,7 +26,7 @@ export const coverageNames = [
   "Setup Config",
   "Lookup",
 ];
-export const coverageHash = (text: string) =>
+const coverageHash = (text: string) =>
   createHash("sha256").update(text).digest("hex");
 export const coverageSource = (
   id = "intent",

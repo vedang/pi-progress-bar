@@ -23,6 +23,65 @@ function fixture() {
 }
 
 describe("one-level coverage store", () => {
+  it("bounds count-only groups even when they consume no child slots", () => {
+    const store = new CoverageStore();
+    for (let i = 1; i <= 200; i++)
+      expect(
+        store.admit({
+          parent: { ...coverageParent(), id: `task:${i}` },
+          intent: coverageSource(),
+          inventory: {
+            ...coverageInventory([]),
+            complete: false,
+            knownTotal: 22,
+          },
+        }).accepted,
+      ).toBe(true);
+    expect(
+      store.admit({
+        parent: { ...coverageParent(), id: "task:201" },
+        intent: coverageSource(),
+        inventory: {
+          ...coverageInventory([]),
+          complete: false,
+          knownTotal: 22,
+        },
+      }),
+    ).toEqual({ accepted: false, reason: "capacity" });
+    expect(store.snapshot().groups).toHaveLength(200);
+  });
+  it("does not retain two requirements revisions for one parent", () => {
+    const { store, parent } = fixture();
+    const revisionTwo = { ...parent, revision: 2 };
+    expect(
+      store.admit({
+        parent: revisionTwo,
+        intent: coverageSource(),
+        inventory: coverageInventory(),
+      }).accepted,
+    ).toBe(true);
+    expect(store.snapshot().groups).toHaveLength(1);
+    expect(store.snapshot().groups[0].parentRevision).toBe(2);
+    expect(
+      store.admit({
+        parent,
+        intent: coverageSource(),
+        inventory: coverageInventory(),
+      }).accepted,
+    ).toBe(false);
+    expect(store.snapshot().groups).toHaveLength(1);
+  });
+  it("does not copy undeclared raw evidence in source references", () => {
+    const store = new CoverageStore();
+    const intent = { ...coverageSource(), rawPrompt: "PRIVATE_SENTINEL" };
+    const admission = store.admit({
+      parent: coverageParent(),
+      intent,
+      inventory: coverageInventory(),
+    });
+    expect(admission.accepted).toBe(false);
+    expect(JSON.stringify(store.snapshot())).not.toContain("PRIVATE_SENTINEL");
+  });
   it("keeps count-only scope explicit without inventing children", () => {
     const store = new CoverageStore();
     expect(

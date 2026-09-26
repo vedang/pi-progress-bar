@@ -115,6 +115,10 @@ Main's new host characterization passes2/2 on local Pi0.84.2 and2/2 on installed
 
 `src/advisory/continuation-policy.ts` exposes `captureContinuationPolicy(renderedPrompt: unknown)` and `validateContinuationPolicy(snapshot: unknown, effectivePrompt: unknown)`. Both return a detached discriminated union: `{coverage:"complete", promptHash:string, text:string}` or `{coverage:"unknown"}`. Hash is SHA-256 of the full exact UTF-8 rendered prompt. Complete proof has exactly those three keys and serialized JSON fits8192 UTF-8 bytes; nonblank full prompt required. Partial structured options are not a policy proof. Validation rechecks shape, text/hash consistency, size and equality to the actual context-time prompt. Unknown input remains unknown even when a later settlement returns to the original prompt. No provider calls, persistence or session state in these helpers; index owns capture/context ordering and invalidation at N05. Explicitly distinguish capture from validation: the unvalidated captured snapshot never grants D permission. Main's `__tests__/continuation-policy.test.ts` is intentionally missing-module RED until N01. N01 Main adds remaining canonical origin/frontier/history REDs before its source handoff; host characterization is not proof of Monitor frontier integration.
 
+### N01 receipt layer
+
+[Continuation contracts](continuation-contracts.md) freezes the passive delivery receipt callback and Main REDs. The original chain releases before the detached receipt is observed; original independent-run binding and authorization/frontier gates remain separate. Final N01 review covers all its layers, not this callback alone.
+
 ## 7. Required acceptance matrix
 
 Fresh N00 corpus now has19 cases with runtime parent statuses (`not-started`, `reopened`, `done`); reported in-flight work remains conversation evidence, not an invented status enum. Earlier18-case candidate hash is retained in review/Beads history, not current acceptance.

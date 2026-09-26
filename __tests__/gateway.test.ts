@@ -32,6 +32,58 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe("shared Jev gateway", () => {
+  it("does not let inherited serialization hooks hide oversized evidence", async () => {
+    const responseText = JSON.stringify(result);
+    const fetcher = vi.fn(async () => new Response(responseText));
+    const gateway = new JevGateway({
+      fetch: fetcher,
+      getApiKey: () => "fixture-key",
+    });
+    gateway.enable("oversized");
+    const oversized = { ...request, state: { text: "x".repeat(24577) } };
+    const previous = Object.getOwnPropertyDescriptor(
+      Object.prototype,
+      "toJSON",
+    );
+    let reads = 0;
+    let actual: unknown;
+    try {
+      Object.defineProperty(Object.prototype, "toJSON", {
+        configurable: true,
+        get() {
+          reads++;
+          return () => ({});
+        },
+      });
+      actual = await gateway.evaluate(oversized, "oversized");
+    } finally {
+      if (previous) Object.defineProperty(Object.prototype, "toJSON", previous);
+      else Reflect.deleteProperty(Object.prototype, "toJSON");
+    }
+    expect(actual).toBeUndefined();
+    expect(reads).toBe(0);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("rejects own accessor evidence without executing it or dispatching", async () => {
+    const getter = vi.fn(() => "untrusted getter result");
+    const unsafe = {
+      ...request,
+      state: Object.defineProperty({}, "text", {
+        enumerable: true,
+        get: getter,
+      }),
+    };
+    const fetcher = vi.fn(async () => Response.json(result));
+    const gateway = new JevGateway({
+      fetch: fetcher,
+      getApiKey: () => "fixture-key",
+    });
+    gateway.enable("accessor");
+    expect(await gateway.evaluate(unsafe, "accessor")).toBeUndefined();
+    expect(getter).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
   it("requires explicit consent and a key, and never sends unchanged successful state twice", async () => {
     let now = 0;
     const fetcher = vi.fn(async (_url: string, _init?: RequestInit) =>

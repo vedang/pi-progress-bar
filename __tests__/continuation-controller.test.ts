@@ -77,9 +77,11 @@ function fixture() {
     },
   );
   const emit = vi.fn((_output: AppliedContinuationDraft) => true);
+  const authority = vi.fn(() => current);
+  const canStart = vi.fn(() => allowed);
   const controller = new ContinuationController({
-    authority: () => current,
-    canStart: () => allowed,
+    authority,
+    canStart,
     gate,
     draft,
     emit,
@@ -94,6 +96,8 @@ function fixture() {
     gate,
     draft,
     emit,
+    authority,
+    canStart,
     start,
     setCurrent: (next: ContinuationAuthorityProjection) => {
       current = next;
@@ -105,6 +109,121 @@ function fixture() {
 }
 
 describe("one-shot continuation controller", () => {
+  it.each(["authority", "scheduler"])(
+    "reserves advancement before synchronous %s reentry",
+    async (callback) => {
+      const h = fixture();
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.gate.mockImplementation(async (batch, _signal, admit) => {
+        admit();
+        await held;
+        return yes(batch);
+      });
+      let nested: Promise<void> | undefined;
+      if (callback === "authority")
+        h.authority.mockImplementationOnce(() => {
+          nested = h.controller.wake();
+          return projection();
+        });
+      else
+        h.canStart.mockImplementationOnce(() => {
+          nested = h.controller.wake();
+          return true;
+        });
+      h.start();
+      const outer = h.controller.wake();
+      const callsWhileHeld = h.gate.mock.calls.length;
+      h.controller.invalidate();
+      const armedWhileHeld = h.controller.arm(rootFor(projection(8)));
+      release();
+      await outer;
+      await nested;
+      expect(callsWhileHeld).toBe(1);
+      expect(armedWhileHeld).toBe(false);
+      expect(h.emit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["before-draft", "before-emit"])(
+    "does not resurrect phase after scheduler invalidation %s",
+    async (stage) => {
+      const h = fixture();
+      let cancel = false;
+      const originalGate = h.gate.getMockImplementation();
+      const originalDraft = h.draft.getMockImplementation();
+      h.gate.mockImplementation(async (...args) => {
+        const result = await originalGate?.(...args);
+        if (stage === "before-draft") cancel = true;
+        return result;
+      });
+      h.draft.mockImplementation(async (...args) => {
+        const result = await originalDraft?.(...args);
+        if (stage === "before-emit") cancel = true;
+        return result;
+      });
+      h.canStart.mockImplementation(() => {
+        if (cancel) h.controller.invalidate();
+        return true;
+      });
+      h.start();
+      await h.controller.wake();
+      expect(h.emit).not.toHaveBeenCalled();
+      if (stage === "before-draft") expect(h.draft).not.toHaveBeenCalled();
+      expect(h.controller.snapshot().phase).toBe("consumed");
+      expect(h.controller.arm(rootFor(projection(8)))).toBe(true);
+    },
+  );
+
+  it("rechecks authority changed by final scheduling callback before emission", async () => {
+    const h = fixture();
+    let finished = false;
+    const original = h.draft.getMockImplementation();
+    h.draft.mockImplementation(async (...args) => {
+      const result = await original?.(...args);
+      finished = true;
+      return result;
+    });
+    h.canStart.mockImplementation(() => {
+      if (finished) h.setCurrent(projection(8));
+      return true;
+    });
+    h.start();
+    await h.controller.wake();
+    expect(h.emit).not.toHaveBeenCalled();
+    expect(h.controller.snapshot().phase).toBe("consumed");
+  });
+
+  it.each(["replies", "send-id", "question-id", "reply-id", "serialized"])(
+    "rejects over-bound receipt %s before retention",
+    (mode) => {
+      const h = fixture();
+      const current = projection();
+      const receipt = {
+        ...current.receipt,
+        question: { ...current.receipt.question },
+        replies: current.receipt.replies.map((reply) => ({ ...reply })),
+      };
+      if (mode === "replies")
+        receipt.replies = Array.from({ length: 17 }, (_, i) => ({
+          ...receipt.replies[0],
+          entryId: `reply:${i}`,
+        }));
+      if (mode === "send-id") receipt.sendId = "s".repeat(12289);
+      if (mode === "question-id") receipt.question.entryId = "q".repeat(12289);
+      if (mode === "reply-id") receipt.replies[0].entryId = "r".repeat(12289);
+      if (mode === "serialized")
+        receipt.replies = Array.from({ length: 16 }, (_, i) => ({
+          ...receipt.replies[0],
+          entryId: `${i}:${"r".repeat(1600)}`,
+        }));
+      h.controller.arm(rootFor(current));
+      expect(h.controller.settle(receipt)).toBe(false);
+      expect(h.controller.snapshot().phase).toBe("await-reply");
+    },
+  );
   it("advances only a correlated settled root and emits one validated conditional draft", async () => {
     const h = fixture();
     const current = projection();

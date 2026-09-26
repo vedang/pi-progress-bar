@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { HybridTask, SourceRef } from "./hybrid-state";
+import type { Assessment, HybridTask, SourceRef } from "./hybrid-state";
 
 const MAX_ACTIVE_CHILDREN = 64;
 const MAX_RETAINED_CHILDREN = 200;
@@ -9,11 +9,12 @@ const MAX_ADMISSION_BYTES = 32 * 1024;
 
 const digest = /^[a-f0-9]{64}$/;
 const taskId = /^task:[1-9]\d*$/;
-const groupId = /^subtask-group:[1-9]\d*$/;
+const groupId = /^subtask-group:([1-9]\d*)$/;
 const childId = /^subtask-child:[1-9]\d*$/;
+const controlCharacter = /[\p{Cc}\p{Cf}]/u;
+const whitespaceCharacter = /^\s$/u;
 
 type AdmissionFailure = "invalid" | "capacity";
-
 type SubtaskChildStatus = "pending" | "reported-completed" | "reported-blocked";
 
 interface SubtaskProof {
@@ -99,38 +100,108 @@ interface SubtaskGroup extends SubtaskGroupSnapshot {
   latestAdmissionSignature: string;
 }
 
-const record = (value: unknown): value is Record<string, unknown> =>
-  !!value && typeof value === "object" && !Array.isArray(value);
+interface ParentAuthority {
+  revision: number;
+  included: boolean;
+}
+
+const plainDataRecord = (value: unknown): value is Record<string, unknown> => {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  )
+    return false;
+  return Object.values(Object.getOwnPropertyDescriptors(value)).every(
+    (descriptor) => "value" in descriptor && descriptor.enumerable,
+  );
+};
 
 const hasExactKeys = (
-  value: Record<string, unknown>,
+  value: unknown,
   required: readonly string[],
   optional: readonly string[] = [],
-) => {
+): value is Record<string, unknown> => {
+  if (!plainDataRecord(value)) return false;
   const allowed = new Set([...required, ...optional]);
+  const keys = Reflect.ownKeys(value);
   return (
+    keys.length >= required.length &&
     required.every((key) => Object.hasOwn(value, key)) &&
-    Object.keys(value).every((key) => allowed.has(key))
+    keys.every((key) => typeof key === "string" && allowed.has(key))
   );
+};
+
+const densePlainArray = (
+  value: unknown,
+  minimumLength: number,
+  maximumLength: number,
+): value is unknown[] => {
+  if (!Array.isArray(value)) return false;
+  // Read length before any element descriptor so oversized input never invokes
+  // an indexed getter through later validation.
+  if (value.length < minimumLength || value.length > maximumLength)
+    return false;
+  if (Object.getPrototypeOf(value) !== Array.prototype) return false;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== value.length + 1 || !keys.includes("length"))
+    return false;
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  if (!lengthDescriptor || !("value" in lengthDescriptor)) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable)
+      return false;
+  }
+  return true;
+};
+
+const operationArrayValidity = (value: unknown): "valid" | AdmissionFailure => {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype)
+    return "invalid";
+  if (value.length > MAX_ACTIVE_CHILDREN) return "capacity";
+  return densePlainArray(value, 0, MAX_ACTIVE_CHILDREN) ? "valid" : "invalid";
 };
 
 const validHash = (value: unknown): value is string =>
   typeof value === "string" && digest.test(value);
 
+const textWithinScalarLimit = (value: unknown, limit: number): boolean => {
+  if (typeof value !== "string" || !value.length) return false;
+  let scalars = 0;
+  let nonblank = false;
+  for (let index = 0; index < value.length; ) {
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) return false;
+    const character = String.fromCodePoint(codePoint);
+    if (controlCharacter.test(character)) return false;
+    scalars += 1;
+    if (scalars > limit) return false;
+    if (!whitespaceCharacter.test(character)) nonblank = true;
+    index += codePoint > 0xffff ? 2 : 1;
+  }
+  return nonblank;
+};
+
 const validText = (value: unknown, maxLength: number): value is string =>
-  typeof value === "string" &&
-  !!value.trim() &&
-  Array.from(value).length <= maxLength &&
-  !/[\p{Cc}\p{Cf}]/u.test(value);
+  textWithinScalarLimit(value, maxLength);
 
 const labelValidity = (value: unknown): "valid" | AdmissionFailure => {
-  if (
-    typeof value !== "string" ||
-    !value.trim() ||
-    /[\p{Cc}\p{Cf}]/u.test(value)
-  )
-    return "invalid";
-  return Array.from(value).length <= MAX_LABEL_SCALARS ? "valid" : "capacity";
+  if (typeof value !== "string" || !value.length) return "invalid";
+  let scalars = 0;
+  let nonblank = false;
+  for (let index = 0; index < value.length; ) {
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) return "invalid";
+    const character = String.fromCodePoint(codePoint);
+    if (controlCharacter.test(character)) return "invalid";
+    scalars += 1;
+    if (scalars > MAX_LABEL_SCALARS) return "capacity";
+    if (!whitespaceCharacter.test(character)) nonblank = true;
+    index += codePoint > 0xffff ? 2 : 1;
+  }
+  return nonblank ? "valid" : "invalid";
 };
 
 const positiveInteger = (value: unknown): value is number =>
@@ -149,14 +220,12 @@ const unit = (value: unknown): value is number =>
   value <= 1;
 
 const validObservationRef = (value: unknown) =>
-  record(value) &&
   hasExactKeys(value, ["entryId", "messageHash", "role"]) &&
   validText(value.entryId, 512) &&
   validHash(value.messageHash) &&
   validRole(value.role);
 
 const validSourceRef = (value: unknown): value is SourceRef =>
-  record(value) &&
   hasExactKeys(value, [
     "entryId",
     "messageHash",
@@ -174,7 +243,6 @@ const validSourceRef = (value: unknown): value is SourceRef =>
   validHash(value.quoteHash);
 
 const validAssessment = (value: unknown) =>
-  record(value) &&
   hasExactKeys(value, [
     "rawChoice",
     "confidence",
@@ -200,7 +268,6 @@ const validAssessment = (value: unknown) =>
 
 /** Full HybridTask shape prevents extra transport payloads entering reducer state. */
 const validParent = (value: unknown): value is HybridTask =>
-  record(value) &&
   hasExactKeys(
     value,
     [
@@ -230,7 +297,6 @@ const validParent = (value: unknown): value is HybridTask =>
     validAssessment(value.latestAssessment));
 
 const validProof = (value: unknown): value is SubtaskProof =>
-  record(value) &&
   hasExactKeys(value, [
     "contextHash",
     "gateRequestHash",
@@ -244,8 +310,9 @@ const validChildId = (value: unknown): value is string =>
   typeof value === "string" && childId.test(value);
 
 const childOperationValidity = (value: unknown): "valid" | AdmissionFailure => {
-  if (!record(value) || typeof value.kind !== "string") return "invalid";
-  switch (value.kind) {
+  if (!plainDataRecord(value)) return "invalid";
+  const kind = value.kind;
+  switch (kind) {
     case "add":
       if (!hasExactKeys(value, ["kind", "label", "source"])) return "invalid";
       return !validSourceRef(value.source)
@@ -270,7 +337,6 @@ const childOperationValidity = (value: unknown): "valid" | AdmissionFailure => {
 };
 
 const validRemoval = (value: unknown): value is SubtaskRemoval =>
-  record(value) &&
   hasExactKeys(value, ["id", "source", "reason"]) &&
   validChildId(value.id) &&
   validSourceRef(value.source) &&
@@ -278,7 +344,6 @@ const validRemoval = (value: unknown): value is SubtaskRemoval =>
 
 const admissionValidity = (value: unknown): "valid" | AdmissionFailure => {
   if (
-    !record(value) ||
     !hasExactKeys(
       value,
       [
@@ -291,23 +356,64 @@ const admissionValidity = (value: unknown): "valid" | AdmissionFailure => {
         "complete",
       ],
       ["knownTotal"],
-    ) ||
+    )
+  )
+    return "invalid";
+
+  const children = value.children;
+  const childrenValidity = operationArrayValidity(children);
+  if (childrenValidity !== "valid" || !Array.isArray(children))
+    return childrenValidity;
+  const removals = value.removals;
+  const removalsValidity = operationArrayValidity(removals);
+  if (removalsValidity !== "valid" || !Array.isArray(removals))
+    return removalsValidity;
+
+  if (
     !validParent(value.parent) ||
     !nonNegativeInteger(value.expectedListRevision) ||
     !validSourceRef(value.source) ||
     !validProof(value.proof) ||
-    !Array.isArray(value.children) ||
-    !Array.isArray(value.removals) ||
     typeof value.complete !== "boolean" ||
     (Object.hasOwn(value, "knownTotal") &&
       (!nonNegativeInteger(value.knownTotal) || value.knownTotal === undefined))
   )
     return "invalid";
-  for (const child of value.children) {
-    const validity = childOperationValidity(child);
+
+  for (let index = 0; index < children.length; index += 1) {
+    const validity = childOperationValidity(children[index]);
     if (validity !== "valid") return validity;
   }
-  return value.removals.every(validRemoval) ? "valid" : "invalid";
+  for (let index = 0; index < removals.length; index += 1) {
+    if (!validRemoval(removals[index])) return "invalid";
+  }
+  return "valid";
+};
+
+const reportValidity = (value: unknown): value is SubtaskReport => {
+  if (
+    !hasExactKeys(value, [
+      "groupId",
+      "listRevision",
+      "childIds",
+      "source",
+      "status",
+    ]) ||
+    !densePlainArray(value.childIds, 1, MAX_ACTIVE_CHILDREN)
+  )
+    return false;
+  if (
+    typeof value.groupId !== "string" ||
+    !groupId.test(value.groupId) ||
+    !positiveInteger(value.listRevision) ||
+    !validSourceRef(value.source) ||
+    !statusIsValid(value.status)
+  )
+    return false;
+  for (let index = 0; index < value.childIds.length; index += 1) {
+    if (!validChildId(value.childIds[index])) return false;
+  }
+  return true;
 };
 
 const statusIsValid = (value: unknown): value is SubtaskChildStatus =>
@@ -315,12 +421,51 @@ const statusIsValid = (value: unknown): value is SubtaskChildStatus =>
   value === "reported-completed" ||
   value === "reported-blocked";
 
-const cloneSource = (source: SourceRef): SourceRef => ({ ...source });
+const cloneSource = (source: SourceRef): SourceRef => ({
+  entryId: source.entryId,
+  messageHash: source.messageHash,
+  role: source.role,
+  start: source.start,
+  end: source.end,
+  quoteHash: source.quoteHash,
+});
 
-const cloneProof = (proof: SubtaskProof): SubtaskProof => ({ ...proof });
+const cloneProof = (proof: SubtaskProof): SubtaskProof => ({
+  contextHash: proof.contextHash,
+  gateRequestHash: proof.gateRequestHash,
+  proposalRequestHash: proof.proposalRequestHash,
+});
+
+const cloneAssessment = (assessment: Assessment): Assessment => ({
+  rawChoice: assessment.rawChoice,
+  confidence: assessment.confidence,
+  probability: assessment.probability,
+  reason: assessment.reason,
+  source: {
+    entryId: assessment.source.entryId,
+    messageHash: assessment.source.messageHash,
+    role: assessment.source.role,
+  },
+});
+
+const cloneParent = (parent: HybridTask): HybridTask => ({
+  id: parent.id,
+  label: parent.label,
+  kind: parent.kind,
+  basis: parent.basis,
+  status: parent.status,
+  included: parent.included,
+  revision: parent.revision,
+  source: cloneSource(parent.source),
+  ...(parent.latestAssessment === undefined
+    ? {}
+    : { latestAssessment: cloneAssessment(parent.latestAssessment) }),
+});
 
 const cloneChild = (child: SubtaskChildSnapshot): SubtaskChildSnapshot => ({
-  ...child,
+  id: child.id,
+  label: child.label,
+  status: child.status,
   source: cloneSource(child.source),
 });
 
@@ -332,6 +477,48 @@ const cloneRetiredChild = (
     reason: child.retirement.reason,
     source: cloneSource(child.retirement.source),
   },
+});
+
+const cloneAdmission = (input: SubtaskAdmission): SubtaskAdmission => ({
+  parent: cloneParent(input.parent),
+  expectedListRevision: input.expectedListRevision,
+  source: cloneSource(input.source),
+  proof: cloneProof(input.proof),
+  children: input.children.map((operation) => {
+    switch (operation.kind) {
+      case "add":
+        return {
+          kind: "add",
+          label: operation.label,
+          source: cloneSource(operation.source),
+        };
+      case "retain":
+        return { kind: "retain", id: operation.id };
+      case "reword":
+        return {
+          kind: "reword",
+          id: operation.id,
+          label: operation.label,
+          source: cloneSource(operation.source),
+        };
+      case "replace":
+        return {
+          kind: "replace",
+          id: operation.id,
+          label: operation.label,
+          source: cloneSource(operation.source),
+        };
+      default:
+        throw new Error("Validated subtask operation is unsupported");
+    }
+  }),
+  removals: input.removals.map((removal) => ({
+    id: removal.id,
+    source: cloneSource(removal.source),
+    reason: removal.reason,
+  })),
+  complete: input.complete,
+  ...(input.knownTotal === undefined ? {} : { knownTotal: input.knownTotal }),
 });
 
 const parentSourceDigest = (source: SourceRef) =>
@@ -405,14 +592,22 @@ const sameRetiredChildren = (
 
 const admissionSignature = (input: SubtaskAdmission) => JSON.stringify(input);
 
+const allocatedGroupId = (id: string, nextGroupId: number) => {
+  const match = id.match(groupId);
+  if (!match) return false;
+  const allocated = Number(match[1]);
+  return Number.isSafeInteger(allocated) && allocated < nextGroupId;
+};
+
 /**
  * Pure, disconnected generic subtask reducer. It owns only sidecar list state;
  * caller-owned HybridTask records remain immutable inputs.
  */
 export class SubtaskStore {
   private groups: SubtaskGroup[] = [];
-  /** Revision fences survive invalidated groups so old admissions cannot revive. */
-  private parentRevisionFences = new Map<string, number>();
+  /** Successful reconciliation makes this complete bounded parent authority. */
+  private currentParents = new Map<string, ParentAuthority>();
+  private hasCurrentParentAuthority = false;
   private nextGroupId = 1;
   private nextChildId = 1;
 
@@ -434,32 +629,24 @@ export class SubtaskStore {
 
   reconcile(parents: readonly HybridTask[]): void {
     try {
-      if (!Array.isArray(parents) || !parents.every(validParent)) return;
-      const current = new Map<string, HybridTask>();
-      for (const parent of parents) {
-        if (current.has(parent.id)) return;
-        current.set(parent.id, parent);
+      if (!densePlainArray(parents, 0, MAX_GROUPS)) return;
+      const current = new Map<string, ParentAuthority>();
+      for (let index = 0; index < parents.length; index += 1) {
+        const parent = parents[index];
+        if (!validParent(parent) || current.has(parent.id)) return;
+        current.set(parent.id, {
+          revision: parent.revision,
+          included: parent.included,
+        });
       }
-      const fences = new Map(this.parentRevisionFences);
       const groups = this.groups.flatMap((group) => {
         const parent = current.get(group.parentTaskId);
-        if (!parent || parent.revision !== group.parentRevision) {
-          if (parent) {
-            fences.set(
-              group.parentTaskId,
-              Math.max(
-                fences.get(group.parentTaskId) ?? 0,
-                group.parentRevision,
-                parent.revision,
-              ),
-            );
-          }
-          return [];
-        }
+        if (!parent || parent.revision !== group.parentRevision) return [];
         return [{ ...group, included: parent.included }];
       });
+      this.currentParents = current;
+      this.hasCurrentParentAuthority = true;
       this.groups = groups;
-      this.parentRevisionFences = fences;
     } catch {
       // Malformed reconciliation input has no authority to delete retained facts.
     }
@@ -490,20 +677,24 @@ export class SubtaskStore {
     const validity = admissionValidity(input);
     if (validity !== "valid") return { accepted: false, reason: validity };
 
-    const serialized = admissionSignature(input);
+    // All byte accounting and replay identity use this inert detached projection.
+    const admission = cloneAdmission(input);
+    const serialized = admissionSignature(admission);
     if (Buffer.byteLength(serialized, "utf8") > MAX_ADMISSION_BYTES)
       return { accepted: false, reason: "capacity" };
 
-    const { parent } = input;
+    const { parent } = admission;
     if (!parent.included) return { accepted: false, reason: "stale" };
+    if (this.hasCurrentParentAuthority) {
+      const current = this.currentParents.get(parent.id);
+      if (!current || current.revision !== parent.revision || !current.included)
+        return { accepted: false, reason: "stale" };
+    }
 
     const parentGroups = this.groups.filter(
       (group) => group.parentTaskId === parent.id,
     );
-    if (
-      (this.parentRevisionFences.get(parent.id) ?? 0) > parent.revision ||
-      parentGroups.some((group) => group.parentRevision > parent.revision)
-    )
+    if (parentGroups.some((group) => group.parentRevision > parent.revision))
       return { accepted: false, reason: "stale" };
 
     const group = parentGroups.find(
@@ -511,7 +702,7 @@ export class SubtaskStore {
     );
     if (!group)
       return this.admitNewGroup(
-        input,
+        admission,
         serialized,
         parentGroups.filter(
           (candidate) => candidate.parentRevision < parent.revision,
@@ -519,13 +710,13 @@ export class SubtaskStore {
       );
 
     if (!group.included) return { accepted: false, reason: "stale" };
-    if (input.expectedListRevision !== group.listRevision) {
+    if (admission.expectedListRevision !== group.listRevision) {
       return serialized === group.latestAdmissionSignature
         ? { accepted: true }
         : { accepted: false, reason: "stale" };
     }
 
-    return this.refineGroup(group, input, serialized);
+    return this.refineGroup(group, admission, serialized);
   }
 
   private admitNewGroup(
@@ -585,13 +776,6 @@ export class SubtaskStore {
       ...this.groups.filter((item) => !supersededSet.has(item)),
       group,
     ];
-    this.parentRevisionFences.set(
-      input.parent.id,
-      Math.max(
-        this.parentRevisionFences.get(input.parent.id) ?? 0,
-        input.parent.revision,
-      ),
-    );
     this.nextGroupId += 1;
     this.nextChildId += children.length;
     return { accepted: true };
@@ -745,39 +929,25 @@ export class SubtaskStore {
   }
 
   private reportInternal(input: SubtaskReport): SubtaskReportResult {
-    if (
-      !record(input) ||
-      !hasExactKeys(input, [
-        "groupId",
-        "listRevision",
-        "childIds",
-        "source",
-        "status",
-      ]) ||
-      typeof input.groupId !== "string" ||
-      !groupId.test(input.groupId) ||
-      !positiveInteger(input.listRevision) ||
-      !Array.isArray(input.childIds) ||
-      !input.childIds.every(validChildId) ||
-      !validSourceRef(input.source) ||
-      !statusIsValid(input.status)
-    )
-      return { accepted: false, reason: "invalid" };
+    if (!reportValidity(input)) return { accepted: false, reason: "invalid" };
 
     const group = this.groups.find(
       (candidate) => candidate.id === input.groupId,
     );
-    if (!group) return { accepted: false, reason: "foreign" };
+    if (!group) {
+      return allocatedGroupId(input.groupId, this.nextGroupId)
+        ? { accepted: false, reason: "stale" }
+        : { accepted: false, reason: "foreign" };
+    }
     if (!group.included || group.listRevision !== input.listRevision)
       return { accepted: false, reason: "stale" };
 
-    const selected = new Set(input.childIds);
-    if (!selected.size || selected.size !== input.childIds.length)
+    const childIds = [...input.childIds];
+    const selected = new Set(childIds);
+    if (selected.size !== childIds.length)
       return { accepted: false, reason: "invalid" };
     if (
-      !input.childIds.every((id) =>
-        group.children.some((child) => child.id === id),
-      )
+      !childIds.every((id) => group.children.some((child) => child.id === id))
     )
       return { accepted: false, reason: "foreign" };
 

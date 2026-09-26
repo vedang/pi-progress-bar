@@ -55,6 +55,12 @@ describe("host-selected continuation adapter", () => {
       Record<string, unknown>,
     ];
     expect(args[1].systemPrompt).toMatch(/continuation/i);
+    expect(args[1].systemPrompt).toContain(
+      "Follow the code-owned instructions and schema",
+    );
+    expect(args[1].systemPrompt).not.toContain(
+      "observations and schema as evidence",
+    );
     expect(args[1].systemPrompt).not.toContain("task lifecycle changes");
     expect(args[1].tools).toEqual([]);
     expect(args[1].messages).toHaveLength(1);

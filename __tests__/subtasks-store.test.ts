@@ -79,6 +79,45 @@ describe("generic conversation-backed subtask store", () => {
     expect(input).toEqual(original);
   });
 
+  it("rejects first-admission foreign removals without creating a group or spending IDs", () => {
+    const { store, input, group } = fixture();
+    const before = store.snapshot();
+    const next = {
+      ...subtaskAdmission(["New parent obligation"]),
+      parent: { ...input.parent, id: "task:2" },
+    };
+    expect(
+      store.admit({
+        ...next,
+        removals: [
+          {
+            id: group.children[0].id,
+            source: subtaskSource(),
+            reason: "withdrawn",
+          },
+        ],
+      }),
+    ).toEqual({ accepted: false, reason: "foreign" });
+    expect(store.snapshot()).toEqual(before);
+    expect(store.admit(next)).toEqual({ accepted: true });
+    expect(store.snapshot().groups[1]).toMatchObject({
+      id: "subtask-group:2",
+      children: [{ id: "subtask-child:3" }],
+    });
+  });
+
+  it("rejects a new empty unknown-scope group instead of manufacturing a sidecar", () => {
+    const store = new SubtaskStore();
+    const before = store.snapshot();
+    expect(store.admit(subtaskAdmission([]))).toEqual({
+      accepted: false,
+      reason: "invalid",
+    });
+    expect(store.snapshot()).toEqual(before);
+    expect(store.admit(subtaskAdmission())).toEqual({ accepted: true });
+    expect(store.snapshot().groups[0].id).toBe("subtask-group:1");
+  });
+
   it("makes exact latest admission replay idempotent without reallocating IDs", () => {
     const { store, input } = fixture();
     const before = store.snapshot();

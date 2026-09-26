@@ -10,6 +10,7 @@ const MAX_SUBTASK_CHECKPOINT_BYTES = 64 * 1024;
 const CHECKPOINT_VERSION = 1;
 const MAX_OMISSIONS = 2;
 const MAX_OMISSION_SCALARS = 512;
+const MAX_NUMERIC_ID_CODE_UNITS = 32;
 
 const digest = /^[a-f0-9]{64}$/;
 const taskId = /^task:[1-9]\d*$/;
@@ -197,8 +198,13 @@ const operationArrayValidity = (value: unknown): "valid" | AdmissionFailure => {
   return densePlainArray(value, 0, MAX_ACTIVE_CHILDREN) ? "valid" : "invalid";
 };
 
+const numericIdIsValid = (value: unknown, pattern: RegExp): value is string =>
+  typeof value === "string" &&
+  value.length <= MAX_NUMERIC_ID_CODE_UNITS &&
+  pattern.test(value);
+
 const validHash = (value: unknown): value is string =>
-  typeof value === "string" && digest.test(value);
+  typeof value === "string" && value.length === 64 && digest.test(value);
 
 const textWithinScalarLimit = (value: unknown, limit: number): boolean => {
   if (typeof value !== "string" || !value.length) return false;
@@ -291,7 +297,7 @@ const validAssessment = (value: unknown) =>
     value.rawChoice === "yes" ||
     value.rawChoice === "no" ||
     value.rawChoice === "invalid" ||
-    (typeof value.rawChoice === "string" && taskId.test(value.rawChoice))) &&
+    numericIdIsValid(value.rawChoice, taskId)) &&
   unit(value.confidence) &&
   unit(value.probability) &&
   (value.reason === "accepted" ||
@@ -315,8 +321,7 @@ const validParent = (value: unknown): value is HybridTask =>
     ],
     ["latestAssessment"],
   ) &&
-  typeof value.id === "string" &&
-  taskId.test(value.id) &&
+  numericIdIsValid(value.id, taskId) &&
   labelValidity(value.label) === "valid" &&
   (value.kind === "action" || value.kind === "response") &&
   (value.basis === "explicit" || value.basis === "derived") &&
@@ -340,7 +345,7 @@ const validProof = (value: unknown): value is SubtaskProof =>
   validHash(value.proposalRequestHash);
 
 const validChildId = (value: unknown): value is string =>
-  typeof value === "string" && childId.test(value);
+  numericIdIsValid(value, childId);
 
 const childOperationValidity = (value: unknown): "valid" | AdmissionFailure => {
   if (!plainDataRecord(value)) return "invalid";
@@ -436,8 +441,7 @@ const reportValidity = (value: unknown): value is SubtaskReport => {
   )
     return false;
   if (
-    typeof value.groupId !== "string" ||
-    !groupId.test(value.groupId) ||
+    !numericIdIsValid(value.groupId, groupId) ||
     !positiveInteger(value.listRevision) ||
     !validSourceRef(value.source) ||
     !statusIsValid(value.status)
@@ -510,6 +514,34 @@ const cloneRetiredChild = (
     reason: child.retirement.reason,
     source: cloneSource(child.retirement.source),
   },
+});
+
+const cloneSubtaskCheckpoint = (
+  checkpoint: SubtaskCheckpoint,
+): SubtaskCheckpoint => ({
+  version: checkpoint.version,
+  nextGroupId: checkpoint.nextGroupId,
+  nextChildId: checkpoint.nextChildId,
+  groups: checkpoint.groups.map((group) => ({
+    id: group.id,
+    parentTaskId: group.parentTaskId,
+    parentRevision: group.parentRevision,
+    parentSourceDigest: group.parentSourceDigest,
+    listRevision: group.listRevision,
+    source: cloneSource(group.source),
+    proof: cloneProof(group.proof),
+    complete: group.complete,
+    ...(group.knownTotal === undefined ? {} : { knownTotal: group.knownTotal }),
+    children: group.children.map(cloneChild),
+    retired: group.retired.map(cloneRetiredChild),
+    omissions: [...group.omissions],
+    latestAdmissionDigest: group.latestAdmissionDigest,
+    reports: group.reports.map((report) => ({
+      childId: report.childId,
+      status: report.status,
+      source: cloneSource(report.source),
+    })),
+  })),
 });
 
 const cloneAdmission = (input: SubtaskAdmission): SubtaskAdmission => ({
@@ -654,14 +686,13 @@ const admissionDigest = (input: SubtaskAdmission) =>
   createHash("sha256").update(inertJson(input)).digest("hex");
 
 const allocatedGroupId = (id: string, nextGroupId: number) => {
-  const match = id.match(groupId);
-  if (!match) return false;
-  const allocated = Number(match[1]);
-  return Number.isSafeInteger(allocated) && allocated < nextGroupId;
+  const allocated = opaqueIdNumber(id, groupId);
+  return allocated !== undefined && allocated < nextGroupId;
 };
 
 const opaqueIdNumber = (value: string, pattern: RegExp) => {
-  const match = value.match(pattern);
+  if (!numericIdIsValid(value, pattern)) return;
+  const match = pattern.exec(value);
   if (!match) return;
   const number = Number(match[1]);
   return Number.isSafeInteger(number) && number >= 1 ? number : undefined;
@@ -727,8 +758,7 @@ const validCheckpointGroup = (
     !checkpointGroupKeys(value) ||
     typeof value.id !== "string" ||
     opaqueIdNumber(value.id, groupId) === undefined ||
-    typeof value.parentTaskId !== "string" ||
-    !taskId.test(value.parentTaskId) ||
+    !numericIdIsValid(value.parentTaskId, taskId) ||
     !positiveInteger(value.parentRevision) ||
     !validHash(value.parentSourceDigest) ||
     !positiveInteger(value.listRevision) ||
@@ -984,28 +1014,31 @@ export class SubtaskStore {
     )
       return;
 
+    const checkpoint = cloneSubtaskCheckpoint(data);
     const currentParents = new Map<string, ParentAuthority>();
     for (const parent of options.parents) {
       if (!validParent(parent) || currentParents.has(parent.id)) return;
-      currentParents.set(parent.id, {
-        revision: parent.revision,
-        included: parent.included,
+      const snapshot = cloneParent(parent);
+      currentParents.set(snapshot.id, {
+        revision: snapshot.revision,
+        included: snapshot.included,
       });
     }
+    const sourceCurrentCallback = options.sourceCurrent;
     const sourceCurrent = (source: SourceRef) => {
       try {
-        return options.sourceCurrent(cloneSource(source)) === true;
+        return sourceCurrentCallback(cloneSource(source)) === true;
       } catch {
         return false;
       }
     };
 
     const store = new SubtaskStore();
-    store.nextGroupId = data.nextGroupId;
-    store.nextChildId = data.nextChildId;
+    store.nextGroupId = checkpoint.nextGroupId;
+    store.nextChildId = checkpoint.nextChildId;
     store.currentParents = currentParents;
     store.hasCurrentParentAuthority = true;
-    store.groups = data.groups.flatMap((group) => {
+    store.groups = checkpoint.groups.flatMap((group) => {
       const parent = currentParents.get(group.parentTaskId);
       // Parent wording/source can change at same revision. Persisted digest is
       // immutable admission provenance; revision is current authority fence.

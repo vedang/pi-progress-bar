@@ -7,6 +7,7 @@ const MAX_RECEIPTS = 200;
 const MAX_UNFINISHED_OWNERS = 20;
 const MAX_JOURNAL_BYTES = 64 * 1024;
 const MAX_TEXT_SCALARS = 512;
+const MAX_NUMERIC_ID_CODE_UNITS = 32;
 
 const digest = /^[a-f0-9]{64}$/;
 const taskId = /^task:[1-9]\d*$/;
@@ -133,6 +134,11 @@ const densePlainArray = (
   }
   return true;
 };
+
+const numericIdIsValid = (value: unknown, pattern: RegExp): value is string =>
+  typeof value === "string" &&
+  value.length <= MAX_NUMERIC_ID_CODE_UNITS &&
+  pattern.test(value);
 
 const validHash = (value: unknown): value is string =>
   typeof value === "string" && value.length === 64 && digest.test(value);
@@ -300,9 +306,7 @@ const validRecord = (value: unknown): value is SubtaskPhaseRecord => {
       ["parkedUntil", "gate", "proposal"],
     ) ||
     !validHash(value.identity) ||
-    typeof value.parentTaskId !== "string" ||
-    value.parentTaskId.length > 32 ||
-    !taskId.test(value.parentTaskId) ||
+    !numericIdIsValid(value.parentTaskId, taskId) ||
     !positiveInteger(value.parentRevision) ||
     !validHash(value.parentSourceDigest) ||
     !nonNegativeInteger(value.listRevision) ||
@@ -567,6 +571,18 @@ const cloneUsage = (usage: SubtaskUsage): SubtaskUsage => ({
   outputTokens: usage.outputTokens,
 });
 
+const cloneJournal = (
+  journal: SubtaskJournalCheckpoint,
+): SubtaskJournalCheckpoint => ({
+  version: journal.version,
+  dispatches: journal.dispatches,
+  usage: {
+    jev: cloneUsage(journal.usage.jev),
+    extraction: cloneUsage(journal.usage.extraction),
+  },
+  records: journal.records.map(cloneRecord),
+});
+
 /**
  * Drop stale authority without refunding the lifetime wallet. A crash after a
  * charged dispatch is terminal until a later explicit recovery policy exists.
@@ -577,9 +593,11 @@ export const restoreSubtaskJournal = (
 ): SubtaskJournalCheckpoint | undefined => {
   if (!subtaskJournalIsValid(data) || typeof isCurrent !== "function") return;
 
-  const records = data.records.flatMap((record) => {
+  const journal = cloneJournal(data);
+  const current = isCurrent;
+  const records = journal.records.flatMap((record) => {
     try {
-      if (isCurrent(cloneRecord(record)) !== true) return [];
+      if (current(cloneRecord(record)) !== true) return [];
     } catch {
       return [];
     }
@@ -589,10 +607,10 @@ export const restoreSubtaskJournal = (
   });
   return {
     version: JOURNAL_VERSION,
-    dispatches: data.dispatches,
+    dispatches: journal.dispatches,
     usage: {
-      jev: cloneUsage(data.usage.jev),
-      extraction: cloneUsage(data.usage.extraction),
+      jev: cloneUsage(journal.usage.jev),
+      extraction: cloneUsage(journal.usage.extraction),
     },
     records,
   };

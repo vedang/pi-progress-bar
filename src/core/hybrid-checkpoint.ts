@@ -251,12 +251,19 @@ const exactKeys = (
     Object.keys(value).every((key) => allowed.has(key))
   );
 };
+const MAX_NUMERIC_ID_CODE_UNITS = 32;
 const hashIsValid = (value: unknown): value is string =>
-  typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  typeof value === "string" &&
+  value.length === 64 &&
+  /^[a-f0-9]{64}$/.test(value);
+const numericIdIsValid = (value: unknown, pattern: RegExp): value is string =>
+  typeof value === "string" &&
+  value.length <= MAX_NUMERIC_ID_CODE_UNITS &&
+  pattern.test(value);
 const taskIdIsValid = (value: unknown): value is string =>
-  typeof value === "string" && /^task:[1-9]\d*$/.test(value);
+  numericIdIsValid(value, /^task:[1-9]\d*$/);
 const eventIdIsValid = (value: unknown): value is string =>
-  typeof value === "string" && /^event:[1-9]\d*$/.test(value);
+  numericIdIsValid(value, /^event:[1-9]\d*$/);
 const roleIsValid = (value: unknown): value is ObservationRole =>
   value === "user" || value === "assistant" || value === "intercom";
 const byteLength = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
@@ -935,9 +942,9 @@ function validCoverageUsage(
 }
 
 const coverageJobIdIsValid = (value: unknown): value is string =>
-  typeof value === "string" && /^coverage-group:[1-9]\d*$/.test(value);
+  numericIdIsValid(value, /^coverage-group:[1-9]\d*$/);
 const coverageChildIdIsValid = (value: unknown): value is string =>
-  typeof value === "string" && /^coverage-child:[1-9]\d*$/.test(value);
+  numericIdIsValid(value, /^coverage-child:[1-9]\d*$/);
 const coverageChoices = new Set([
   "reviewed",
   "retracted",
@@ -2063,6 +2070,7 @@ export function restoreCheckpoint(
 
 const MAX_STRICT_DATA_ARRAY_ITEMS = 8192;
 const MAX_STRICT_DATA_OBJECT_KEYS = 64;
+const MAX_STRICT_DATA_STRING_CODE_UNITS = MAX_CHECKPOINT_BYTES;
 const MAX_STRICT_DATA_NODES = 100_000;
 const MAX_STRICT_DATA_DEPTH = 64;
 const STRICT_DATA_REJECTED = Symbol("strict-data-rejected");
@@ -2079,10 +2087,13 @@ function strictDetachedData(
   budget.nodes += 1;
   if (budget.nodes > MAX_STRICT_DATA_NODES || depth > MAX_STRICT_DATA_DEPTH)
     return STRICT_DATA_REJECTED;
+  if (typeof value === "string")
+    return value.length <= MAX_STRICT_DATA_STRING_CODE_UNITS
+      ? value
+      : STRICT_DATA_REJECTED;
   if (
     value === undefined ||
     value === null ||
-    typeof value === "string" ||
     typeof value === "number" ||
     typeof value === "boolean"
   )
@@ -2345,11 +2356,15 @@ function journalRecordIsCurrent(
 ) {
   const parent = state.tasks.find((task) => task.id === record.parentTaskId);
   if (!parent) return false;
+  const requiredListRevision =
+    record.proposal?.outcome === "accepted"
+      ? record.proposal.listRevision
+      : record.listRevision;
   if (
     !parent.included ||
     parent.revision !== record.parentRevision ||
     !canonicalSource(record.source, resolve) ||
-    (listRevisions.get(record.parentTaskId) ?? 0) !== record.listRevision ||
+    listRevisions.get(record.parentTaskId) !== requiredListRevision ||
     typeof isCurrentJob !== "function"
   )
     return false;
@@ -2441,6 +2456,11 @@ export function commitSubtaskCheckpoint(
   }
   if (typeof save !== "function") return;
   try {
+    if (candidate.monitor?.enabled)
+      encodeSubtaskCheckpoint(candidate.state, {
+        ...candidate.monitor,
+        enabled: false,
+      });
     if (save(detachSubtaskData(candidate)) !== true) return;
     return detachSubtaskData(candidate);
   } catch {

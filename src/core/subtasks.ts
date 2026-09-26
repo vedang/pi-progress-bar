@@ -14,12 +14,9 @@ const childId = /^subtask-child:[1-9]\d*$/;
 
 type AdmissionFailure = "invalid" | "capacity";
 
-export type SubtaskChildStatus =
-  | "pending"
-  | "reported-completed"
-  | "reported-blocked";
+type SubtaskChildStatus = "pending" | "reported-completed" | "reported-blocked";
 
-export interface SubtaskProof {
+interface SubtaskProof {
   contextHash: string;
   gateRequestHash: string;
   proposalRequestHash: string;
@@ -31,7 +28,7 @@ export type SubtaskChildOperation =
   | { kind: "reword"; id: string; label: string; source: SourceRef }
   | { kind: "replace"; id: string; label: string; source: SourceRef };
 
-export interface SubtaskRemoval {
+interface SubtaskRemoval {
   id: string;
   source: SourceRef;
   reason: "withdrawn" | "out-of-scope";
@@ -71,14 +68,14 @@ export interface SubtaskChildSnapshot {
   source: SourceRef;
 }
 
-export interface SubtaskRetiredChildSnapshot extends SubtaskChildSnapshot {
+interface SubtaskRetiredChildSnapshot extends SubtaskChildSnapshot {
   retirement: {
     source: SourceRef;
     reason: "replaced" | "withdrawn" | "out-of-scope";
   };
 }
 
-export interface SubtaskGroupSnapshot {
+interface SubtaskGroupSnapshot {
   id: string;
   parentTaskId: string;
   parentRevision: number;
@@ -538,9 +535,13 @@ export class SubtaskStore {
   ): SubtaskAdmissionResult {
     if (input.expectedListRevision !== 0)
       return { accepted: false, reason: "stale" };
+    // First admission has no active child set; removal can only be foreign.
+    if (input.removals.length) return { accepted: false, reason: "foreign" };
 
     const active = this.buildInitialChildren(input.children);
     if (!active) return { accepted: false, reason: "foreign" };
+    if (!active.length && input.knownTotal === undefined)
+      return { accepted: false, reason: "invalid" };
     if (active.length > MAX_ACTIVE_CHILDREN)
       return { accepted: false, reason: "capacity" };
     if (!this.validTotal(input.complete, input.knownTotal, active.length))

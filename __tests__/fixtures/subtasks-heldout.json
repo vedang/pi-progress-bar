@@ -1,7 +1,10 @@
 {
   "version": 1,
   "provenance": "Synthetic generic-subtask corpus frozen at C00 before new generic gate/proposer/rubric implementation on 2026-09-26. Separate from original observed coverage-heldout.json and all tuning fixtures. Do not tune against failures; require owner-approved revision and a fresh gate.",
-  "thresholds": { "confidence": 0.5, "probability": 0.8 },
+  "thresholds": {
+    "confidence": 0.5,
+    "probability": 0.8
+  },
   "gateCases": [
     {
       "id": "sg01",
@@ -218,7 +221,19 @@
       ],
       "expected": "yes-after-new-context",
       "requiredConcepts": ["onboarding", "support", "cost", "recommendation"],
-      "tools": false
+      "tools": false,
+      "phaseExpectations": [
+        {
+          "throughMessage": 0,
+          "gate": "no",
+          "proposalDispatches": 0
+        },
+        {
+          "throughMessage": 1,
+          "gate": "yes",
+          "proposalDispatches": 1
+        }
+      ]
     },
     {
       "id": "sg14",
@@ -233,6 +248,46 @@
         }
       ],
       "expectedByParent": ["no", "yes"],
+      "tools": false
+    },
+    {
+      "id": "sg15",
+      "parent": "Review all named incident checklist items",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Review every item in the incident checklist. There are twelve items, but their names have not been supplied yet. Track only identified members, not generic stand-in steps."
+        }
+      ],
+      "inventory": {
+        "complete": false,
+        "knownTotal": 12,
+        "labels": []
+      },
+      "expected": "yes",
+      "expectedChildren": [],
+      "expectedKnownTotal": 12,
+      "expectedComplete": false,
+      "tools": false
+    },
+    {
+      "id": "sg16",
+      "parent": "Review all named maintenance sections",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Review the maintenance sections. So far only Backups, Rotation, and Recovery have been identified out of twelve. Track those members and leave missing section names unknown; do not invent them."
+        }
+      ],
+      "inventory": {
+        "complete": false,
+        "knownTotal": 12,
+        "labels": ["Backups", "Rotation", "Recovery"]
+      },
+      "expected": "yes",
+      "requiredConcepts": ["Backups", "Rotation", "Recovery"],
+      "expectedKnownTotal": 12,
+      "expectedComplete": false,
       "tools": false
     }
   ],
@@ -333,6 +388,34 @@
       "children": ["Review Rollout", "Review Rollback"],
       "text": "Both Rollout and Rollback tabs were exported into text files. Neither has been reviewed.",
       "expectedPending": [0, 1]
+    },
+    {
+      "id": "sr13",
+      "children": ["Compare onboarding effort", "Compare support options"],
+      "initialCompleted": [0],
+      "text": "No new progress to report. Keep the previously recorded comparison result.",
+      "expectedCompleted": [0],
+      "expectedPending": [1],
+      "expectedTransitions": []
+    },
+    {
+      "id": "sr14",
+      "children": ["Review Backup schedule", "Review Recovery procedure"],
+      "text": "The old plan is finished.",
+      "requestListRevision": 1,
+      "currentListRevision": 2,
+      "expectedDispatches": 0,
+      "expectedPending": [0, 1],
+      "mechanicsOnly": "late report binding rejected before provider"
+    },
+    {
+      "id": "sr15",
+      "children": ["Write recommendation"],
+      "text": "The recommendation is complete.",
+      "sourceCurrent": false,
+      "expectedDispatches": 0,
+      "expectedPending": [0],
+      "mechanicsOnly": "amended or abandoned-branch report rejected before provider"
     }
   ],
   "acceptance": {
@@ -346,10 +429,137 @@
       "sg05",
       "sg06",
       "sg13",
-      "sg14"
+      "sg14",
+      "sg15",
+      "sg16",
+      "sl01",
+      "sl02"
     ],
     "allDesignatedReportTransitionsRequired": true,
     "generatedLabelsNeedNotMatchVerbatim": true,
-    "noOrUncertainMustDispatchZeroProposals": true
-  }
+    "noOrUncertainMustDispatchZeroProposals": true,
+    "allDesignatedListUpdatesRequired": true,
+    "phaseAndStaleControlsReportedSeparatelyFromModelQuality": true
+  },
+  "listUpdateCases": [
+    {
+      "id": "sl01",
+      "parent": "Prepare the agreed decision package",
+      "initialChildren": [
+        {
+          "id": "existing:0",
+          "label": "Read scope note",
+          "status": "reported-completed"
+        },
+        {
+          "id": "existing:1",
+          "label": "Compare costs",
+          "status": "pending"
+        },
+        {
+          "id": "existing:2",
+          "label": "Draft decision memo",
+          "status": "pending"
+        },
+        {
+          "id": "existing:3",
+          "label": "Prepare presentation slides",
+          "status": "pending"
+        }
+      ],
+      "text": "The decision-package deliverable is unchanged. Refine its working plan: compare costs first; rename Read scope note to Read requirements note (wording only); use a decision matrix instead of the memo; drop the presentation slides; and add a risk register. Retain the completed scope-reading work.",
+      "expectedGate": "yes",
+      "expectedOperations": [
+        {
+          "kind": "retain",
+          "childIndex": 1
+        },
+        {
+          "kind": "reword",
+          "childIndex": 0,
+          "label": "Read requirements note",
+          "preserveStatus": true
+        },
+        {
+          "kind": "replace",
+          "childIndex": 2,
+          "concept": "decision matrix",
+          "status": "pending"
+        },
+        {
+          "kind": "add",
+          "concept": "risk register",
+          "status": "pending"
+        }
+      ],
+      "expectedRemovals": [
+        {
+          "childIndex": 3,
+          "reason": "withdrawn"
+        }
+      ],
+      "expectedParentRevisionChange": false
+    },
+    {
+      "id": "sl02",
+      "parent": "Prepare supplier recommendation",
+      "initialChildren": [
+        {
+          "id": "existing:0",
+          "label": "Compare costs",
+          "status": "pending"
+        },
+        {
+          "id": "existing:1",
+          "label": "Check support",
+          "status": "reported-completed"
+        },
+        {
+          "id": "existing:2",
+          "label": "Write recommendation",
+          "status": "pending"
+        }
+      ],
+      "text": "Refine this working plan only by renaming Compare costs to Compare annual operating costs. Keep every other step and its progress unchanged.",
+      "expectedGate": "yes",
+      "expectedOperations": [
+        {
+          "kind": "reword",
+          "childIndex": 0,
+          "label": "Compare annual operating costs",
+          "preserveStatus": true
+        },
+        {
+          "kind": "retain",
+          "childIndex": 1
+        },
+        {
+          "kind": "retain",
+          "childIndex": 2
+        }
+      ],
+      "expectedRemovals": [],
+      "expectedParentRevisionChange": false
+    },
+    {
+      "id": "sl03",
+      "parent": "Prepare incident drill",
+      "initialChildren": [
+        {
+          "id": "existing:0",
+          "label": "Write scenario",
+          "status": "pending"
+        },
+        {
+          "id": "existing:1",
+          "label": "Write debrief",
+          "status": "pending"
+        }
+      ],
+      "text": "I might replace one of those steps, but have not decided which or what should replace it. Do not change the current plan yet.",
+      "expectedGate": "no-or-uncertain",
+      "expectedProposalDispatches": 0,
+      "expectedUnchanged": true
+    }
+  ]
 }

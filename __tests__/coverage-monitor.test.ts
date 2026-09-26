@@ -327,6 +327,12 @@ it("projects detached bounded reconciliation gaps without changing settlement or
   const calls = [h.fetch.mock.calls.length, h.extract.mock.calls.length];
   const tasks = structuredClone(h.monitor.state.tasks);
   const correction = h.monitor.correctionSnapshot();
+  // The attested worksheet listing records observed access, not review.
+  expect(
+    h.monitor
+      .coverageSnapshot()
+      .groups[0].children.filter((child) => child.accessed),
+  ).toHaveLength(22);
   const snapshot = h.monitor.advisorySettlementSnapshot();
   expect(snapshot).toMatchObject({
     reason: "ready",
@@ -340,7 +346,7 @@ it("projects detached bounded reconciliation gaps without changing settlement or
         reviewed: 0,
         blocked: 0,
         pending: 22,
-        accessed: 0,
+        accessed: 22,
         gaps: coverageNames.slice(0, 3),
         omittedChildren: 19,
       },

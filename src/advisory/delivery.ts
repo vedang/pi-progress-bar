@@ -260,7 +260,7 @@ export class ReconciliationDelivery {
       this.cancel("branch-changed");
       return;
     }
-    if (this.matches(chain, message)) this.confirm(chain);
+    if (this.matchesTransportEvent(chain, message)) this.confirm(chain);
     this.scan(chain, branch);
   }
 
@@ -539,7 +539,7 @@ export class ReconciliationDelivery {
         if (!plainObject(entry)) continue;
         if (typeof entry.id === "string")
           idCounts.set(entry.id, (idCounts.get(entry.id) ?? 0) + 1);
-        if (!this.matches(chain, entry)) continue;
+        if (!this.matchesCanonicalBranch(chain, entry)) continue;
         if (question) return;
         question = entry;
         questionIndex = index;
@@ -716,30 +716,41 @@ export class ReconciliationDelivery {
         return;
       }
     }
-    if (suffix.some((entry) => this.matches(chain, entry))) {
+    if (suffix.some((entry) => this.matchesCanonicalBranch(chain, entry))) {
       chain.canonical = true;
       this.confirm(chain);
     }
   }
 
-  private matches(chain: Chain, candidate: unknown): boolean {
+  /** Host message_end may confirm a role-only transport event before append. */
+  private matchesTransportEvent(chain: Chain, candidate: unknown): boolean {
     if (!plainObject(candidate)) return false;
     const isCustom =
       candidate.role === "custom" || candidate.type === "custom_message";
     if (
       !isCustom ||
       candidate.customType !== ADVISORY_CUSTOM_TYPE ||
-      candidate.content !== chain.request.content ||
       candidate.display !== true ||
       !plainObject(candidate.details) ||
       !exactKeys(candidate.details, ["kind", "opportunityId", "sendId"])
     )
       return false;
+    if (
+      candidate.details.kind !== chain.request.kind ||
+      candidate.details.opportunityId !== chain.request.opportunityId ||
+      typeof candidate.details.sendId !== "string" ||
+      !chain.attemptedIds.includes(candidate.details.sendId)
+    )
+      return false;
+    return candidate.content === chain.request.content;
+  }
+
+  /** Branch provenance requires a canonical custom_message entry, never event shape. */
+  private matchesCanonicalBranch(chain: Chain, candidate: unknown): boolean {
     return (
-      candidate.details.kind === chain.request.kind &&
-      candidate.details.opportunityId === chain.request.opportunityId &&
-      typeof candidate.details.sendId === "string" &&
-      chain.attemptedIds.includes(candidate.details.sendId)
+      plainObject(candidate) &&
+      candidate.type === "custom_message" &&
+      this.matchesTransportEvent(chain, candidate)
     );
   }
 

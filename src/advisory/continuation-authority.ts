@@ -365,33 +365,25 @@ const immutableQuestionMatches = (
   entry: unknown,
   receipt: ReconciliationSettlement,
 ): boolean => {
-  if (!record(entry)) return false;
-  const isCustom = entry.role === "custom" || entry.type === "custom_message";
   if (
-    !isCustom ||
+    !record(entry) ||
+    entry.type !== "custom_message" ||
     entry.customType !== ADVISORY_CUSTOM_TYPE ||
     entry.display !== true ||
-    typeof entry.content !== "string" ||
-    Buffer.byteLength(entry.content, "utf8") > MAX_QUESTION_BYTES ||
     !record(entry.details) ||
     !exactKeys(entry.details, ["kind", "opportunityId", "sendId"])
   )
     return false;
-  return (
-    entry.details.kind === "reconciliation" &&
-    entry.details.opportunityId === receipt.opportunityId &&
-    entry.details.sendId === receipt.sendId &&
-    sha256(entry.content) === receipt.question.contentHash
-  );
+  if (
+    entry.details.kind !== "reconciliation" ||
+    entry.details.opportunityId !== receipt.opportunityId ||
+    entry.details.sendId !== receipt.sendId ||
+    typeof entry.content !== "string" ||
+    Buffer.byteLength(entry.content, "utf8") > MAX_QUESTION_BYTES
+  )
+    return false;
+  return sha256(entry.content) === receipt.question.contentHash;
 };
-
-const questionMatches = (
-  entry: unknown,
-  receipt: ReconciliationSettlement,
-): boolean =>
-  record(entry) &&
-  entry.id === receipt.question.entryId &&
-  immutableQuestionMatches(entry, receipt);
 
 const validCursor = (value: unknown): value is Cursor =>
   record(value) &&
@@ -578,7 +570,9 @@ export const projectContinuationAuthority = (
       const entry = input.branch[index];
       if (!immutableQuestionMatches(entry, receipt)) continue;
       immutableQuestionCount++;
-      if (questionMatches(entry, receipt)) questionIndex = index;
+      if (immutableQuestionCount > 1) return unavailable("stale");
+      if (record(entry) && entry.id === receipt.question.entryId)
+        questionIndex = index;
     }
     if (
       branch.entryIdCounts.get(receipt.question.entryId) !== 1 ||

@@ -298,13 +298,22 @@ describe("continuation per-parent gate", () => {
   it.each([
     "x".repeat(241),
     "😀".repeat(241),
-    "Task\\ncontinuation",
-    "Task\\u200bcontinuation",
+    "Task\ncontinuation",
+    "Task\u200bcontinuation",
   ])("rejects invalid N01 task-label domain %s", (label) => {
     const current = authority();
     current.tasks[0].label = label;
     expect(buildContinuationGate(current)).toBeUndefined();
   });
+
+  it.each(["Task\\ncontinuation", "Task\\u200bcontinuation"])(
+    "accepts literal escaped spellings that contain no control characters: %s",
+    (label) => {
+      const current = authority();
+      current.tasks[0].label = label;
+      expect(buildContinuationGate(current)).toBeDefined();
+    },
+  );
 
   it("retains the 240 Unicode-code-point label boundary", () => {
     const current = authority();

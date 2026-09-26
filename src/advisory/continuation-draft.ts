@@ -308,6 +308,12 @@ const validRequest = (value: unknown): value is ContinuationDraftRequest => {
   return requestHash(value.input) === value.requestHash;
 };
 
+/** Exact N03 request identity, shape, hash and immutable N02 eligibility proof. */
+export const isValidatedContinuationDraftRequest = (
+  request: unknown,
+): request is ContinuationDraftRequest =>
+  validRequest(request) && exactGateBindings.has(request);
+
 const parseDraft = (rawText: unknown): ContinuationDraft | undefined => {
   if (
     typeof rawText !== "string" ||

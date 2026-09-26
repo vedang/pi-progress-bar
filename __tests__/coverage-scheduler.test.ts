@@ -606,61 +606,69 @@ it("newer intent fences selected-model dispatch1024 before its late result is ac
       ),
   ).toBe(false);
 });
-it("normalizes mixed permanent/ready owner overlaps on restore before newer work completes", async () => {
-  const h = await fixture();
-  await restoreBeforeInventory(h);
-  const extract = h.extract.getMockImplementation();
-  if (!extract) throw new Error("Missing extractor");
-  let malformed = true;
-  h.extract.mockImplementation(async (input, signal, onDispatch) => {
-    if (!input.instructions.includes("parentIndices"))
-      return extract(input, signal, onDispatch);
-    onDispatch?.(Date.now());
-    return {
-      text: malformed ? "{bad-json" : '{"intents":[]}',
-      provider: "offline",
-      model: "fixture",
-      usage: { inputTokens: 3, outputTokens: 2 },
-    };
-  });
-  h.append("older-owner", "Review every tab in docs/old.xlsx.", "user");
-  await h.settle("older-owner");
-  await vi.advanceTimersByTimeAsync(100);
-  const older = h
-    .checkpoint()
-    .monitor?.coverage?.intentJobs?.find(
-      (job) => job.source.entryId === "older-owner",
+it.each([true, false])(
+  "normalizes restored owner overlaps before newer work completes (persisted queue=%s)",
+  async (persistedQueue) => {
+    const h = await fixture();
+    await restoreBeforeInventory(h);
+    const extract = h.extract.getMockImplementation();
+    if (!extract) throw new Error("Missing extractor");
+    let malformed = true;
+    h.extract.mockImplementation(async (input, signal, onDispatch) => {
+      if (!input.instructions.includes("parentIndices"))
+        return extract(input, signal, onDispatch);
+      onDispatch?.(Date.now());
+      return {
+        text: malformed ? "{bad-json" : '{"intents":[]}',
+        provider: "offline",
+        model: "fixture",
+        usage: { inputTokens: 3, outputTokens: 2 },
+      };
+    });
+    h.append("older-owner", "Review every tab in docs/old.xlsx.", "user");
+    await h.settle("older-owner");
+    await vi.advanceTimersByTimeAsync(100);
+    const older = h
+      .checkpoint()
+      .monitor?.coverage?.intentJobs?.find(
+        (job) => job.source.entryId === "older-owner",
+      );
+    expect(older?.state).toBe("permanent");
+    await addUncoveredParent(h);
+    h.append("newer-owner", "Review every tab in docs/new.xlsx.", "user");
+    await h.settle("newer-owner");
+    await vi.advanceTimersByTimeAsync(100);
+    const saved = h.checkpoint();
+    const coverage = saved.monitor?.coverage;
+    const newer = coverage?.intentJobs?.find(
+      (job) => job.source.entryId === "newer-owner",
     );
-  expect(older?.state).toBe("permanent");
-  await addUncoveredParent(h);
-  h.append("newer-owner", "Review every tab in docs/new.xlsx.", "user");
-  await h.settle("newer-owner");
-  await vi.advanceTimersByTimeAsync(100);
-  const saved = h.checkpoint();
-  const coverage = saved.monitor?.coverage;
-  const newer = coverage?.intentJobs?.find(
-    (job) => job.source.entryId === "newer-owner",
-  );
-  if (!older || !newer || !coverage) throw new Error("Missing owner jobs");
-  expect(older.owners).toHaveLength(1);
-  expect(newer.owners).toHaveLength(2);
-  // Legal persisted mixed state: old permanent owner is unqueued; newer owner ready.
-  newer.state = "ready";
-  coverage.intentJobs = [older, newer];
-  coverage.queue = [{ kind: "intent", key: newer.targetKey }];
-  malformed = false;
-  const before = h.extract.mock.calls.length;
-  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
-  await vi.advanceTimersByTimeAsync(200);
-  h.monitor.modelSelected();
-  await vi.advanceTimersByTimeAsync(200);
-  expect(
-    h.extract.mock.calls
-      .slice(before)
-      .filter(([input]) => input.instructions.includes("parentIndices"))
-      .map(([input]) => input.latest.id),
-  ).toEqual(["newer-owner"]);
-});
+    if (!older || !newer || !coverage) throw new Error("Missing owner jobs");
+    expect(older.owners).toHaveLength(1);
+    expect(newer.owners).toHaveLength(2);
+    // Legal persisted mixed state: old permanent owner is unqueued; newer owner ready.
+    newer.state = "ready";
+    coverage.intentJobs = [older, newer];
+    if (persistedQueue)
+      coverage.queue = [{ kind: "intent", key: newer.targetKey }];
+    else {
+      older.state = "ready";
+      delete coverage.queue;
+    }
+    malformed = false;
+    const before = h.extract.mock.calls.length;
+    await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+    await vi.advanceTimersByTimeAsync(200);
+    h.monitor.modelSelected();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(
+      h.extract.mock.calls
+        .slice(before)
+        .filter(([input]) => input.instructions.includes("parentIndices"))
+        .map(([input]) => input.latest.id),
+    ).toEqual(["newer-owner"]);
+  },
+);
 it("inventory admission fences a held competing intent before accepting its response", async () => {
   const h = await fixture();
   await restoreBeforeInventory(h);

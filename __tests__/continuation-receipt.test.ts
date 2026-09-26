@@ -143,6 +143,35 @@ describe("passive continuation settlement receipt", () => {
     },
   );
 
+  it("does not promote a transport-only custom event to canonical receipt evidence", () => {
+    const h = fixture();
+    const event = { ...h.question, role: "custom" };
+    Reflect.deleteProperty(event, "type");
+    h.branch.push(event, h.reply);
+    h.delivery.onMessageEnd(event, h.branch);
+    h.delivery.onAgentSettled(h.branch);
+    expect(h.receipts).toEqual([]);
+  });
+
+  it("skips unrelated advisory payloads using metadata before content", () => {
+    const h = fixture();
+    const unrelated = {
+      ...h.question,
+      id: "unrelated",
+      details: {
+        ...h.question.details,
+        opportunityId: "00000000-0000-4000-8000-000000000099",
+      },
+    };
+    const read = vi.fn(() => "Unrelated private advisory payload");
+    Object.defineProperty(unrelated, "content", { get: read });
+    h.branch.push(unrelated, h.question, h.reply);
+    h.delivery.onContext(h.branch);
+    h.delivery.onAgentSettled(h.branch);
+    expect(h.receipts).toHaveLength(1);
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("rejects an empty canonical reply", () => {
     const h = fixture();
     h.reply.message.content = [];

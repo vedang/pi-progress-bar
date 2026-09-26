@@ -192,6 +192,52 @@ describe("canonical continuation authority projection", () => {
     },
   );
 
+  it("rejects transport-only question shape even with matching receipt identity", () => {
+    const { input, question } = continuationAuthorityFixture();
+    const event = { ...question, role: "custom" };
+    Reflect.deleteProperty(event, "type");
+    input.branch[1] = event;
+    expect(projectContinuationAuthority(input)).toEqual({
+      available: false,
+      reason: "stale",
+    });
+  });
+
+  it("does not read unrelated historical advisory payloads", () => {
+    const { input, question } = continuationAuthorityFixture();
+    const unrelated = {
+      ...question,
+      id: "unrelated",
+      details: {
+        ...question.details,
+        opportunityId: "00000000-0000-4000-8000-000000000099",
+      },
+    };
+    const read = vi.fn(() => "Unrelated historical private payload");
+    Object.defineProperty(unrelated, "content", { get: read });
+    input.branch.unshift(unrelated);
+    expect(projectContinuationAuthority(input).available).toBe(true);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("stops question payload inspection after a second match proves ambiguity", () => {
+    const { input, question } = continuationAuthorityFixture();
+    const later = { ...structuredClone(question), id: "third-question" };
+    const read = vi.fn(() => question.content);
+    Object.defineProperty(later, "content", { get: read });
+    input.branch.splice(
+      2,
+      0,
+      { ...structuredClone(question), id: "second-question" },
+      later,
+    );
+    expect(projectContinuationAuthority(input)).toEqual({
+      available: false,
+      reason: "stale",
+    });
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("abstains for unknown policy or no unfinished included work", () => {
     const { input, task } = continuationAuthorityFixture();
     input.policy = { coverage: "unknown" };

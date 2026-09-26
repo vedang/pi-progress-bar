@@ -4,6 +4,10 @@
 
 **Scope:** three incrementally accepted capabilities, in order: **A reconciliation**, **B test correction**, **C review correction**. No release, install, publish, push, branch, UI redesign, debugger work, Beads mutation, migration, or new user-facing control belongs here.
 
+## Continuation amendment (`pi-progress-barroot-5dy`)
+
+Owner approved a bounded second nudge after a successful reconciled status reply. [Continuation design](continuation-nudge.md) governs capability D: exact root/reply/frontier proof, current authorization, per-parent Jev yes, selected-model structured draft, and one conditional follow-up opportunity. Its response never recursively rearms A or D. The extension remains advisory-only under the existing master ON/OFF; no release or checkpoint change belongs to D. Original A/B/C behavior below remains binding except for the explicitly documented new continuation opportunity. Implementation and mocked verification are authorized; new real-provider calibration requires its own explicit cap.
+
 ## Independent-health amendment (`pi-progress-barroot-7rv`)
 
 Owner subsequently authorized strict **v9** bounded task-health coverage proof. This supersedes this document's v8-preservation constraint for that health change only; historical v8 source/acceptance facts below remain historical. No migration or durable advisory queue is added: old v8 remains OFF without automatic replay/rebilling.

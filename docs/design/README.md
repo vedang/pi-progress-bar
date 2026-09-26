@@ -8,6 +8,10 @@
 
 [Conversation-grounded subtask design](coverage-subtasks.md) supersedes the workbook-bound coverage plan. [Implementation audit and rework map](generic-subtasks-rework.md) separates reusable mechanics from required changes. Generic Jev→LLM development is owner-authorized and underway; historical coverage test passes are not acceptance of the revised requirement.
 
+## Authorized continuation nudge
+
+[Bounded continuation design](continuation-nudge.md), epic `pi-progress-barroot-5dy`, adds one authorization-aware follow-up after a reconciled status reply. This is staged implementation work, not current release acceptance. Its loop/authority constraints are separate from generic subtasks; final QA/handoff joins both tracks.
+
 ## Read in this order
 
 1. [Confirmed product scope](../../PRODUCT.md) — what the user has asked for and approved so far.

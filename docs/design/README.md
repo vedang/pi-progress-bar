@@ -4,6 +4,10 @@
 
 **Historical design packet below:** manual source/Apply/consent/inspector affordances, interval polling, selected Beads-source workflow and span-only/Jev-only task labels are superseded. Retain useful signal semantics and evidence distinctions, not obsolete UX. Historical experimental results are not current release acceptance.
 
+## Current subtask revision
+
+[Conversation-grounded subtask design](coverage-subtasks.md) supersedes the workbook-bound coverage plan. [Implementation audit and rework map](generic-subtasks-rework.md) separates reusable mechanics from required changes. Generic Jev→LLM development awaits explicit owner restart; historical coverage test passes are not acceptance of the revised requirement.
+
 ## Read in this order
 
 1. [Confirmed product scope](../../PRODUCT.md) — what the user has asked for and approved so far.

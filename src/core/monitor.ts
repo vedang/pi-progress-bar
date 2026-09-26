@@ -2760,11 +2760,39 @@ export class Monitor {
     return this.coverageQueue.length;
   }
 
+  /** Durable and in-flight intent authority is owner-based, not queue-based. */
+  private coverageIntentOverlaps(
+    owners: readonly CoverageIntentParentBinding[],
+  ) {
+    const ownerKeys = new Set(
+      owners.map((owner) => this.coverageOwnerKey(owner)),
+    );
+    return new Set(
+      [...this.coverageIntentJobs].flatMap(([key, job]) =>
+        job.owners.some((owner) => ownerKeys.has(this.coverageOwnerKey(owner)))
+          ? [key]
+          : [],
+      ),
+    );
+  }
+
   /** Queue selected-model ingress only when an ungrouped parent candidate remains. */
   private scheduleCoverageIntent(observation: Observation) {
-    if (!this.enabled || this.coverageDispatches >= 1024) return;
+    if (!this.enabled) return;
     const target = this.coverageIntentTarget(observation);
     if (!target) return;
+    // A newer owner reservation invalidates every old state, including a
+    // dispatched job whose queue slot was intentionally released.
+    const superseded = this.coverageIntentOverlaps(target.owners);
+    if (superseded.size) {
+      this.fenceCoverageIntentJobs(superseded);
+      this.recordCoverageOmission(1, true);
+    }
+    // Budget prevents only new transport. It never restores superseded work.
+    if (this.coverageDispatches >= 1024) {
+      this.recordCoverageOmission(1, true);
+      return;
+    }
     const originalJobs = this.coverageIntentJobs;
     const originalRequests = this.coverageIntentRequests;
     const originalQueue = this.coverageQueue;
@@ -2778,21 +2806,7 @@ export class Monitor {
     const requests = new Map(originalRequests);
     const queue = originalQueue.map((candidate) => ({ ...candidate }));
     const occupied = position < 0 ? undefined : queue[position];
-    if (occupied?.kind === "intent") {
-      // Newer candidate evidence fences old intent in this preserved position.
-      this.recordCoverageOmission();
-      const priorRequest = requests.get(occupied.key);
-      if (priorRequest) this.coverageIntents.cancel(priorRequest);
-      jobs.delete(occupied.key);
-      requests.delete(occupied.key);
-      if (
-        this.coverageFlight?.kind === "intent" &&
-        this.coverageFlight.jobKey === occupied.key
-      ) {
-        this.coverageFlight.controller.abort();
-        this.coverageFlight = undefined;
-      }
-    } else if (occupied?.kind === "report") {
+    if (occupied?.kind === "report") {
       // A current report owner cannot normally be an intent candidate. Fence anyway.
       this.recordCoverageOmission();
       const prior = this.coverageJobs.get(occupied.key);
@@ -2819,8 +2833,7 @@ export class Monitor {
         (candidate) =>
           !(candidate.kind === "intent" && candidate.key === target.key),
       );
-      if (this.coverageIntents.journalAtCapacity || occupied)
-        this.recordCoverageOmission(1, true);
+      this.recordCoverageOmission(1, true);
       return;
     }
     const job = this.coverageIntents.jobSnapshot(
@@ -3141,14 +3154,42 @@ export class Monitor {
   /** Named canonical/control wake only; coverage owns no retry timer or poller. */
   private wakeCoverage(revivePermanent = false) {
     const now = Date.now();
-    const enqueue = (item: CoverageQueueCheckpoint) => {
-      if (
-        this.coverageQueue.some(
-          (candidate) =>
-            candidate.kind === item.kind && candidate.key === item.key,
+    if (revivePermanent) {
+      const jobs = [...this.coverageIntentJobs.entries()];
+      const superseded = new Set<string>();
+      for (let index = 0; index < jobs.length; index++) {
+        const current = jobs[index];
+        if (!current) continue;
+        const [key, job] = current;
+        const owners = new Set(
+          job.owners.map((owner) => this.coverageOwnerKey(owner)),
+        );
+        if (
+          jobs
+            .slice(index + 1)
+            .some(([, newer]) =>
+              newer.owners.some((owner) =>
+                owners.has(this.coverageOwnerKey(owner)),
+              ),
+            )
         )
-      )
-        return true;
+          superseded.add(key);
+      }
+      if (superseded.size) {
+        this.fenceCoverageIntentJobs(superseded);
+        this.recordCoverageOmission(1, true);
+      }
+    }
+    const enqueue = (
+      item: CoverageQueueCheckpoint,
+      owners: readonly CoverageIntentParentBinding[],
+    ) => {
+      const position = this.coverageQueuePosition(item, owners);
+      if (position >= 0)
+        return (
+          this.coverageQueue[position]?.kind === item.kind &&
+          this.coverageQueue[position]?.key === item.key
+        );
       if (this.coverageQueue.length >= 20) return false;
       this.coverageQueue.push(item);
       return true;
@@ -3159,7 +3200,7 @@ export class Monitor {
         delete job.parkedUntil;
       } else if (revivePermanent && job.state === "permanent") {
         job.state = "ready";
-        if (!enqueue({ kind: "intent", key: job.targetKey })) {
+        if (!enqueue({ kind: "intent", key: job.targetKey }, job.owners)) {
           job.state = "permanent";
           this.recordCoverageOmission();
         }
@@ -3171,7 +3212,15 @@ export class Monitor {
         delete job.parkedUntil;
       } else if (revivePermanent && job.state === "permanent") {
         job.state = "ready";
-        if (!enqueue({ kind: "report", key: job.parentTaskId })) {
+        if (
+          !enqueue({ kind: "report", key: job.parentTaskId }, [
+            {
+              id: job.parentTaskId,
+              revision: job.parentRevision,
+              sourceDigest: job.parentSourceDigest,
+            },
+          ])
+        ) {
           job.state = "permanent";
           this.recordCoverageOmission();
         }
@@ -3364,6 +3413,34 @@ export class Monitor {
     return false;
   }
 
+  /** Keep paid optional intent failures recoverable but outside runnable queue slots. */
+  private terminalCoverageIntentJob(
+    jobKey: string,
+    request: CoverageIntentRequest,
+    usage: { inputTokens: number; outputTokens: number },
+  ) {
+    const current = this.coverageIntentJobs.get(jobKey);
+    if (!current || current.identity !== request.identity) return false;
+    const jobs = new Map(this.coverageIntentJobs);
+    jobs.set(jobKey, { ...current, state: "permanent" });
+    const receipts = new Map(this.coverageIntentReceipts);
+    const proof = receipts.get(request.identity);
+    if (proof)
+      receipts.set(request.identity, {
+        ...proof,
+        usage: { ...usage },
+        outcome: "dispatched",
+      });
+    this.coverageIntentJobs = jobs;
+    this.coverageIntentReceipts = receipts;
+    this.coverageQueue = this.coverageQueue.filter(
+      (item) => !(item.kind === "intent" && item.key === jobKey),
+    );
+    this.coverageOmissions = saturatingAdd(this.coverageOmissions, 1);
+    // Storage loss must not turn a paid/invalid response into runnable work.
+    return this.persistCoverageCandidate(this.coverage);
+  }
+
   private async runCoverageIntent(
     jobKey: string,
     request: CoverageIntentRequest,
@@ -3423,13 +3500,17 @@ export class Monitor {
         result.usage.outputTokens,
       );
       if (completed.status !== "accepted") {
-        // A paid terminal response frees its union slot; no permanent dead work remains.
-        this.coverageIntentJobs.delete(jobKey);
-        this.coverageIntentRequests.delete(jobKey);
-        this.coverageQueue = this.coverageQueue.filter(
-          (item) => !(item.kind === "intent" && item.key === jobKey),
-        );
-        this.persistCoverageCandidate(this.coverage);
+        if (
+          completed.code === "stale-epoch" ||
+          completed.code === "stale-source" ||
+          completed.code === "stale-parent"
+        )
+          this.discardCoverageIntentJob(jobKey);
+        else
+          this.terminalCoverageIntentJob(jobKey, request, {
+            inputTokens: result.usage.inputTokens,
+            outputTokens: result.usage.outputTokens,
+          });
         return;
       }
       const previousJobs = this.coverageIntentJobs;
@@ -3458,20 +3539,23 @@ export class Monitor {
       this.coverageIntentReceipts = receipts;
       // Journal and accepted dispatch proof become durable before inventory admission.
       if (!this.persistCoverageCandidate(this.coverage)) {
-        this.coverageUsage.extraction.inputTokens = inputTokens;
-        this.coverageUsage.extraction.outputTokens = outputTokens;
         this.coverageIntents = CoverageIntentRequests.restoreJournal(
           priorJournal,
           this.state,
           (entryId) => this.resolveObservation(pass, entryId),
         );
-        // Paid response is terminal even if post-response persistence fails.
-        this.coverageIntentJobs = jobs;
+        // Paid output was not admitted. Retain original durable reservation for
+        // explicit recovery rather than deleting it or immediately rebilling.
+        this.coverageIntentJobs = previousJobs;
         this.coverageIntentRequests = requests;
         this.coverageQueue = this.coverageQueue.filter(
           (item) => !(item.kind === "intent" && item.key === jobKey),
         );
         this.coverageIntentReceipts = previousReceipts;
+        this.terminalCoverageIntentJob(jobKey, request, {
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+        });
         return;
       }
       this.admitPendingCoverage();

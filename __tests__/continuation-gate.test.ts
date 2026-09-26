@@ -6,6 +6,7 @@ import {
 } from "../src/analysis/continuation-gate";
 import { MODEL, type ValidatedResult } from "../src/analysis/gateway";
 import { continuationAuthorityFixture } from "./fixtures/continuation";
+import { subtaskHash } from "./fixtures/subtasks";
 
 function authority(count = 3) {
   const { input } = continuationAuthorityFixture();
@@ -238,6 +239,78 @@ describe("continuation per-parent gate", () => {
       expect(vi.mocked(fetch)).not.toHaveBeenCalled();
     },
   );
+
+  it("states role, chronology and target-local restrictions explicitly in every question", () => {
+    const { batch } = fixture();
+    for (const question of Object.values(batch.request.questions)) {
+      // Frozen prompt-contract clauses; not a semantic-quality oracle.
+      expect(question.instructions).toContain(
+        "Assistant status-only stop may qualify under standing authorization",
+      );
+      expect(question.instructions).toContain(
+        "Latest user status/planning-only limit forbids continuation",
+      );
+      expect(question.instructions).toContain(
+        "Newer direct user approval can supersede an earlier pause",
+      );
+      expect(question.instructions).toContain(
+        "Blockers, ownership and approval limits apply only to the affected target",
+      );
+      expect(question.instructions).toContain("Resumed execution is no");
+    }
+  });
+
+  it("enforces the serialized 8192-byte policy proof boundary, not raw text bytes", () => {
+    const current = authority();
+    current.policy.text = "p";
+    const overhead = Buffer.byteLength(JSON.stringify(current.policy)) - 1;
+    current.policy.text = "p".repeat(8192 - overhead);
+    current.policy.promptHash = subtaskHash(current.policy.text);
+    expect(Buffer.byteLength(JSON.stringify(current.policy))).toBe(8192);
+    expect(buildContinuationGate(current)).toBeDefined();
+    current.policy.text += "p";
+    current.policy.promptHash = subtaskHash(current.policy.text);
+    expect(Buffer.byteLength(JSON.stringify(current.policy))).toBe(8193);
+    expect(buildContinuationGate(current)).toBeUndefined();
+  });
+
+  it("enforces aggregate serialized 12288-byte context with individually valid observations", () => {
+    const current = authority();
+    const extra = {
+      id: "extra",
+      role: "user" as const,
+      text: "x",
+      hash: subtaskHash("x"),
+    };
+    current.context.splice(1, 0, extra);
+    extra.text += "x".repeat(
+      12288 - Buffer.byteLength(JSON.stringify(current.context)),
+    );
+    extra.hash = subtaskHash(extra.text);
+    expect(Buffer.byteLength(JSON.stringify(current.context))).toBe(12288);
+    expect(buildContinuationGate(current)).toBeDefined();
+    extra.text += "x";
+    extra.hash = subtaskHash(extra.text);
+    expect(Buffer.byteLength(JSON.stringify(current.context))).toBe(12289);
+    expect(buildContinuationGate(current)).toBeUndefined();
+  });
+
+  it.each([
+    "x".repeat(241),
+    "😀".repeat(241),
+    "Task\\ncontinuation",
+    "Task\\u200bcontinuation",
+  ])("rejects invalid N01 task-label domain %s", (label) => {
+    const current = authority();
+    current.tasks[0].label = label;
+    expect(buildContinuationGate(current)).toBeUndefined();
+  });
+
+  it("retains the 240 Unicode-code-point label boundary", () => {
+    const current = authority();
+    current.tasks[0].label = "😀".repeat(240);
+    expect(buildContinuationGate(current)).toBeDefined();
+  });
 
   it("abstains for unavailable authority or an all-done board", () => {
     expect(

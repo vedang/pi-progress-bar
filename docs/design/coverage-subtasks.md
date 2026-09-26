@@ -1,6 +1,6 @@
 # Conversation-grounded subtasks — revised design
 
-Status: **design/backlog revision; implementation paused pending owner restart** (2026-09-26). Replaces the workbook-bound C00 contract and original embedded design in `pi-progress-barroot-0wy`. Workbook review was an example, not the product boundary. Current source at `29b193d1` does not implement this design. PRODUCT/README distinguish current behavior from this planned revision. No release, installation, push, paid call or implementation is authorized by this planning change.
+Status: **implementation authorized; C00 contract freeze underway** (2026-09-26). Owner explicitly authorized restart after independent design/backlog review; restart gate `pi-progress-barroot-0wy.14` is closed. Replaces the workbook-bound C00 contract and original embedded design in `pi-progress-barroot-0wy`. Workbook review was an example, not the product boundary. Baseline source at `29b193d1` does not implement this design. PRODUCT/README distinguish current behavior from this revision. [C00 frozen interfaces](subtask-contracts.md) specify staged API/corpus contracts. No release, installation or push is authorized; paid QA remains subject to the stated cap and frozen manifest.
 
 ## 1. Owner requirement and acceptance
 
@@ -96,7 +96,7 @@ Grouped reconciliation preserves every unfinished parent row and admitted MAYBE 
 
 ## 9. Reworked implementation backlog and exit gates
 
-Existing epic remains `pi-progress-barroot-0wy`; its new embedded design must match this file. An **owner restart gate** blocks C00 and therefore every implementation stage. Planning/review can finish while that gate stays open.
+Existing epic remains `pi-progress-barroot-0wy`; its embedded design must match this file. The **owner restart gate** was closed on explicit authorization after design/backlog review. C00 and subsequent stages now execute in dependency order; prior historical closures still do not accept revised behavior.
 
 | Order | Existing/new stage | Deliverable and smallest passing increment |
 |---|---|---|

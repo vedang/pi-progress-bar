@@ -1,0 +1,57 @@
+# Generic subtask contracts — C00 freeze
+
+Date: 2026-09-26. Implements the schema-freeze requirement of [revised design](coverage-subtasks.md). Owner restart authorized via `pi-progress-barroot-0wy.14`; implementation proceeds stage by stage. This document freezes interfaces and test expectations, not claims of implemented behavior. Baseline source29b193d1.
+
+## Layering / removal boundary
+
+C01 adds `src/core/subtasks.ts` as the generic pure reducer, initially disconnected. Current workbook runtime remains working while generic layers are built; C05 cutover removes the old mandatory workbook-inventory admission route. It is not retained as a fallback, compatibility reader or second shipping semantic path. C02 supplies strict v11 storage primitives; active checkpoint reader/writer must switch together with coherent runtime integration, never write a version the running reader cannot restore. Each stage reports connected versus disconnected capability. Existing workbook safety tests remain until Main ports their invariant coverage to the replacement boundary.
+
+## Pure reducer (`SubtaskStore`)
+
+`admit(input)`, `report(input)`, `reconcile(parents)`, `snapshot()` and later `checkpoint()/restore()` are local only. Source/model/currentness validation belongs upstream; reducer still validates exact structure, immutable source-reference shape, hashes, non-empty control-free labels, ownership, revisions and bounds. [ref:coverage_not_task_authority]
+
+Admission shape:
+
+```ts
+interface SubtaskAdmission {
+  parent: HybridTask;
+  expectedListRevision: number; // 0 for first admission; compare-and-swap thereafter
+  source: SourceRef; // canonical grounds for this mutation, not a tool receipt
+  proof: { contextHash: string; gateRequestHash: string; proposalRequestHash: string };
+  children: Array<
+    | { kind: "add"; label: string; source: SourceRef }
+    | { kind: "retain"; id: string }
+    | { kind: "reword"; id: string; label: string; source: SourceRef }
+    | { kind: "replace"; id: string; label: string; source: SourceRef }
+  >;
+  removals: Array<{ id: string; source: SourceRef; reason: "withdrawn" | "out-of-scope" }>;
+  complete: boolean; // evidence-backed exhaustive set only, not merely a full JSON array
+  knownTotal?: number;
+}
+```
+
+Returns `{accepted:true}` or `{accepted:false, reason:"invalid"|"capacity"|"stale"|"foreign"}`. Every previous active child occurs exactly once among retained/reworded/replaced/removal references. New list order is children order. Explicit replacement retires old ID and creates new pending ID. Retired identities count toward session retained capacity. Unknown references, duplicate use, unsupported keys/raw payloads or inconsistent totals reject whole input without allocating IDs or mutating prior state. Source refs are the existing canonical role/entry/hash/range/quote-hash type; nonempty exact ranges required.
+
+One group per parent requirements revision. Group snapshot: `id,parentTaskId,parentRevision,parentSourceDigest,listRevision,source,proof,complete,knownTotal?,children,retired,omissions`. Active child: `id,label,status,source`; status is pending/reported-completed/reported-blocked. Retired child retains its old fields plus `retirement:{source,reason}`; replacement reason is `replaced`. Tool access is optional external evidence, not an initial generic reducer requirement. No mandatory resourceKey, callId or inventory source. Group/child IDs are code-owned opaque `subtask-group:<n>`/`subtask-child:<n>` with monotonic allocators.
+
+Initial admitted list revision is1. Structural/reword/refinement transactions increment list revision; retain-only identical state is no-op. Exact successful input replay is idempotent even though its expected prior revision is now old, but only against the same current parent revision and latest admitted transaction identity; do not replay stale older transactions across intervening changes. New proofs/context without an actual list change can be recorded by the phase journal, not fabricate new child work or recursively trigger a gate. New groups may be empty for attributed count-only scope; parent inclusion/revision still required.
+
+Default generated decomposition is `complete:false`, absent knownTotal; current tracked count is children.length. A complete set requires knownTotal absent or equal to current active count; an incomplete knownTotal cannot be less than active count. Count-only total does not invent labels. Capacity:64 active/group;200 retained children/session (active+retired);200 retained groups including empty;240 Unicode scalars/label;32KiB admission projection and64KiB whole optional checkpoint. No silent retirement eviction.
+
+Report shape: `{groupId,listRevision,childIds,source,status}`. Only current active child IDs; nonempty unique child batch, matching current list, included parent, valid source/status. Whole batch rejects on foreign/stale input. Explicit retraction uses pending. Reports never edit list identity/order or parent state. Access alone cannot call report. Snapshots and input references never alias internal state.
+
+Parent requirements revision invalidates old group; source/label wording changes without requirements revision preserve child identity/status and original group provenance. Archive retains facts, disables further mutations/reports; reinclusion permits later current-authority work. Parent DONE never auto-completes/reopens children or gets reopened by them.
+
+## Jev gate / selected-model protocol (C03a/C03)
+
+Gate input: bounded immutable current eligible parent bindings, complete required existing-child snapshots, newest and bounded preceding whole canonical observations, omission markers, optional validated names-only evidence. Current parent source must be included. Split parent batches to respect24KiB/20questions; a parent whose required context cannot fit is unavailable, not sampled. Context identity includes all actual inputs/version/bindings, excluding UI focus/health/cost scalars. Accepted yes requires confidence>=0.5, selected probability>=0.8 at jev-1.13.0; no/uncertain/unavailable produces no LLM call. Receipt scopes yes to exact parent/current child revision/context. No parent-source mutation or task completion authority.
+
+LLM response strict JSON `{proposals:[...]}`; one proposal per supplied yes-parent index, max20. Proposal has `{parentIndex,children,removals,complete,knownTotal?}`. New child `{kind:"add",label,evidence:[{contextIndex,start,end}]}`; existing forms retain/reword/replace use `childIndex` into supplied current children instead of durable id; reword/replace carry label/evidence. Removal uses `{childIndex,reason,evidence}`. All supporting ranges reference supplied canonical user/assistant/intercom text; labels may paraphrase/imply meaningful steps. `complete:true` requires full-set grounds, not inference that model covered everything. Canonical ref mapping and request proof construction are code-owned. Output may be `{proposals:[]}`; no mutation. No raw IDs/revisions/resource hashes/status assignments accepted from model.
+
+Validate response <=32KiB and selected-model transport existing2048 output-token cap; oversized/truncated response rejects atomically. No pagination/automatic retry to force64 long labels into a response. Capacity is an upper bound, not a guarantee every maximal proposal fits. Supporting exact text establishes provenance, not a proof of semantic usefulness. Frozen quality gate checks that separate concern.
+
+## Durability and coverage
+
+C02/C07 checkpoint receipts bind actual request hashes, parent/list/source versions, gate/model versions and charged provider dispatch ordinals/times/usage. Gate decided/proposal-ready survives reload without gate rebilling; proposal accepted survives without either call. Existing 64KiB optional envelope and1024 shared optional lifetime calls include new gate calls. Failures, stale results and exhausted yes→proposal transitions retain explicit outcomes.
+
+Main RED ownership begins with `__tests__/subtasks-store.test.ts`; later stage-specific tests freeze phase/gate/proposer/runtime APIs before source changes. `__tests__/fixtures/subtasks-heldout.json` is freshly frozen before new generic prompt implementation, separate from tuning fixture and old coverage-heldout. Freshness means not tuned against—not hidden from reviewers. No paid evaluation in C00. Current host authority tests remain applicable; C05 proves actual generic transport/events, not just pure-helper behavior.

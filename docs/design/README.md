@@ -6,7 +6,7 @@
 
 ## Current subtask revision
 
-[Conversation-grounded subtask design](coverage-subtasks.md) supersedes the workbook-bound coverage plan. [Implementation audit and rework map](generic-subtasks-rework.md) separates reusable mechanics from required changes. Generic Jev→LLM development awaits explicit owner restart; historical coverage test passes are not acceptance of the revised requirement.
+[Conversation-grounded subtask design](coverage-subtasks.md) supersedes the workbook-bound coverage plan. [Implementation audit and rework map](generic-subtasks-rework.md) separates reusable mechanics from required changes. Generic Jev→LLM development is owner-authorized and underway; historical coverage test passes are not acceptance of the revised requirement.
 
 ## Read in this order
 

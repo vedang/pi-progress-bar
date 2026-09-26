@@ -99,7 +99,7 @@ Optional **Task Title**, **Description**, and **Acceptance Criteria** appear onl
 
 ## Subtasks: revision planned, not yet implemented
 
-**Workbook-only support is not the intended product.** Owner-directed [generic subtask design](docs/design/coverage-subtasks.md) uses Jev to decide whether an existing task needs subtasks, then the selected model to propose grounded children. No workbook, file path, tool inventory or pre-listed steps are required. [Implementation audit and rework](docs/design/generic-subtasks-rework.md) explains what remains reusable and what must change. Development is paused until the revised design/backlog is reported and the owner authorizes restart; v11 is planned, not implemented. Current narrow behavior below is historical candidate capability, not generic-subtask acceptance or a shipping boundary.
+**Workbook-only support is not the intended product.** Owner-directed [generic subtask design](docs/design/coverage-subtasks.md) uses Jev to decide whether an existing task needs subtasks, then the selected model to propose grounded children. No workbook, file path, tool inventory or pre-listed steps are required. [Implementation audit and rework](docs/design/generic-subtasks-rework.md) explains what remains reusable and what must change. Revised design/backlog review passed and the owner authorized implementation; v11 is planned, not implemented. Current narrow behavior below is historical candidate capability, not generic-subtask acceptance or a shipping boundary.
 
 ### Current candidate: workbook coverage
 

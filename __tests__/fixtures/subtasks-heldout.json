@@ -1,0 +1,355 @@
+{
+  "version": 1,
+  "provenance": "Synthetic generic-subtask corpus frozen at C00 before new generic gate/proposer/rubric implementation on 2026-09-26. Separate from original observed coverage-heldout.json and all tuning fixtures. Do not tune against failures; require owner-approved revision and a fresh gate.",
+  "thresholds": { "confidence": 0.5, "probability": 0.8 },
+  "gateCases": [
+    {
+      "id": "sg01",
+      "parent": "Recommend a customer-support routing strategy",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Recommend how we should route support requests. We need to understand the current bottleneck, compare routing choices against our response-time target, and give the team a justified recommendation."
+        }
+      ],
+      "expected": "yes",
+      "requiredConcepts": [
+        "current bottleneck",
+        "compare routing choices",
+        "recommendation"
+      ],
+      "forbiddenConcepts": ["deploy production changes", "purchase services"],
+      "tools": false
+    },
+    {
+      "id": "sg02",
+      "parent": "Implement invoice validation",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Implement invoice validation. Reject missing customer references, prevent duplicate invoice numbers, and show helpful validation failures without saving invalid invoices."
+        }
+      ],
+      "expected": "yes",
+      "requiredConcepts": [
+        "customer reference",
+        "duplicate invoice",
+        "validation failures"
+      ],
+      "forbiddenConcepts": [
+        "rewrite billing platform",
+        "release to production"
+      ],
+      "tools": false
+    },
+    {
+      "id": "sg03",
+      "parent": "Review onboarding handbook",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Review the onboarding handbook sections Welcome, Security Basics, and First Week. Summarize problems after checking each section."
+        }
+      ],
+      "expected": "yes",
+      "requiredConcepts": ["Welcome", "Security Basics", "First Week"],
+      "tools": false
+    },
+    {
+      "id": "sg04",
+      "parent": "Prepare an incident exercise",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Prepare an incident exercise for our team. Work out a realistic scenario, define the participant roles and timeline, and write the debrief questions."
+        }
+      ],
+      "expected": "yes",
+      "requiredConcepts": ["scenario", "roles", "timeline", "debrief"],
+      "tools": false
+    },
+    {
+      "id": "sg05",
+      "parent": "Audit two service interfaces",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Audit the Accounts and Payments interfaces together. Check the authentication requirements for each and then document their shared error-handling inconsistencies."
+        }
+      ],
+      "expected": "yes",
+      "requiredConcepts": [
+        "Accounts authentication",
+        "Payments authentication",
+        "error handling"
+      ],
+      "tools": false
+    },
+    {
+      "id": "sg06",
+      "parent": "Review release workbook",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Read every tab of the release workbook and give me one summary of the risks. Use the observed tab names; do not invent any missing names."
+        }
+      ],
+      "inventory": {
+        "complete": true,
+        "labels": [
+          "Scope",
+          "Owners",
+          "Timeline",
+          "Dependencies",
+          "Services",
+          "Accounts",
+          "Payments",
+          "Search",
+          "Storage",
+          "Security",
+          "Rollout",
+          "Rollback",
+          "Regions",
+          "Incidents",
+          "Support",
+          "Training",
+          "Costs",
+          "Licenses",
+          "Checks",
+          "Exceptions",
+          "Signoffs",
+          "Notes"
+        ]
+      },
+      "expected": "yes",
+      "requiredInventoryMembers": 22,
+      "tools": true
+    },
+    {
+      "id": "sg07",
+      "parent": "Return a unit conversion",
+      "messages": [
+        {
+          "role": "user",
+          "text": "How many centimeters are in 2 meters? Give only the number."
+        }
+      ],
+      "expected": "no",
+      "tools": false
+    },
+    {
+      "id": "sg08",
+      "parent": "Answer whether an event is scheduled",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Is the team sync on Friday? A yes or no answer is enough."
+        }
+      ],
+      "expected": "no",
+      "tools": false
+    },
+    {
+      "id": "sg09",
+      "parent": "Explain a quoted example",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Explain why this sample instruction is ambiguous: 'Investigate outages, replace the cache, and deploy new servers.' These are examples to discuss, not work to perform."
+        }
+      ],
+      "expected": "no",
+      "forbiddenConcepts": [
+        "investigate outages",
+        "replace cache",
+        "deploy servers"
+      ],
+      "tools": false
+    },
+    {
+      "id": "sg10",
+      "parent": "Answer a deployment question",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Tell me whether this deployment description is understandable. The operations team will validate staging and run the production rollout; neither is assigned to you."
+        }
+      ],
+      "expected": "no",
+      "forbiddenConcepts": ["validate staging", "production rollout"],
+      "tools": false
+    },
+    {
+      "id": "sg11",
+      "parent": "Explain log retention",
+      "messages": [
+        {
+          "role": "assistant",
+          "text": "If you later want implementation work, I could audit retention rules, change the collector, and test archiving. For now I am only answering your explanation question."
+        }
+      ],
+      "expected": "no",
+      "tools": false
+    },
+    {
+      "id": "sg12",
+      "parent": "Help with the next part",
+      "messages": [
+        {
+          "role": "user",
+          "text": "Help with that next part. I have not said which work I mean yet."
+        }
+      ],
+      "expected": "no-or-uncertain",
+      "tools": false
+    },
+    {
+      "id": "sg13",
+      "parent": "Review vendor options",
+      "messages": [
+        {
+          "role": "user",
+          "text": "First just acknowledge that you received my vendor question."
+        },
+        {
+          "role": "user",
+          "text": "Now compare onboarding effort, support arrangements, and annual cost, then recommend the best fit for our small team."
+        }
+      ],
+      "expected": "yes-after-new-context",
+      "requiredConcepts": ["onboarding", "support", "cost", "recommendation"],
+      "tools": false
+    },
+    {
+      "id": "sg14",
+      "parents": [
+        "Return the meeting time",
+        "Prepare a data-retention proposal"
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "text": "For the meeting-time task, return 10am. For the data-retention proposal, identify our obligations, compare retention periods, and write a recommended policy. Keep those tasks separate."
+        }
+      ],
+      "expectedByParent": ["no", "yes"],
+      "tools": false
+    }
+  ],
+  "reportCases": [
+    {
+      "id": "sr01",
+      "children": [
+        "Identify current bottleneck",
+        "Compare routing choices",
+        "Write recommendation"
+      ],
+      "text": "I identified the bottleneck and compared the routing choices. The recommendation is not written yet.",
+      "expectedCompleted": [0, 1],
+      "expectedPending": [2]
+    },
+    {
+      "id": "sr02",
+      "children": ["Implement duplicate invoice validation"],
+      "text": "I read the duplicate-invoice validation code. I have not implemented the change.",
+      "expectedPending": [0]
+    },
+    {
+      "id": "sr03",
+      "children": ["Implement duplicate invoice validation"],
+      "text": "Duplicate invoice validation is implemented; invalid duplicates are rejected before saving.",
+      "expectedCompleted": [0]
+    },
+    {
+      "id": "sr04",
+      "children": [
+        "Review Welcome",
+        "Review Security Basics",
+        "Review First Week"
+      ],
+      "text": "Welcome and First Week have been reviewed. I cannot review Security Basics because that section is missing.",
+      "expectedCompleted": [0, 2],
+      "expectedBlocked": [1]
+    },
+    {
+      "id": "sr05",
+      "children": ["Compare retention periods", "Write recommended policy"],
+      "initialCompleted": [0],
+      "text": "Correction: I had not finished comparing retention periods. The policy is also still pending.",
+      "expectedRetracted": [0],
+      "expectedPending": [1]
+    },
+    {
+      "id": "sr06",
+      "children": ["Draft exercise scenario", "Write debrief questions"],
+      "text": "The example status report says 'scenario and debrief questions complete'. It is a template, not a report of our work.",
+      "expectedPending": [0, 1]
+    },
+    {
+      "id": "sr07",
+      "children": [
+        "Check Accounts authentication",
+        "Check Payments authentication"
+      ],
+      "text": "I will check Accounts authentication and then Payments authentication tomorrow.",
+      "expectedPending": [0, 1]
+    },
+    {
+      "id": "sr08",
+      "children": [
+        "Review Welcome",
+        "Review Security Basics",
+        "Review First Week"
+      ],
+      "completeSet": true,
+      "text": "All three listed handbook sections have now been reviewed.",
+      "expectedCompleted": [0, 1, 2]
+    },
+    {
+      "id": "sr09",
+      "children": ["Identify constraints", "Compare approaches"],
+      "completeSet": false,
+      "text": "All of it is finished.",
+      "expectedPending": [0, 1]
+    },
+    {
+      "id": "sr10",
+      "children": [
+        "Check Accounts authentication",
+        "Check Payments authentication"
+      ],
+      "text": "That check is done.",
+      "expectedPending": [0, 1]
+    },
+    {
+      "id": "sr11",
+      "parent": "Review first handbook",
+      "children": ["Review Introduction"],
+      "text": "I reviewed Introduction in the second handbook only. Introduction in the first handbook remains unread.",
+      "expectedPending": [0]
+    },
+    {
+      "id": "sr12",
+      "children": ["Review Rollout", "Review Rollback"],
+      "text": "Both Rollout and Rollback tabs were exported into text files. Neither has been reviewed.",
+      "expectedPending": [0, 1]
+    }
+  ],
+  "acceptance": {
+    "unsafeParentOrScopeAdmissions": 0,
+    "falseChildAdvancement": 0,
+    "requiredPositiveGateAndProposalCases": [
+      "sg01",
+      "sg02",
+      "sg03",
+      "sg04",
+      "sg05",
+      "sg06",
+      "sg13",
+      "sg14"
+    ],
+    "allDesignatedReportTransitionsRequired": true,
+    "generatedLabelsNeedNotMatchVerbatim": true,
+    "noOrUncertainMustDispatchZeroProposals": true
+  }
+}

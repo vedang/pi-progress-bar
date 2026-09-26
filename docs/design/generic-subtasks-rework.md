@@ -1,6 +1,6 @@
 # Generic subtasks: implementation audit and rework map
 
-Date: 2026-09-26. Source audited: `29b193d1`; acceptance/bookkeeping through `960b4622`. This is an implementation-seam investigation, **not** the deferred exhaustive test-audit campaign. No source, test or fixture changes made. [Revised design](coverage-subtasks.md) governs future work; implementation stays paused pending owner restart.
+Date: 2026-09-26. Source audited: `29b193d1`; acceptance/bookkeeping through `960b4622`. This is an implementation-seam investigation, **not** the deferred exhaustive test-audit campaign. No source, test or fixture changes made. [Revised design](coverage-subtasks.md) governs rework. At audit publication implementation was paused; owner subsequently authorized restart and gate `.14` is now closed. The findings below describe the pre-rework baseline.
 
 ## Finding
 

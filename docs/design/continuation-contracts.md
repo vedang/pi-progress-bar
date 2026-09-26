@@ -1,4 +1,13 @@
-# Continuation contracts — staged N01 implementation
+# Continuation contracts
+
+## N02 gate API frozen by Main
+
+`src/analysis/continuation-gate.ts` exposes pure `buildContinuationGate(projection)` and `applyContinuationGate(batch, result, currentProjection)`. Build takes the available/unavailable N01 union and returns undefined when unavailable, invalid, all-done or over bounds. Otherwise it returns a detached deeply frozen `{request,parentIndices,requestHash}` batch: state is the entire N01 available projection, model is pinned `jev-1.13.0`, one yes/no/uncertain Choice per unfinished parent, in board order. Include the numeric `tasks[index]` path in each question's instructions, not merely the question ID (provider question IDs are not model-visible). Complete included board stays in shared state, including done parents. Maximum20 parents/questions and24KiB full serialized request, including instructions; no truncation or subset fallback.
+
+Apply takes the exact batch, optional provider result and freshly projected current authority. Any malformed result, wrong model, absent/extra answers, invalid distribution/confidence/usage, request-proof mismatch or changed full authority fails atomically with undefined. Do not trust equality of a caller-retained fingerprint alone. Valid no/uncertain/low-threshold answers produce no eligible parent, never an inferred yes. Valid return is detached `{acceptedIndices,assessments,requestHash,authorityFingerprint,usage}`; assessments retain parentIndex/choice/confidence/selected probability for every question. Only yes with confidence>=0.5 and yes probability>=0.8 yields that parent's board index. Keep exact request and authority binding; no semantic retries, task mutation, drafting, provider calls, timers, persistence or runtime wiring here. N04 owns one-shot admission/counters through existing bounded JevGateway; these helpers supply its pure request/result seam.
+
+Main RED `__tests__/continuation-gate.test.ts` freezes mechanics and negative/positive evidence plumbing, not model accuracy. User pause/status-only/planning/approval, waiting, ownership ambiguity/conflict, injection, assistant/intercom waiver, already-resumed and newer-user-approval examples must remain complete role-tagged evidence. Source instructions must express those distinctions and treat conversation/labels as evidence, not commands. N06 fresh paid semantic acceptance remains mandatory. Live TypeSafe Choice/API docs consulted; pinned version and thresholds unchanged.
+ — staged N01 implementation
 
 Companion to [continuation design](continuation-nudge.md). N00 host/policy/corpus freeze is accepted. Main owns all RED tests; workers implement source only. This document freezes the next disconnected layer, not feature acceptance.
 

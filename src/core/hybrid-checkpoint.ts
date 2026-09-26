@@ -2364,7 +2364,7 @@ function journalRecordIsCurrent(
     !parent.included ||
     parent.revision !== record.parentRevision ||
     !canonicalSource(record.source, resolve) ||
-    listRevisions.get(record.parentTaskId) !== requiredListRevision ||
+    (listRevisions.get(record.parentTaskId) ?? 0) !== requiredListRevision ||
     typeof isCurrentJob !== "function"
   )
     return false;

@@ -249,6 +249,9 @@ const positiveInteger = (value: unknown): value is number =>
 const nonNegativeInteger = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) >= 0;
 
+const safeIncrement = (value: number, increment = 1) =>
+  Number.isSafeInteger(value + increment);
+
 const validRole = (value: unknown) =>
   value === "user" || value === "assistant" || value === "intercom";
 
@@ -1173,6 +1176,11 @@ export class SubtaskStore {
       return { accepted: false, reason: "capacity" };
     if (this.groups.length - superseded.length >= MAX_GROUPS)
       return { accepted: false, reason: "capacity" };
+    if (
+      !safeIncrement(this.nextGroupId) ||
+      !safeIncrement(this.nextChildId, active.length)
+    )
+      return { accepted: false, reason: "capacity" };
 
     const children = active.map((child, index) => ({
       ...child,
@@ -1330,6 +1338,11 @@ export class SubtaskStore {
       group.latestAdmissionDigest = replayDigest;
       return { accepted: true };
     }
+    if (
+      !safeIncrement(group.listRevision) ||
+      !safeIncrement(this.nextChildId, addedCount)
+    )
+      return { accepted: false, reason: "capacity" };
 
     this.groups = this.groups.map((candidate) =>
       candidate === group

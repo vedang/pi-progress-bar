@@ -1,16 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import {
-  type Context,
-  fauxAssistantMessage,
-  fauxProvider,
-  fauxToolCall,
-  InMemoryCredentialStore,
-  Type,
-} from "@earendil-works/pi-ai";
-import * as pinnedPi from "@earendil-works/pi-coding-agent";
+import type { Context } from "@earendil-works/pi-ai";
 import { expect, it, vi } from "vitest";
 import type { ExtractionInput } from "../src/analysis/extractor";
 import type { EvaluationRequest } from "../src/analysis/gateway";
@@ -18,15 +9,18 @@ import type { encodeCheckpoint } from "../src/core/hybrid-checkpoint";
 import { Monitor } from "../src/core/monitor";
 import extension from "../src/index";
 import { coverageNames } from "./fixtures/coverage";
+import { coverageHost } from "./fixtures/coverage-host";
 import { jevReply } from "./fixtures/hybrid-monitor";
 
 it("production extension on real Pi yields22children and changing item/batch access", async () => {
-  const host = process.env.PROGRESS_PI_HOST_ROOT
-    ? ((await import(
-        pathToFileURL(join(process.env.PROGRESS_PI_HOST_ROOT, "dist/index.js"))
-          .href
-      )) as typeof pinnedPi)
-    : pinnedPi;
+  const { host, ai } = await coverageHost();
+  const {
+    fauxAssistantMessage,
+    fauxProvider,
+    fauxToolCall,
+    InMemoryCredentialStore,
+    Type,
+  } = ai;
   const cwd = await mkdtemp(join(tmpdir(), "coverage-live-host-"));
   const manager = host.SessionManager.inMemory(cwd);
   const settingsManager = host.SettingsManager.inMemory({
@@ -99,15 +93,22 @@ it("production extension on real Pi yields22children and changing item/batch acc
   ];
   let step = 0;
   const respond = async (context: Context) => {
-    if (context.systemPrompt?.startsWith("Extract grounded")) {
-      const last = context.messages.at(-1);
-      if (
-        last?.role !== "user" ||
-        !Array.isArray(last.content) ||
-        last.content[0].type !== "text"
-      )
-        throw new Error("Unexpected extraction envelope");
-      const input = JSON.parse(last.content[0].text) as ExtractionInput;
+    const last = context.messages.at(-1);
+    const content =
+      last?.role === "user" &&
+      Array.isArray(last.content) &&
+      last.content[0]?.type === "text"
+        ? last.content[0].text
+        : undefined;
+    // Route by the actual extraction payload, independent of system-message representation.
+    const input = content?.startsWith("{")
+      ? (JSON.parse(content) as ExtractionInput)
+      : undefined;
+    if (
+      input &&
+      typeof input.instructions === "string" &&
+      Array.isArray(input.tasks)
+    ) {
       return fauxAssistantMessage(
         JSON.stringify(
           input.instructions.includes("parentIndices")

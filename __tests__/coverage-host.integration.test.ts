@@ -1,24 +1,18 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import {
-  fauxAssistantMessage,
-  fauxProvider,
-  fauxToolCall,
-  InMemoryCredentialStore,
-} from "@earendil-works/pi-ai";
-import * as pinnedPi from "@earendil-works/pi-coding-agent";
 import { expect, it } from "vitest";
+import { coverageHost } from "./fixtures/coverage-host";
 
 // [ref:coverage_not_task_authority] Host proof, not a classifier or production adapter.
 it("coverage host pairs canonical results and rejects preappend authority", async () => {
-  const host = process.env.PROGRESS_PI_HOST_ROOT
-    ? ((await import(
-        pathToFileURL(join(process.env.PROGRESS_PI_HOST_ROOT, "dist/index.js"))
-          .href
-      )) as typeof pinnedPi)
-    : pinnedPi;
+  const { host, ai } = await coverageHost();
+  const {
+    fauxAssistantMessage,
+    fauxProvider,
+    fauxToolCall,
+    InMemoryCredentialStore,
+  } = ai;
   const cwd = await mkdtemp(join(tmpdir(), "coverage-host-"));
   const file = join(cwd, "inventory.txt");
   await writeFile(file, "inventory before late listener");
@@ -127,6 +121,12 @@ it("coverage host pairs canonical results and rejects preappend authority", asyn
     });
     await session.prompt("Read every item in the inventory.");
     expect(errors).toEqual([]);
+    expect(
+      session.messages.filter(
+        (message) =>
+          message.role === "assistant" && message.stopReason === "error",
+      ),
+    ).toEqual([]);
     expect(starts).toEqual([read.id, missing.id]);
     expect(preappend).toEqual([read.id, missing.id]);
     expect(ends).toEqual(

@@ -6,11 +6,15 @@ const MAX_RETAINED_CHILDREN = 200;
 const MAX_GROUPS = 200;
 const MAX_LABEL_SCALARS = 240;
 const MAX_ADMISSION_BYTES = 32 * 1024;
+const MAX_SUBTASK_CHECKPOINT_BYTES = 64 * 1024;
+const CHECKPOINT_VERSION = 1;
+const MAX_OMISSIONS = 2;
+const MAX_OMISSION_SCALARS = 512;
 
 const digest = /^[a-f0-9]{64}$/;
 const taskId = /^task:[1-9]\d*$/;
 const groupId = /^subtask-group:([1-9]\d*)$/;
-const childId = /^subtask-child:[1-9]\d*$/;
+const childId = /^subtask-child:([1-9]\d*)$/;
 const controlCharacter = /[\p{Cc}\p{Cf}]/u;
 const whitespaceCharacter = /^\s$/u;
 
@@ -95,9 +99,38 @@ export interface SubtaskSnapshot {
   groups: SubtaskGroupSnapshot[];
 }
 
+interface SubtaskReportReceipt {
+  status: SubtaskChildStatus;
+  source: SourceRef;
+}
+
+interface SubtaskCheckpointReport extends SubtaskReportReceipt {
+  childId: string;
+}
+
+interface SubtaskCheckpointGroup extends SubtaskGroupSnapshot {
+  latestAdmissionDigest: string;
+  reports: SubtaskCheckpointReport[];
+}
+
+export interface SubtaskCheckpoint {
+  version: typeof CHECKPOINT_VERSION;
+  nextGroupId: number;
+  nextChildId: number;
+  groups: SubtaskCheckpointGroup[];
+}
+
+export interface SubtaskRestoreOptions {
+  parents: readonly HybridTask[];
+  sourceCurrent: (source: SourceRef) => boolean;
+}
+
 interface SubtaskGroup extends SubtaskGroupSnapshot {
   included: boolean;
-  latestAdmissionSignature: string;
+  /** SHA-256 of exact latest validated admission, never raw proposal data. */
+  latestAdmissionDigest: string;
+  /** Latest report or explicit retraction receipt for active and retired IDs. */
+  reportReceipts: Map<string, SubtaskReportReceipt>;
 }
 
 interface ParentAuthority {
@@ -617,13 +650,203 @@ const sameRetiredChildren = (
       sameSource(child.retirement.source, right[index].retirement.source),
   );
 
-const admissionSignature = (input: SubtaskAdmission) => inertJson(input);
+const admissionDigest = (input: SubtaskAdmission) =>
+  createHash("sha256").update(inertJson(input)).digest("hex");
 
 const allocatedGroupId = (id: string, nextGroupId: number) => {
   const match = id.match(groupId);
   if (!match) return false;
   const allocated = Number(match[1]);
   return Number.isSafeInteger(allocated) && allocated < nextGroupId;
+};
+
+const opaqueIdNumber = (value: string, pattern: RegExp) => {
+  const match = value.match(pattern);
+  if (!match) return;
+  const number = Number(match[1]);
+  return Number.isSafeInteger(number) && number >= 1 ? number : undefined;
+};
+
+const validCheckpointChild = (value: unknown): value is SubtaskChildSnapshot =>
+  hasExactKeys(value, ["id", "label", "status", "source"]) &&
+  validChildId(value.id) &&
+  opaqueIdNumber(value.id, childId) !== undefined &&
+  labelValidity(value.label) === "valid" &&
+  statusIsValid(value.status) &&
+  validSourceRef(value.source);
+
+const validCheckpointRetiredChild = (
+  value: unknown,
+): value is SubtaskRetiredChildSnapshot =>
+  hasExactKeys(value, ["id", "label", "status", "source", "retirement"]) &&
+  validChildId(value.id) &&
+  opaqueIdNumber(value.id, childId) !== undefined &&
+  labelValidity(value.label) === "valid" &&
+  statusIsValid(value.status) &&
+  validSourceRef(value.source) &&
+  hasExactKeys(value.retirement, ["source", "reason"]) &&
+  validSourceRef(value.retirement.source) &&
+  (value.retirement.reason === "replaced" ||
+    value.retirement.reason === "withdrawn" ||
+    value.retirement.reason === "out-of-scope");
+
+const validCheckpointReport = (
+  value: unknown,
+): value is SubtaskCheckpointReport =>
+  hasExactKeys(value, ["childId", "status", "source"]) &&
+  validChildId(value.childId) &&
+  opaqueIdNumber(value.childId, childId) !== undefined &&
+  statusIsValid(value.status) &&
+  validSourceRef(value.source);
+
+const checkpointGroupKeys = (value: unknown) =>
+  hasExactKeys(
+    value,
+    [
+      "id",
+      "parentTaskId",
+      "parentRevision",
+      "parentSourceDigest",
+      "listRevision",
+      "source",
+      "proof",
+      "complete",
+      "children",
+      "retired",
+      "omissions",
+      "latestAdmissionDigest",
+      "reports",
+    ],
+    ["knownTotal"],
+  );
+
+const validCheckpointGroup = (
+  value: unknown,
+): value is SubtaskCheckpointGroup => {
+  if (
+    !checkpointGroupKeys(value) ||
+    typeof value.id !== "string" ||
+    opaqueIdNumber(value.id, groupId) === undefined ||
+    typeof value.parentTaskId !== "string" ||
+    !taskId.test(value.parentTaskId) ||
+    !positiveInteger(value.parentRevision) ||
+    !validHash(value.parentSourceDigest) ||
+    !positiveInteger(value.listRevision) ||
+    !validSourceRef(value.source) ||
+    !validProof(value.proof) ||
+    typeof value.complete !== "boolean" ||
+    !validHash(value.latestAdmissionDigest) ||
+    !densePlainArray(value.children, 0, MAX_ACTIVE_CHILDREN) ||
+    !value.children.every(validCheckpointChild) ||
+    !densePlainArray(value.retired, 0, MAX_RETAINED_CHILDREN) ||
+    !value.retired.every(validCheckpointRetiredChild) ||
+    value.children.length + value.retired.length > MAX_RETAINED_CHILDREN ||
+    !densePlainArray(value.omissions, 0, MAX_OMISSIONS) ||
+    !value.omissions.every((omission) =>
+      validText(omission, MAX_OMISSION_SCALARS),
+    ) ||
+    !densePlainArray(value.reports, 0, MAX_RETAINED_CHILDREN) ||
+    value.reports.length > value.children.length + value.retired.length ||
+    !value.reports.every(validCheckpointReport)
+  )
+    return false;
+
+  if (
+    (Object.hasOwn(value, "knownTotal") &&
+      (!nonNegativeInteger(value.knownTotal) ||
+        value.knownTotal === undefined)) ||
+    !(value.complete
+      ? value.knownTotal === undefined ||
+        value.knownTotal === value.children.length
+      : value.knownTotal === undefined ||
+        (typeof value.knownTotal === "number" &&
+          value.knownTotal >= value.children.length))
+  )
+    return false;
+
+  const childById = new Map<string, SubtaskChildSnapshot>();
+  for (const child of value.children) childById.set(child.id, child);
+  for (const child of value.retired) childById.set(child.id, child);
+  if (childById.size !== value.children.length + value.retired.length)
+    return false;
+
+  const reports = new Map<string, SubtaskCheckpointReport>();
+  for (const report of value.reports) reports.set(report.childId, report);
+  if (
+    reports.size !== value.reports.length ||
+    [...reports.keys()].some((id) => !childById.has(id))
+  )
+    return false;
+
+  return [...childById.values()].every((child) => {
+    const report = reports.get(child.id);
+    return (
+      (child.status === "pending" || report !== undefined) &&
+      (!report || report.status === child.status)
+    );
+  });
+};
+
+const validSubtaskCheckpointShape = (
+  value: unknown,
+): value is SubtaskCheckpoint => {
+  if (
+    !hasExactKeys(value, ["version", "nextGroupId", "nextChildId", "groups"]) ||
+    value.version !== CHECKPOINT_VERSION ||
+    !positiveInteger(value.nextGroupId) ||
+    !positiveInteger(value.nextChildId) ||
+    !densePlainArray(value.groups, 0, MAX_GROUPS) ||
+    !value.groups.every(validCheckpointGroup)
+  )
+    return false;
+
+  const groupIds = new Set(value.groups.map((group) => group.id));
+  const parentRevisions = new Set(
+    value.groups.map(
+      (group) => `${group.parentTaskId}:${group.parentRevision}`,
+    ),
+  );
+  if (
+    groupIds.size !== value.groups.length ||
+    parentRevisions.size !== value.groups.length
+  )
+    return false;
+
+  const children = value.groups.flatMap((group) => [
+    ...group.children,
+    ...group.retired,
+  ]);
+  if (
+    children.length > MAX_RETAINED_CHILDREN ||
+    new Set(children.map((child) => child.id)).size !== children.length
+  )
+    return false;
+
+  const highestGroupId = Math.max(
+    0,
+    ...value.groups.map((group) => opaqueIdNumber(group.id, groupId) ?? 0),
+  );
+  const highestChildId = Math.max(
+    0,
+    ...children.map((child) => opaqueIdNumber(child.id, childId) ?? 0),
+  );
+  return (
+    value.nextGroupId > highestGroupId && value.nextChildId > highestChildId
+  );
+};
+
+export const subtaskCheckpointIsValid = (
+  value: unknown,
+): value is SubtaskCheckpoint => {
+  try {
+    return (
+      validSubtaskCheckpointShape(value) &&
+      Buffer.byteLength(inertJson(value), "utf8") <=
+        MAX_SUBTASK_CHECKPOINT_BYTES
+    );
+  } catch {
+    return false;
+  }
 };
 
 /**
@@ -700,15 +923,156 @@ export class SubtaskStore {
     };
   }
 
+  /**
+   * Persist only generic sidecar facts. This is a v11 component, not a v10
+   * runtime checkpoint: parent authority is rebuilt by restore.
+   */
+  checkpoint(): SubtaskCheckpoint {
+    const checkpoint: SubtaskCheckpoint = {
+      version: CHECKPOINT_VERSION,
+      nextGroupId: this.nextGroupId,
+      nextChildId: this.nextChildId,
+      groups: this.groups.map((group) => ({
+        id: group.id,
+        parentTaskId: group.parentTaskId,
+        parentRevision: group.parentRevision,
+        parentSourceDigest: group.parentSourceDigest,
+        listRevision: group.listRevision,
+        source: cloneSource(group.source),
+        proof: cloneProof(group.proof),
+        complete: group.complete,
+        ...(group.knownTotal === undefined
+          ? {}
+          : { knownTotal: group.knownTotal }),
+        children: group.children.map(cloneChild),
+        retired: group.retired.map(cloneRetiredChild),
+        omissions: [...group.omissions],
+        latestAdmissionDigest: group.latestAdmissionDigest,
+        reports: [...group.children, ...group.retired].flatMap((child) => {
+          const receipt = group.reportReceipts.get(child.id);
+          return receipt
+            ? [
+                {
+                  childId: child.id,
+                  status: receipt.status,
+                  source: cloneSource(receipt.source),
+                },
+              ]
+            : [];
+        }),
+      })),
+    };
+    if (!validSubtaskCheckpointShape(checkpoint))
+      throw new Error("Subtask checkpoint has invalid v11 component shape");
+    if (
+      Buffer.byteLength(inertJson(checkpoint), "utf8") >
+      MAX_SUBTASK_CHECKPOINT_BYTES
+    )
+      throw new Error("Subtask checkpoint exceeds v11 component bounds");
+    return checkpoint;
+  }
+
+  static restore(
+    data: unknown,
+    options: SubtaskRestoreOptions,
+  ): SubtaskStore | undefined {
+    if (
+      !subtaskCheckpointIsValid(data) ||
+      !hasExactKeys(options, ["parents", "sourceCurrent"]) ||
+      !densePlainArray(options.parents, 0, MAX_GROUPS) ||
+      typeof options.sourceCurrent !== "function"
+    )
+      return;
+
+    const currentParents = new Map<string, ParentAuthority>();
+    for (const parent of options.parents) {
+      if (!validParent(parent) || currentParents.has(parent.id)) return;
+      currentParents.set(parent.id, {
+        revision: parent.revision,
+        included: parent.included,
+      });
+    }
+    const sourceCurrent = (source: SourceRef) => {
+      try {
+        return options.sourceCurrent(cloneSource(source)) === true;
+      } catch {
+        return false;
+      }
+    };
+
+    const store = new SubtaskStore();
+    store.nextGroupId = data.nextGroupId;
+    store.nextChildId = data.nextChildId;
+    store.currentParents = currentParents;
+    store.hasCurrentParentAuthority = true;
+    store.groups = data.groups.flatMap((group) => {
+      const parent = currentParents.get(group.parentTaskId);
+      // Parent wording/source can change at same revision. Persisted digest is
+      // immutable admission provenance; revision is current authority fence.
+      if (
+        !parent ||
+        parent.revision !== group.parentRevision ||
+        !sourceCurrent(group.source) ||
+        !group.children.every((child) => sourceCurrent(child.source)) ||
+        !group.retired.every(
+          (child) =>
+            sourceCurrent(child.source) &&
+            sourceCurrent(child.retirement.source),
+        )
+      )
+        return [];
+
+      const reportReceipts = new Map<string, SubtaskReportReceipt>();
+      for (const report of group.reports) {
+        if (sourceCurrent(report.source))
+          reportReceipts.set(report.childId, {
+            status: report.status,
+            source: cloneSource(report.source),
+          });
+      }
+      const restoredStatus = (child: SubtaskChildSnapshot) =>
+        reportReceipts.get(child.id)?.status ?? "pending";
+      return [
+        {
+          id: group.id,
+          parentTaskId: group.parentTaskId,
+          parentRevision: group.parentRevision,
+          parentSourceDigest: group.parentSourceDigest,
+          listRevision: group.listRevision,
+          source: cloneSource(group.source),
+          proof: cloneProof(group.proof),
+          complete: group.complete,
+          ...(group.knownTotal === undefined
+            ? {}
+            : { knownTotal: group.knownTotal }),
+          children: group.children.map((child) => ({
+            ...cloneChild(child),
+            status: restoredStatus(child),
+          })),
+          retired: group.retired.map((child) => ({
+            ...cloneRetiredChild(child),
+            status: restoredStatus(child),
+          })),
+          omissions: [...group.omissions],
+          included: parent.included,
+          latestAdmissionDigest: group.latestAdmissionDigest,
+          reportReceipts,
+        } satisfies SubtaskGroup,
+      ];
+    });
+    return store;
+  }
+
   private admitInternal(input: SubtaskAdmission): SubtaskAdmissionResult {
     const validity = admissionValidity(input);
     if (validity !== "valid") return { accepted: false, reason: validity };
 
     // All byte accounting and replay identity use this inert detached projection.
     const admission = cloneAdmission(input);
-    const serialized = admissionSignature(admission);
-    if (Buffer.byteLength(serialized, "utf8") > MAX_ADMISSION_BYTES)
+    const serializedAdmission = inertJson(admission);
+    if (Buffer.byteLength(serializedAdmission, "utf8") > MAX_ADMISSION_BYTES)
       return { accepted: false, reason: "capacity" };
+    const replayDigest = admissionDigest(admission);
 
     const { parent } = admission;
     if (!parent.included) return { accepted: false, reason: "stale" };
@@ -730,7 +1094,7 @@ export class SubtaskStore {
     if (!group)
       return this.admitNewGroup(
         admission,
-        serialized,
+        replayDigest,
         parentGroups.filter(
           (candidate) => candidate.parentRevision < parent.revision,
         ),
@@ -738,17 +1102,17 @@ export class SubtaskStore {
 
     if (!group.included) return { accepted: false, reason: "stale" };
     if (admission.expectedListRevision !== group.listRevision) {
-      return serialized === group.latestAdmissionSignature
+      return replayDigest === group.latestAdmissionDigest
         ? { accepted: true }
         : { accepted: false, reason: "stale" };
     }
 
-    return this.refineGroup(group, admission, serialized);
+    return this.refineGroup(group, admission, replayDigest);
   }
 
   private admitNewGroup(
     input: SubtaskAdmission,
-    serialized: string,
+    replayDigest: string,
     superseded: readonly SubtaskGroup[],
   ): SubtaskAdmissionResult {
     if (input.expectedListRevision !== 0)
@@ -797,7 +1161,8 @@ export class SubtaskStore {
       retired: [],
       omissions: omissionList(input.complete, input.knownTotal, children, []),
       included: true,
-      latestAdmissionSignature: serialized,
+      latestAdmissionDigest: replayDigest,
+      reportReceipts: new Map(),
     };
     this.groups = [
       ...this.groups.filter((item) => !supersededSet.has(item)),
@@ -811,7 +1176,7 @@ export class SubtaskStore {
   private refineGroup(
     group: SubtaskGroup,
     input: SubtaskAdmission,
-    serialized: string,
+    replayDigest: string,
   ): SubtaskAdmissionResult {
     const activeById = new Map(
       group.children.map((child) => [child.id, child]),
@@ -929,7 +1294,7 @@ export class SubtaskStore {
       group.knownTotal !== input.knownTotal;
 
     if (!changed) {
-      group.latestAdmissionSignature = serialized;
+      group.latestAdmissionDigest = replayDigest;
       return { accepted: true };
     }
 
@@ -947,7 +1312,7 @@ export class SubtaskStore {
             children,
             retired,
             omissions,
-            latestAdmissionSignature: serialized,
+            latestAdmissionDigest: replayDigest,
           }
         : candidate,
     );
@@ -978,18 +1343,24 @@ export class SubtaskStore {
     )
       return { accepted: false, reason: "foreign" };
 
-    this.groups = this.groups.map((candidate) =>
-      candidate === group
-        ? {
-            ...candidate,
-            children: candidate.children.map((child) =>
-              selected.has(child.id)
-                ? { ...cloneChild(child), status: input.status }
-                : child,
-            ),
-          }
-        : candidate,
-    );
+    this.groups = this.groups.map((candidate) => {
+      if (candidate !== group) return candidate;
+      const reportReceipts = new Map(candidate.reportReceipts);
+      for (const id of selected)
+        reportReceipts.set(id, {
+          status: input.status,
+          source: cloneSource(input.source),
+        });
+      return {
+        ...candidate,
+        reportReceipts,
+        children: candidate.children.map((child) =>
+          selected.has(child.id)
+            ? { ...cloneChild(child), status: input.status }
+            : child,
+        ),
+      };
+    });
     return { accepted: true };
   }
 

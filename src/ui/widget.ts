@@ -138,6 +138,39 @@ const warning = (snapshot: WidgetSnapshot, width: number) => {
     return shortWarning("analysis-active", presentation.activity, width);
 };
 
+/**
+ * Advisory qualifier only: exact current parent/revision coverage has open or
+ * unconfirmed review facts. It never changes task lifecycle or progress.
+ */
+export const coverageUnconfirmedForTask = (
+  coverage: WidgetSnapshot["coverage"],
+  task: WidgetSnapshot["board"]["tasks"][number] | undefined,
+) => {
+  if (!coverage || !task) return false;
+  return coverage.groups.some((group) => {
+    if (
+      group.parentTaskId !== task.taskId ||
+      group.parentRevision !== task.revision
+    )
+      return false;
+    const knownTotal = group.complete
+      ? (group.knownTotal ?? group.children.length)
+      : group.knownTotal;
+    const reviewed = group.children.filter(
+      (child) => child.status === "reported-reviewed",
+    ).length;
+    return (
+      !group.complete ||
+      knownTotal === undefined ||
+      group.children.some(
+        (child) =>
+          child.status === "reported-blocked" || child.status === "pending",
+      ) ||
+      reviewed < knownTotal
+    );
+  });
+};
+
 const currentTask = (board: BoardSnapshot) => {
   const current = board.currentTask;
   if (!current) return { text: "Current Task: not identified" };
@@ -277,11 +310,22 @@ export function renderWidget(
     snapshot.visibility?.budgetRemaining === 0
       ? "Visibility budget reached · history incomplete"
       : undefined;
+  const coverageTask = snapshot.board.currentTask
+    ? snapshot.board.tasks.find(
+        (candidate) => candidate.taskId === snapshot.board.currentTask?.taskId,
+      )
+    : undefined;
+  const coverageUnconfirmed = coverageUnconfirmedForTask(
+    snapshot.coverage,
+    coverageTask,
+  );
   const coverageWarning = snapshot.coverage?.exhausted
-    ? "Coverage exhausted · optional review unavailable"
+    ? `Coverage${coverageUnconfirmed ? " incomplete/unconfirmed ·" : ""} exhausted · optional review unavailable`
     : snapshot.coverage?.omissions && snapshot.coverage.omissions > 0
-      ? `Coverage incomplete · ${compact(snapshot.coverage.omissions)} optional candidates omitted`
-      : undefined;
+      ? `Coverage${coverageUnconfirmed ? " incomplete/unconfirmed ·" : " incomplete ·"} ${compact(snapshot.coverage.omissions)} optional candidates omitted`
+      : coverageUnconfirmed
+        ? "Coverage incomplete/unconfirmed · optional review remains"
+        : undefined;
   const lines: WidgetLine[] = [
     header,
     ...(current ? [{ text: current, wrap: true }] : []),

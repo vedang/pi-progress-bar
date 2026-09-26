@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { type BoardLayout, layoutBoard } from "./layout";
 import {
+  coverageUnconfirmedForTask,
   lifecycleTone,
   sanitizeTerminalText,
   type WidgetSnapshot,
@@ -43,6 +44,18 @@ interface ActionAnchor {
   id: string;
   order: number;
   lineOffset: number;
+}
+
+/** Exact child and wrapped line stay in view through transient current rows. */
+interface CoverageAnchor {
+  childId: string;
+  lineOffset: number;
+}
+
+interface CoveragePaneBodyLine {
+  text: string;
+  childId?: string;
+  childLineOffset?: number;
 }
 
 export interface BoardOptions {
@@ -107,6 +120,9 @@ class TaskBoard implements BoardComponent {
       this.pane === "coverage" &&
       this.coverageOffset >=
         this.coverageMaximum(this.selected(), this.lastLayout);
+    const coverageAnchor = coverageAtEnd
+      ? undefined
+      : this.captureCoverageAnchor();
     this.snapshot = clone(next);
     const tasks = this.tasks();
     const currentIndex = previousId
@@ -132,7 +148,10 @@ class TaskBoard implements BoardComponent {
     if (previousId !== this.selectedId || !sameCoverageParent) {
       this.resetActionAnchor();
       this.coverageOffset = 0;
-    } else if (anchor) this.restoreActionAnchor(anchor);
+    } else {
+      if (anchor) this.restoreActionAnchor(anchor);
+      if (coverageAnchor) this.restoreCoverageAnchor(coverageAnchor);
+    }
     if (this.pane === "coverage" && !this.hasCoverage(this.selected()))
       this.pane = "detail";
     this.clampOffsets(this.lastLayout);
@@ -500,6 +519,18 @@ class TaskBoard implements BoardComponent {
     return { reviewed, blocked, pending, accessed, denominator };
   }
 
+  private coverageUnconfirmed(task: BoardTask) {
+    return coverageUnconfirmedForTask(this.snapshot.coverage, task);
+  }
+
+  private coverageQualifier(width: number) {
+    return this.wrapLines(
+      "• Coverage incomplete/unconfirmed · optional review remains",
+      width,
+      "warning",
+    );
+  }
+
   /** Current runtime IDs are untrusted until they resolve in this exact group. */
   private coverageCurrentChildren(group: CoverageGroup) {
     const ids = new Set(
@@ -526,6 +557,8 @@ class TaskBoard implements BoardComponent {
     if (!groups.length && !coverage?.exhausted && !(coverage?.omissions ?? 0))
       return [];
     const lines = [...this.wrapLines("Coverage:", width)];
+    if (this.coverageUnconfirmed(task))
+      lines.push(...this.coverageQualifier(width));
     if (coverage?.exhausted)
       lines.push(
         ...this.wrapLines(
@@ -596,11 +629,16 @@ class TaskBoard implements BoardComponent {
     ];
   }
 
-  private coveragePaneContent(task: BoardTask, layout: BoardLayout) {
+  private coveragePaneContent(
+    task: BoardTask,
+    layout: BoardLayout,
+  ): { pinned: string[]; body: CoveragePaneBodyLine[] } {
     const width = layout.rightWidth;
     const groups = this.coverageGroups(task);
     const coverage = this.snapshot.coverage;
     const header = [...this.wrapLines("Coverage:", width, "accent")];
+    if (this.coverageUnconfirmed(task))
+      header.push(...this.coverageQualifier(width));
     if (coverage?.exhausted)
       header.push(
         ...this.wrapLines(
@@ -617,7 +655,7 @@ class TaskBoard implements BoardComponent {
           "warning",
         ),
       );
-    const body: string[] = [];
+    const body: CoveragePaneBodyLine[] = [];
     for (const group of groups) {
       const stats = this.coverageStats(group);
       const denominator =
@@ -641,25 +679,39 @@ class TaskBoard implements BoardComponent {
             `• ${this.coverageCurrentLabel(current)}`,
             width,
             "accent",
-          ),
+          ).map((text) => ({ text })),
         );
       if (groups.length > 1)
-        body.push(...this.wrapLines("Inventory:", width, "dim"));
-      for (const child of group.children)
         body.push(
-          ...this.wrapLines(
-            `• ${child.label} · ${
-              child.status === "reported-reviewed"
-                ? "reported reviewed"
-                : child.status === "reported-blocked"
-                  ? "blocked"
-                  : "pending"
-            }${child.accessed ? " · accessed" : ""}`,
-            width,
-          ),
+          ...this.wrapLines("Inventory:", width, "dim").map((text) => ({
+            text,
+          })),
         );
+      for (const child of group.children) {
+        const childLines = this.wrapLines(
+          `• ${child.label} · ${
+            child.status === "reported-reviewed"
+              ? "reported reviewed"
+              : child.status === "reported-blocked"
+                ? "blocked"
+                : "pending"
+          }${child.accessed ? " · accessed" : ""}`,
+          width,
+        );
+        body.push(
+          ...childLines.map((text, childLineOffset) => ({
+            text,
+            childId: child.id,
+            childLineOffset,
+          })),
+        );
+      }
       for (const omission of group.omissions)
-        body.push(...this.wrapLines(`• ${omission}`, width, "warning"));
+        body.push(
+          ...this.wrapLines(`• ${omission}`, width, "warning").map((text) => ({
+            text,
+          })),
+        );
     }
     const maximumPinned = Math.max(1, layout.contentRows - 2);
     const summary = this.coverageSummaryHeadings(width);
@@ -677,7 +729,9 @@ class TaskBoard implements BoardComponent {
     this.coverageOffset = Math.max(0, Math.min(this.coverageOffset, maximum));
     return [
       ...pinned,
-      ...body.slice(this.coverageOffset, this.coverageOffset + capacity),
+      ...body
+        .slice(this.coverageOffset, this.coverageOffset + capacity)
+        .map((line) => line.text),
     ];
   }
 
@@ -699,6 +753,42 @@ class TaskBoard implements BoardComponent {
       0,
       body.length - this.coverageCapacity(task, layout, pinned.length),
     );
+  }
+
+  /** Preserve first visible child line, not stale numeric row after current rows. */
+  private captureCoverageAnchor(): CoverageAnchor | undefined {
+    const task = this.selected();
+    if (!task || this.pane !== "coverage") return;
+    const { pinned, body } = this.coveragePaneContent(task, this.lastLayout);
+    const capacity = this.coverageCapacity(
+      task,
+      this.lastLayout,
+      pinned.length,
+    );
+    const maximum = Math.max(0, body.length - capacity);
+    const offset = Math.max(0, Math.min(this.coverageOffset, maximum));
+    if (offset >= maximum) return;
+    const line = body
+      .slice(offset, offset + capacity)
+      .find(
+        (candidate) =>
+          candidate.childId !== undefined &&
+          candidate.childLineOffset !== undefined,
+      );
+    if (!line?.childId || line.childLineOffset === undefined) return;
+    return { childId: line.childId, lineOffset: line.childLineOffset };
+  }
+
+  private restoreCoverageAnchor(anchor: CoverageAnchor) {
+    const task = this.selected();
+    if (!task || this.pane !== "coverage") return;
+    const { body } = this.coveragePaneContent(task, this.lastLayout);
+    const offset = body.findIndex(
+      (line) =>
+        line.childId === anchor.childId &&
+        line.childLineOffset === anchor.lineOffset,
+    );
+    if (offset >= 0) this.coverageOffset = offset;
   }
 
   private sameVisibilityTask(

@@ -261,7 +261,7 @@ describe("generic conversation-backed subtask store", () => {
     const store = new SubtaskStore();
     const expand = vi.spyOn(Array, "from");
     let expanded = false;
-    let result;
+    let result: ReturnType<SubtaskStore["admit"]> | undefined;
     try {
       result = store.admit(input);
       expanded = expand.mock.calls.some((args) => args[0] === label);
@@ -272,6 +272,53 @@ describe("generic conversation-backed subtask store", () => {
     expect(expanded).toBe(false);
     expect(store.snapshot()).toEqual({ groups: [] });
   });
+
+  it.each(["object", "array"])(
+    "ignores prototype-level serializers for size, provenance and replay (%s)",
+    (kind) => {
+      const oversized = byteBoundAdmission(32769);
+      const input = subtaskAdmission();
+      const stale = {
+        ...subtaskAdmission(["Different obligation"]),
+        expectedListRevision: 99,
+      };
+      const capped = new SubtaskStore();
+      const replay = new SubtaskStore();
+      const control = new SubtaskStore();
+      expect(control.admit(input)).toEqual({ accepted: true });
+      const empty = capped.snapshot();
+      const prototype = kind === "object" ? Object.prototype : Array.prototype;
+      const previous = Object.getOwnPropertyDescriptor(prototype, "toJSON");
+      let calls = 0;
+      const outcomes: ReturnType<SubtaskStore["admit"]>[] = [];
+      // Keep assertions/framework serialization outside this tightly scoped hook.
+      try {
+        Object.defineProperty(prototype, "toJSON", {
+          configurable: true,
+          value: () => {
+            calls++;
+            return "forged";
+          },
+        });
+        outcomes.push(capped.admit(oversized));
+        outcomes.push(replay.admit(input));
+        outcomes.push(replay.admit(stale));
+      } finally {
+        if (previous) Object.defineProperty(prototype, "toJSON", previous);
+        else Reflect.deleteProperty(prototype, "toJSON");
+      }
+      expect(calls).toBe(0);
+      expect(outcomes).toEqual([
+        { accepted: false, reason: "capacity" },
+        { accepted: true },
+        { accepted: false, reason: "stale" },
+      ]);
+      expect(capped.snapshot()).toEqual(empty);
+      expect(replay.snapshot()).toEqual(control.snapshot());
+      expect(capped.admit(input)).toEqual({ accepted: true });
+      expect(capped.snapshot()).toEqual(control.snapshot());
+    },
+  );
 
   it("makes exact latest admission replay idempotent without reallocating IDs", () => {
     const { store, input } = fixture();

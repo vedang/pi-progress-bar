@@ -825,7 +825,9 @@ export class Monitor {
     const accepted = this.coverageAdapter.confirm(entries, this.coverageEpoch);
     this.prunePendingCoverage(pass);
     this.enqueueCoverageAdapterResult(accepted, pass);
-    this.admitPendingCoverage();
+    this.admitPendingCoverage(pass);
+    // Inventory admission can group an owner after pre-admission reconciliation.
+    this.reconcileCoverageIntentJournal(pass);
     this.wakeCoverage();
     this.drain();
     this.publish();
@@ -2332,6 +2334,25 @@ export class Monitor {
         )
       )
         enqueueRestored({ kind: "intent", key: job.targetKey });
+    if (this.normalizeCoverageIntentOverlaps()) {
+      droppedQueueItems++;
+      const retainedIntentIdentities = new Set(
+        [
+          ...this.coverageIntentJobs.values(),
+          ...this.coverageIntents
+            .journalSnapshot()
+            .accepted.map((receipt) => ({ identity: receipt.identity })),
+          ...this.coverageIntents
+            .journalSnapshot()
+            .negative.map((receipt) => ({ identity: receipt.identity })),
+        ].map((item) => item.identity),
+      );
+      this.coverageIntentReceipts = new Map(
+        [...this.coverageIntentReceipts].filter(([identity]) =>
+          retainedIntentIdentities.has(identity),
+        ),
+      );
+    }
     if (droppedQueueItems)
       this.coverageOmissions = saturatingAdd(
         this.coverageOmissions,
@@ -2611,8 +2632,8 @@ export class Monitor {
   }
 
   /** Admit only canonical inventory/access pending an already-grounded intent. */
-  private admitPendingCoverage() {
-    this.prunePendingCoverage(this.beginCanonicalPass());
+  private admitPendingCoverage(pass = this.beginCanonicalPass()) {
+    this.prunePendingCoverage(pass);
     const candidate = this.clonedCoverage();
     if (!candidate) return;
     const before = JSON.stringify(candidate.checkpoint());
@@ -2774,6 +2795,44 @@ export class Monitor {
           : [],
       ),
     );
+  }
+
+  /** Keep one latest authority per owner while retaining legal queue order. */
+  private normalizeCoverageIntentOverlaps() {
+    const jobs = [...this.coverageIntentJobs.entries()];
+    const queuedAt = new Map(
+      this.coverageQueue.flatMap((item, index) =>
+        item.kind === "intent" ? [[item.key, index] as const] : [],
+      ),
+    );
+    const superseded = new Set<string>();
+    for (let index = 0; index < jobs.length; index++) {
+      const current = jobs[index];
+      if (!current) continue;
+      const [key, job] = current;
+      const owners = new Set(
+        job.owners.map((owner) => this.coverageOwnerKey(owner)),
+      );
+      for (const newer of jobs.slice(index + 1)) {
+        const [newerKey, newerJob] = newer;
+        if (
+          !newerJob.owners.some((owner) =>
+            owners.has(this.coverageOwnerKey(owner)),
+          )
+        )
+          continue;
+        const currentPosition = queuedAt.get(key);
+        const newerPosition = queuedAt.get(newerKey);
+        if (
+          currentPosition !== undefined &&
+          (newerPosition === undefined || currentPosition < newerPosition)
+        )
+          superseded.add(newerKey);
+        else superseded.add(key);
+      }
+    }
+    this.fenceCoverageIntentJobs(superseded);
+    return superseded.size;
   }
 
   /** Queue selected-model ingress only when an ungrouped parent candidate remains. */
@@ -3154,32 +3213,8 @@ export class Monitor {
   /** Named canonical/control wake only; coverage owns no retry timer or poller. */
   private wakeCoverage(revivePermanent = false) {
     const now = Date.now();
-    if (revivePermanent) {
-      const jobs = [...this.coverageIntentJobs.entries()];
-      const superseded = new Set<string>();
-      for (let index = 0; index < jobs.length; index++) {
-        const current = jobs[index];
-        if (!current) continue;
-        const [key, job] = current;
-        const owners = new Set(
-          job.owners.map((owner) => this.coverageOwnerKey(owner)),
-        );
-        if (
-          jobs
-            .slice(index + 1)
-            .some(([, newer]) =>
-              newer.owners.some((owner) =>
-                owners.has(this.coverageOwnerKey(owner)),
-              ),
-            )
-        )
-          superseded.add(key);
-      }
-      if (superseded.size) {
-        this.fenceCoverageIntentJobs(superseded);
-        this.recordCoverageOmission(1, true);
-      }
-    }
+    if (this.normalizeCoverageIntentOverlaps())
+      this.recordCoverageOmission(1, true);
     const enqueue = (
       item: CoverageQueueCheckpoint,
       owners: readonly CoverageIntentParentBinding[],
@@ -3468,19 +3503,49 @@ export class Monitor {
         (at) => this.recordCoverageExtractionDispatch(epoch, at),
       );
       const live = this.coverageIntentJobs.get(jobKey);
+      const usageValid =
+        safeUsageValue(result.usage.inputTokens) &&
+        safeUsageValue(result.usage.outputTokens);
+      const responseAccounted =
+        this.enabled && epoch === this.coverageEpoch && usageValid;
+      if (responseAccounted) {
+        this.coverageUsage.extraction.inputTokens = saturatingAdd(
+          this.coverageUsage.extraction.inputTokens,
+          result.usage.inputTokens,
+        );
+        this.coverageUsage.extraction.outputTokens = saturatingAdd(
+          this.coverageUsage.extraction.outputTokens,
+          result.usage.outputTokens,
+        );
+        const proof = this.coverageIntentReceipts.get(request.identity);
+        if (proof) {
+          const receipts = new Map(this.coverageIntentReceipts);
+          receipts.set(request.identity, {
+            ...proof,
+            usage: {
+              inputTokens: result.usage.inputTokens,
+              outputTokens: result.usage.outputTokens,
+            },
+          });
+          this.coverageIntentReceipts = receipts;
+        }
+      }
       if (
         controller.signal.aborted ||
         this.coverageFlight?.kind !== "intent" ||
         this.coverageFlight.jobKey !== jobKey ||
         this.coverageFlight.request !== request ||
         live?.identity !== request.identity ||
-        !this.enabled ||
-        epoch !== this.coverageEpoch ||
-        !safeUsageValue(result.usage.inputTokens) ||
-        !safeUsageValue(result.usage.outputTokens)
-      )
+        !responseAccounted
+      ) {
+        if (responseAccounted) this.persistCoverageState();
         return;
+      }
       const pass = this.beginCanonicalPass();
+      if (!live || !this.coverageIntentJobCurrent(live, pass)) {
+        this.discardCoverageIntentJob(jobKey);
+        return;
+      }
       const priorJournal = this.coverageIntents.journalSnapshot();
       const completed = this.coverageIntents.finish(
         request,
@@ -3488,16 +3553,6 @@ export class Monitor {
         this.state,
         (entryId) => this.resolveObservation(pass, entryId),
         epoch,
-      );
-      const inputTokens = this.coverageUsage.extraction.inputTokens;
-      const outputTokens = this.coverageUsage.extraction.outputTokens;
-      this.coverageUsage.extraction.inputTokens = saturatingAdd(
-        inputTokens,
-        result.usage.inputTokens,
-      );
-      this.coverageUsage.extraction.outputTokens = saturatingAdd(
-        outputTokens,
-        result.usage.outputTokens,
       );
       if (completed.status !== "accepted") {
         if (

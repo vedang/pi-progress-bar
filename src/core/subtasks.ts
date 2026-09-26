@@ -521,10 +521,37 @@ const cloneAdmission = (input: SubtaskAdmission): SubtaskAdmission => ({
   ...(input.knownTotal === undefined ? {} : { knownTotal: input.knownTotal }),
 });
 
+/**
+ * Build a JSON-only projection that cannot inherit ambient toJSON hooks.
+ * Reducer clones stay ordinary arrays/records; only serialization needs masking.
+ */
+const inertSerializationProjection = (value: unknown): unknown => {
+  if (Array.isArray(value)) {
+    const projection: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1)
+      projection.push(inertSerializationProjection(value[index]));
+    Object.defineProperty(projection, "toJSON", {
+      value: undefined,
+      enumerable: false,
+    });
+    return projection;
+  }
+  if (value && typeof value === "object") {
+    const projection = Object.create(null) as Record<string, unknown>;
+    for (const [key, child] of Object.entries(value))
+      projection[key] = inertSerializationProjection(child);
+    return projection;
+  }
+  return value;
+};
+
+const inertJson = (value: object) =>
+  JSON.stringify(inertSerializationProjection(value)) as string;
+
 const parentSourceDigest = (source: SourceRef) =>
   createHash("sha256")
     .update(
-      JSON.stringify([
+      inertJson([
         source.entryId,
         source.messageHash,
         source.role,
@@ -590,7 +617,7 @@ const sameRetiredChildren = (
       sameSource(child.retirement.source, right[index].retirement.source),
   );
 
-const admissionSignature = (input: SubtaskAdmission) => JSON.stringify(input);
+const admissionSignature = (input: SubtaskAdmission) => inertJson(input);
 
 const allocatedGroupId = (id: string, nextGroupId: number) => {
   const match = id.match(groupId);

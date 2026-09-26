@@ -1,4 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+
+import type { ObservationRef } from "../core/hybrid-state";
 
 const ADVISORY_CUSTOM_TYPE = "pi-progress-advisory" as const;
 const RECONCILIATION_KIND = "reconciliation" as const;
@@ -8,6 +10,10 @@ const RETRY_DELAYS_MS = [2_000, 8_000] as const;
 const FINAL_EVIDENCE_GRACE_MS = 8_000;
 const MAX_CONTENT_UTF8_BYTES = 24 * 1024;
 const MAX_CONTENT_JSON_BODY_BYTES = 32 * 1024;
+const MAX_SETTLEMENT_SUFFIX_ENTRIES = 64;
+const MAX_SETTLEMENT_REPLIES = 16;
+const MAX_SETTLEMENT_VISIBLE_BYTES = 12 * 1024;
+const RECEIPT_HASH_PLACEHOLDER = "0".repeat(64);
 const UUID_V4 =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -29,6 +35,17 @@ export type ReconciliationDeliveryRequest = Readonly<{
   content: string;
   sessionEpoch: number;
   branchEpoch: number;
+}>;
+
+export type ReconciliationSettlement = Readonly<{
+  kind: "reconciliation";
+  opportunityId: string;
+  sendId: string;
+  sessionEpoch: number;
+  branchEpoch: number;
+  replyRunId: number;
+  question: Readonly<{ entryId: string; contentHash: string }>;
+  replies: readonly ObservationRef[];
 }>;
 
 type DeliveryState = Readonly<{
@@ -70,6 +87,7 @@ type DeliveryOptions = Readonly<{
   ): void;
   uuid?(): string;
   clock?: Clock;
+  onReconciliationSettled?(receipt: ReconciliationSettlement): void;
 }>;
 
 type Phase = "pending" | "confirmed" | "exhausted" | "cancelled";
@@ -89,6 +107,7 @@ interface Chain {
   settledRun?: number;
   external: boolean;
   canonical: boolean;
+  revoked: boolean;
 }
 
 const defaultClock: Clock = {
@@ -105,6 +124,9 @@ const validUuid = (value: unknown): value is string =>
   value.length === 36 &&
   Buffer.byteLength(value, "utf8") === 36 &&
   UUID_V4.test(value);
+
+const sha256 = (text: string) =>
+  createHash("sha256").update(text).digest("hex");
 
 const plainObject = (value: unknown): value is Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -185,6 +207,7 @@ export class ReconciliationDelivery {
         : {}),
       external: false,
       canonical: false,
+      revoked: false,
     };
     this.chain = chain;
     this.invoke(chain);
@@ -272,11 +295,23 @@ export class ReconciliationDelivery {
           ? "advisory-only"
           : "uncertain-advisory";
 
+    const receipt =
+      origin === "advisory-only" && this.options.onReconciliationSettled
+        ? this.settlementReceipt(chain, branch, run)
+        : undefined;
+
     // Retain only a still-live uncertain chain so its bounded retry/grace work
     // can gather canonical evidence. All terminal chains must release future
-    // opportunities after this settlement.
+    // opportunities before a passive receipt observer can acquire transport.
     if (origin !== "uncertain-advisory" || chain.phase !== "pending")
       this.clearChain(chain);
+    if (receipt) {
+      try {
+        this.options.onReconciliationSettled?.(receipt);
+      } catch {
+        // Passive observers cannot alter settlement origin or transport state.
+      }
+    }
     return origin;
   }
 
@@ -474,6 +509,198 @@ export class ReconciliationDelivery {
     );
   }
 
+  private settlementReceipt(
+    chain: Chain,
+    branch: readonly unknown[],
+    run: number,
+  ): ReconciliationSettlement | undefined {
+    try {
+      if (
+        chain.request.kind !== RECONCILIATION_KIND ||
+        chain.revoked ||
+        chain.phase !== "confirmed" ||
+        chain.ownRun !== run ||
+        !this.receiptStateCurrent(chain)
+      )
+        return;
+
+      const suffixLength = branch.length - chain.baselineLength;
+      if (suffixLength <= 0 || suffixLength > MAX_SETTLEMENT_SUFFIX_ENTRIES)
+        return;
+      const suffix = branch.slice(chain.baselineLength);
+      const idCounts = new Map<string, number>();
+      let question: Record<string, unknown> | undefined;
+      let questionIndex = -1;
+      for (let index = 0; index < suffix.length; index++) {
+        const entry = suffix[index];
+        if (!plainObject(entry)) continue;
+        if (typeof entry.id === "string")
+          idCounts.set(entry.id, (idCounts.get(entry.id) ?? 0) + 1);
+        if (!this.matches(chain, entry)) continue;
+        if (question) return;
+        question = entry;
+        questionIndex = index;
+      }
+      if (!question || questionIndex < 0) return;
+
+      const questionId = question.id;
+      const details = question.details;
+      if (
+        typeof questionId !== "string" ||
+        !questionId ||
+        !this.receiptStringFits(questionId) ||
+        idCounts.get(questionId) !== 1 ||
+        !plainObject(details) ||
+        typeof details.sendId !== "string" ||
+        !this.receiptStringFits(details.sendId)
+      )
+        return;
+
+      for (const entry of suffix) {
+        if (this.containsSubstantiveTool(entry)) return;
+      }
+
+      const replies: ObservationRef[] = [];
+      let serializedBytes = 2; // JSON array brackets for visible observations.
+      for (let index = questionIndex + 1; index < suffix.length; index++) {
+        const entry = suffix[index];
+        if (
+          !plainObject(entry) ||
+          entry.type !== "message" ||
+          !plainObject(entry.message) ||
+          entry.message.role !== "assistant"
+        )
+          continue;
+
+        if (entry.message.stopReason !== "stop") return;
+        const entryId = entry.id;
+        if (
+          typeof entryId !== "string" ||
+          !entryId ||
+          !this.receiptStringFits(entryId) ||
+          idCounts.get(entryId) !== 1 ||
+          replies.length >= MAX_SETTLEMENT_REPLIES
+        )
+          return;
+        const text = this.receiptVisibleText(entry.message.content);
+        if (!text?.trim()) return;
+        const observationBytes = this.receiptObservationBytes(entryId, text);
+        if (
+          observationBytes === undefined ||
+          serializedBytes + (replies.length ? 1 : 0) + observationBytes >
+            MAX_SETTLEMENT_VISIBLE_BYTES
+        )
+          return;
+        serializedBytes += (replies.length ? 1 : 0) + observationBytes;
+        replies.push({
+          entryId,
+          messageHash: sha256(text),
+          role: "assistant",
+        });
+      }
+      if (replies.length === 0) return;
+
+      const frozenReplies = Object.freeze(
+        replies.map((reply) => Object.freeze({ ...reply })),
+      );
+      return Object.freeze({
+        kind: RECONCILIATION_KIND,
+        opportunityId: chain.request.opportunityId,
+        sendId: details.sendId,
+        sessionEpoch: chain.request.sessionEpoch,
+        branchEpoch: chain.request.branchEpoch,
+        replyRunId: run,
+        question: Object.freeze({
+          entryId: questionId,
+          contentHash: sha256(chain.request.content),
+        }),
+        replies: frozenReplies,
+      });
+    } catch {
+      // Host transcript shape is untrusted; invalid evidence only abstains.
+      return;
+    }
+  }
+
+  private receiptStateCurrent(chain: Chain): boolean {
+    try {
+      const state = this.options.state();
+      return (
+        state.enabled &&
+        (state.mode === "tui" || state.mode === "rpc") &&
+        state.sessionEpoch === chain.request.sessionEpoch &&
+        state.branchEpoch === chain.request.branchEpoch &&
+        state.opportunityId === chain.request.opportunityId &&
+        state.relevant &&
+        state.idle &&
+        !state.pendingMessages
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** Inspect block kinds only; never read tool arguments, results, or thoughts. */
+  private containsSubstantiveTool(entry: unknown): boolean {
+    if (
+      !plainObject(entry) ||
+      entry.type !== "message" ||
+      !plainObject(entry.message)
+    )
+      return false;
+    const message = entry.message;
+    if (message.role === "toolResult" || message.role === "tool") return true;
+    if (!Array.isArray(message.content)) return false;
+    return message.content.some((block) => {
+      if (!plainObject(block)) return false;
+      return (
+        block.type === "toolCall" ||
+        block.type === "toolResult" ||
+        block.type === "tool_use" ||
+        block.type === "tool_result"
+      );
+    });
+  }
+
+  /** Existing canonical visible-text normalization, with admission before hash. */
+  private receiptVisibleText(content: unknown): string | undefined {
+    if (typeof content === "string")
+      return Buffer.byteLength(content, "utf8") <= MAX_SETTLEMENT_VISIBLE_BYTES
+        ? content
+        : undefined;
+    if (!Array.isArray(content)) return;
+
+    let text = "";
+    let bytes = 0;
+    for (const block of content) {
+      if (
+        !plainObject(block) ||
+        block.type !== "text" ||
+        typeof block.text !== "string"
+      )
+        continue;
+      const blockBytes = Buffer.byteLength(block.text, "utf8");
+      if (bytes + blockBytes > MAX_SETTLEMENT_VISIBLE_BYTES) return;
+      bytes += blockBytes;
+      text += block.text;
+    }
+    return text;
+  }
+
+  private receiptStringFits(value: string): boolean {
+    return Buffer.byteLength(value, "utf8") <= MAX_SETTLEMENT_VISIBLE_BYTES;
+  }
+
+  private receiptObservationBytes(entryId: string, text: string) {
+    const serialized = JSON.stringify({
+      id: entryId,
+      role: "assistant",
+      text,
+      hash: RECEIPT_HASH_PLACEHOLDER,
+    });
+    return Buffer.byteLength(serialized, "utf8");
+  }
+
   private scan(chain: Chain, branch: readonly unknown[]): void {
     const suffix = branch.slice(chain.baselineLength);
     if (suffix.some(isExternalEntry)) {
@@ -526,6 +753,7 @@ export class ReconciliationDelivery {
     const chain = this.chain;
     if (!chain) return;
     this.clearTimer(chain);
+    chain.revoked = true;
     chain.phase = "cancelled";
     if (chain.settledRun !== undefined) this.clearChain(chain);
   }

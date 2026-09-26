@@ -30,6 +30,7 @@ it.each(["OPEN", "DONE"] as const)(
     const h = await fixture();
     h.view.board.tasks[0].status = status;
     h.view.presentation.progress.done = status === "DONE" ? 1 : 0;
+    h.view.board.currentTask = { taskId: h.view.board.tasks[0].taskId, status };
     h.board.update(h.view);
     const output = h.text();
     expect(output).toMatch(/reported reviewed[^\n]*1\s*\/\s*22/i);
@@ -38,6 +39,13 @@ it.each(["OPEN", "DONE"] as const)(
     expect(output).toMatch(/(?:20\s+pending|pending\s*:?\s*20)/i);
     expect(output).toMatch(/intent[^\n]*user/i);
     expect(output).toContain(status);
+    if (status === "DONE") {
+      expect(output).toMatch(/coverage[^\n]*(?:incomplete|unconfirmed)/i);
+      const widget = renderWidget(h.view, false, 120, theme).join("\n");
+      expect(widget).toMatch(/coverage[^\n]*(?:incomplete|unconfirmed)/i);
+      expect(widget).toContain("1/1");
+      expect(h.view.board.tasks[0].status).toBe("DONE");
+    }
     expect(h.view.presentation.progress).toEqual({
       done: status === "DONE" ? 1 : 0,
       total: 1,
@@ -93,6 +101,38 @@ it("scrolls coverage independently and preserves position through runtime curren
     expect(h.text(120).split(heading)).toHaveLength(2);
   h.board.handleInput(keys.escape);
   expect(h.onClose).toHaveBeenCalledOnce();
+});
+it("anchors a mid-list child while runtime current rows appear and disappear", async () => {
+  const h = await fixture(24);
+  const coverage = h.view.coverage;
+  if (!coverage) throw new Error("Missing coverage");
+  h.text(120);
+  h.board.handleInput(keys.tab);
+  h.board.handleInput(keys.tab);
+  h.board.handleInput(keys.pageDown);
+  const firstVisibleChild = () => {
+    for (const line of h.text(120).split("\n")) {
+      const child = coverage.groups[0].children.find((item) =>
+        line.includes(`• ${item.label} ·`),
+      );
+      if (child) return child.id;
+    }
+  };
+  const anchor = firstVisibleChild();
+  expect(anchor).toBeDefined();
+  expect(anchor).not.toBe(coverage.groups[0].children[0].id);
+  coverage.current = [
+    {
+      groupId: coverage.groups[0].id,
+      childIds: [coverage.groups[0].children[0].id],
+    },
+  ];
+  h.board.update(h.view);
+  expect(firstVisibleChild()).toBe(anchor);
+  coverage.current = [];
+  h.board.update(h.view);
+  expect(firstVisibleChild()).toBe(anchor);
+  h.board.dispose();
 });
 it("renders runtime current batch separately from durable reviewed status", async () => {
   const h = await fixture();

@@ -16,6 +16,9 @@ import type { ReconciliationSettlement } from "./delivery";
 const MAX_GATE_DISPATCHES = 32;
 const MAX_DRAFT_DISPATCHES = 32;
 const MAX_DISPATCHES = 64;
+const MAX_RECEIPT_REPLIES = 16;
+const MAX_RECEIPT_IDENTIFIER_BYTES = 12 * 1024;
+const MAX_RECEIPT_SERIALIZED_BYTES = 24 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/;
 const UUID_V4 =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -96,6 +99,18 @@ const safeInteger = (value: unknown, minimum = 0): value is number =>
 
 const nonblank = (value: unknown): value is string =>
   typeof value === "string" && !!value.trim();
+
+/** Bound UTF-8 work before serializing any untrusted identifier. */
+const boundedIdentifier = (value: unknown): value is string =>
+  typeof value === "string" &&
+  value.length <= MAX_RECEIPT_IDENTIFIER_BYTES &&
+  !!value.trim() &&
+  Buffer.byteLength(value, "utf8") <= MAX_RECEIPT_IDENTIFIER_BYTES;
+
+const serializedStringBytes = (value: string) =>
+  Buffer.byteLength(JSON.stringify(value), "utf8");
+
+const literalBytes = (value: string) => Buffer.byteLength(value, "utf8");
 
 const sameRoot = (
   left: ContinuationRoot | undefined,
@@ -199,22 +214,67 @@ const copyReceipt = (value: unknown): ReconciliationSettlement | undefined => {
       "replies",
     ]) ||
     value.kind !== "reconciliation" ||
-    !nonblank(value.opportunityId) ||
-    !nonblank(value.sendId) ||
+    !boundedIdentifier(value.opportunityId) ||
+    !boundedIdentifier(value.sendId) ||
     !safeInteger(value.sessionEpoch) ||
     !safeInteger(value.branchEpoch) ||
     !safeInteger(value.replyRunId, 1) ||
     !record(value.question) ||
     !exactKeys(value.question, ["entryId", "contentHash"]) ||
-    !nonblank(value.question.entryId) ||
-    typeof value.question.contentHash !== "string" ||
+    !boundedIdentifier(value.question.entryId) ||
+    !boundedIdentifier(value.question.contentHash) ||
     !SHA256.test(value.question.contentHash) ||
     !Array.isArray(value.replies) ||
-    !value.replies.length
+    !value.replies.length ||
+    value.replies.length > MAX_RECEIPT_REPLIES
   )
     return;
 
+  let serializedBytes =
+    literalBytes('{"kind":"reconciliation","opportunityId":') +
+    serializedStringBytes(value.opportunityId) +
+    literalBytes(',"sendId":') +
+    serializedStringBytes(value.sendId) +
+    literalBytes(',"sessionEpoch":') +
+    literalBytes(String(value.sessionEpoch)) +
+    literalBytes(',"branchEpoch":') +
+    literalBytes(String(value.branchEpoch)) +
+    literalBytes(',"replyRunId":') +
+    literalBytes(String(value.replyRunId)) +
+    literalBytes(',"question":{"entryId":') +
+    serializedStringBytes(value.question.entryId) +
+    literalBytes(',"contentHash":') +
+    serializedStringBytes(value.question.contentHash) +
+    literalBytes('},"replies":[');
   const replyIds = new Set<string>();
+  for (let index = 0; index < value.replies.length; index++) {
+    const reply = value.replies[index];
+    if (
+      !record(reply) ||
+      !exactKeys(reply, ["entryId", "messageHash", "role"]) ||
+      !boundedIdentifier(reply.entryId) ||
+      !boundedIdentifier(reply.messageHash) ||
+      !SHA256.test(reply.messageHash) ||
+      reply.role !== "assistant" ||
+      replyIds.has(reply.entryId)
+    )
+      return;
+    replyIds.add(reply.entryId);
+    const replyBytes =
+      literalBytes('{"entryId":') +
+      serializedStringBytes(reply.entryId) +
+      literalBytes(',"messageHash":') +
+      serializedStringBytes(reply.messageHash) +
+      literalBytes(',"role":"assistant"}');
+    const separatorBytes = index ? 1 : 0;
+    if (
+      serializedBytes + separatorBytes + replyBytes + literalBytes("]}") >
+      MAX_RECEIPT_SERIALIZED_BYTES
+    )
+      return;
+    serializedBytes += separatorBytes + replyBytes;
+  }
+
   const replies =
     [] as ReconciliationSettlement["replies"] extends readonly (infer Reply)[]
       ? Reply[]
@@ -222,15 +282,10 @@ const copyReceipt = (value: unknown): ReconciliationSettlement | undefined => {
   for (const reply of value.replies) {
     if (
       !record(reply) ||
-      !exactKeys(reply, ["entryId", "messageHash", "role"]) ||
-      !nonblank(reply.entryId) ||
-      typeof reply.messageHash !== "string" ||
-      !SHA256.test(reply.messageHash) ||
-      reply.role !== "assistant" ||
-      replyIds.has(reply.entryId)
+      !boundedIdentifier(reply.entryId) ||
+      !boundedIdentifier(reply.messageHash)
     )
       return;
-    replyIds.add(reply.entryId);
     replies.push(
       Object.freeze({
         entryId: reply.entryId,
@@ -327,10 +382,9 @@ export class ContinuationController {
   }
 
   settle(receipt: ReconciliationSettlement): boolean {
+    if (this.phase !== "await-reply" || !this.root) return false;
     const copy = copyReceipt(receipt);
     if (
-      this.phase !== "await-reply" ||
-      !this.root ||
       !copy ||
       copy.opportunityId !== this.root.opportunityId ||
       copy.sessionEpoch !== this.root.sessionEpoch ||
@@ -345,6 +399,26 @@ export class ContinuationController {
 
   async wake(): Promise<void> {
     if (this.flight || this.phase !== "await-frontier") return;
+
+    let releaseFlight: () => void = () => {};
+    const flight = new Promise<void>((resolve) => {
+      releaseFlight = resolve;
+    });
+    // Reserve before authority or scheduler callbacks can synchronously reenter.
+    this.flight = flight;
+    const generation = this.generation;
+    const root = this.root;
+    try {
+      await this.advance();
+    } catch {
+      this.consumeIfActive(generation, root);
+    } finally {
+      releaseFlight();
+      if (this.flight === flight) this.flight = undefined;
+    }
+  }
+
+  private async advance(): Promise<void> {
     const root = this.root;
     const receipt = this.receipt;
     const generation = this.generation;
@@ -374,28 +448,22 @@ export class ContinuationController {
       this.consumeIfActive(generation, root);
       return;
     }
-    if (!this.hasCapacity("gate")) {
+    if (
+      !this.hasCapacity("gate") ||
+      !this.active(generation, root, receipt, "await-frontier")
+    ) {
       this.consumeIfActive(generation, root);
       return;
     }
 
     const batch = buildContinuationGate(phaseAuthority);
-    if (!batch) {
+    if (!batch || !this.active(generation, root, receipt, "await-frontier")) {
       this.consumeIfActive(generation, root);
       return;
     }
 
     this.phase = "classifying";
-    let settleFlight: () => void = () => {};
-    const flight = new Promise<void>((resolve) => {
-      settleFlight = resolve;
-    });
-    this.flight = flight;
-    void this.classify(generation, root, receipt, batch)
-      .catch(() => this.consumeIfActive(generation, root))
-      .finally(settleFlight);
-    await flight;
-    if (this.flight === flight) this.flight = undefined;
+    await this.classify(generation, root, receipt, batch);
   }
 
   invalidate(): void {
@@ -476,12 +544,17 @@ export class ContinuationController {
       return;
     }
 
+    // Scheduler may synchronously invalidate or replace authority. Check it first.
+    if (!this.canSchedule()) {
+      this.consumeIfActive(generation, root);
+      return;
+    }
     const beforeDraft = this.current(generation, root, receipt);
     if (
       !beforeDraft ||
       !sameJson(request.input.authority, beforeDraft) ||
-      !this.canSchedule() ||
-      !this.hasCapacity("draft")
+      !this.hasCapacity("draft") ||
+      !this.active(generation, root, receipt, "classifying")
     ) {
       this.consumeIfActive(generation, root);
       return;
@@ -542,11 +615,16 @@ export class ContinuationController {
       return;
     }
 
+    // Keep scheduler before final authority so its callback cannot stale emission.
+    if (!this.canSchedule()) {
+      this.consumeIfActive(generation, root);
+      return;
+    }
     const beforeEmission = this.current(generation, root, receipt);
     if (
       !beforeEmission ||
       !sameJson(request.input.authority, beforeEmission) ||
-      !this.canSchedule()
+      !this.active(generation, root, receipt, "drafting")
     ) {
       this.consumeIfActive(generation, root);
       return;
@@ -579,17 +657,13 @@ export class ContinuationController {
       admit: () => {
         if (used) return false;
         used = true;
+        const phase = kind === "gate" ? "classifying" : "drafting";
         if (
           signal.aborted ||
-          !this.active(
-            generation,
-            root,
-            receipt,
-            kind === "gate" ? "classifying" : "drafting",
-          ) ||
           !this.hasCapacity(kind) ||
           !this.canSchedule() ||
-          !fresh()
+          !fresh() ||
+          !this.active(generation, root, receipt, phase)
         )
           return false;
         if (kind === "gate") this.gateDispatches++;

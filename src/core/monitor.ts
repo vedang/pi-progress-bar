@@ -2317,23 +2317,8 @@ export class Monitor {
       this.coverageQueue.push({ ...item });
     };
     for (const item of savedCoverage?.queue ?? []) enqueueRestored(item);
-    for (const job of this.coverageJobs.values())
-      if (
-        job.state !== "permanent" &&
-        job.state !== "complete" &&
-        !this.coverageQueue.some(
-          (item) => item.kind === "report" && item.key === job.parentTaskId,
-        )
-      )
-        enqueueRestored({ kind: "report", key: job.parentTaskId });
-    for (const job of this.coverageIntentJobs.values())
-      if (
-        job.state !== "permanent" &&
-        !this.coverageQueue.some(
-          (item) => item.kind === "intent" && item.key === job.targetKey,
-        )
-      )
-        enqueueRestored({ kind: "intent", key: job.targetKey });
+    // Only persisted queue order outranks later durable job order. Fallback
+    // entries are reconstructed after stale owner authority is removed.
     if (this.normalizeCoverageIntentOverlaps()) {
       droppedQueueItems++;
       const retainedIntentIdentities = new Set(
@@ -2353,6 +2338,23 @@ export class Monitor {
         ),
       );
     }
+    for (const job of this.coverageJobs.values())
+      if (
+        job.state !== "permanent" &&
+        job.state !== "complete" &&
+        !this.coverageQueue.some(
+          (item) => item.kind === "report" && item.key === job.parentTaskId,
+        )
+      )
+        enqueueRestored({ kind: "report", key: job.parentTaskId });
+    for (const job of this.coverageIntentJobs.values())
+      if (
+        job.state !== "permanent" &&
+        !this.coverageQueue.some(
+          (item) => item.kind === "intent" && item.key === job.targetKey,
+        )
+      )
+        enqueueRestored({ kind: "intent", key: job.targetKey });
     if (droppedQueueItems)
       this.coverageOmissions = saturatingAdd(
         this.coverageOmissions,

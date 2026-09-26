@@ -142,6 +142,7 @@ describe("disconnected strict v11 generic subtask envelope", () => {
     [1, 1, "accepted", false],
     [1, 1, "noop", false],
     [0, 1, "accepted", true],
+    [0, 0, "accepted", true],
   ] as const)(
     "restores proposal frontier %s→%s %s, missing list=%s",
     async (prior, resultRevision, outcome, missing) => {

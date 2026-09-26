@@ -2,6 +2,14 @@
 
 Date: 2026-09-26. Implements the schema-freeze requirement of [revised design](coverage-subtasks.md). Owner restart authorized via `pi-progress-barroot-0wy.14`; implementation proceeds stage by stage. This document freezes interfaces and test expectations, not claims of implemented behavior. Baseline source29b193d1.
 
+## C02 full-review repair fences
+
+Accepted proposal restore compares store list frontier to the resulting `proposal.listRevision`, not pre-proposal record.listRevision; all other outcomes use record.listRevision. Missing resulting list discards accepted authority while retaining charges. Encoder may accept exact ON byte limit; commit must additionally preflight an OFF projection before save so new state cannot make durable OFF impossible.
+
+Store and journal restore snapshot **all** validated caller-owned data before the first canonical/currentness callback. Detached callback arguments alone do not stop closures mutating original wallet/records/child facts. Use the snapshot exclusively after callbacks; preserve charges and accepted facts from that snapshot.
+
+Reject scalar sizes before expensive validation/serialization: strict v11 detach uses a cheap code-unit ceiling no greater than whole-envelope capacity before trim/JSON; fixed hashes require length64 before regex; numeric ID regex inputs must have bounded maximum code units. Preserve legitimate exact512KiB mandatory envelopes and existing Unicode scalar/UTF8 limits. These supplement—not replace—exact serialized byte checks.
+
 ## C02 disconnected strict-v11 envelope and commit boundary
 
 Main freezes named staged exports in `src/core/hybrid-checkpoint.ts`: `encodeSubtaskCheckpoint(state,monitor?)`, `subtaskCheckpointStorageStatus(data)`, `restoreSubtaskCheckpoint(data,sourceId,resolve,preceding,isCurrentJob?)`, `commitSubtaskCheckpoint(state,monitor,save)`. Reuse/refactor common mandatory state, parent, health/detail metadata and canonical replay validation; do not implement v11 by relabeling/delegating to a v10 reader or stripping unknown legacy fields. Existing active encode/restore/status exports remain v10 until C05 switches coherently; staged exports are explicitly v11 only, reject v10/older and never migrate/rebuild/rebill. C05 removes obsolete path rather than retaining fallback.

@@ -54,6 +54,28 @@ function decided() {
 }
 
 describe("durable generic decomposition phases", () => {
+  it("snapshots wallet before a currentness callback mutates the original journal", () => {
+    const data = decided();
+    const before = structuredClone(data);
+    const restored = restoreSubtaskJournal(data, () => {
+      data.dispatches = 0;
+      data.usage.jev = { calls: 0, inputTokens: 0, outputTokens: 0 };
+      return false;
+    });
+    expect(restored?.records).toEqual([]);
+    expect(restored?.dispatches).toBe(before.dispatches);
+    expect(restored?.usage).toEqual(before.usage);
+  });
+  it("retains validated record snapshot despite closure mutation during currentness", () => {
+    const data = decided();
+    const before = structuredClone(data);
+    const restored = restoreSubtaskJournal(data, () => {
+      data.records[0].identity = subtaskHash("injected-record");
+      data.records[0].selectedModel = "injected/model";
+      return true;
+    });
+    expect(restored).toEqual(before);
+  });
   it("restores ready gate and detached provenance without scheduling providers", () => {
     const data = journal();
     expect(subtaskJournalIsValid(data)).toBe(true);

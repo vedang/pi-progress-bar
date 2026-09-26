@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SubtaskStore, subtaskCheckpointIsValid } from "../src/core/subtasks";
 import {
   subtaskAdmission,
@@ -29,6 +29,40 @@ const restore = (
 ) => SubtaskStore.restore(payload, { parents, sourceCurrent });
 
 describe("generic subtask store persistence primitives", () => {
+  it("snapshots validated store facts before canonical callbacks mutate original payload", () => {
+    const { store, parent } = fixture();
+    const payload = store.checkpoint();
+    const before = store.snapshot();
+    const restored = restore(payload, [parent], () => {
+      payload.groups[0].children[0].label = "Injected after validation";
+      payload.groups[0].reports[0].status = "reported-blocked";
+      return true;
+    });
+    expect(restored?.snapshot()).toEqual(before);
+  });
+  it("rejects oversized hashes before invoking a hash regular expression", () => {
+    const { store } = fixture();
+    const payload = store.checkpoint();
+    payload.groups[0].parentSourceDigest = "f".repeat(1024 * 1024);
+    const original = RegExp.prototype.test;
+    let oversizedHashTests = 0;
+    const spy = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (
+      this: RegExp,
+      value: string,
+    ) {
+      if (this.source === "^[a-f0-9]{64}$" && value.length > 64)
+        oversizedHashTests++;
+      return original.call(this, value);
+    });
+    let valid: boolean;
+    try {
+      valid = subtaskCheckpointIsValid(payload);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(valid).toBe(false);
+    expect(oversizedHashTests).toBe(0);
+  });
   it("roundtrips generic provenance/status without tool or workbook receipts", () => {
     const { store, parent } = fixture();
     const payload = store.checkpoint();

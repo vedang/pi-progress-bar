@@ -10,7 +10,10 @@ import {
   type CorrectionSnapshot,
   type CorrectionTask,
 } from "../advisory/corrections";
-import type { ReconciliationUncertainActivity } from "../advisory/reconciliation";
+import type {
+  ReconciliationCoverageSummary,
+  ReconciliationUncertainActivity,
+} from "../advisory/reconciliation";
 import {
   type ActivityCall,
   type ActivityList,
@@ -369,6 +372,7 @@ export interface AdvisorySettlementSnapshot {
   reason: AdvisorySettlementReason;
   tasks: AdvisorySettlementTask[];
   uncertainActivities?: ReconciliationUncertainActivity[];
+  coverage?: ReconciliationCoverageSummary[];
 }
 
 const rejectedStorageMessage = (kind: "unsupported" | "corrupt") =>
@@ -1659,6 +1663,7 @@ export class Monitor {
    */
   advisorySettlementSnapshot(): AdvisorySettlementSnapshot {
     const uncertainActivities = this.visibilityUncertainActivities();
+    const coverage = this.reconciliationCoverage();
     return {
       enabled: this.enabled,
       reason: this.advisorySettlementReason(),
@@ -1676,6 +1681,7 @@ export class Monitor {
           : [],
       ),
       ...(uncertainActivities.length ? { uncertainActivities } : {}),
+      ...(coverage.length ? { coverage } : {}),
     };
   }
 
@@ -5072,6 +5078,49 @@ export class Monitor {
         sourceDigest: visibilityTaskSourceDigest(task),
       }));
     return tasks.length > 0 && tasks.length <= 20 ? tasks : undefined;
+  }
+
+  /**
+   * Copy current parent/revision coverage as reported facts only. This cannot
+   * affect settlement, parent health, corrections, or task authority.
+   */
+  private reconciliationCoverage(): ReconciliationCoverageSummary[] {
+    const parents = new Map(
+      this.state.tasks
+        .filter((task) => task.included)
+        .map((task) => [`${task.id}:${task.revision}`, task]),
+    );
+    return this.coverage.snapshot().groups.flatMap((group) => {
+      if (!parents.has(`${group.parentTaskId}:${group.parentRevision}`))
+        return [];
+      const reviewed = group.children.filter(
+        (child) => child.status === "reported-reviewed",
+      ).length;
+      const blocked = group.children.filter(
+        (child) => child.status === "reported-blocked",
+      ).length;
+      const pending = group.children.length - reviewed - blocked;
+      const unconfirmed = group.children.filter(
+        (child) => child.status !== "reported-reviewed",
+      );
+      const knownTotal = group.complete
+        ? (group.knownTotal ?? group.children.length)
+        : group.knownTotal;
+      return [
+        {
+          parentTaskId: group.parentTaskId,
+          parentRevision: group.parentRevision,
+          complete: group.complete,
+          ...(knownTotal === undefined ? {} : { knownTotal }),
+          reviewed,
+          blocked,
+          pending,
+          accessed: group.children.filter((child) => child.accessed).length,
+          gaps: unconfirmed.slice(0, 3).map((child) => child.label),
+          omittedChildren: Math.max(0, unconfirmed.length - 3),
+        },
+      ];
+    });
   }
 
   /**

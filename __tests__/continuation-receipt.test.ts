@@ -47,11 +47,13 @@ function fixture(
     receipts.push(receipt);
   });
   const send = vi.fn();
+  let nextSendId = 2;
   const delivery = new ReconciliationDelivery({
     state: () => state,
     branch: () => branch,
     sendMessage: send,
-    uuid: () => sendId,
+    uuid: () =>
+      `00000000-0000-4000-8000-${String(nextSendId++).padStart(12, "0")}`,
     onReconciliationSettled,
   });
   active.push(delivery);
@@ -89,6 +91,7 @@ function fixture(
     state,
     receipts,
     onReconciliationSettled,
+    send,
     delivery,
     request,
     question,
@@ -164,6 +167,19 @@ describe("passive continuation settlement receipt", () => {
     h.delivery.onContext(h.branch);
     h.delivery.onAgentSettled(h.branch);
     expect(h.receipts).toEqual([]);
+  });
+
+  it("never revives receipt after uncertain settlement through retry and settlement-only confirmation", async () => {
+    const h = fixture();
+    expect(h.delivery.onAgentSettled(h.branch)).toBe("uncertain-advisory");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(h.send).toHaveBeenCalledTimes(2);
+    h.delivery.onAgentStart();
+    h.branch.push({ ...h.question, ...h.send.mock.calls[1][0] }, h.reply);
+    // Preserve existing transport classification; only receipt eligibility is terminal.
+    expect(h.delivery.onAgentSettled(h.branch)).toBe("advisory-only");
+    expect(h.receipts).toEqual([]);
+    expect(h.onReconciliationSettled).not.toHaveBeenCalled();
   });
 
   it.each(["amended", "duplicate-question", "duplicate-reply"])(

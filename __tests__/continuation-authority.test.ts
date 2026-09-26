@@ -174,6 +174,24 @@ describe("canonical continuation authority projection", () => {
     },
   );
 
+  it.each(["duplicate-question", "display-change"])(
+    "revalidates unique full delivery question shape (%s)",
+    (mode) => {
+      const { input, question } = continuationAuthorityFixture();
+      expect(projectContinuationAuthority(input).available).toBe(true);
+      if (mode === "duplicate-question")
+        input.branch.splice(2, 0, {
+          ...structuredClone(question),
+          id: "second-question",
+        });
+      else question.display = false;
+      expect(projectContinuationAuthority(input)).toEqual({
+        available: false,
+        reason: "stale",
+      });
+    },
+  );
+
   it("abstains for unknown policy or no unfinished included work", () => {
     const { input, task } = continuationAuthorityFixture();
     input.policy = { coverage: "unknown" };

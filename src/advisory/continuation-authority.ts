@@ -361,15 +361,16 @@ const validReceipt = (value: unknown): ReceiptData | undefined => {
   };
 };
 
-const questionMatches = (
+const immutableQuestionMatches = (
   entry: unknown,
   receipt: ReconciliationSettlement,
 ): boolean => {
+  if (!record(entry)) return false;
+  const isCustom = entry.role === "custom" || entry.type === "custom_message";
   if (
-    !record(entry) ||
-    entry.type !== "custom_message" ||
-    entry.id !== receipt.question.entryId ||
+    !isCustom ||
     entry.customType !== ADVISORY_CUSTOM_TYPE ||
+    entry.display !== true ||
     typeof entry.content !== "string" ||
     Buffer.byteLength(entry.content, "utf8") > MAX_QUESTION_BYTES ||
     !record(entry.details) ||
@@ -383,6 +384,14 @@ const questionMatches = (
     sha256(entry.content) === receipt.question.contentHash
   );
 };
+
+const questionMatches = (
+  entry: unknown,
+  receipt: ReconciliationSettlement,
+): boolean =>
+  record(entry) &&
+  entry.id === receipt.question.entryId &&
+  immutableQuestionMatches(entry, receipt);
 
 const validCursor = (value: unknown): value is Cursor =>
   record(value) &&
@@ -563,19 +572,20 @@ export const projectContinuationAuthority = (
 
     const branch = indexBranch(input.branch);
     const receipt = receiptData.receipt;
+    let questionIndex = -1;
+    let immutableQuestionCount = 0;
+    for (let index = 0; index < input.branch.length; index++) {
+      const entry = input.branch[index];
+      if (!immutableQuestionMatches(entry, receipt)) continue;
+      immutableQuestionCount++;
+      if (questionMatches(entry, receipt)) questionIndex = index;
+    }
     if (
       branch.entryIdCounts.get(receipt.question.entryId) !== 1 ||
-      !questionMatches(
-        input.branch.find(
-          (entry) => record(entry) && entry.id === receipt.question.entryId,
-        ),
-        receipt,
-      )
+      immutableQuestionCount !== 1 ||
+      questionIndex < 0
     )
       return unavailable("stale");
-    const questionIndex = input.branch.findIndex(
-      (entry) => record(entry) && entry.id === receipt.question.entryId,
-    );
 
     const replyHeaders: Header[] = [];
     let previousIndex = questionIndex;

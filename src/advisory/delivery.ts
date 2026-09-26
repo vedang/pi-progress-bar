@@ -295,6 +295,9 @@ export class ReconciliationDelivery {
           ? "advisory-only"
           : "uncertain-advisory";
 
+    // An uncertain settlement may retain ordinary retry transport, but it can
+    // never later become continuation receipt authority.
+    if (origin === "uncertain-advisory") chain.revoked = true;
     const receipt =
       origin === "advisory-only" && this.options.onReconciliationSettled
         ? this.settlementReceipt(chain, branch, run)

@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
 import {
+  type ContinuationAuthorityBinding,
+  type ContinuationAuthorityProjection,
+  projectContinuationAuthority,
+} from "../advisory/continuation-authority";
+import {
   type CorrectionAttempt,
   type CorrectionAttemptSource,
   type CorrectionAuthority,
@@ -1683,6 +1688,29 @@ export class Monitor {
       ...(uncertainActivities.length ? { uncertainActivities } : {}),
       ...(coverage.length ? { coverage } : {}),
     };
+  }
+
+  /**
+   * Detached canonical continuation evidence. This read never reuses the
+   * correction window or schedules work; only the pure helper materializes it.
+   */
+  continuationAuthority(
+    binding: ContinuationAuthorityBinding,
+  ): ContinuationAuthorityProjection {
+    let branch: readonly unknown[] = [];
+    try {
+      branch = this.reader ? this.reader() : [];
+    } catch {
+      // An unreadable active branch cannot establish a current receipt root.
+    }
+    return projectContinuationAuthority({
+      ...binding,
+      branch,
+      tasks: this.state.tasks,
+      events: this.state.events,
+      ready: this.advisorySettlementReason() === "ready",
+      ...(this.state.cursor ? { cursor: { ...this.state.cursor } } : {}),
+    });
   }
 
   /**

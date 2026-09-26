@@ -102,6 +102,7 @@ class TaskBoard implements BoardComponent {
     const previousIndex = this.selectedIndex;
     const previousId = this.selectedId;
     const anchor = this.captureActionAnchor() ?? this.actionAnchor;
+    const coverageParent = this.coverageParentIdentity(this.selected());
     const coverageAtEnd =
       this.pane === "coverage" &&
       this.coverageOffset >=
@@ -126,7 +127,9 @@ class TaskBoard implements BoardComponent {
       this.listOffset = 0;
       this.resetActionAnchor();
     }
-    if (previousId !== this.selectedId) {
+    const sameCoverageParent =
+      coverageParent === this.coverageParentIdentity(this.selected());
+    if (previousId !== this.selectedId || !sameCoverageParent) {
       this.resetActionAnchor();
       this.coverageOffset = 0;
     } else if (anchor) this.restoreActionAnchor(anchor);
@@ -134,7 +137,7 @@ class TaskBoard implements BoardComponent {
       this.pane = "detail";
     this.clampOffsets(this.lastLayout);
     // Current runtime activity is pinned metadata, never a scroll command.
-    if (coverageAtEnd && this.pane === "coverage")
+    if (coverageAtEnd && sameCoverageParent && this.pane === "coverage")
       this.coverageOffset = this.coverageMaximum(
         this.selected(),
         this.lastLayout,
@@ -282,6 +285,7 @@ class TaskBoard implements BoardComponent {
     this.selectedIndex = next;
     this.selectedId = tasks[next]?.taskId;
     this.resetActionAnchor();
+    this.coverageOffset = 0;
     this.clampOffsets(this.lastLayout);
     this.requestRender();
   }
@@ -452,6 +456,12 @@ class TaskBoard implements BoardComponent {
     return { pinned, body, actions: visibility.actions };
   }
 
+  private coverageParentIdentity(task: BoardTask | undefined) {
+    return task
+      ? `${task.taskId}:${task.revision}:${task.sourceDigest ?? ""}`
+      : undefined;
+  }
+
   /** Coverage stays attached to its exact parent revision, never task rows. */
   private coverageGroups(task: BoardTask): readonly CoverageGroup[] {
     return (this.snapshot.coverage?.groups ?? []).filter(
@@ -490,10 +500,23 @@ class TaskBoard implements BoardComponent {
     return { reviewed, blocked, pending, accessed, denominator };
   }
 
-  private coverageCurrentCount(group: CoverageGroup) {
-    return (this.snapshot.coverage?.current ?? [])
-      .filter((current) => current.groupId === group.id)
-      .reduce((total, current) => total + current.childIds.length, 0);
+  /** Current runtime IDs are untrusted until they resolve in this exact group. */
+  private coverageCurrentChildren(group: CoverageGroup) {
+    const ids = new Set(
+      (this.snapshot.coverage?.current ?? [])
+        .filter((current) => current.groupId === group.id)
+        .flatMap((current) => current.childIds),
+    );
+    return group.children.filter((child) => ids.has(child.id));
+  }
+
+  private coverageCurrentLabel(
+    children: readonly CoverageGroup["children"][number][],
+  ) {
+    const marker = children.length === 1 ? "item" : "batch";
+    return `Current ${marker}: ${children.length} ${
+      children.length === 1 ? "item" : "items"
+    } · ${children.map((child) => child.label).join(" · ")}`;
   }
 
   /** Detail pane summarizes coverage; inventory itself has its own scroll pane. */
@@ -539,11 +562,11 @@ class TaskBoard implements BoardComponent {
           "dim",
         ),
       );
-      const current = this.coverageCurrentCount(group);
-      if (current)
+      const current = this.coverageCurrentChildren(group);
+      if (current.length)
         lines.push(
           ...this.wrapLines(
-            `• Current ${current === 1 ? "item" : "batch"}: ${current} ${current === 1 ? "item" : "items"}`,
+            `• ${this.coverageCurrentLabel(current)}`,
             width,
             "accent",
           ),
@@ -559,30 +582,47 @@ class TaskBoard implements BoardComponent {
     return lines;
   }
 
+  /** Detail owns full health values; coverage keeps a bounded header viewport. */
+  private coverageSummaryHeadings(width: number) {
+    return [
+      this.formatLine("Summary:", width),
+      ...[
+        "Requirements",
+        "Acceptance",
+        "New red test",
+        "Red evidence",
+        "Implementation",
+      ].flatMap((label) => this.wrapLines(`• ${label}`, width, "dim")),
+    ];
+  }
+
   private coveragePaneContent(task: BoardTask, layout: BoardLayout) {
     const width = layout.rightWidth;
     const groups = this.coverageGroups(task);
-    const health = task.health;
-    const pinned = [
-      ...this.wrapLines(`Service: ${this.snapshot.board.service.label}`, width),
-      this.formatLine("Summary:", width),
-      ...[
-        ["Requirements", health.requirements],
-        ["Acceptance", health.acceptance],
-        ["New red test", health.newRedTest],
-        ["Red evidence", health.redEvidence],
-        ["Implementation", health.implementation],
-      ].flatMap(([label, value]) =>
-        this.wrapLines(`• ${label}: ${value}`, width),
-      ),
-      ...this.wrapLines("Coverage:", width, "accent"),
-    ];
+    const coverage = this.snapshot.coverage;
+    const header = [...this.wrapLines("Coverage:", width, "accent")];
+    if (coverage?.exhausted)
+      header.push(
+        ...this.wrapLines(
+          "Coverage exhausted · optional review unavailable",
+          width,
+          "warning",
+        ),
+      );
+    if ((coverage?.omissions ?? 0) > 0)
+      header.push(
+        ...this.wrapLines(
+          `${coverage?.omissions} optional candidates omitted`,
+          width,
+          "warning",
+        ),
+      );
     const body: string[] = [];
     for (const group of groups) {
       const stats = this.coverageStats(group);
       const denominator =
         stats.denominator === undefined ? "unknown total" : stats.denominator;
-      pinned.push(
+      header.push(
         ...this.wrapLines(
           `Reported reviewed ${stats.reviewed} / ${denominator}`,
           width,
@@ -594,11 +634,11 @@ class TaskBoard implements BoardComponent {
         ),
         ...this.wrapLines(`Intent: ${this.coverageRole(group)}`, width, "dim"),
       );
-      const current = this.coverageCurrentCount(group);
-      if (current)
-        pinned.push(
+      const current = this.coverageCurrentChildren(group);
+      if (current.length)
+        body.push(
           ...this.wrapLines(
-            `Current ${current === 1 ? "item" : "batch"}: ${current} ${current === 1 ? "item" : "items"}`,
+            `• ${this.coverageCurrentLabel(current)}`,
             width,
             "accent",
           ),
@@ -621,7 +661,13 @@ class TaskBoard implements BoardComponent {
       for (const omission of group.omissions)
         body.push(...this.wrapLines(`• ${omission}`, width, "warning"));
     }
-    return { pinned, body };
+    const maximumPinned = Math.max(1, layout.contentRows - 2);
+    const summary = this.coverageSummaryHeadings(width);
+    const pinned =
+      header.length + summary.length <= maximumPinned
+        ? [...summary, ...header]
+        : header;
+    return { pinned: pinned.slice(0, maximumPinned), body };
   }
 
   private coveragePaneLines(task: BoardTask, layout: BoardLayout): string[] {

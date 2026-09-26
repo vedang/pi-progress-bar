@@ -322,6 +322,45 @@ it("shows omitted coverage even before any group exists", async () => {
   );
   expect(h.monitor.state.tasks).toHaveLength(1);
 });
+it("projects detached bounded reconciliation gaps without changing settlement or correction authority", async () => {
+  const h = await mapped();
+  const calls = [h.fetch.mock.calls.length, h.extract.mock.calls.length];
+  const tasks = structuredClone(h.monitor.state.tasks);
+  const correction = h.monitor.correctionSnapshot();
+  const snapshot = h.monitor.advisorySettlementSnapshot();
+  expect(snapshot).toMatchObject({
+    reason: "ready",
+    tasks: [{ id: "task:1" }],
+    coverage: [
+      {
+        parentTaskId: "task:1",
+        parentRevision: 1,
+        complete: true,
+        knownTotal: 22,
+        reviewed: 0,
+        blocked: 0,
+        pending: 22,
+        accessed: 0,
+        gaps: coverageNames.slice(0, 3),
+        omittedChildren: 19,
+      },
+    ],
+  });
+  expect(snapshot.tasks).toHaveLength(1);
+  const coverage = Reflect.get(snapshot, "coverage") as
+    | Array<{ gaps: string[] }>
+    | undefined;
+  if (!coverage) throw new Error("Missing coverage summary");
+  coverage[0].gaps[0] = "MUTATED";
+  expect(JSON.stringify(h.monitor.advisorySettlementSnapshot())).not.toContain(
+    "MUTATED",
+  );
+  expect(h.monitor.correctionSnapshot()).toEqual(correction);
+  expect(h.monitor.state.tasks).toEqual(tasks);
+  expect([h.fetch.mock.calls.length, h.extract.mock.calls.length]).toEqual(
+    calls,
+  );
+});
 it("renders minimal read-only coverage on the selected parent board", async () => {
   const h = await mapped();
   const snapshot = {

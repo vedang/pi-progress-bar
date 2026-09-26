@@ -13,9 +13,11 @@ import { MODEL, type ValidatedResult } from "../src/analysis/gateway";
 import { continuationAuthorityFixture } from "./fixtures/continuation";
 
 function projection(run = 7) {
-  const { input } = continuationAuthorityFixture();
+  const { input, question } = continuationAuthorityFixture();
   input.originalRunId = run;
-  input.receipt.opportunityId = `00000000-0000-4000-8000-${String(run).padStart(12, "0")}`;
+  const opportunityId = `00000000-0000-4000-8000-${String(run).padStart(12, "0")}`;
+  input.receipt = { ...input.receipt, opportunityId };
+  question.details.opportunityId = opportunityId;
   const current = projectContinuationAuthority(input);
   if (!current.available) throw new Error("Expected authority");
   return current;

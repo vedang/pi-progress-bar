@@ -108,6 +108,7 @@ it("renders runtime current batch separately from durable reviewed status", asyn
   ];
   h.board.update(h.view);
   expect(h.text()).toMatch(/current[^\n]*(?:batch|items)/i);
+  expect(h.text()).toMatch(/current[^\n]*Phase 1[^\n]*Phase 2/i);
   expect(h.text()).toMatch(/reported reviewed[^\n]*1\s*\/\s*22/i);
   h.board.dispose();
 });
@@ -121,6 +122,63 @@ it("shows exhausted/incomplete coverage even without an admitted group", async (
   expect(renderWidget(h.view, true, 120, theme).join("\n")).toMatch(
     /coverage[^\n]*exhausted|exhausted[^\n]*coverage/i,
   );
+  h.board.dispose();
+});
+it("keeps every child reachable when coverage headers and health values exceed the viewport", async () => {
+  const h = await fixture(18);
+  const health = h.view.board.tasks[0].health;
+  for (const key of Object.keys(health) as Array<keyof typeof health>)
+    health[key] = "Long health explanation ".repeat(10);
+  h.board.update(h.view);
+  h.text(56);
+  h.board.handleInput(keys.tab);
+  h.board.handleInput(keys.tab);
+  h.board.handleInput(keys.end);
+  expect(h.text(56)).toContain("Lookup");
+  h.board.handleInput(keys.home);
+  expect(h.text(56)).toContain("Overview");
+  h.board.dispose();
+});
+it("keeps global exhaustion and omission warnings visible in the coverage pane", async () => {
+  const h = await fixture();
+  if (!h.view.coverage) throw new Error("Missing coverage");
+  h.view.coverage.exhausted = true;
+  h.view.coverage.omissions = 3;
+  h.board.update(h.view);
+  h.board.handleInput(keys.tab);
+  h.board.handleInput(keys.tab);
+  expect(h.text()).toMatch(/exhausted/i);
+  expect(h.text()).toMatch(/3[^\n]*omitted/i);
+  h.board.dispose();
+});
+it("does not carry one parent's coverage scroll into another parent", async () => {
+  const h = await fixture(24);
+  const coverage = h.view.coverage;
+  if (!coverage) throw new Error("Missing coverage");
+  h.view.board.tasks.push({
+    ...structuredClone(h.view.board.tasks[0]),
+    taskId: "task:2",
+    label: "Other workbook",
+  });
+  const second = structuredClone(coverage.groups[0]);
+  second.id = "coverage-group:2";
+  second.parentTaskId = "task:2";
+  second.children.forEach((child, index) => {
+    child.id = `coverage-child:${index + 23}`;
+    child.label = `Second ${child.label}`;
+  });
+  coverage.groups.push(second);
+  h.board.update(h.view);
+  h.board.handleInput(keys.tab);
+  h.board.handleInput(keys.tab);
+  h.board.handleInput(keys.end);
+  expect(h.text(120)).toContain("Lookup");
+  h.board.handleInput(keys.tab);
+  h.board.handleInput(keys.down);
+  h.board.handleInput(keys.tab);
+  h.board.handleInput(keys.tab);
+  expect(h.text(120)).toContain("Second Overview");
+  expect(h.text(120)).not.toContain("Second Lookup");
   h.board.dispose();
 });
 it.each([56, 80, 160])(

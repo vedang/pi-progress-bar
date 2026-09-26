@@ -1,0 +1,626 @@
+import type { SourceRef } from "./hybrid-state";
+
+const JOURNAL_VERSION = 1;
+const MAX_DISPATCHES = 1024;
+const MAX_RECORDS = 200;
+const MAX_RECEIPTS = 200;
+const MAX_UNFINISHED_OWNERS = 20;
+const MAX_JOURNAL_BYTES = 64 * 1024;
+const MAX_TEXT_SCALARS = 512;
+
+const digest = /^[a-f0-9]{64}$/;
+const taskId = /^task:[1-9]\d*$/;
+const controlCharacter = /[\p{Cc}\p{Cf}]/u;
+const whitespaceCharacter = /^\s$/u;
+
+type SubtaskPhase = "gate-ready" | "gate-decided" | "proposal-decided";
+type SubtaskPhaseState =
+  | "ready"
+  | "dispatched"
+  | "parked"
+  | "permanent"
+  | "complete";
+type SubtaskGateChoice = "yes" | "no" | "uncertain";
+type SubtaskGateOutcome = "dispatched" | "decided" | "failed";
+type SubtaskProposalOutcome = "dispatched" | "accepted" | "noop" | "failed";
+
+interface SubtaskUsage {
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+interface SubtaskReceiptUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+interface SubtaskGateReceipt {
+  requestHash: string;
+  dispatch: number;
+  at: number;
+  outcome: SubtaskGateOutcome;
+  choice?: SubtaskGateChoice;
+  confidence?: number;
+  probability?: number;
+  usage: SubtaskReceiptUsage;
+}
+
+interface SubtaskProposalReceipt {
+  requestHash: string;
+  dispatch: number;
+  at: number;
+  outcome: SubtaskProposalOutcome;
+  listRevision?: number;
+  usage: SubtaskReceiptUsage;
+}
+
+export interface SubtaskPhaseRecord {
+  identity: string;
+  parentTaskId: string;
+  parentRevision: number;
+  parentSourceDigest: string;
+  listRevision: number;
+  source: SourceRef;
+  contextHash: string;
+  gateModel: string;
+  selectedModel: string;
+  phase: SubtaskPhase;
+  state: SubtaskPhaseState;
+  parkedUntil?: number;
+  gate?: SubtaskGateReceipt;
+  proposal?: SubtaskProposalReceipt;
+}
+
+export interface SubtaskJournalCheckpoint {
+  version: typeof JOURNAL_VERSION;
+  dispatches: number;
+  usage: {
+    jev: SubtaskUsage;
+    extraction: SubtaskUsage;
+  };
+  records: SubtaskPhaseRecord[];
+}
+
+const plainDataRecord = (value: unknown): value is Record<string, unknown> => {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  )
+    return false;
+  return Object.values(Object.getOwnPropertyDescriptors(value)).every(
+    (descriptor) => "value" in descriptor && descriptor.enumerable,
+  );
+};
+
+const hasExactKeys = (
+  value: unknown,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): value is Record<string, unknown> => {
+  if (!plainDataRecord(value)) return false;
+  const allowed = new Set([...required, ...optional]);
+  const keys = Reflect.ownKeys(value);
+  return (
+    keys.length >= required.length &&
+    required.every((key) => Object.hasOwn(value, key)) &&
+    keys.every((key) => typeof key === "string" && allowed.has(key))
+  );
+};
+
+const densePlainArray = (
+  value: unknown,
+  minimumLength: number,
+  maximumLength: number,
+): value is unknown[] => {
+  if (!Array.isArray(value)) return false;
+  // Read length before indexed descriptors so oversized input cannot invoke a
+  // getter while being rejected for capacity.
+  if (value.length < minimumLength || value.length > maximumLength)
+    return false;
+  if (Object.getPrototypeOf(value) !== Array.prototype) return false;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== value.length + 1 || !keys.includes("length"))
+    return false;
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  if (!lengthDescriptor || !("value" in lengthDescriptor)) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable)
+      return false;
+  }
+  return true;
+};
+
+const validHash = (value: unknown): value is string =>
+  typeof value === "string" && value.length === 64 && digest.test(value);
+
+const positiveInteger = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && (value as number) >= 1;
+
+const nonNegativeInteger = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && (value as number) >= 0;
+
+const finiteNonNegative = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0;
+
+const validText = (
+  value: unknown,
+  limit = MAX_TEXT_SCALARS,
+): value is string => {
+  if (typeof value !== "string" || !value.length) return false;
+  let scalars = 0;
+  let nonblank = false;
+  for (let index = 0; index < value.length; ) {
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) return false;
+    const character = String.fromCodePoint(codePoint);
+    if (controlCharacter.test(character)) return false;
+    scalars += 1;
+    if (scalars > limit) return false;
+    if (!whitespaceCharacter.test(character)) nonblank = true;
+    index += codePoint > 0xffff ? 2 : 1;
+  }
+  return nonblank;
+};
+
+const validSourceRef = (value: unknown): value is SourceRef =>
+  hasExactKeys(value, [
+    "entryId",
+    "messageHash",
+    "role",
+    "start",
+    "end",
+    "quoteHash",
+  ]) &&
+  validText(value.entryId) &&
+  validHash(value.messageHash) &&
+  (value.role === "user" ||
+    value.role === "assistant" ||
+    value.role === "intercom") &&
+  nonNegativeInteger(value.start) &&
+  positiveInteger(value.end) &&
+  value.end > value.start &&
+  validHash(value.quoteHash);
+
+const validUsage = (value: unknown): value is SubtaskUsage =>
+  hasExactKeys(value, ["calls", "inputTokens", "outputTokens"]) &&
+  nonNegativeInteger(value.calls) &&
+  nonNegativeInteger(value.inputTokens) &&
+  nonNegativeInteger(value.outputTokens);
+
+const validReceiptUsage = (value: unknown): value is SubtaskReceiptUsage =>
+  hasExactKeys(value, ["inputTokens", "outputTokens"]) &&
+  nonNegativeInteger(value.inputTokens) &&
+  nonNegativeInteger(value.outputTokens);
+
+const validGateReceipt = (value: unknown): value is SubtaskGateReceipt => {
+  if (!plainDataRecord(value)) return false;
+  const outcome = value.outcome;
+  const decided = outcome === "decided";
+  if (
+    !hasExactKeys(
+      value,
+      decided
+        ? [
+            "requestHash",
+            "dispatch",
+            "at",
+            "outcome",
+            "choice",
+            "confidence",
+            "probability",
+            "usage",
+          ]
+        : ["requestHash", "dispatch", "at", "outcome", "usage"],
+    ) ||
+    !validHash(value.requestHash) ||
+    !positiveInteger(value.dispatch) ||
+    !finiteNonNegative(value.at) ||
+    !validReceiptUsage(value.usage)
+  )
+    return false;
+  if (!decided) return outcome === "dispatched" || outcome === "failed";
+  return (
+    (value.choice === "yes" ||
+      value.choice === "no" ||
+      value.choice === "uncertain") &&
+    typeof value.confidence === "number" &&
+    Number.isFinite(value.confidence) &&
+    value.confidence >= 0 &&
+    value.confidence <= 1 &&
+    typeof value.probability === "number" &&
+    Number.isFinite(value.probability) &&
+    value.probability >= 0 &&
+    value.probability <= 1
+  );
+};
+
+const validProposalReceipt = (
+  value: unknown,
+): value is SubtaskProposalReceipt => {
+  if (!plainDataRecord(value)) return false;
+  const accepted = value.outcome === "accepted";
+  if (
+    !hasExactKeys(
+      value,
+      accepted
+        ? ["requestHash", "dispatch", "at", "outcome", "listRevision", "usage"]
+        : ["requestHash", "dispatch", "at", "outcome", "usage"],
+    ) ||
+    !validHash(value.requestHash) ||
+    !positiveInteger(value.dispatch) ||
+    !finiteNonNegative(value.at) ||
+    !validReceiptUsage(value.usage)
+  )
+    return false;
+  if (accepted) return nonNegativeInteger(value.listRevision);
+  return (
+    value.outcome === "dispatched" ||
+    value.outcome === "noop" ||
+    value.outcome === "failed"
+  );
+};
+
+const acceptedYes = (gate: SubtaskGateReceipt) =>
+  gate.outcome === "decided" &&
+  gate.choice === "yes" &&
+  gate.confidence !== undefined &&
+  gate.confidence >= 0.5 &&
+  gate.probability !== undefined &&
+  gate.probability >= 0.8;
+
+const validAttemptState = (
+  state: SubtaskPhaseState,
+  outcome: "dispatched" | "failed",
+) =>
+  outcome === "dispatched"
+    ? state === "dispatched" || state === "permanent"
+    : state === "parked" || state === "permanent";
+
+const validRecord = (value: unknown): value is SubtaskPhaseRecord => {
+  if (
+    !hasExactKeys(
+      value,
+      [
+        "identity",
+        "parentTaskId",
+        "parentRevision",
+        "parentSourceDigest",
+        "listRevision",
+        "source",
+        "contextHash",
+        "gateModel",
+        "selectedModel",
+        "phase",
+        "state",
+      ],
+      ["parkedUntil", "gate", "proposal"],
+    ) ||
+    !validHash(value.identity) ||
+    typeof value.parentTaskId !== "string" ||
+    value.parentTaskId.length > 32 ||
+    !taskId.test(value.parentTaskId) ||
+    !positiveInteger(value.parentRevision) ||
+    !validHash(value.parentSourceDigest) ||
+    !nonNegativeInteger(value.listRevision) ||
+    !validSourceRef(value.source) ||
+    !validHash(value.contextHash) ||
+    value.gateModel !== "jev-1.13.0" ||
+    !validText(value.selectedModel) ||
+    (value.phase !== "gate-ready" &&
+      value.phase !== "gate-decided" &&
+      value.phase !== "proposal-decided") ||
+    (value.state !== "ready" &&
+      value.state !== "dispatched" &&
+      value.state !== "parked" &&
+      value.state !== "permanent" &&
+      value.state !== "complete")
+  )
+    return false;
+
+  const hasParkedUntil = Object.hasOwn(value, "parkedUntil");
+  if (
+    (value.state === "parked" &&
+      (!hasParkedUntil || !finiteNonNegative(value.parkedUntil))) ||
+    (value.state !== "parked" && hasParkedUntil)
+  )
+    return false;
+
+  const hasGate = Object.hasOwn(value, "gate");
+  const hasProposal = Object.hasOwn(value, "proposal");
+  if (
+    (hasGate && !validGateReceipt(value.gate)) ||
+    (hasProposal && !validProposalReceipt(value.proposal))
+  )
+    return false;
+
+  const record = value as unknown as SubtaskPhaseRecord;
+  switch (record.phase) {
+    case "gate-ready": {
+      if (hasProposal) return false;
+      if (!hasGate) return record.state === "ready";
+      const gate = record.gate;
+      if (!gate || gate.outcome === "decided") return false;
+      return validAttemptState(record.state, gate.outcome);
+    }
+    case "gate-decided": {
+      const gate = record.gate;
+      if (!hasGate || !gate || gate.outcome !== "decided") return false;
+      if (!hasProposal)
+        return acceptedYes(gate)
+          ? record.state === "ready"
+          : record.state === "complete";
+      const proposal = record.proposal;
+      if (!acceptedYes(gate) || !proposal || proposal.dispatch <= gate.dispatch)
+        return false;
+      if (proposal.outcome !== "dispatched" && proposal.outcome !== "failed")
+        return false;
+      return validAttemptState(record.state, proposal.outcome);
+    }
+    case "proposal-decided": {
+      const gate = record.gate;
+      const proposal = record.proposal;
+      if (
+        !hasGate ||
+        !gate ||
+        !acceptedYes(gate) ||
+        !hasProposal ||
+        !proposal ||
+        proposal.dispatch <= gate.dispatch ||
+        record.state !== "complete" ||
+        (proposal.outcome !== "accepted" && proposal.outcome !== "noop")
+      )
+        return false;
+      return (
+        proposal.outcome !== "accepted" ||
+        proposal.listRevision === record.listRevision ||
+        proposal.listRevision === record.listRevision + 1
+      );
+    }
+  }
+};
+
+const validJournalShape = (
+  value: unknown,
+): value is SubtaskJournalCheckpoint => {
+  if (
+    !hasExactKeys(value, ["version", "dispatches", "usage", "records"]) ||
+    value.version !== JOURNAL_VERSION ||
+    !nonNegativeInteger(value.dispatches) ||
+    value.dispatches > MAX_DISPATCHES ||
+    !hasExactKeys(value.usage, ["jev", "extraction"]) ||
+    !validUsage(value.usage.jev) ||
+    !validUsage(value.usage.extraction) ||
+    value.usage.jev.calls + value.usage.extraction.calls !== value.dispatches ||
+    !densePlainArray(value.records, 0, MAX_RECORDS) ||
+    !value.records.every(validRecord)
+  )
+    return false;
+
+  const records = value.records;
+  if (new Set(records.map((record) => record.identity)).size !== records.length)
+    return false;
+
+  const unfinished = records.filter((record) => record.state !== "complete");
+  if (
+    unfinished.length > MAX_UNFINISHED_OWNERS ||
+    new Set(unfinished.map((record) => record.parentTaskId)).size !==
+      unfinished.length
+  )
+    return false;
+
+  const receipts = records.flatMap((record) => [
+    ...(record.gate === undefined ? [] : [["jev", record.gate] as const]),
+    ...(record.proposal === undefined
+      ? []
+      : [["extraction", record.proposal] as const]),
+  ]);
+  if (receipts.length > MAX_RECEIPTS) return false;
+
+  const ordinals = new Set<number>();
+  let gateInputTokens = 0;
+  let gateOutputTokens = 0;
+  let proposalInputTokens = 0;
+  let proposalOutputTokens = 0;
+  let gateReceipts = 0;
+  let proposalReceipts = 0;
+  for (const [bucket, receipt] of receipts) {
+    if (receipt.dispatch > value.dispatches || ordinals.has(receipt.dispatch))
+      return false;
+    ordinals.add(receipt.dispatch);
+    if (bucket === "jev") {
+      gateReceipts += 1;
+      gateInputTokens += receipt.usage.inputTokens;
+      gateOutputTokens += receipt.usage.outputTokens;
+    } else {
+      proposalReceipts += 1;
+      proposalInputTokens += receipt.usage.inputTokens;
+      proposalOutputTokens += receipt.usage.outputTokens;
+    }
+  }
+  if (
+    !Number.isSafeInteger(gateInputTokens) ||
+    !Number.isSafeInteger(gateOutputTokens) ||
+    !Number.isSafeInteger(proposalInputTokens) ||
+    !Number.isSafeInteger(proposalOutputTokens)
+  )
+    return false;
+
+  return (
+    gateReceipts <= value.usage.jev.calls &&
+    proposalReceipts <= value.usage.extraction.calls &&
+    gateInputTokens <= value.usage.jev.inputTokens &&
+    gateOutputTokens <= value.usage.jev.outputTokens &&
+    proposalInputTokens <= value.usage.extraction.inputTokens &&
+    proposalOutputTokens <= value.usage.extraction.outputTokens
+  );
+};
+
+/** Build JSON data without consulting caller or prototype serialization hooks. */
+const inertSerializationProjection = (value: unknown): unknown => {
+  if (Array.isArray(value)) {
+    const projection: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1)
+      projection.push(inertSerializationProjection(value[index]));
+    Object.defineProperty(projection, "toJSON", {
+      value: undefined,
+      enumerable: false,
+    });
+    return projection;
+  }
+  if (value && typeof value === "object") {
+    const projection = Object.create(null) as Record<string, unknown>;
+    for (const [key, child] of Object.entries(value))
+      projection[key] = inertSerializationProjection(child);
+    return projection;
+  }
+  return value;
+};
+
+const inertJson = (value: object) =>
+  JSON.stringify(inertSerializationProjection(value)) as string;
+
+export const subtaskJournalIsValid = (
+  value: unknown,
+): value is SubtaskJournalCheckpoint => {
+  try {
+    return (
+      validJournalShape(value) &&
+      Buffer.byteLength(inertJson(value), "utf8") <= MAX_JOURNAL_BYTES
+    );
+  } catch {
+    return false;
+  }
+};
+
+const cloneSource = (source: SourceRef): SourceRef => ({
+  entryId: source.entryId,
+  messageHash: source.messageHash,
+  role: source.role,
+  start: source.start,
+  end: source.end,
+  quoteHash: source.quoteHash,
+});
+
+const cloneReceiptUsage = (
+  usage: SubtaskReceiptUsage,
+): SubtaskReceiptUsage => ({
+  inputTokens: usage.inputTokens,
+  outputTokens: usage.outputTokens,
+});
+
+const cloneGate = (gate: SubtaskGateReceipt): SubtaskGateReceipt => ({
+  requestHash: gate.requestHash,
+  dispatch: gate.dispatch,
+  at: gate.at,
+  outcome: gate.outcome,
+  ...(gate.outcome === "decided"
+    ? {
+        choice: gate.choice,
+        confidence: gate.confidence,
+        probability: gate.probability,
+      }
+    : {}),
+  usage: cloneReceiptUsage(gate.usage),
+});
+
+const cloneProposal = (
+  proposal: SubtaskProposalReceipt,
+): SubtaskProposalReceipt => ({
+  requestHash: proposal.requestHash,
+  dispatch: proposal.dispatch,
+  at: proposal.at,
+  outcome: proposal.outcome,
+  ...(proposal.outcome === "accepted"
+    ? { listRevision: proposal.listRevision }
+    : {}),
+  usage: cloneReceiptUsage(proposal.usage),
+});
+
+const cloneRecord = (record: SubtaskPhaseRecord): SubtaskPhaseRecord => ({
+  identity: record.identity,
+  parentTaskId: record.parentTaskId,
+  parentRevision: record.parentRevision,
+  parentSourceDigest: record.parentSourceDigest,
+  listRevision: record.listRevision,
+  source: cloneSource(record.source),
+  contextHash: record.contextHash,
+  gateModel: record.gateModel,
+  selectedModel: record.selectedModel,
+  phase: record.phase,
+  state: record.state,
+  ...(record.parkedUntil === undefined
+    ? {}
+    : { parkedUntil: record.parkedUntil }),
+  ...(record.gate === undefined ? {} : { gate: cloneGate(record.gate) }),
+  ...(record.proposal === undefined
+    ? {}
+    : { proposal: cloneProposal(record.proposal) }),
+});
+
+const cloneUsage = (usage: SubtaskUsage): SubtaskUsage => ({
+  calls: usage.calls,
+  inputTokens: usage.inputTokens,
+  outputTokens: usage.outputTokens,
+});
+
+/**
+ * Drop stale authority without refunding the lifetime wallet. A crash after a
+ * charged dispatch is terminal until a later explicit recovery policy exists.
+ */
+export const restoreSubtaskJournal = (
+  data: unknown,
+  isCurrent: (record: SubtaskPhaseRecord) => boolean,
+): SubtaskJournalCheckpoint | undefined => {
+  if (!subtaskJournalIsValid(data) || typeof isCurrent !== "function") return;
+
+  const records = data.records.flatMap((record) => {
+    try {
+      if (isCurrent(cloneRecord(record)) !== true) return [];
+    } catch {
+      return [];
+    }
+    const restored = cloneRecord(record);
+    if (restored.state === "dispatched") restored.state = "permanent";
+    return [restored];
+  });
+  return {
+    version: JOURNAL_VERSION,
+    dispatches: data.dispatches,
+    usage: {
+      jev: cloneUsage(data.usage.jev),
+      extraction: cloneUsage(data.usage.extraction),
+    },
+    records,
+  };
+};
+
+/** Pure eligibility selector. It schedules nothing and never changes journal data. */
+export const nextSubtaskPhase = (
+  journal: SubtaskJournalCheckpoint,
+  identity: string,
+): "gate" | "proposal" | undefined => {
+  if (!subtaskJournalIsValid(journal) || journal.dispatches >= MAX_DISPATCHES)
+    return;
+  const record = journal.records.find((item) => item.identity === identity);
+  if (!record) return;
+  if (
+    record.phase === "gate-ready" &&
+    record.state === "ready" &&
+    record.gate === undefined &&
+    record.proposal === undefined
+  )
+    return "gate";
+  if (
+    record.phase === "gate-decided" &&
+    record.state === "ready" &&
+    record.gate !== undefined &&
+    acceptedYes(record.gate) &&
+    record.proposal === undefined
+  )
+    return "proposal";
+  return;
+};

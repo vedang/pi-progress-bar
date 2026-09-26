@@ -166,6 +166,10 @@ describe("generic conversation-backed subtask store", () => {
     expect(after.children[1]).toMatchObject({
       id: group.children[0].id,
       label: "Compare deployment tradeoffs",
+      source: subtaskSource(
+        "wording",
+        "Call the comparison deployment tradeoffs.",
+      ),
       status: "reported-completed",
     });
     expect(after.children[0].id).toBe(group.children[1].id);
@@ -201,6 +205,12 @@ describe("generic conversation-backed subtask store", () => {
     const after = store.snapshot().groups[0];
     expect(after.children[0].id).not.toBe(group.children[0].id);
     expect(after.children[0].status).toBe("pending");
+    expect(after.children[0].source).toEqual(
+      subtaskSource(
+        "replacement",
+        "Replace the old comparison with revised requirements.",
+      ),
+    );
     expect(after.retired[0]).toEqual({
       ...group.children[0],
       status: "reported-completed",
@@ -377,6 +387,85 @@ describe("generic conversation-backed subtask store", () => {
     ).toEqual({ accepted: false, reason: "invalid" });
   });
 
+  it.each([
+    { complete: true, knownTotal: undefined, accepted: true },
+    { complete: true, knownTotal: 2, accepted: true },
+    { complete: false, knownTotal: 2, accepted: true },
+    { complete: false, knownTotal: 1, accepted: false },
+  ])(
+    "validates exhaustive and incomplete totals ($complete/$knownTotal)",
+    ({ complete, knownTotal, accepted }) => {
+      const store = new SubtaskStore();
+      const before = store.snapshot();
+      const input = {
+        ...subtaskAdmission(),
+        complete,
+        ...(knownTotal === undefined ? {} : { knownTotal }),
+      };
+      expect(store.admit(input)).toEqual(
+        accepted ? { accepted: true } : { accepted: false, reason: "invalid" },
+      );
+      if (!accepted) expect(store.snapshot()).toEqual(before);
+      else {
+        const group = store.snapshot().groups[0];
+        expect(group.complete).toBe(complete);
+        expect(group.knownTotal).toBe(knownTotal);
+        expect(group.children.map((child) => child.status)).toEqual([
+          "pending",
+          "pending",
+        ]);
+      }
+    },
+  );
+
+  it("rejects empty, duplicate and malformed-source report batches atomically", () => {
+    const { store, group } = fixture();
+    const before = store.snapshot();
+    const report = {
+      groupId: group.id,
+      listRevision: 1,
+      childIds: [group.children[0].id],
+      source: subtaskSource(),
+      status: "reported-completed" as const,
+    };
+    for (const malformed of [
+      { ...report, childIds: [] },
+      { ...report, childIds: [group.children[0].id, group.children[0].id] },
+      { ...report, source: { ...report.source, end: 0 } },
+      { ...report, source: { ...report.source, quoteHash: "invalid" } },
+      {
+        ...report,
+        source: { ...report.source, rawPrompt: "PRIVATE_REPORT_SENTINEL" },
+      },
+    ]) {
+      expect(store.report(malformed)).toEqual({
+        accepted: false,
+        reason: "invalid",
+      });
+      expect(store.snapshot()).toEqual(before);
+    }
+    expect(store.report(report)).toEqual({ accepted: true });
+    expect(store.snapshot().groups[0].children[0].status).toBe(
+      "reported-completed",
+    );
+  });
+
+  it("increments revision for retain-only reorder without changing child records", () => {
+    const { store, input, group } = fixture();
+    expect(
+      store.admit({
+        ...input,
+        expectedListRevision: 1,
+        children: [...group.children]
+          .reverse()
+          .map((child) => ({ kind: "retain" as const, id: child.id })),
+      }),
+    ).toEqual({ accepted: true });
+    const after = store.snapshot().groups[0];
+    expect(after.listRevision).toBe(2);
+    expect(after.children).toEqual([...group.children].reverse());
+  });
+
   it("bounds active children and rejects raw provenance fields without partial mutation", () => {
     const store = new SubtaskStore();
     const before = store.snapshot();
@@ -452,29 +541,34 @@ describe("generic conversation-backed subtask store", () => {
       ...subtaskParent(),
       id: `task:${i + 1}`,
     }));
+    const countOnly = { ...subtaskAdmission([]), knownTotal: 22 };
     for (const parent of parents)
-      expect(store.admit({ ...subtaskAdmission([]), parent })).toEqual({
+      expect(store.admit({ ...countOnly, parent })).toEqual({
         accepted: true,
       });
     const before = store.snapshot();
     expect(before.groups).toHaveLength(200);
     const nextParent = { ...subtaskParent(), id: "task:201" };
-    expect(
-      store.admit({ ...subtaskAdmission([]), parent: nextParent }),
-    ).toEqual({ accepted: false, reason: "capacity" });
+    expect(store.admit({ ...countOnly, parent: nextParent })).toEqual({
+      accepted: false,
+      reason: "capacity",
+    });
     expect(store.snapshot()).toEqual(before);
     store.reconcile([...parents.slice(1), nextParent]);
-    expect(
-      store.admit({ ...subtaskAdmission([]), parent: nextParent }),
-    ).toEqual({ accepted: true });
+    expect(store.admit({ ...countOnly, parent: nextParent })).toEqual({
+      accepted: true,
+    });
     expect(
       store
         .snapshot()
         .groups.find((group) => group.parentTaskId === nextParent.id)?.id,
     ).toBe("subtask-group:201");
-    const withChild = subtaskAdmission(["First real child"]);
-    withChild.parent = nextParent;
-    withChild.expectedListRevision = 1;
+    const withChild = {
+      ...subtaskAdmission(["First real child"]),
+      knownTotal: 22,
+      parent: nextParent,
+      expectedListRevision: 1,
+    };
     expect(store.admit(withChild)).toEqual({ accepted: true });
     expect(
       store

@@ -43,7 +43,10 @@ function answer(request: EvaluationRequest, choice: string) {
     ),
   });
 }
-async function fixture(details = false, failIntent = false) {
+async function fixture(
+  details = false,
+  failIntent: boolean | "malformed" | "persist" = false,
+) {
   const h = monitorHarness([branchEntry("goal", text)], {
     richDetailsEnabled: details,
     extractionText: (input) =>
@@ -95,7 +98,20 @@ async function fixture(details = false, failIntent = false) {
     calls.push(request);
     return transport ? transport(request, init) : answer(request, choice);
   });
-  if (failIntent) {
+  if (failIntent === "persist") {
+    let denied = false;
+    h.save.mockImplementation((value) => {
+      if (
+        !denied &&
+        (value as ReturnType<typeof encodeCheckpoint>).monitor?.coverage
+          ?.intents?.accepted.length
+      ) {
+        denied = true;
+        throw new Error("intent receipt storage denied once");
+      }
+    });
+  }
+  if (failIntent && failIntent !== "persist") {
     const extract = h.extract.getMockImplementation();
     let failed = false;
     if (!extract) throw new Error("Missing extractor");
@@ -103,6 +119,13 @@ async function fixture(details = false, failIntent = false) {
       if (input.instructions.includes("parentIndices") && !failed) {
         failed = true;
         onDispatch?.(Date.now());
+        if (failIntent === "malformed")
+          return {
+            text: "{invalid-json",
+            provider: "offline",
+            model: "fixture",
+            usage: { inputTokens: 3, outputTokens: 2 },
+          };
         throw new Error("temporary extraction failure");
       }
       return extract(input, signal, onDispatch);
@@ -199,9 +222,12 @@ async function addUncoveredParent(h: Awaited<ReturnType<typeof fixture>>) {
   expect(h.monitor.state.tasks).toHaveLength(2);
   h.extract.mockImplementation(extract);
 }
-it("explicit model recovery resumes a failed paid intent without mandatory re-extraction", async () => {
-  await fixture(false, true);
-});
+it.each([true, "malformed", "persist"] as const)(
+  "explicit model recovery resumes paid intent failure (%s) without mandatory re-extraction",
+  async (failure) => {
+    await fixture(false, failure);
+  },
+);
 it.each([false, true])(
   "coalesces a same-parent resource backlog before optional dispatch (vary resource=%s)",
   async (varyResource) => {
@@ -501,6 +527,70 @@ it("rejects cached stale intent before spending after a queued parent revision",
         input.latest.id === "stale-intent",
     ),
   ).toHaveLength(0);
+});
+it("newer intent fences selected-model dispatch1024 before its late result is accepted", async () => {
+  const h = await fixture();
+  const saved = h.save.mock.calls
+    .map(([value]) => value as ReturnType<typeof encodeCheckpoint>)
+    .filter(
+      (value) =>
+        value.monitor?.coverage?.state.groups.length === 0 &&
+        (value.monitor.coverage.intents?.accepted.length ?? 0) > 0,
+    )
+    .at(-1);
+  if (!saved?.monitor?.coverage)
+    throw new Error("Missing pre-inventory intent checkpoint");
+  saved.monitor.coverage.dispatches = 1023;
+  saved.monitor.coverage.usage.jev.calls =
+    1023 - saved.monitor.coverage.usage.extraction.calls;
+  h.replace([branchEntry("goal", text)]);
+  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  const extract = h.extract.getMockImplementation();
+  if (!extract) throw new Error("Missing extractor");
+  let release: (() => void) | undefined;
+  h.extract.mockImplementation(async (input, signal, onDispatch) => {
+    if (!input.instructions.includes("parentIndices"))
+      return extract(input, signal, onDispatch);
+    onDispatch?.(Date.now());
+    return new Promise((resolve) => {
+      release = () =>
+        resolve({
+          text: JSON.stringify({
+            intents: [
+              {
+                parentIndices: [0],
+                quote: input.latest.text,
+                resource: "docs/old.xlsx",
+                kind: "unconditional-enumerable",
+              },
+            ],
+          }),
+          provider: "offline",
+          model: "fixture",
+          usage: { inputTokens: 3, outputTokens: 2 },
+        });
+    });
+  });
+  h.append("older-intent", "Review every tab in docs/old.xlsx.", "user");
+  await h.settle("older-intent");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.checkpoint().monitor?.coverage?.dispatches).toBe(1024);
+  expect(release).toBeDefined();
+  h.append(
+    "newer-intent",
+    "Review every tab in docs/new.xlsx instead.",
+    "user",
+  );
+  await h.settle("newer-intent");
+  release?.();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(
+    h
+      .checkpoint()
+      .monitor?.coverage?.intents?.accepted.some(
+        (receipt) => receipt.source.entryId === "older-intent",
+      ),
+  ).toBe(false);
 });
 it("schedules20+2report judgments after semantics/readyhealth with isolated usage", async () => {
   const h = await fixture();

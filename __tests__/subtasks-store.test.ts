@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SubtaskStore } from "../src/core/subtasks";
 import {
   subtaskAdmission,
@@ -116,6 +116,161 @@ describe("generic conversation-backed subtask store", () => {
     expect(store.snapshot()).toEqual(before);
     expect(store.admit(subtaskAdmission())).toEqual({ accepted: true });
     expect(store.snapshot().groups[0].id).toBe("subtask-group:1");
+  });
+
+  it.each(["revision", "archive", "absence"])(
+    "fences first or delayed admission after authoritative reconciliation (%s)",
+    (kind) => {
+      const store = new SubtaskStore();
+      const input = subtaskAdmission();
+      if (kind === "absence") {
+        expect(store.admit(input)).toEqual({ accepted: true });
+        store.reconcile([]);
+      } else
+        store.reconcile([
+          {
+            ...input.parent,
+            ...(kind === "revision" ? { revision: 2 } : { included: false }),
+          },
+        ]);
+      const before = store.snapshot();
+      expect(store.admit(input)).toEqual({ accepted: false, reason: "stale" });
+      expect(store.snapshot()).toEqual(before);
+    },
+  );
+
+  it("classifies a previously allocated invalidated group report as stale", () => {
+    const { store, input, group } = fixture();
+    store.reconcile([{ ...input.parent, revision: 2 }]);
+    const before = store.snapshot();
+    expect(
+      store.report({
+        groupId: group.id,
+        listRevision: 1,
+        childIds: [group.children[0].id],
+        source: subtaskSource(),
+        status: "reported-completed",
+      }),
+    ).toEqual({ accepted: false, reason: "stale" });
+    expect(store.snapshot()).toEqual(before);
+    expect(
+      store.report({
+        groupId: "subtask-group:999",
+        listRevision: 1,
+        childIds: [group.children[0].id],
+        source: subtaskSource(),
+        status: "reported-completed",
+      }),
+    ).toEqual({ accepted: false, reason: "foreign" });
+  });
+
+  it.each(["hidden", "inherited"])(
+    "rejects caller serialization hooks before byte accounting (%s)",
+    (kind) => {
+      const store = new SubtaskStore();
+      const input = byteBoundAdmission(32769);
+      const hook = vi.fn(() => ({}));
+      if (kind === "hidden")
+        Object.defineProperty(input, "toJSON", { value: hook });
+      else Object.setPrototypeOf(input, { toJSON: hook });
+      const before = store.snapshot();
+      expect(store.admit(input)).toEqual({
+        accepted: false,
+        reason: "invalid",
+      });
+      expect(hook).not.toHaveBeenCalled();
+      expect(store.snapshot()).toEqual(before);
+    },
+  );
+
+  it("does not let a hidden serializer forge exact-latest replay", () => {
+    const { store, input } = fixture();
+    const forged = {
+      ...subtaskAdmission(["Different work"]),
+      expectedListRevision: 99,
+    };
+    const hook = vi.fn(() => input);
+    Object.defineProperty(forged, "toJSON", { value: hook });
+    const before = store.snapshot();
+    expect(store.admit(forged)).toEqual({ accepted: false, reason: "invalid" });
+    expect(hook).not.toHaveBeenCalled();
+    expect(store.snapshot()).toEqual(before);
+  });
+
+  it("rejects sparse report batches without advancing the valid prefix", () => {
+    const { store, group } = fixture();
+    const childIds = Array<string>(2);
+    childIds[0] = group.children[0].id;
+    const before = store.snapshot();
+    expect(
+      store.report({
+        groupId: group.id,
+        listRevision: 1,
+        childIds,
+        source: subtaskSource(),
+        status: "reported-completed",
+      }),
+    ).toEqual({ accepted: false, reason: "invalid" });
+    expect(store.snapshot()).toEqual(before);
+  });
+
+  it.each(["children", "removals"])(
+    "rejects oversized operation arrays before reading elements (%s)",
+    (field) => {
+      const input = subtaskAdmission();
+      const values = Array(65).fill(undefined);
+      const read = vi.fn(() => {
+        throw new Error("Must reject length before access");
+      });
+      Object.defineProperty(values, 0, { get: read });
+      const store = new SubtaskStore();
+      const before = store.snapshot();
+      expect(store.admit({ ...input, [field]: values })).toEqual({
+        accepted: false,
+        reason: "capacity",
+      });
+      expect(read).not.toHaveBeenCalled();
+      expect(store.snapshot()).toEqual(before);
+    },
+  );
+
+  it("bounds report length before reading child IDs", () => {
+    const { store, group } = fixture();
+    const childIds = Array<string>(65).fill(group.children[0].id);
+    const read = vi.fn(() => {
+      throw new Error("Must reject length before access");
+    });
+    Object.defineProperty(childIds, 0, { get: read });
+    const before = store.snapshot();
+    expect(
+      store.report({
+        groupId: group.id,
+        listRevision: 1,
+        childIds,
+        source: subtaskSource(),
+        status: "reported-completed",
+      }),
+    ).toEqual({ accepted: false, reason: "invalid" });
+    expect(read).not.toHaveBeenCalled();
+    expect(store.snapshot()).toEqual(before);
+  });
+
+  it("rejects oversized labels without materializing all scalar values", () => {
+    const label = "x".repeat(100000);
+    const input = subtaskAdmission([label]);
+    const store = new SubtaskStore();
+    const expand = vi.spyOn(Array, "from");
+    let expanded = false;
+    let result;
+    try {
+      result = store.admit(input);
+      expanded = expand.mock.calls.some((args) => args[0] === label);
+    } finally {
+      expand.mockRestore();
+    }
+    expect(result).toEqual({ accepted: false, reason: "capacity" });
+    expect(expanded).toBe(false);
+    expect(store.snapshot()).toEqual({ groups: [] });
   });
 
   it("makes exact latest admission replay idempotent without reallocating IDs", () => {

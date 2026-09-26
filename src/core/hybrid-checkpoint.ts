@@ -57,8 +57,21 @@ import {
   type TaskStatus,
   taskLabelIsValid,
 } from "./hybrid-state";
+import {
+  restoreSubtaskJournal,
+  type SubtaskJournalCheckpoint,
+  type SubtaskPhaseRecord,
+  subtaskJournalIsValid,
+} from "./subtask-journal";
+import {
+  type SubtaskCheckpoint,
+  SubtaskStore,
+  subtaskCheckpointIsValid,
+} from "./subtasks";
 
 const VERSION = 10;
+const SUBTASK_VERSION = 11;
+const MAX_SUBTASK_OPTIONAL_BYTES = 64 * 1024;
 const MAX_TASKS = 200;
 const MAX_ACTIVE_TASKS = 20;
 const MAX_EVENTS = 1000;
@@ -189,6 +202,32 @@ interface Checkpoint {
   version: typeof VERSION;
   state: HybridState;
   monitor?: MonitorCheckpointMetadata;
+}
+
+interface SubtaskCheckpointMetadata {
+  state: SubtaskCheckpoint;
+  journal: SubtaskJournalCheckpoint;
+}
+
+/** v11 staged monitor projection. It deliberately has no legacy coverage field. */
+interface SubtaskMonitorCheckpointMetadata {
+  enabled: boolean;
+  usage: {
+    jev: { calls: number; inputTokens: number; outputTokens: number };
+    extraction: { calls: number; inputTokens: number; outputTokens: number };
+  };
+  lastJevCallAt?: number;
+  lastExtractionCallAt?: number;
+  idleDoneTaskId?: string;
+  healthCards?: HealthCard[];
+  taskDetails?: unknown[];
+  subtasks?: SubtaskCheckpointMetadata;
+}
+
+interface SubtaskCheckpointEnvelope {
+  version: typeof SUBTASK_VERSION;
+  state: HybridState;
+  monitor?: SubtaskMonitorCheckpointMetadata;
 }
 
 /** Structural storage result only; canonical replay/amendment is checked separately. */
@@ -2017,6 +2056,393 @@ export function restoreCheckpoint(
     if ((state as HybridState & { focusTaskId?: unknown }).focusTaskId === null)
       state.focusTaskId = undefined;
     return copyState(state);
+  } catch {
+    return;
+  }
+}
+
+const MAX_STRICT_DATA_ARRAY_ITEMS = 8192;
+const MAX_STRICT_DATA_OBJECT_KEYS = 64;
+const MAX_STRICT_DATA_NODES = 100_000;
+const MAX_STRICT_DATA_DEPTH = 64;
+const STRICT_DATA_REJECTED = Symbol("strict-data-rejected");
+
+/**
+ * Copy only enumerable own data properties before staged-v11 validation. This
+ * keeps legacy validators reusable without allowing input hooks to run first.
+ */
+function strictDetachedData(
+  value: unknown,
+  budget = { nodes: 0 },
+  depth = 0,
+): unknown | typeof STRICT_DATA_REJECTED {
+  budget.nodes += 1;
+  if (budget.nodes > MAX_STRICT_DATA_NODES || depth > MAX_STRICT_DATA_DEPTH)
+    return STRICT_DATA_REJECTED;
+  if (
+    value === undefined ||
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  )
+    return value;
+  if (!value || typeof value !== "object") return STRICT_DATA_REJECTED;
+
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype)
+      return STRICT_DATA_REJECTED;
+    const length = Object.getOwnPropertyDescriptor(value, "length");
+    if (
+      !length ||
+      !("value" in length) ||
+      !Number.isSafeInteger(length.value) ||
+      length.value < 0 ||
+      length.value > MAX_STRICT_DATA_ARRAY_ITEMS
+    )
+      return STRICT_DATA_REJECTED;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== length.value + 1 || !keys.includes("length"))
+      return STRICT_DATA_REJECTED;
+    const detached: unknown[] = [];
+    for (let index = 0; index < length.value; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable)
+        return STRICT_DATA_REJECTED;
+      const child = strictDetachedData(descriptor.value, budget, depth + 1);
+      if (child === STRICT_DATA_REJECTED) return STRICT_DATA_REJECTED;
+      detached.push(child);
+    }
+    return detached;
+  }
+
+  if (Object.getPrototypeOf(value) !== Object.prototype)
+    return STRICT_DATA_REJECTED;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > MAX_STRICT_DATA_OBJECT_KEYS) return STRICT_DATA_REJECTED;
+  const detached: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (typeof key !== "string") return STRICT_DATA_REJECTED;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable)
+      return STRICT_DATA_REJECTED;
+    const child = strictDetachedData(descriptor.value, budget, depth + 1);
+    if (child === STRICT_DATA_REJECTED) return STRICT_DATA_REJECTED;
+    Object.defineProperty(detached, key, {
+      value: child,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return detached;
+}
+
+/** Serialize detached staged data without consulting any caller serialization hook. */
+function subtaskInertProjection(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const projection: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1)
+      projection.push(subtaskInertProjection(value[index]));
+    Object.defineProperty(projection, "toJSON", {
+      value: undefined,
+      enumerable: false,
+    });
+    return projection;
+  }
+  if (value && typeof value === "object") {
+    const projection = Object.create(null) as Record<string, unknown>;
+    for (const [key, child] of Object.entries(value))
+      projection[key] = subtaskInertProjection(child);
+    return projection;
+  }
+  return value;
+}
+
+function subtaskInertJson(value: object) {
+  return JSON.stringify(subtaskInertProjection(value)) as string;
+}
+
+function subtaskByteLength(value: object) {
+  return Buffer.byteLength(subtaskInertJson(value), "utf8");
+}
+
+function detachSubtaskData<T extends object>(value: T): T {
+  return JSON.parse(subtaskInertJson(value)) as T;
+}
+
+function validSubtaskMonitorMetadata(
+  value: unknown,
+  state: HybridState,
+): value is SubtaskMonitorCheckpointMetadata {
+  if (
+    !record(value) ||
+    !exactKeys(
+      value,
+      ["enabled", "usage"],
+      [
+        "lastJevCallAt",
+        "lastExtractionCallAt",
+        "idleDoneTaskId",
+        "healthCards",
+        "taskDetails",
+        "subtasks",
+      ],
+    ) ||
+    typeof value.enabled !== "boolean" ||
+    !record(value.usage) ||
+    !exactKeys(value.usage, ["jev", "extraction"]) ||
+    ![value.usage.jev, value.usage.extraction].every(
+      (usage) =>
+        record(usage) &&
+        exactKeys(usage, ["calls", "inputTokens", "outputTokens"]) &&
+        nonNegativeInteger(usage.calls) &&
+        nonNegativeInteger(usage.inputTokens) &&
+        nonNegativeInteger(usage.outputTokens),
+    ) ||
+    (Object.hasOwn(value, "lastJevCallAt") &&
+      !nonNegativeInteger(value.lastJevCallAt)) ||
+    (Object.hasOwn(value, "lastExtractionCallAt") &&
+      !nonNegativeInteger(value.lastExtractionCallAt)) ||
+    (Object.hasOwn(value, "idleDoneTaskId") &&
+      !taskIdIsValid(value.idleDoneTaskId))
+  )
+    return false;
+
+  if (Object.hasOwn(value, "subtasks")) {
+    if (
+      !record(value.subtasks) ||
+      !exactKeys(value.subtasks, ["state", "journal"]) ||
+      !subtaskCheckpointIsValid(value.subtasks.state) ||
+      !subtaskJournalIsValid(value.subtasks.journal) ||
+      subtaskByteLength(value.subtasks) > MAX_SUBTASK_OPTIONAL_BYTES
+    )
+      return false;
+  }
+  if (Object.hasOwn(value, "healthCards")) {
+    if (
+      !Array.isArray(value.healthCards) ||
+      value.healthCards.length > MAX_TASKS ||
+      !value.healthCards.every(validHealthCard) ||
+      new Set(value.healthCards.map((card) => card.taskId)).size !==
+        value.healthCards.length ||
+      !value.healthCards.every((card) =>
+        state.tasks.some((task) => task.id === card.taskId),
+      )
+    )
+      return false;
+  }
+  if (
+    Object.hasOwn(value, "taskDetails") &&
+    (!Array.isArray(value.taskDetails) ||
+      value.taskDetails.length > MAX_TASKS ||
+      !value.taskDetails.every(validTaskDetailRecord) ||
+      new Set(value.taskDetails.map((detail) => detail.taskId)).size !==
+        value.taskDetails.length ||
+      !value.taskDetails.every((detail) => {
+        const task = state.tasks.find((item) => item.id === detail.taskId);
+        return (
+          !!task &&
+          task.revision === detail.revision &&
+          task.label === detail.label &&
+          task.source.entryId === detail.taskSource.entryId &&
+          task.source.messageHash === detail.taskSource.messageHash &&
+          task.source.role === detail.taskSource.role &&
+          task.source.start === detail.taskSource.start &&
+          task.source.end === detail.taskSource.end &&
+          task.source.quoteHash === detail.taskSource.quoteHash
+        );
+      }))
+  )
+    return false;
+  return (
+    !Object.hasOwn(value, "idleDoneTaskId") ||
+    state.tasks.some(
+      (task) =>
+        task.id === value.idleDoneTaskId &&
+        task.included &&
+        task.status === "done",
+    )
+  );
+}
+
+function validSubtaskCheckpointEnvelope(
+  value: unknown,
+): value is SubtaskCheckpointEnvelope {
+  return (
+    record(value) &&
+    exactKeys(value, ["version", "state"], ["monitor"]) &&
+    value.version === SUBTASK_VERSION &&
+    validState(value.state) &&
+    (!Object.hasOwn(value, "monitor") ||
+      validSubtaskMonitorMetadata(value.monitor, value.state))
+  );
+}
+
+/** Staged v11 classification only. It intentionally has no legacy fallback. */
+export function subtaskCheckpointStorageStatus(
+  data: unknown,
+): CheckpointStorageStatus {
+  if (data === undefined) return "absent";
+  try {
+    const detached = strictDetachedData(data);
+    if (detached === STRICT_DATA_REJECTED || !detached || !record(detached))
+      return "corrupt";
+    if (
+      typeof detached.version === "number" &&
+      detached.version !== SUBTASK_VERSION
+    )
+      return "unsupported";
+    return validSubtaskCheckpointEnvelope(detached) &&
+      subtaskByteLength(detached) <= MAX_CHECKPOINT_BYTES
+      ? "supported"
+      : "corrupt";
+  } catch {
+    return "corrupt";
+  }
+}
+
+/**
+ * Encode strict v11 staged data without changing the active v10 codec or
+ * reserving optional bytes when no optional projection is present.
+ */
+export function encodeSubtaskCheckpoint(
+  state: HybridState,
+  monitor?: SubtaskMonitorCheckpointMetadata,
+): SubtaskCheckpointEnvelope {
+  const detachedState = strictDetachedData(state);
+  const detachedMonitor =
+    monitor === undefined ? undefined : strictDetachedData(monitor);
+  if (
+    detachedState === STRICT_DATA_REJECTED ||
+    !validState(detachedState) ||
+    (monitor !== undefined &&
+      (detachedMonitor === STRICT_DATA_REJECTED ||
+        !validSubtaskMonitorMetadata(detachedMonitor, detachedState)))
+  )
+    throw new Error("Invalid hybrid subtask checkpoint");
+
+  const checkpoint: SubtaskCheckpointEnvelope = {
+    version: SUBTASK_VERSION,
+    state: checkpointState(detachedState),
+    ...(monitor === undefined
+      ? {}
+      : { monitor: detachedMonitor as SubtaskMonitorCheckpointMetadata }),
+  };
+  if (!validSubtaskCheckpointEnvelope(checkpoint))
+    throw new Error("Invalid hybrid subtask checkpoint");
+  if (subtaskByteLength(checkpoint) > MAX_CHECKPOINT_BYTES)
+    throw new Error("Hybrid subtask checkpoint exceeds v11 bounds");
+  return detachSubtaskData(checkpoint);
+}
+
+function journalRecordIsCurrent(
+  record: SubtaskPhaseRecord,
+  state: HybridState,
+  listRevisions: ReadonlyMap<string, number>,
+  resolve: (entryId: string) => Observation | undefined,
+  isCurrentJob: ((record: SubtaskPhaseRecord) => boolean) | undefined,
+) {
+  const parent = state.tasks.find((task) => task.id === record.parentTaskId);
+  if (!parent) return false;
+  if (
+    !parent.included ||
+    parent.revision !== record.parentRevision ||
+    !canonicalSource(record.source, resolve) ||
+    (listRevisions.get(record.parentTaskId) ?? 0) !== record.listRevision ||
+    typeof isCurrentJob !== "function"
+  )
+    return false;
+  try {
+    return isCurrentJob(detachSubtaskData(record)) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Restore v11 mandatory state exactly, then locally prune stale optional facts.
+ * It never routes a v11 payload through the active v10 reader.
+ */
+export function restoreSubtaskCheckpoint(
+  data: unknown,
+  sourceId: string,
+  resolve: (entryId: string) => Observation | undefined,
+  preceding: (entryId: string) => readonly Observation[],
+  isCurrentJob?: (record: SubtaskPhaseRecord) => boolean,
+):
+  | { state: HybridState; monitor?: SubtaskMonitorCheckpointMetadata }
+  | undefined {
+  try {
+    const detached = strictDetachedData(data);
+    if (
+      detached === STRICT_DATA_REJECTED ||
+      !detached ||
+      !validSubtaskCheckpointEnvelope(detached) ||
+      subtaskByteLength(detached) > MAX_CHECKPOINT_BYTES ||
+      detached.state.sourceId !== sourceId ||
+      !referencesResolve(detached.state, resolve) ||
+      !replayPending(detached.state, resolve, preceding)
+    )
+      return;
+
+    const state = detachSubtaskData(detached.state);
+    if ((state as HybridState & { focusTaskId?: unknown }).focusTaskId === null)
+      state.focusTaskId = undefined;
+    const restoredState = copyState(state);
+    if (!detached.monitor) return { state: restoredState };
+
+    const monitor = detachSubtaskData(detached.monitor);
+    if (monitor.subtasks) {
+      const store = SubtaskStore.restore(monitor.subtasks.state, {
+        parents: restoredState.tasks,
+        sourceCurrent: (source) => !!canonicalSource(source, resolve),
+      });
+      if (!store) return;
+      const listRevisions = new Map(
+        store
+          .snapshot()
+          .groups.map((group) => [group.parentTaskId, group.listRevision]),
+      );
+      const journal = restoreSubtaskJournal(
+        monitor.subtasks.journal,
+        (record) =>
+          journalRecordIsCurrent(
+            record,
+            restoredState,
+            listRevisions,
+            resolve,
+            isCurrentJob,
+          ),
+      );
+      if (!journal) return;
+      monitor.subtasks = { state: store.checkpoint(), journal };
+    }
+    return { state: restoredState, monitor: detachSubtaskData(monitor) };
+  } catch {
+    return;
+  }
+}
+
+/**
+ * Persist one detached v11 candidate. Storage callback owns external atomicity;
+ * this boundary never publishes a candidate when it returns false or throws.
+ */
+export function commitSubtaskCheckpoint(
+  state: HybridState,
+  monitor: SubtaskMonitorCheckpointMetadata | undefined,
+  save: (candidate: SubtaskCheckpointEnvelope) => boolean,
+): SubtaskCheckpointEnvelope | undefined {
+  let candidate: SubtaskCheckpointEnvelope;
+  try {
+    candidate = encodeSubtaskCheckpoint(state, monitor);
+  } catch {
+    return;
+  }
+  if (typeof save !== "function") return;
+  try {
+    if (save(detachSubtaskData(candidate)) !== true) return;
+    return detachSubtaskData(candidate);
   } catch {
     return;
   }

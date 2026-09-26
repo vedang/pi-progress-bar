@@ -65,6 +65,77 @@ describe("disconnected strict v11 generic subtask envelope", () => {
     ])
       expect(api).toBeTypeOf("function");
   });
+  it.each(["ready", "yes", "negative", "noop"])(
+    "retains initial revision-zero %s journal authority without a group",
+    async (mode) => {
+      const { state, monitor } = await fixture();
+      const parent = state.tasks[0];
+      const source = parent.source;
+      monitor.subtasks.state = new SubtaskStore().checkpoint();
+      const data = monitor.subtasks.journal;
+      const item: SubtaskJournalCheckpoint["records"][number] = {
+        identity: subtaskHash(`initial-${mode}`),
+        parentTaskId: parent.id,
+        parentRevision: parent.revision,
+        parentSourceDigest: subtaskHash(
+          JSON.stringify([
+            source.entryId,
+            source.messageHash,
+            source.role,
+            source.start,
+            source.end,
+            source.quoteHash,
+          ]),
+        ),
+        listRevision: 0,
+        source,
+        contextHash: subtaskHash("initial-context"),
+        gateModel: "jev-1.13.0",
+        selectedModel: "fixture/selected",
+        phase: "gate-ready",
+        state: "ready",
+      };
+      if (mode !== "ready") {
+        data.dispatches = 1;
+        data.usage.jev.calls = 1;
+        item.phase = "gate-decided";
+        item.gate = {
+          requestHash: subtaskHash("gate"),
+          dispatch: 1,
+          at: 10,
+          outcome: "decided",
+          choice: mode === "negative" ? "no" : "yes",
+          confidence: 1,
+          probability: 1,
+          usage: { inputTokens: 0, outputTokens: 0 },
+        };
+        if (mode === "negative") item.state = "complete";
+      }
+      if (mode === "noop") {
+        data.dispatches = 2;
+        data.usage.extraction.calls = 1;
+        item.phase = "proposal-decided";
+        item.state = "complete";
+        item.proposal = {
+          requestHash: subtaskHash("proposal"),
+          dispatch: 2,
+          at: 11,
+          outcome: "noop",
+          usage: { inputTokens: 0, outputTokens: 0 },
+        };
+      }
+      data.records = [item];
+      const checkpoint = encodeSubtaskCheckpoint(state, monitor);
+      const restored = restoreSubtaskCheckpoint(
+        checkpoint,
+        state.sourceId,
+        resolve,
+        () => [],
+        () => true,
+      );
+      expect(restored?.monitor?.subtasks?.journal).toEqual(data);
+    },
+  );
   it.each([
     [0, 1, "accepted", false],
     [1, 2, "accepted", false],
@@ -209,7 +280,9 @@ describe("disconnected strict v11 generic subtask envelope", () => {
     );
     expect(restored?.state).toEqual(state);
     expect(restored?.monitor).toEqual(monitor);
-    restored!.monitor!.subtasks!.state.groups[0].children[0].label =
+    if (!restored?.monitor?.subtasks)
+      throw new Error("Expected restored subtasks");
+    restored.monitor.subtasks.state.groups[0].children[0].label =
       "Caller change";
     expect(
       checkpoint.monitor?.subtasks?.state.groups[0].children[0].label,
@@ -386,7 +459,8 @@ describe("disconnected strict v11 generic subtask envelope", () => {
     const saved = commitSubtaskCheckpoint(state, monitor, save);
     expect(saved).toEqual(encodeSubtaskCheckpoint(state, monitor));
     expect(save).toHaveBeenCalledTimes(1);
-    saved!.state.tasks[0].label = "Changed return";
+    if (!saved) throw new Error("Expected committed checkpoint");
+    saved.state.tasks[0].label = "Changed return";
     expect(state.tasks[0].label).not.toBe("Changed return");
   });
   it("does not call storage for an invalid candidate", async () => {

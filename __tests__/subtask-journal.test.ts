@@ -8,6 +8,11 @@ import {
 } from "../src/core/subtask-journal";
 import { subtaskHash, subtaskSource } from "./fixtures/subtasks";
 
+function required<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("Expected fixture value");
+  return value;
+}
+
 function record(): SubtaskPhaseRecord {
   return {
     identity: subtaskHash("job"),
@@ -81,8 +86,10 @@ describe("durable generic decomposition phases", () => {
     expect(subtaskJournalIsValid(data)).toBe(true);
     const restored = restoreSubtaskJournal(data, () => true);
     expect(restored).toEqual(data);
-    expect(nextSubtaskPhase(restored!, data.records[0].identity)).toBe("gate");
-    restored!.records[0].source.entryId = "changed";
+    expect(nextSubtaskPhase(required(restored), data.records[0].identity)).toBe(
+      "gate",
+    );
+    required(restored).records[0].source.entryId = "changed";
     expect(data.records[0].source.entryId).toBe("request");
   });
   it("restores accepted yes directly to proposal without repeating gate", () => {
@@ -90,7 +97,7 @@ describe("durable generic decomposition phases", () => {
     expect(subtaskJournalIsValid(data)).toBe(true);
     const restored = restoreSubtaskJournal(data, () => true);
     expect(restored).toEqual(data);
-    expect(nextSubtaskPhase(restored!, data.records[0].identity)).toBe(
+    expect(nextSubtaskPhase(required(restored), data.records[0].identity)).toBe(
       "proposal",
     );
     expect(restored?.dispatches).toBe(1);
@@ -102,17 +109,17 @@ describe("durable generic decomposition phases", () => {
       const item = data.records[0];
       item.state = "complete";
       if (mode === "no" || mode === "uncertain")
-        Object.assign(item.gate!, {
+        Object.assign(required(item.gate), {
           choice: mode,
           confidence: 1,
           probability: 1,
         });
-      if (mode === "low-confidence") item.gate!.confidence = 0.499;
-      if (mode === "low-probability") item.gate!.probability = 0.799;
+      if (mode === "low-confidence") required(item.gate).confidence = 0.499;
+      if (mode === "low-probability") required(item.gate).probability = 0.799;
       expect(subtaskJournalIsValid(data)).toBe(true);
       expect(
         nextSubtaskPhase(
-          restoreSubtaskJournal(data, () => true)!,
+          required(restoreSubtaskJournal(data, () => true)),
           item.identity,
         ),
       ).toBeUndefined();
@@ -135,7 +142,7 @@ describe("durable generic decomposition phases", () => {
     };
     const restored = restoreSubtaskJournal(data, () => true);
     expect(restored).toEqual(data);
-    expect(nextSubtaskPhase(restored!, item.identity)).toBeUndefined();
+    expect(nextSubtaskPhase(required(restored), item.identity)).toBeUndefined();
   });
   it("preserves charged crash-before-receipt as permanent, never silently re-bills", () => {
     const data = journal();
@@ -154,7 +161,7 @@ describe("durable generic decomposition phases", () => {
     const restored = restoreSubtaskJournal(data, () => true);
     expect(restored?.records[0].state).toBe("permanent");
     expect(restored?.dispatches).toBe(1);
-    expect(nextSubtaskPhase(restored!, item.identity)).toBeUndefined();
+    expect(nextSubtaskPhase(required(restored), item.identity)).toBeUndefined();
   });
   it("prunes stale authority but retains lifetime charges and usage", () => {
     const data = decided();
@@ -171,7 +178,7 @@ describe("durable generic decomposition phases", () => {
   it("a new changed context can be ready despite a retained old negative", () => {
     const data = decided();
     data.records[0].state = "complete";
-    Object.assign(data.records[0].gate!, {
+    Object.assign(required(data.records[0].gate), {
       choice: "no",
       confidence: 1,
       probability: 1,
@@ -189,7 +196,7 @@ describe("durable generic decomposition phases", () => {
     const data = decided();
     data.dispatches = 1024;
     data.usage.jev.calls = 1024;
-    data.records[0].gate!.dispatch = 1024;
+    required(data.records[0].gate).dispatch = 1024;
     expect(subtaskJournalIsValid(data)).toBe(true);
     expect(nextSubtaskPhase(data, data.records[0].identity)).toBeUndefined();
     data.dispatches++;
@@ -214,11 +221,11 @@ describe("durable generic decomposition phases", () => {
     if (mode === "extra") Object.assign(data, { callId: "runtime-call" });
     if (mode === "model") item.gateModel = "jev-latest";
     if (mode === "duplicate") data.records.push(structuredClone(item));
-    if (mode === "future-dispatch") item.gate!.dispatch = 2;
+    if (mode === "future-dispatch") required(item.gate).dispatch = 2;
     if (mode === "usage") data.usage.jev.inputTokens = 0;
     if (mode === "missing-gate") delete item.gate;
     if (mode === "negative-ready")
-      Object.assign(item.gate!, {
+      Object.assign(required(item.gate), {
         choice: "no",
         confidence: 1,
         probability: 1,

@@ -29,6 +29,100 @@ const restore = (
 ) => SubtaskStore.restore(payload, { parents, sourceCurrent });
 
 describe("generic subtask store persistence primitives", () => {
+  it.each(["group", "child"])(
+    "rejects %s allocator overflow atomically after valid restore",
+    (kind) => {
+      const payload = new SubtaskStore().checkpoint();
+      if (kind === "group") payload.nextGroupId = Number.MAX_SAFE_INTEGER;
+      else payload.nextChildId = Number.MAX_SAFE_INTEGER;
+      expect(subtaskCheckpointIsValid(payload)).toBe(true);
+      const store = restore(payload);
+      if (!store) throw new Error("Valid max-safe allocator must restore");
+      const before = store.checkpoint();
+      expect(store.admit(subtaskAdmission(["One child"]))).toEqual({
+        accepted: false,
+        reason: "capacity",
+      });
+      expect(store.checkpoint()).toEqual(before);
+    },
+  );
+  it("rejects replacement child allocation overflow without retiring the prior child", () => {
+    const { store: original, parent, admission, group } = fixture();
+    const payload = original.checkpoint();
+    payload.nextChildId = Number.MAX_SAFE_INTEGER;
+    const store = restore(payload, [parent]);
+    if (!store) throw new Error("Expected valid restore");
+    const before = store.checkpoint();
+    expect(
+      store.admit({
+        ...admission,
+        expectedListRevision: 1,
+        children: [
+          {
+            kind: "replace",
+            id: group.children[0].id,
+            label: "New scope",
+            source: parent.source,
+          },
+          { kind: "retain", id: group.children[1].id },
+        ],
+      }),
+    ).toEqual({ accepted: false, reason: "capacity" });
+    expect(store.checkpoint()).toEqual(before);
+  });
+  it("rejects list revision overflow but still permits a retain-only no-op", () => {
+    const { store: original, parent, admission } = fixture();
+    const payload = original.checkpoint();
+    payload.groups[0].listRevision = Number.MAX_SAFE_INTEGER;
+    const store = restore(payload, [parent]);
+    if (!store) throw new Error("Expected max-safe revision restore");
+    const group = store.snapshot().groups[0];
+    const before = store.checkpoint();
+    expect(
+      store.admit({
+        ...admission,
+        expectedListRevision: group.listRevision,
+        children: [
+          {
+            kind: "reword",
+            id: group.children[0].id,
+            label: "Reworded child",
+            source: parent.source,
+          },
+          { kind: "retain", id: group.children[1].id },
+        ],
+      }),
+    ).toEqual({ accepted: false, reason: "capacity" });
+    expect(store.checkpoint()).toEqual(before);
+    expect(
+      store.admit({
+        ...admission,
+        expectedListRevision: group.listRevision,
+        children: group.children.map((child) => ({
+          kind: "retain" as const,
+          id: child.id,
+        })),
+      }),
+    ).toEqual({ accepted: true });
+    expect(store.snapshot().groups[0].listRevision).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(subtaskCheckpointIsValid(store.checkpoint())).toBe(true);
+  });
+  it("permits the last safe group and child allocation", () => {
+    const payload = new SubtaskStore().checkpoint();
+    payload.nextGroupId = Number.MAX_SAFE_INTEGER - 1;
+    payload.nextChildId = Number.MAX_SAFE_INTEGER - 1;
+    const store = restore(payload);
+    if (!store) throw new Error("Expected safe allocator restore");
+    expect(store.admit(subtaskAdmission(["One child"]))).toEqual({
+      accepted: true,
+    });
+    expect(store.checkpoint()).toMatchObject({
+      nextGroupId: Number.MAX_SAFE_INTEGER,
+      nextChildId: Number.MAX_SAFE_INTEGER,
+    });
+  });
   it("snapshots validated store facts before canonical callbacks mutate original payload", () => {
     const { store, parent } = fixture();
     const payload = store.checkpoint();

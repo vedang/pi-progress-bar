@@ -4,7 +4,9 @@ Date: 2026-09-26. Implements the schema-freeze requirement of [revised design](c
 
 ## C02 full-review repair fences
 
-Accepted proposal restore compares store list frontier to the resulting `proposal.listRevision`, not pre-proposal record.listRevision; all other outcomes use record.listRevision. Missing resulting list discards accepted authority while retaining charges. Encoder may accept exact ON byte limit; commit must additionally preflight an OFF projection before save so new state cannot make durable OFF impossible.
+Accepted proposal restore compares store list frontier to the resulting `proposal.listRevision`, not pre-proposal record.listRevision; all other outcomes use record.listRevision. An absent group is frontier0 (not undefined): initial gate-ready, accepted yes, negative and noop records must survive a valid currentness check without inventing a group. Missing accepted result0→1 still fails currentness. Missing resulting list discards accepted authority while retaining charges. Encoder may accept exact ON byte limit; commit must additionally preflight an OFF projection before save so new state cannot make durable OFF impossible.
+
+Safe-integer high-water/list counters may restore at MAX_SAFE_INTEGER, but any mutation requiring an unsafe nextGroupId/nextChildId/listRevision increment fails atomically with capacity before modifying facts or replay proof. Last-safe increments remain allowed; retain-only no-op and reports do not consume list revision or allocators.
 
 Store and journal restore snapshot **all** validated caller-owned data before the first canonical/currentness callback. Detached callback arguments alone do not stop closures mutating original wallet/records/child facts. Use the snapshot exclusively after callbacks; preserve charges and accepted facts from that snapshot.
 

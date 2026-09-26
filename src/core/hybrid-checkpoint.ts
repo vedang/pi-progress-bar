@@ -2356,15 +2356,20 @@ function journalRecordIsCurrent(
 ) {
   const parent = state.tasks.find((task) => task.id === record.parentTaskId);
   if (!parent) return false;
-  const requiredListRevision =
-    record.proposal?.outcome === "accepted"
-      ? record.proposal.listRevision
-      : record.listRevision;
+  const acceptedProposal = record.proposal?.outcome === "accepted";
+  const requiredListRevision = acceptedProposal
+    ? record.proposal?.listRevision
+    : record.listRevision;
+  const actualListRevision = listRevisions.get(record.parentTaskId);
+  const listRevisionIsCurrent = acceptedProposal
+    ? actualListRevision !== undefined &&
+      actualListRevision === requiredListRevision
+    : (actualListRevision ?? 0) === requiredListRevision;
   if (
     !parent.included ||
     parent.revision !== record.parentRevision ||
     !canonicalSource(record.source, resolve) ||
-    (listRevisions.get(record.parentTaskId) ?? 0) !== requiredListRevision ||
+    !listRevisionIsCurrent ||
     typeof isCurrentJob !== "function"
   )
     return false;

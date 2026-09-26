@@ -14,8 +14,11 @@ import {
 } from "./widget";
 
 type BoardTask = WidgetSnapshot["board"]["tasks"][number];
+type CoverageSnapshot = NonNullable<WidgetSnapshot["coverage"]>;
+type CoverageGroup = CoverageSnapshot["groups"][number];
 type VisibilitySnapshot = NonNullable<WidgetSnapshot["visibility"]>;
 type VisibilityAction = VisibilitySnapshot["actions"][number];
+type BoardPane = "list" | "detail" | "coverage";
 
 type DetailValue = {
   text: string;
@@ -31,8 +34,9 @@ interface BoardViewState {
   selectedId?: string;
   listOffset: number;
   detailOffset: number;
+  coverageOffset: number;
   debugger: boolean;
-  pane: "list" | "detail";
+  pane: BoardPane;
 }
 
 interface ActionAnchor {
@@ -74,11 +78,13 @@ class TaskBoard implements BoardComponent {
   private selectedIndex = 0;
   private listOffset = 0;
   private detailOffset = 0;
+  /** Coverage inventory offset is detached from task detail/action history. */
+  private coverageOffset = 0;
   /** Stable action + wrapped-line position while the user scrolls history. */
   private actionAnchor: ActionAnchor | undefined;
   private actionAnchorGap = false;
   private debugger = false;
-  private pane: "list" | "detail" = "list";
+  private pane: BoardPane = "list";
   private disposed = false;
   private lastLayout: BoardLayout;
 
@@ -96,6 +102,10 @@ class TaskBoard implements BoardComponent {
     const previousIndex = this.selectedIndex;
     const previousId = this.selectedId;
     const anchor = this.captureActionAnchor() ?? this.actionAnchor;
+    const coverageAtEnd =
+      this.pane === "coverage" &&
+      this.coverageOffset >=
+        this.coverageMaximum(this.selected(), this.lastLayout);
     this.snapshot = clone(next);
     const tasks = this.tasks();
     const currentIndex = previousId
@@ -116,9 +126,19 @@ class TaskBoard implements BoardComponent {
       this.listOffset = 0;
       this.resetActionAnchor();
     }
-    if (previousId !== this.selectedId) this.resetActionAnchor();
-    else if (anchor) this.restoreActionAnchor(anchor);
+    if (previousId !== this.selectedId) {
+      this.resetActionAnchor();
+      this.coverageOffset = 0;
+    } else if (anchor) this.restoreActionAnchor(anchor);
+    if (this.pane === "coverage" && !this.hasCoverage(this.selected()))
+      this.pane = "detail";
     this.clampOffsets(this.lastLayout);
+    // Current runtime activity is pinned metadata, never a scroll command.
+    if (coverageAtEnd && this.pane === "coverage")
+      this.coverageOffset = this.coverageMaximum(
+        this.selected(),
+        this.lastLayout,
+      );
     this.options.requestRender();
   }
 
@@ -133,6 +153,7 @@ class TaskBoard implements BoardComponent {
       ...(this.selectedId ? { selectedId: this.selectedId } : {}),
       listOffset: this.listOffset,
       detailOffset: this.detailOffset,
+      coverageOffset: this.coverageOffset,
       debugger: this.debugger,
       pane: this.pane,
     };
@@ -151,19 +172,25 @@ class TaskBoard implements BoardComponent {
       return;
     }
     if (matchesKey(data, "tab")) {
-      this.pane = this.pane === "list" ? "detail" : "list";
+      const panes: BoardPane[] = this.hasCoverage(this.selected())
+        ? ["list", "detail", "coverage"]
+        : ["list", "detail"];
+      const index = panes.indexOf(this.pane);
+      this.pane = panes[(index + 1) % panes.length] ?? "list";
       this.requestRender();
       return;
     }
     if (matchesKey(data, "left")) {
-      if (this.pane !== "list") {
-        this.pane = "list";
+      const next = this.pane === "coverage" ? "detail" : "list";
+      if (this.pane !== next) {
+        this.pane = next;
         this.requestRender();
       }
       return;
     }
     if (matchesKey(data, "right")) {
-      if (this.pane !== "detail") {
+      // Keep existing right/enter ownership; Tab alone adds optional coverage.
+      if (this.pane === "list") {
         this.pane = "detail";
         this.requestRender();
       }
@@ -178,6 +205,10 @@ class TaskBoard implements BoardComponent {
     }
     if (this.pane === "detail") {
       this.handleDetailInput(data);
+      return;
+    }
+    if (this.pane === "coverage") {
+      this.handleCoverageInput(data);
       return;
     }
     this.handleListInput(data);
@@ -255,6 +286,26 @@ class TaskBoard implements BoardComponent {
     this.requestRender();
   }
 
+  private handleCoverageInput(data: string): void {
+    const maximum = this.coverageMaximum(this.selected(), this.lastLayout);
+    const page = Math.max(
+      1,
+      this.coverageCapacity(this.selected(), this.lastLayout),
+    );
+    let next = this.coverageOffset;
+    if (matchesKey(data, "up")) next--;
+    else if (matchesKey(data, "down")) next++;
+    else if (matchesKey(data, "pageUp")) next -= page;
+    else if (matchesKey(data, "pageDown")) next += page;
+    else if (matchesKey(data, "home")) next = 0;
+    else if (matchesKey(data, "end")) next = maximum;
+    else return;
+    next = Math.max(0, Math.min(next, maximum));
+    if (next === this.coverageOffset) return;
+    this.coverageOffset = next;
+    this.requestRender();
+  }
+
   private handleDetailInput(data: string): void {
     const maximum = this.detailMaximum(this.lastLayout);
     const page = Math.max(1, this.detailCapacity(this.lastLayout));
@@ -297,7 +348,10 @@ class TaskBoard implements BoardComponent {
           this.taskLine(item, layout.leftWidth, item.taskId === task.taskId),
         ),
     ];
-    const detail = this.detailLines(task, layout);
+    const detail =
+      this.pane === "coverage"
+        ? this.coveragePaneLines(task, layout)
+        : this.detailLines(task, layout);
     return this.compose(left, detail, layout);
   }
 
@@ -398,45 +452,207 @@ class TaskBoard implements BoardComponent {
     return { pinned, body, actions: visibility.actions };
   }
 
-  /** Coverage is a read-only optional sidecar under its exact semantic parent. */
-  private coverageLines(task: BoardTask, width: number) {
-    const groups = this.snapshot.coverage?.groups.filter(
+  /** Coverage stays attached to its exact parent revision, never task rows. */
+  private coverageGroups(task: BoardTask): readonly CoverageGroup[] {
+    return (this.snapshot.coverage?.groups ?? []).filter(
       (group) =>
         group.parentTaskId === task.taskId &&
         group.parentRevision === task.revision,
     );
-    const omissions = this.snapshot.coverage?.omissions ?? 0;
-    if (!groups?.length && omissions <= 0) return [];
+  }
+
+  private hasCoverage(task = this.selected()) {
+    return (
+      !!task && this.coverageGroups(task).some((group) => group.children.length)
+    );
+  }
+
+  private coverageRole(group: CoverageGroup) {
+    return ["user", "assistant", "intercom"].includes(group.intent.role)
+      ? group.intent.role
+      : "unknown";
+  }
+
+  private coverageStats(group: CoverageGroup) {
+    const reviewed = group.children.filter(
+      (child) => child.status === "reported-reviewed",
+    ).length;
+    const blocked = group.children.filter(
+      (child) => child.status === "reported-blocked",
+    ).length;
+    const pending = group.children.filter(
+      (child) => child.status === "pending",
+    ).length;
+    const accessed = group.children.filter((child) => child.accessed).length;
+    const denominator = group.complete
+      ? (group.knownTotal ?? group.children.length)
+      : group.knownTotal;
+    return { reviewed, blocked, pending, accessed, denominator };
+  }
+
+  private coverageCurrentCount(group: CoverageGroup) {
+    return (this.snapshot.coverage?.current ?? [])
+      .filter((current) => current.groupId === group.id)
+      .reduce((total, current) => total + current.childIds.length, 0);
+  }
+
+  /** Detail pane summarizes coverage; inventory itself has its own scroll pane. */
+  private coverageLines(task: BoardTask, width: number) {
+    const groups = this.coverageGroups(task);
+    const coverage = this.snapshot.coverage;
+    if (!groups.length && !coverage?.exhausted && !(coverage?.omissions ?? 0))
+      return [];
     const lines = [...this.wrapLines("Coverage:", width)];
-    if (omissions > 0)
+    if (coverage?.exhausted)
       lines.push(
         ...this.wrapLines(
-          `• Incomplete · ${omissions} optional candidates omitted`,
+          "• Coverage exhausted · optional review unavailable",
           width,
           "warning",
         ),
       );
-    for (const group of groups ?? []) {
-      const accessed = group.children.filter((child) => child.accessed).length;
+    if ((coverage?.omissions ?? 0) > 0)
       lines.push(
         ...this.wrapLines(
-          `• ${group.children.length} known · ${accessed} accessed`,
+          `• Incomplete · ${coverage?.omissions} optional candidates omitted`,
+          width,
+          "warning",
+        ),
+      );
+    for (const group of groups) {
+      const stats = this.coverageStats(group);
+      const denominator =
+        stats.denominator === undefined ? "unknown total" : stats.denominator;
+      lines.push(
+        ...this.wrapLines(
+          `• Reported reviewed ${stats.reviewed} / ${denominator}`,
+          width,
+        ),
+        ...this.wrapLines(
+          `• ${stats.accessed} accessed · ${stats.blocked} blocked · ${stats.pending} pending`,
+          width,
+          "dim",
+        ),
+        ...this.wrapLines(
+          `• Intent: ${this.coverageRole(group)}`,
           width,
           "dim",
         ),
       );
-      for (const child of group.children)
+      const current = this.coverageCurrentCount(group);
+      if (current)
         lines.push(
           ...this.wrapLines(
-            `• ${child.label} · ${child.accessed ? "accessed" : "not accessed"}`,
+            `• Current ${current === 1 ? "item" : "batch"}: ${current} ${current === 1 ? "item" : "items"}`,
             width,
-            "dim",
+            "accent",
           ),
+        );
+      const first = group.children[0];
+      if (first)
+        lines.push(
+          ...this.wrapLines(`• First tab: ${first.label}`, width, "dim"),
         );
       for (const omission of group.omissions)
         lines.push(...this.wrapLines(`• ${omission}`, width, "warning"));
     }
     return lines;
+  }
+
+  private coveragePaneContent(task: BoardTask, layout: BoardLayout) {
+    const width = layout.rightWidth;
+    const groups = this.coverageGroups(task);
+    const health = task.health;
+    const pinned = [
+      ...this.wrapLines(`Service: ${this.snapshot.board.service.label}`, width),
+      this.formatLine("Summary:", width),
+      ...[
+        ["Requirements", health.requirements],
+        ["Acceptance", health.acceptance],
+        ["New red test", health.newRedTest],
+        ["Red evidence", health.redEvidence],
+        ["Implementation", health.implementation],
+      ].flatMap(([label, value]) =>
+        this.wrapLines(`• ${label}: ${value}`, width),
+      ),
+      ...this.wrapLines("Coverage:", width, "accent"),
+    ];
+    const body: string[] = [];
+    for (const group of groups) {
+      const stats = this.coverageStats(group);
+      const denominator =
+        stats.denominator === undefined ? "unknown total" : stats.denominator;
+      pinned.push(
+        ...this.wrapLines(
+          `Reported reviewed ${stats.reviewed} / ${denominator}`,
+          width,
+        ),
+        ...this.wrapLines(
+          `${stats.accessed} accessed · ${stats.blocked} blocked · ${stats.pending} pending`,
+          width,
+          "dim",
+        ),
+        ...this.wrapLines(`Intent: ${this.coverageRole(group)}`, width, "dim"),
+      );
+      const current = this.coverageCurrentCount(group);
+      if (current)
+        pinned.push(
+          ...this.wrapLines(
+            `Current ${current === 1 ? "item" : "batch"}: ${current} ${current === 1 ? "item" : "items"}`,
+            width,
+            "accent",
+          ),
+        );
+      if (groups.length > 1)
+        body.push(...this.wrapLines("Inventory:", width, "dim"));
+      for (const child of group.children)
+        body.push(
+          ...this.wrapLines(
+            `• ${child.label} · ${
+              child.status === "reported-reviewed"
+                ? "reported reviewed"
+                : child.status === "reported-blocked"
+                  ? "blocked"
+                  : "pending"
+            }${child.accessed ? " · accessed" : ""}`,
+            width,
+          ),
+        );
+      for (const omission of group.omissions)
+        body.push(...this.wrapLines(`• ${omission}`, width, "warning"));
+    }
+    return { pinned, body };
+  }
+
+  private coveragePaneLines(task: BoardTask, layout: BoardLayout): string[] {
+    const { pinned, body } = this.coveragePaneContent(task, layout);
+    const capacity = this.coverageCapacity(task, layout, pinned.length);
+    const maximum = Math.max(0, body.length - capacity);
+    this.coverageOffset = Math.max(0, Math.min(this.coverageOffset, maximum));
+    return [
+      ...pinned,
+      ...body.slice(this.coverageOffset, this.coverageOffset + capacity),
+    ];
+  }
+
+  private coverageCapacity(
+    task: BoardTask | undefined,
+    layout: BoardLayout,
+    pinnedLength?: number,
+  ) {
+    if (!task) return 1;
+    const pinned =
+      pinnedLength ?? this.coveragePaneContent(task, layout).pinned.length;
+    return Math.max(1, layout.contentRows - pinned);
+  }
+
+  private coverageMaximum(task: BoardTask | undefined, layout: BoardLayout) {
+    if (!task) return 0;
+    const { pinned, body } = this.coveragePaneContent(task, layout);
+    return Math.max(
+      0,
+      body.length - this.coverageCapacity(task, layout, pinned.length),
+    );
   }
 
   private sameVisibilityTask(
@@ -707,6 +923,7 @@ class TaskBoard implements BoardComponent {
     if (!tasks.length) {
       this.listOffset = 0;
       this.detailOffset = 0;
+      this.coverageOffset = 0;
       return;
     }
     this.selectedIndex = Math.max(
@@ -724,6 +941,13 @@ class TaskBoard implements BoardComponent {
     this.detailOffset = Math.max(
       0,
       Math.min(this.detailOffset, this.detailMaximum(layout)),
+    );
+    this.coverageOffset = Math.max(
+      0,
+      Math.min(
+        this.coverageOffset,
+        this.coverageMaximum(this.selected(), layout),
+      ),
     );
   }
 

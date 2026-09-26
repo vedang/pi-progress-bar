@@ -277,8 +277,9 @@ export function renderWidget(
     snapshot.visibility?.budgetRemaining === 0
       ? "Visibility budget reached · history incomplete"
       : undefined;
-  const coverageWarning =
-    snapshot.coverage?.omissions && snapshot.coverage.omissions > 0
+  const coverageWarning = snapshot.coverage?.exhausted
+    ? "Coverage exhausted · optional review unavailable"
+    : snapshot.coverage?.omissions && snapshot.coverage.omissions > 0
       ? `Coverage incomplete · ${compact(snapshot.coverage.omissions)} optional candidates omitted`
       : undefined;
   const lines: WidgetLine[] = [

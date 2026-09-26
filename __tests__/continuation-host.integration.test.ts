@@ -30,8 +30,34 @@ it.each([false, true])(
     const faux = ai.fauxProvider({ provider: "continuation-host" });
     runtime.registerNativeProvider(faux.provider);
     const providerForcedPolicy: boolean[] = [];
+    const providerPolicies: { hash: string; proofBytes: number }[] = [];
     const respond = (context: unknown) => {
-      providerForcedPolicy.push(JSON.stringify(context).includes(forced));
+      const request = context as {
+        systemPrompt?: unknown;
+        messages?: unknown[];
+      };
+      const transcript = ai as unknown as {
+        getCurrentSystemPrompt?: (messages: unknown[]) => string;
+      };
+      // Installed Pi passes normalized system-message transcripts; pinned Pi
+      // passes Context.systemPrompt. Use each paired SDK's own projection.
+      const text = transcript.getCurrentSystemPrompt
+        ? transcript.getCurrentSystemPrompt(request.messages ?? [])
+        : request.systemPrompt;
+      if (typeof text !== "string")
+        throw new Error("Provider system prompt unavailable");
+      providerPolicies.push({
+        hash: hash(text),
+        proofBytes: Buffer.byteLength(
+          JSON.stringify({
+            coverage: "complete",
+            promptHash: hash(text),
+            text,
+          }),
+          "utf8",
+        ),
+      });
+      providerForcedPolicy.push(text.includes(forced));
       return ai.fauxAssistantMessage(
         providerForcedPolicy.length === 1
           ? "Comparison is underway; recommendation remains pending."
@@ -180,9 +206,24 @@ it.each([false, true])(
       // assuming that every agent_start supplied a fresh structured projection.
       expect(policies).toHaveLength(1);
       expect(contextPolicies).toHaveLength(2);
+      let proofValid = true;
+      const proofOutcomes: string[] = [];
       for (const [index, observed] of contextPolicies.entries()) {
+        expect(providerPolicies[index].hash).toBe(observed.hash);
         expect(providerForcedPolicy[index]).toBe(observed.includesForcedPolicy);
+        proofValid =
+          proofValid &&
+          observed.hash === policies[0].hash &&
+          providerPolicies[index].proofBytes <= 8192;
+        proofOutcomes.push(proofValid ? "complete" : "unknown");
       }
+      expect(proofOutcomes).toEqual(
+        lateOverride ? ["unknown", "unknown"] : ["complete", "complete"],
+      );
+      if (process.env.PROGRESS_HOST_DIAGNOSTICS === "1")
+        process.stdout.write(
+          `${JSON.stringify({ lateOverride, originalHash: policies[0].hash, providers: providerPolicies, proofOutcomes })}\n`,
+        );
       expect(policies[0].policy.coverage).toBe("complete");
       expect(JSON.stringify(policies[0].policy)).not.toContain(forced);
       if (lateOverride) {

@@ -62,10 +62,35 @@ describe("continuation effective-policy proof", () => {
     const proof = captureContinuationPolicy(at);
     expect(proof.coverage).toBe("complete");
     expect(Buffer.byteLength(JSON.stringify(proof), "utf8")).toBe(8 * 1024);
-    expect(captureContinuationPolicy(`${at}x`)).toEqual(unknown);
+    expect(validateContinuationPolicy(proof, at)).toEqual(proof);
+    const over = `${at}x`;
+    const oversizedProof = {
+      coverage: "complete",
+      promptHash: hash(over),
+      text: over,
+    };
+    expect(Buffer.byteLength(JSON.stringify(oversizedProof), "utf8")).toBe(
+      8193,
+    );
+    expect(captureContinuationPolicy(over)).toEqual(unknown);
+    expect(validateContinuationPolicy(oversizedProof, over)).toEqual(unknown);
     // UTF8 bytes, not UTF16 length; this string is shorter but exceeds the cap.
     expect(captureContinuationPolicy("😀".repeat(2048))).toEqual(unknown);
   });
+
+  it.each(['"', "\\", "\n", "\ud800"])(
+    "counts JSON escape expansion for capture and validation (%j)",
+    (character) => {
+      const text = `Policy: ${character.repeat(character.charCodeAt(0) === 0xd800 ? 2000 : 5000)}`;
+      const proof = { coverage: "complete", promptHash: hash(text), text };
+      expect(Buffer.byteLength(text, "utf8")).toBeLessThan(8192);
+      expect(Buffer.byteLength(JSON.stringify(proof), "utf8")).toBeGreaterThan(
+        8192,
+      );
+      expect(captureContinuationPolicy(text)).toEqual(unknown);
+      expect(validateContinuationPolicy(proof, text)).toEqual(unknown);
+    },
+  );
 
   it("returns a detached proof and rejects tampered text/hash or unsupported fields", () => {
     const captured = captureContinuationPolicy(prompt);

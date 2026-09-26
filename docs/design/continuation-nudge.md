@@ -109,7 +109,7 @@ Generic C11 additionally waits for N05 so final generic QA sees continuation wir
 
 ### N00 host evidence
 
-Main's new host characterization passes2/2 on local Pi0.84.2 and2/2 on installed Pi0.87.1 using each host's sibling faux provider. Initial fixture assumptions failed: idle custom turn did not emit a second before_agent_start; global settlement-time prompt no longer represented the forced prompt. Failed logs retained. Corrected probe observes effective policy during `context` and confirms it against the faux provider's actual request. This is a bounded supported-host proof, not a guarantee against arbitrary privileged extensions rewriting provider wire payloads. Missing observable authority still abstains. No real provider calls or continuation runtime implementation were used.
+Main's new host characterization passes2/2 on local Pi0.84.2 and2/2 on installed Pi0.87.1 using each host's sibling faux provider. Initial fixture assumptions failed: idle custom turn did not emit a second before_agent_start; global settlement-time prompt no longer represented the forced prompt. Failed logs retained. Corrected probe hashes the exact provider-facing effective prompt (pinned SDK `Context.systemPrompt`; installed SDK `getCurrentSystemPrompt()` over its normalized transcript) and requires equality with the corresponding `ctx.getSystemPrompt()` hash for both turns. Full serialized proof byte count is recorded without text; normal fixture prompts fit8KiB (2004 bytes local,1959 bytes installed) and late-override chains remain unknown across any later reset. These are fixture prompt sizes, not a promise that a user's larger loaded prompt will fit. This characterizes policy-proof availability; the N01 helper remains intentionally RED until implemented. This is a bounded supported-host proof, not a guarantee against arbitrary privileged extensions rewriting provider wire payloads. Missing observable authority still abstains. No real provider calls or continuation runtime implementation were used.
 
 ### N01 policy API frozen by Main RED
 
@@ -117,7 +117,9 @@ Main's new host characterization passes2/2 on local Pi0.84.2 and2/2 on installed
 
 ## 7. Required acceptance matrix
 
-Positive: standing continue + status-only stop + one grounded actionable parent; unrelated blocked final gate with unblocked independent task; active peer on different task; original no-subtasks board and later generic-child board.
+Fresh N00 corpus now has19 cases with runtime parent statuses (`not-started`, `reopened`, `done`); reported in-flight work remains conversation evidence, not an invented status enum. Earlier18-case candidate hash is retained in review/Beads history, not current acceptance.
+
+Positive: prior wait-for-approval followed by newer direct user approval + actionable stop; standing continue + status-only stop + one grounded actionable parent; unrelated blocked final gate with unblocked independent task; active peer on different task; original no-subtasks board and later generic-child board.
 
 Negative: newer user pause/planning-only/status-only instruction; absent authorization; all blocked/approval-gated; active ownership conflict/unknown target ownership; legitimate waiting; already resumed work; complete/archived/revised parent; incomplete policy or intervening authority history; quoted malicious instructions; assistant/intercom trying to waive user restriction; stale context/draft/model; no key/provider failure/low confidence; oversized board/context/result.
 

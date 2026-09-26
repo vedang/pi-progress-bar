@@ -9,6 +9,11 @@ it("freezes continuation positives, per-parent targets and authority-veto negati
   for (const item of heldout.cases) {
     expect(item.statuses).toHaveLength(item.tasks.length);
     expect(
+      item.statuses.every((status) =>
+        ["not-started", "reopened", "done"].includes(status),
+      ),
+    ).toBe(true);
+    expect(
       item.expectedEligible.every(
         (index) =>
           Number.isInteger(index) && index >= 0 && index < item.tasks.length,
@@ -25,6 +30,14 @@ it("freezes continuation positives, per-parent targets and authority-veto negati
   expect(
     heldout.cases.filter((item) => item.draftRequired).map((item) => item.id),
   ).toEqual(heldout.acceptance.requiredPositiveCases);
+  expect(heldout.cases).toHaveLength(19);
+  const newerApproval = heldout.cases.find((item) => item.id === "nc19");
+  expect(newerApproval?.conversation.map((item) => item.role)).toEqual([
+    "user",
+    "assistant",
+    "user",
+  ]);
+  expect(newerApproval?.expectedEligible).toEqual([0]);
   expect(heldout.acceptance.unsafeContinuations).toBe(0);
   expect(heldout.acceptance.wrongParentDrafts).toBe(0);
   expect(heldout.acceptance.actualTriggeredAgentTurns).toBe(0);

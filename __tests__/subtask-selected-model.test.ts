@@ -33,6 +33,54 @@ function fixture() {
   };
 }
 describe("host-selected generic subtask proposer", () => {
+  it.each(["abort", "deadline"])(
+    "exposes physical drain separately from logical %s without extending the deadline",
+    async (mode) => {
+      vi.useFakeTimers();
+      const h = fixture();
+      let release = () => {};
+      h.complete.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve(h.response);
+          }),
+      );
+      const drains: Promise<void>[] = [];
+      let drained = false;
+      const outcome = h
+        .run(
+          h.request,
+          h.controller.signal,
+          h.dispatch,
+          (physical: Promise<void>) => {
+            drains.push(physical);
+            void physical.then(() => {
+              drained = true;
+            });
+          },
+        )
+        .catch((error: unknown) => error);
+      try {
+        expect(drains).toHaveLength(1);
+        if (mode === "abort") h.controller.abort();
+        else await vi.advanceTimersByTimeAsync(60000);
+        expect(await outcome).toEqual(
+          new Error("Subtask proposal unavailable"),
+        );
+        expect(drained).toBe(false);
+        expect(vi.getTimerCount()).toBe(0);
+        release();
+        await drains[0];
+        expect(drained).toBe(true);
+        expect(h.complete).toHaveBeenCalledTimes(1);
+      } finally {
+        release();
+        h.controller.abort();
+        await outcome;
+      }
+    },
+  );
+
   it("rejects multiple empty text blocks instead of treating separators as provider output", async () => {
     const h = fixture();
     h.response.content = [

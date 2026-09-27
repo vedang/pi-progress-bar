@@ -28,7 +28,10 @@ it("runs generic decomposition after unchanged mandatory semantics without tools
       request: SubtaskProposalRequest,
       signal: AbortSignal,
       onDispatch?: (at: number) => boolean,
+      onPhysicalFlight?: (drain: Promise<void>) => void,
     ) => {
+      expect(onPhysicalFlight).toBeTypeOf("function");
+      onPhysicalFlight?.(Promise.resolve());
       if (onDispatch?.(Date.now()) === false || signal.aborted)
         throw new Error("vetoed");
       const contextIndex = request.input.context.findIndex(

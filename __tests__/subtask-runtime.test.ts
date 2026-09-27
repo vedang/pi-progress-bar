@@ -50,6 +50,7 @@ function fixture() {
       batch: SubtaskGateBatch,
       signal: AbortSignal,
       onDispatch: (at: number) => boolean,
+      _onPhysicalFlight?: (drain: Promise<void>) => void,
     ): Promise<ValidatedResult | undefined> => {
       if (!onDispatch(100) || signal.aborted) return;
       network("gate");
@@ -86,6 +87,7 @@ function fixture() {
       request: ProposalRequest,
       signal: AbortSignal,
       onDispatch: (at: number) => boolean,
+      _onPhysicalFlight?: (drain: Promise<void>) => void,
     ) => {
       if (!onDispatch(101) || signal.aborted) throw new Error("vetoed");
       network("proposal");
@@ -149,6 +151,76 @@ function fixture() {
 }
 
 describe("durable generic subtask runtime", () => {
+  it("retains gate reservation when logical gateway cancellation precedes fetch drain", async () => {
+    const h = fixture();
+    let release = () => {};
+    const physical = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.gate.mockImplementation(
+      async (_batch, _signal, onDispatch, onPhysicalFlight) => {
+        if (!onDispatch(100)) return;
+        onPhysicalFlight?.(physical);
+        return undefined;
+      },
+    );
+    const runtime = h.create();
+    let settled = false;
+    const run = runtime.run(h.parent.id).then(() => {
+      settled = true;
+    });
+    try {
+      await vi.waitFor(() =>
+        expect(runtime.checkpoint().journal.dispatches).toBe(1),
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(settled).toBe(false);
+      expect(h.propose).not.toHaveBeenCalled();
+      release();
+      await run;
+      expect(settled).toBe(true);
+      expect(runtime.checkpoint().journal.dispatches).toBe(1);
+    } finally {
+      release();
+      await run;
+    }
+  });
+
+  it("retains reservation after logical proposal failure until its separate physical drain", async () => {
+    const h = fixture();
+    let release = () => {};
+    const physical = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.propose.mockImplementation(
+      async (_request, _signal, onDispatch, onPhysicalFlight) => {
+        if (!onDispatch(101)) throw new Error("vetoed");
+        onPhysicalFlight?.(physical);
+        throw new Error("Subtask proposal unavailable");
+      },
+    );
+    const runtime = h.create();
+    let settled = false;
+    const logical = runtime.run(h.parent.id).then(() => {
+      settled = true;
+    });
+    try {
+      await vi.waitFor(() => expect(h.propose).toHaveBeenCalledTimes(1));
+      expect(settled).toBe(false);
+      runtime.invalidate();
+      const second = runtime.run(h.parent.id);
+      expect(h.gate).toHaveBeenCalledTimes(1);
+      release();
+      await Promise.all([logical, second]);
+      expect(settled).toBe(true);
+      expect(runtime.checkpoint().journal.dispatches).toBe(2);
+      expect(runtime.snapshot().groups).toEqual([]);
+    } finally {
+      release();
+      await logical;
+    }
+  });
+
   it("preserves the restored durable component before any run or provider opportunity", async () => {
     const h = fixture();
     const runtime = h.create();

@@ -32,6 +32,44 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe("shared Jev gateway", () => {
+  it("exposes abort-ignoring fetch drain without delaying logical invalidation", async () => {
+    let release = () => {};
+    const fetcher = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(Response.json(result));
+        }),
+    );
+    const drains: Promise<void>[] = [];
+    let drained = false;
+    const gateway = new JevGateway({
+      fetch: fetcher,
+      getApiKey: () => "fixture-key",
+      onPhysicalFlight: (physical: Promise<void>) => {
+        drains.push(physical);
+        void physical.then(() => {
+          drained = true;
+        });
+      },
+    });
+    gateway.enable("drain");
+    const outcome = gateway.evaluate(request, "drain");
+    try {
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      gateway.invalidate();
+      expect(await outcome).toBeUndefined();
+      expect(drains).toHaveLength(1);
+      expect(drained).toBe(false);
+      release();
+      await drains[0];
+      expect(drained).toBe(true);
+    } finally {
+      gateway.invalidate();
+      release();
+      await outcome;
+    }
+  });
+
   it("does not let inherited serialization hooks hide oversized evidence", async () => {
     const responseText = JSON.stringify(result);
     const fetcher = vi.fn(async () => new Response(responseText));

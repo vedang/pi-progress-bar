@@ -20,6 +20,7 @@ import type {
 } from "./hybrid-state";
 import { SubtaskAccess, type SubtaskAccessSnapshot } from "./subtask-access";
 import {
+  acceptedSubtaskRecordMatchesGroup,
   nextSubtaskPhase,
   pruneIncoherentAcceptedSubtaskRecords,
   restoreSubtaskJournal,
@@ -682,7 +683,7 @@ export class SubtaskRuntime {
       "accepted",
       admitted.listRevision,
     );
-    const journal = this.finalJournal("extraction", record, usage, true);
+    const journal = this.finalJournal("extraction", record, usage);
     if (!journal || !this.commitCandidate(candidate, journal)) return;
     if (
       !this.exactBatch(
@@ -1084,24 +1085,9 @@ export class SubtaskRuntime {
     bucket: UsageBucket,
     record: SubtaskPhaseRecord,
     usage: Usage | undefined,
-    retireAcceptedFrontiers = false,
   ): SubtaskJournalCheckpoint | undefined {
     if (!usage) return;
     const journal = this.replaceRecord(record);
-    if (
-      retireAcceptedFrontiers &&
-      record.proposal?.outcome === "accepted" &&
-      !this.retireRecords(
-        journal,
-        (current) =>
-          current.identity !== record.identity &&
-          current.state !== "superseded" &&
-          current.parentTaskId === record.parentTaskId &&
-          current.proposal?.outcome === "accepted" &&
-          current.proposal.listRevision !== record.proposal?.listRevision,
-      )
-    )
-      return;
     journal.usage[bucket].inputTokens += usage.inputTokens;
     journal.usage[bucket].outputTokens += usage.outputTokens;
     if (!Number.isSafeInteger(journal.usage[bucket].inputTokens)) return;
@@ -1161,13 +1147,23 @@ export class SubtaskRuntime {
     store: SubtaskStore,
     journal: SubtaskJournalCheckpoint,
   ): boolean {
-    if (!subtaskJournalIsValid(journal)) return false;
     let state: SubtaskCheckpoint;
     try {
       state = store.checkpoint();
+      if (
+        !this.retireRecords(
+          journal,
+          (record) =>
+            record.state !== "superseded" &&
+            record.proposal?.outcome === "accepted" &&
+            !acceptedSubtaskRecordMatchesGroup(record, state.groups),
+        )
+      )
+        return false;
     } catch {
       return false;
     }
+    if (!subtaskJournalIsValid(journal)) return false;
     const candidate = deepFreeze({ state, journal: detached(journal) });
     try {
       return this.options.commit(candidate) === true;

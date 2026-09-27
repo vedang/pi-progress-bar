@@ -615,6 +615,18 @@ export interface SubtaskAcceptedGroupFrontier {
   listRevision: number;
 }
 
+export const acceptedSubtaskRecordMatchesGroup = (
+  record: SubtaskPhaseRecord,
+  groups: readonly SubtaskAcceptedGroupFrontier[],
+) =>
+  record.proposal?.outcome === "accepted" &&
+  groups.some(
+    (group) =>
+      group.parentTaskId === record.parentTaskId &&
+      group.parentRevision === record.parentRevision &&
+      group.listRevision === record.proposal?.listRevision,
+  );
+
 /**
  * Reject only raw, nonsuperseded accepted authority whose serialized resulting
  * group never existed. Canonical pruning later may still retire coherent proof.
@@ -632,12 +644,7 @@ export const pruneIncoherentAcceptedSubtaskRecords = (
         record.proposal?.outcome !== "accepted"
       )
         return true;
-      return groups.some(
-        (group) =>
-          group.parentTaskId === record.parentTaskId &&
-          group.parentRevision === record.parentRevision &&
-          group.listRevision === record.proposal?.listRevision,
-      );
+      return acceptedSubtaskRecordMatchesGroup(record, groups);
     });
     return subtaskJournalIsValid(pruned) ? pruned : undefined;
   } catch {

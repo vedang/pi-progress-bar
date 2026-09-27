@@ -49,6 +49,7 @@ it("production extension on real Pi yields22children and changing item/batch acc
   let firstGate = true;
   let subtaskGates = 0;
   let proposedLists = 0;
+  let reportCalls = 0;
   vi.stubEnv("TYPESAFE_API_KEY", "offline-only");
   vi.stubGlobal(
     "fetch",
@@ -85,6 +86,25 @@ it("production extension on real Pi yields22children and changing item/batch acc
           choice: need ? "yes" : "no",
           confidence: 1,
           probabilities: { yes: need ? 1 : 0, no: need ? 0 : 1, uncertain: 0 },
+        };
+      }
+      const reports = Object.entries(request.questions).filter(([key]) =>
+        key.startsWith("subtask:subtask-child:"),
+      );
+      if (reports.length) reportCalls++;
+      // Inventory/reads are explicitly not review completion in this scenario.
+      // Do not inherit the generic mock's first composite (completed-item).
+      for (const [key, question] of reports) {
+        response.answers[key] = {
+          type: "choice",
+          choice: "unchanged",
+          confidence: 1,
+          probabilities: Object.fromEntries(
+            Object.keys(question.criteria).map((choice) => [
+              choice,
+              choice === "unchanged" ? 1 : 0,
+            ]),
+          ),
         };
       }
       return Response.json(response);
@@ -315,6 +335,7 @@ it("production extension on real Pi yields22children and changing item/batch acc
     );
     await session.prompt("Continue the requested review.");
     expect(errors).toEqual([]);
+    expect(reportCalls).toBeGreaterThan(0);
     const saved = checkpoints().at(-1);
     expect(saved?.state.tasks).toHaveLength(1);
     expect(

@@ -33,6 +33,28 @@ function fixture() {
   };
 }
 describe("host-selected generic subtask proposer", () => {
+  it("rejects multiple empty text blocks instead of treating separators as provider output", async () => {
+    const h = fixture();
+    h.response.content = [
+      { type: "text", text: "" },
+      { type: "text", text: "" },
+    ];
+    await expect(h.run(h.request, h.controller.signal)).rejects.toThrow(
+      "Subtask proposal unavailable",
+    );
+    expect(h.complete).toHaveBeenCalledTimes(1);
+  });
+  it("accepts substantive provider text surrounded by empty blocks", async () => {
+    const h = fixture();
+    h.response.content = [
+      { type: "text", text: "" },
+      { type: "text", text: h.text },
+      { type: "text", text: "" },
+    ];
+    const result = await h.run(h.request, h.controller.signal);
+    expect(JSON.parse(result.text)).toEqual(JSON.parse(h.text));
+    expect(h.complete).toHaveBeenCalledTimes(1);
+  });
   it("uses code-owned proposal instructions/schema, host auth, exact hashed input and no tools/retries", async () => {
     const h = fixture();
     expect(

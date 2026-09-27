@@ -40,6 +40,41 @@ function byteBoundAdmission(bytes: number) {
 }
 
 describe("generic conversation-backed subtask store", () => {
+  it.each(["x\ud800", "\ud800x", "x\udc00", "x\ud800\ud800"])(
+    "rejects non-scalar child labels atomically %#",
+    (label) => {
+      const store = new SubtaskStore();
+      const before = store.checkpoint();
+      expect(store.admit(subtaskAdmission([label]))).toEqual({
+        accepted: false,
+        reason: "invalid",
+      });
+      expect(store.checkpoint()).toEqual(before);
+    },
+  );
+  it.each(["reword", "replace"] as const)(
+    "rejects non-scalar %s without changing reports, IDs or replay",
+    (kind) => {
+      const { store, input, group } = fixture();
+      const before = store.checkpoint();
+      expect(
+        store.admit({
+          ...input,
+          expectedListRevision: group.listRevision,
+          children: [
+            {
+              kind,
+              id: group.children[0].id,
+              label: "x\ud800",
+              source: subtaskSource(),
+            },
+            { kind: "retain", id: group.children[1].id },
+          ],
+        }),
+      ).toEqual({ accepted: false, reason: "invalid" });
+      expect(store.checkpoint()).toEqual(before);
+    },
+  );
   it("creates meaningful pending children without a file, resource or tool receipt", () => {
     const input = subtaskAdmission();
     const original = structuredClone(input);

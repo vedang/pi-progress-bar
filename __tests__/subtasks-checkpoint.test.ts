@@ -29,6 +29,13 @@ const restore = (
 ) => SubtaskStore.restore(payload, { parents, sourceCurrent });
 
 describe("generic subtask store persistence primitives", () => {
+  it("rejects persisted child labels containing unpaired surrogates", () => {
+    const store = new SubtaskStore();
+    expect(store.admit(subtaskAdmission())).toEqual({ accepted: true });
+    const checkpoint = store.checkpoint();
+    checkpoint.groups[0].children[0].label = "x\ud800";
+    expect(subtaskCheckpointIsValid(checkpoint)).toBe(false);
+  });
   it.each(["group", "child"])(
     "rejects %s allocator overflow atomically after valid restore",
     (kind) => {

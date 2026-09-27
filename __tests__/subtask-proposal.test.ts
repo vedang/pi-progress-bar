@@ -31,6 +31,60 @@ function fixture(existing = false, reported = false) {
 const raw = (proposal: unknown) => JSON.stringify({ proposals: [proposal] });
 
 describe("yes-authorized generic subtask proposals", () => {
+  it("advertises the same240 Unicode-scalar label limit for add/reword/replace", () => {
+    const h = fixture();
+    expect(h.request.input.schema).toMatchObject({
+      properties: {
+        proposals: {
+          items: {
+            properties: {
+              children: {
+                items: {
+                  oneOf: [
+                    {
+                      properties: {
+                        kind: { const: "add" },
+                        label: { maxLength: 240 },
+                      },
+                    },
+                    { properties: { kind: { const: "retain" } } },
+                    {
+                      properties: {
+                        kind: { enum: ["reword", "replace"] },
+                        label: { maxLength: 240 },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+  it.each(["x\ud800", "\ud800x", "x\udc00", "x\ud800\ud800"])(
+    "rejects escaped unpaired surrogate label %#",
+    (label) => {
+      const h = fixture();
+      h.proposal.children[0].label = label;
+      expect(
+        applySubtaskProposal(h.request, raw(h.proposal), h.options),
+      ).toBeUndefined();
+      expect(h.store.snapshot().groups).toEqual([]);
+    },
+  );
+  it("accepts exactly240 astral scalars through proposal and durable admission", () => {
+    const h = fixture();
+    h.proposal.children[0].label = "😀".repeat(240);
+    const applied = applySubtaskProposal(h.request, raw(h.proposal), h.options);
+    if (applied?.status !== "accepted")
+      throw new Error("Expected240scalar admission");
+    expect(h.store.admit(applied.admission)).toEqual({ accepted: true });
+    expect(h.store.snapshot().groups[0].children[0].label).toBe(
+      h.proposal.children[0].label,
+    );
+  });
   it("builds a detached bounded request from restored durable yes without files or tools", () => {
     const h = fixture();
     expect(isValidatedSubtaskProposalRequest(h.request)).toBe(true);

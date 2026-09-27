@@ -50,9 +50,16 @@ export interface SubtaskReportOptions {
   resolve: (entryId: string) => Observation | undefined;
 }
 
+export interface SubtaskReportSelection {
+  childIds: readonly string[];
+  maxQuestions: number;
+}
+
 export interface SubtaskReportBatch {
   request: EvaluationRequest;
   childIds: readonly string[];
+  /** Shared durable owner identity; independent of selected chunk boundaries. */
+  jobIdentity: string;
   identity: string;
   requestHash: string;
   parentTaskId: string;
@@ -75,6 +82,7 @@ interface SubtaskReportAssessment {
 /** Content-free attribution receipt. C07 owns durable publication. */
 export interface SubtaskReportReceipt {
   identity: string;
+  jobIdentity: string;
   requestHash: string;
   parentTaskId: string;
   parentRevision: number;
@@ -104,6 +112,7 @@ interface Binding {
 
 interface BatchProof {
   requestHash: string;
+  jobIdentity: string;
   identity: string;
   childIds: readonly string[];
   parentTaskId: string;
@@ -627,8 +636,87 @@ const requestFor = (
   ),
 });
 
+const parentSourceDigestFor = (parent: HybridTask) =>
+  jsonHash([
+    parent.source.entryId,
+    parent.source.messageHash,
+    parent.source.role,
+    parent.source.start,
+    parent.source.end,
+    parent.source.quoteHash,
+  ]);
+
+/** Durable report ownership excludes selected chunks and mutable child statuses. */
+const jobIdentityFor = (binding: Binding): string | undefined =>
+  jsonHash({
+    model: MODEL,
+    rubric,
+    report: {
+      observation: cloneObservation(binding.report),
+      source: cloneSource(binding.reportSource),
+    },
+    parent: {
+      id: binding.parent.id,
+      label: binding.parent.label,
+      revision: binding.parent.revision,
+      source: cloneSource(binding.parent.source),
+    },
+    subtasks: {
+      parentTaskId: binding.group.parentTaskId,
+      parentRevision: binding.group.parentRevision,
+      groupId: binding.group.id,
+      parentSourceDigest: binding.group.parentSourceDigest,
+      listRevision: binding.group.listRevision,
+      source: cloneSource(binding.group.source),
+      proof: {
+        contextHash: binding.group.proof.contextHash,
+        gateRequestHash: binding.group.proof.gateRequestHash,
+        proposalRequestHash: binding.group.proof.proposalRequestHash,
+      },
+      complete: binding.group.complete,
+      ...(binding.group.knownTotal === undefined
+        ? {}
+        : { knownTotal: binding.group.knownTotal }),
+      children: binding.group.children.map((child) => ({
+        id: child.id,
+        label: child.label,
+        source: cloneSource(child.source),
+      })),
+    },
+  });
+
+const selectedChildren = (
+  children: readonly SubtaskChild[],
+  selection: unknown | undefined,
+): { children: SubtaskChild[]; maxQuestions: number } | undefined => {
+  if (selection === undefined)
+    return { children: [...children], maxQuestions: MAX_QUESTIONS };
+  if (!exactKeys(selection, ["childIds", "maxQuestions"])) return;
+  const rawChildIds = selection.childIds;
+  if (
+    !denseArray(rawChildIds, 1, MAX_ACTIVE_CHILDREN) ||
+    !positiveInteger(selection.maxQuestions) ||
+    selection.maxQuestions > MAX_QUESTIONS ||
+    !rawChildIds.every((childId) => typeof childId === "string")
+  )
+    return;
+  const byId = new Map<string, { child: SubtaskChild; index: number }>(
+    children.map((child, index) => [child.id, { child, index }]),
+  );
+  const selected: SubtaskChild[] = [];
+  let priorIndex = -1;
+  for (const childId of rawChildIds as string[]) {
+    const found = byId.get(childId);
+    if (!found || found.index <= priorIndex) return;
+    priorIndex = found.index;
+    selected.push(found.child);
+  }
+  return { children: selected, maxQuestions: selection.maxQuestions };
+};
+
 const batchIdentity = (input: {
   requestHash: string;
+  jobIdentity: string;
   parentTaskId: string;
   parentRevision: number;
   parentSourceDigest: string;
@@ -639,6 +727,7 @@ const batchIdentity = (input: {
 }) =>
   jsonHash([
     input.requestHash,
+    input.jobIdentity,
     input.parentTaskId,
     input.parentRevision,
     input.parentSourceDigest,
@@ -660,21 +749,33 @@ const deepFreeze = <Value>(value: Value): Value => {
  */
 export function subtaskReportBatches(
   options: SubtaskReportOptions,
+  selection?: SubtaskReportSelection,
 ): readonly SubtaskReportBatch[] {
   try {
+    // Capture selection before resolver callbacks, like other caller data.
+    const capturedSelection =
+      selection === undefined ? undefined : detached<unknown>(selection);
+    if (selection !== undefined && capturedSelection === undefined) return [];
     const binding = resolveBinding(options);
     if (!binding) return [];
+    const selected = selectedChildren(
+      binding.group.children,
+      capturedSelection,
+    );
+    const jobIdentity = jobIdentityFor(binding);
+    const parentSourceDigest = parentSourceDigestFor(binding.parent);
+    if (!selected || !jobIdentity || !parentSourceDigest) return [];
     const batches: SubtaskReportBatch[] = [];
-    for (let offset = 0; offset < binding.group.children.length; ) {
+    for (let offset = 0; offset < selected.children.length; ) {
       let count = Math.min(
-        MAX_QUESTIONS,
-        binding.group.children.length - offset,
+        selected.maxQuestions,
+        selected.children.length - offset,
       );
       let children: SubtaskChild[] | undefined;
       let request: EvaluationRequest | undefined;
       let requestHash: string | undefined;
       while (count > 0) {
-        const candidate = binding.group.children.slice(offset, offset + count);
+        const candidate = selected.children.slice(offset, offset + count);
         const candidateRequest = requestFor(binding, candidate);
         const candidateJson = json(candidateRequest);
         if (
@@ -691,19 +792,10 @@ export function subtaskReportBatches(
       // Never trim canonical evidence or omit a child to force a request fit.
       if (!children || !request || !requestHash) return [];
       const childIds = children.map((child) => child.id);
-      const parentSourceDigest = sha256(
-        json([
-          binding.parent.source.entryId,
-          binding.parent.source.messageHash,
-          binding.parent.source.role,
-          binding.parent.source.start,
-          binding.parent.source.end,
-          binding.parent.source.quoteHash,
-        ]) ?? "",
-      );
       const source = cloneSource(binding.reportSource);
       const identity = batchIdentity({
         requestHash,
+        jobIdentity,
         parentTaskId: binding.parent.id,
         parentRevision: binding.parent.revision,
         parentSourceDigest,
@@ -716,6 +808,7 @@ export function subtaskReportBatches(
       const batch = deepFreeze({
         request,
         childIds,
+        jobIdentity,
         identity,
         requestHash,
         parentTaskId: binding.parent.id,
@@ -727,6 +820,7 @@ export function subtaskReportBatches(
       });
       batchProofs.set(batch, {
         requestHash,
+        jobIdentity,
         identity,
         childIds: [...childIds],
         parentTaskId: binding.parent.id,
@@ -761,17 +855,12 @@ const currentProof = (
   if (children.some((child) => !child)) return;
   const request = requestFor(binding, children as SubtaskChild[]);
   const requestHash = jsonHash(request);
-  const parentSourceDigest = jsonHash([
-    binding.parent.source.entryId,
-    binding.parent.source.messageHash,
-    binding.parent.source.role,
-    binding.parent.source.start,
-    binding.parent.source.end,
-    binding.parent.source.quoteHash,
-  ]);
-  if (!requestHash || !parentSourceDigest) return;
+  const jobIdentity = jobIdentityFor(binding);
+  const parentSourceDigest = parentSourceDigestFor(binding.parent);
+  if (!requestHash || !jobIdentity || !parentSourceDigest) return;
   const identity = batchIdentity({
     requestHash,
+    jobIdentity,
     parentTaskId: binding.parent.id,
     parentRevision: binding.parent.revision,
     parentSourceDigest,
@@ -782,6 +871,7 @@ const currentProof = (
   });
   if (
     requestHash !== proof.requestHash ||
+    jobIdentity !== proof.jobIdentity ||
     identity !== proof.identity ||
     binding.parent.id !== proof.parentTaskId ||
     binding.parent.revision !== proof.parentRevision ||
@@ -961,6 +1051,7 @@ export function subtaskReportDecisions(
       reports,
       receipt: {
         identity: current.proof.identity,
+        jobIdentity: current.proof.jobIdentity,
         requestHash: current.proof.requestHash,
         parentTaskId: current.proof.parentTaskId,
         parentRevision: current.proof.parentRevision,

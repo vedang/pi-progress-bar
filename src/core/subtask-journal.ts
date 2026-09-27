@@ -64,6 +64,7 @@ export interface SubtaskPhaseRecord {
   listRevision: number;
   source: SourceRef;
   contextHash: string;
+  triggerHash: string;
   gateModel: string;
   selectedModel: string;
   phase: SubtaskPhase;
@@ -298,6 +299,7 @@ const validRecord = (value: unknown): value is SubtaskPhaseRecord => {
         "listRevision",
         "source",
         "contextHash",
+        "triggerHash",
         "gateModel",
         "selectedModel",
         "phase",
@@ -312,6 +314,7 @@ const validRecord = (value: unknown): value is SubtaskPhaseRecord => {
     !nonNegativeInteger(value.listRevision) ||
     !validSourceRef(value.source) ||
     !validHash(value.contextHash) ||
+    !validHash(value.triggerHash) ||
     value.gateModel !== "jev-1.13.0" ||
     !validText(value.selectedModel) ||
     (value.phase !== "gate-ready" &&
@@ -552,6 +555,7 @@ const cloneRecord = (record: SubtaskPhaseRecord): SubtaskPhaseRecord => ({
   listRevision: record.listRevision,
   source: cloneSource(record.source),
   contextHash: record.contextHash,
+  triggerHash: record.triggerHash,
   gateModel: record.gateModel,
   selectedModel: record.selectedModel,
   phase: record.phase,

@@ -260,6 +260,7 @@ const cloneGateReceipt = (record: SubtaskPhaseRecord): SubtaskPhaseRecord => ({
   listRevision: record.listRevision,
   source: cloneSource(record.source),
   contextHash: record.contextHash,
+  triggerHash: record.triggerHash,
   gateModel: record.gateModel,
   selectedModel: record.selectedModel,
   phase: record.phase,
@@ -517,6 +518,7 @@ const batchMatchesReceipt = (
     record.listRevision === batch.listRevision &&
     sameSource(record.source, batch.source) &&
     record.contextHash === batch.contextHash &&
+    record.triggerHash === batch.triggerHash &&
     record.gateModel === batch.gateModel &&
     record.selectedModel === batch.selectedModel &&
     record.phase === "gate-decided" &&

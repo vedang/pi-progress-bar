@@ -76,6 +76,7 @@ export interface SubtaskGateBatch {
   listRevision: number;
   source: SourceRef;
   contextHash: string;
+  triggerHash: string;
   gateModel: typeof MODEL;
   selectedModel: string;
 }
@@ -725,21 +726,31 @@ const question = () => ({
   criteria: { yes: null, no: null, uncertain: null },
 });
 
+/**
+ * Canonical semantic context shared by full batch identity and independent
+ * trigger identity. The trigger excludes only mutable group/list state.
+ */
+const normalizedContextProjection = (
+  state: SubtaskGateState,
+  includeGroup: boolean,
+) => ({
+  rubricVersion: GATE_RUBRIC_VERSION,
+  gateModel: MODEL,
+  parent: state.parent,
+  ...(includeGroup && state.group !== undefined ? { group: state.group } : {}),
+  parentSource: state.parentSource,
+  latest: state.latest,
+  earlier: state.earlier,
+  omissions: state.omissions,
+  selectedModel: state.selectedModel,
+  ...(state.evidence === undefined ? {} : { evidence: state.evidence }),
+});
+
 const stateContextHash = (state: SubtaskGateState) =>
-  sha256(
-    inertJson({
-      rubricVersion: GATE_RUBRIC_VERSION,
-      gateModel: MODEL,
-      parent: state.parent,
-      ...(state.group === undefined ? {} : { group: state.group }),
-      parentSource: state.parentSource,
-      latest: state.latest,
-      earlier: state.earlier,
-      omissions: state.omissions,
-      selectedModel: state.selectedModel,
-      ...(state.evidence === undefined ? {} : { evidence: state.evidence }),
-    }),
-  );
+  sha256(inertJson(normalizedContextProjection(state, true)));
+
+const stateTriggerHash = (state: SubtaskGateState) =>
+  sha256(inertJson(normalizedContextProjection(state, false)));
 
 const identityFor = (
   binding: Omit<SubtaskGateBatch, "identity" | "request" | "requestHash">,
@@ -779,6 +790,7 @@ const buildBatch = (state: SubtaskGateState): SubtaskGateBatch | undefined => {
     listRevision: state.group?.listRevision ?? 0,
     source: latestSource(state.latest),
     contextHash: stateContextHash(state),
+    triggerHash: stateTriggerHash(state),
     gateModel: MODEL,
     selectedModel: state.selectedModel,
   } as const;
@@ -846,6 +858,7 @@ const validBatch = (value: unknown): value is SubtaskGateBatch => {
       "listRevision",
       "source",
       "contextHash",
+      "triggerHash",
       "gateModel",
       "selectedModel",
     ]) ||
@@ -857,6 +870,7 @@ const validBatch = (value: unknown): value is SubtaskGateBatch => {
     !nonNegativeInteger(value.listRevision) ||
     !validSource(value.source) ||
     !validHash(value.contextHash) ||
+    !validHash(value.triggerHash) ||
     value.gateModel !== MODEL ||
     !validSelectedModel(value.selectedModel) ||
     !plainDataRecord(value.request)
@@ -874,6 +888,7 @@ const validBatch = (value: unknown): value is SubtaskGateBatch => {
     listRevision: state.group?.listRevision ?? 0,
     source: expectedSource,
     contextHash: stateContextHash(state),
+    triggerHash: stateTriggerHash(state),
     gateModel: MODEL,
     selectedModel: state.selectedModel,
   } as const;
@@ -885,6 +900,7 @@ const validBatch = (value: unknown): value is SubtaskGateBatch => {
     value.listRevision !== expectedBinding.listRevision ||
     !sameSource(value.source, expectedBinding.source) ||
     value.contextHash !== expectedBinding.contextHash ||
+    value.triggerHash !== expectedBinding.triggerHash ||
     value.gateModel !== expectedBinding.gateModel ||
     value.selectedModel !== expectedBinding.selectedModel ||
     value.identity !== identityFor(expectedBinding, requestHash)
@@ -975,6 +991,7 @@ const cloneRecord = (record: SubtaskPhaseRecord): SubtaskPhaseRecord => ({
   listRevision: record.listRevision,
   source: cloneSource(record.source),
   contextHash: record.contextHash,
+  triggerHash: record.triggerHash,
   gateModel: record.gateModel,
   selectedModel: record.selectedModel,
   phase: record.phase,
@@ -1072,6 +1089,7 @@ export const applySubtaskGate = (
       listRevision: current.listRevision,
       source: cloneSource(current.source),
       contextHash: current.contextHash,
+      triggerHash: current.triggerHash,
       gateModel: MODEL,
       selectedModel: current.selectedModel,
       phase: "gate-decided",
@@ -1114,6 +1132,7 @@ export const reusableSubtaskGate = (
       record.listRevision !== batch.listRevision ||
       !sameSource(record.source, batch.source) ||
       record.contextHash !== batch.contextHash ||
+      record.triggerHash !== batch.triggerHash ||
       record.gateModel !== MODEL ||
       record.selectedModel !== batch.selectedModel ||
       record.gate?.outcome !== "decided" ||

@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+
+import { ownDataJson } from "../analysis/own-data-json";
 import type { CoverageInventory } from "../core/coverage";
 
 const MAX_PENDING = 16;
@@ -240,21 +242,53 @@ type Candidate =
       activity: ContentActivity;
     });
 
+interface AdapterBudgetState {
+  pending: Candidate[];
+  manifests: Manifest[];
+  declarations: ScriptDeclaration[];
+  scriptReads: ScriptRead[];
+  listings: Listing[];
+  accessReceipts: AccessReceipt[];
+  frontier?: CanonicalFrontier;
+}
+
+type AdapterBudgetUpdate = Partial<AdapterBudgetState>;
+
+interface FileMapping {
+  resourceKey: string;
+  itemKey: string;
+  listingDigest: string;
+}
+
+interface MappingState {
+  fileMappings: Map<string, FileMapping>;
+  ambiguousFiles: Set<string>;
+}
+
 const sha256 = (value: string) =>
   createHash("sha256").update(value).digest("hex");
+
+/** Internal serializer never reads inherited or own serialization hooks. */
+const ownDataText = (value: unknown): string | undefined =>
+  ownDataJson(value)?.json;
+
+const ownDataHash = (value: unknown) => {
+  const text = ownDataText(value);
+  if (text === undefined) throw new Error("Invalid adapter own-data hash");
+  return sha256(text);
+};
+
+const ownDataBytes = (value: unknown) => {
+  const text = ownDataText(value);
+  return text === undefined
+    ? Number.POSITIVE_INFINITY
+    : Buffer.byteLength(text, "utf8");
+};
 
 const uniqueItemKeys = (itemKeys: readonly string[]) => [...new Set(itemKeys)];
 
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
-
-const byteLength = (value: unknown) => {
-  try {
-    return Buffer.byteLength(JSON.stringify(value), "utf8");
-  } catch {
-    return Number.POSITIVE_INFINITY;
-  }
-};
 
 const safeText = (value: unknown, maxBytes = 1024): value is string =>
   typeof value === "string" &&
@@ -418,7 +452,7 @@ const canonicalResults = (
     const id = typeof value?.id === "string" ? value.id : "";
     if (id && entryIds.has(id)) duplicateEntryIds.add(id);
     else if (id) entryIds.add(id);
-    prefix = sha256(JSON.stringify([prefix, id, value?.type ?? ""]));
+    prefix = ownDataHash([prefix, id, value?.type ?? ""]);
     terminal = { order, prefix };
     if (
       order === frontierOrder ||
@@ -680,9 +714,11 @@ const receipt = (
         toolName: result.toolName,
         entryId: result.entryId,
         contentHash: result.contentHash,
-        bindingDigest: sha256(
-          JSON.stringify([result.callId, result.toolName, ...metadata]),
-        ),
+        bindingDigest: ownDataHash([
+          result.callId,
+          result.toolName,
+          ...metadata,
+        ]),
         order: result.order,
         startOrder,
       }
@@ -723,10 +759,7 @@ export class CoverageAdapter {
   private readonly scriptReads = new Map<string, ScriptRead>();
   private readonly listings = new Map<string, Listing>();
   private readonly accessReceipts = new Map<string, AccessReceipt>();
-  private readonly fileMappings = new Map<
-    string,
-    { resourceKey: string; itemKey: string; listingDigest: string }
-  >();
+  private readonly fileMappings = new Map<string, FileMapping>();
   private readonly ambiguousFiles = new Set<string>();
 
   start(input: CoverageToolStart, epoch: number) {
@@ -873,7 +906,7 @@ export class CoverageAdapter {
       })),
       omissions: this.semanticOmissions,
     });
-    if (byteLength(evidence) > MAX_METADATA_BYTES) return;
+    if (ownDataBytes(evidence) > MAX_METADATA_BYTES) return;
     const token = this.evidenceToken;
     subtaskEvidenceAttestations.set(evidence, {
       current: () => this.evidenceToken === token && this.manifests.size > 0,
@@ -1034,7 +1067,7 @@ export class CoverageAdapter {
       };
       if (
         (!prior && this.manifests.size >= MAX_RETAINED_RECEIPTS) ||
-        !this.fitsReplacement(prior, next)
+        !this.fitsManifestReplacement(prior, next, result, index)
       )
         return this.omit();
       this.manifests.set(candidate.resourcePath, next);
@@ -1071,7 +1104,7 @@ export class CoverageAdapter {
       };
       if (
         (!prior && this.declarations.size >= MAX_RETAINED_RECEIPTS) ||
-        !this.fitsReplacement(prior, next)
+        !this.fitsDeclarationReplacement(prior, next, result, index)
       )
         return this.omit("access");
       this.declarations.set(candidate.scriptPath, next);
@@ -1108,7 +1141,7 @@ export class CoverageAdapter {
       };
       if (
         (!prior && this.scriptReads.size >= MAX_RETAINED_RECEIPTS) ||
-        !this.fitsReplacement(prior, next)
+        !this.fitsScriptReadReplacement(prior, next, result, index)
       )
         return this.omit("access");
       this.scriptReads.set(candidate.scriptPath, next);
@@ -1164,7 +1197,8 @@ export class CoverageAdapter {
         scriptReadDigest: scriptRead.bindingDigest,
         files,
       };
-      if (!this.fitsReplacement(prior, next)) return this.omit("access");
+      if (!this.fitsListingReplacement(prior, next, result, index))
+        return this.omit("access");
       this.listings.set(candidate.resourcePath, next);
       this.rememberAcceptedCall(result, index);
       this.rebuildMappings();
@@ -1205,13 +1239,17 @@ export class CoverageAdapter {
     ]);
     if (
       !nextReceipt ||
-      !this.retainAccessReceipt({
-        ...nextReceipt,
-        resourceKey: candidate.activity.resourceKey,
-        itemKeys,
-        listingDigest: candidate.activity.listingDigest,
-        files: [...candidate.activity.files],
-      })
+      !this.retainAccessReceipt(
+        {
+          ...nextReceipt,
+          resourceKey: candidate.activity.resourceKey,
+          itemKeys,
+          listingDigest: candidate.activity.listingDigest,
+          files: [...candidate.activity.files],
+        },
+        result,
+        index,
+      )
     )
       return this.omit("access");
     this.rememberAcceptedCall(result, index);
@@ -1268,57 +1306,104 @@ export class CoverageAdapter {
     this.clearInvalidPendingActivities();
   }
 
-  private mappingFingerprint() {
-    return JSON.stringify({
-      mappings: [...this.fileMappings.entries()].sort(([left], [right]) =>
-        left.localeCompare(right),
-      ),
-      ambiguous: [...this.ambiguousFiles].sort(),
-    });
-  }
-
-  private rebuildMappings() {
-    const before = this.mappingFingerprint();
-    this.fileMappings.clear();
-    this.ambiguousFiles.clear();
-    for (const listing of this.listings.values()) {
-      const manifest = this.manifests.get(listing.resourcePath);
+  private mappingState(
+    listings: readonly Listing[],
+    manifests: readonly Manifest[],
+  ): MappingState {
+    const manifestsByPath = new Map(
+      manifests.map((manifest) => [manifest.resourcePath, manifest]),
+    );
+    const fileMappings = new Map<string, FileMapping>();
+    const ambiguousFiles = new Set<string>();
+    for (const listing of listings) {
+      const manifest = manifestsByPath.get(listing.resourcePath);
       if (!manifest) continue;
       for (const file of listing.files) {
-        if (this.ambiguousFiles.has(file.path)) continue;
-        const current = this.fileMappings.get(file.path);
+        if (ambiguousFiles.has(file.path)) continue;
+        const current = fileMappings.get(file.path);
         if (current && current.resourceKey !== manifest.resourceKey) {
-          this.fileMappings.delete(file.path);
-          this.ambiguousFiles.add(file.path);
+          fileMappings.delete(file.path);
+          ambiguousFiles.add(file.path);
           continue;
         }
-        this.fileMappings.set(file.path, {
+        fileMappings.set(file.path, {
           resourceKey: manifest.resourceKey,
           itemKey: file.itemKey,
           listingDigest: listing.bindingDigest,
         });
       }
     }
+    return { fileMappings, ambiguousFiles };
+  }
+
+  private mappingFingerprint(
+    fileMappings = this.fileMappings,
+    ambiguousFiles = this.ambiguousFiles,
+  ) {
+    return (
+      ownDataText({
+        mappings: [...fileMappings.entries()].sort(([left], [right]) =>
+          left.localeCompare(right),
+        ),
+        ambiguous: [...ambiguousFiles].sort(),
+      }) ?? ""
+    );
+  }
+
+  private rebuildMappings() {
+    const before = this.mappingFingerprint();
+    const next = this.mappingState(
+      [...this.listings.values()],
+      [...this.manifests.values()],
+    );
+    this.fileMappings.clear();
+    this.ambiguousFiles.clear();
+    for (const [path, mapping] of next.fileMappings)
+      this.fileMappings.set(path, mapping);
+    for (const path of next.ambiguousFiles) this.ambiguousFiles.add(path);
     if (before !== this.mappingFingerprint()) this.invalidateAccessEvidence();
     this.dropAccessReceiptsWithoutCurrentMapping();
   }
 
-  private accessReceiptMappingCurrent(receipt: AccessReceipt) {
-    const listing = [...this.listings.values()].find(
+  private accessReceiptMappingCurrent(
+    receipt: AccessReceipt,
+    listings: readonly Listing[] = [...this.listings.values()],
+    manifests: readonly Manifest[] = [...this.manifests.values()],
+    fileMappings: ReadonlyMap<string, FileMapping> = this.fileMappings,
+  ) {
+    const listing = listings.find(
       (item) => item.bindingDigest === receipt.listingDigest,
     );
-    const manifest = listing && this.manifests.get(listing.resourcePath);
+    const manifest =
+      listing &&
+      manifests.find((item) => item.resourcePath === listing.resourcePath);
     return (
       !!listing &&
       manifest?.resourceKey === receipt.resourceKey &&
       receipt.files.every((path) => {
-        const mapping = this.fileMappings.get(path);
+        const mapping = fileMappings.get(path);
         return (
           mapping?.resourceKey === receipt.resourceKey &&
           mapping.listingDigest === receipt.listingDigest &&
           receipt.itemKeys.includes(mapping.itemKey)
         );
       })
+    );
+  }
+
+  private retainedAccessReceiptsFor(
+    listings: readonly Listing[],
+    manifests: readonly Manifest[],
+    receipts = [...this.accessReceipts.values()],
+  ) {
+    const { fileMappings } = this.mappingState(listings, manifests);
+    return receipts.filter((receipt) =>
+      this.accessReceiptMappingCurrent(
+        receipt,
+        listings,
+        manifests,
+        fileMappings,
+      ),
     );
   }
 
@@ -1371,7 +1456,11 @@ export class CoverageAdapter {
     if (changed) this.invalidateAccessEvidence();
   }
 
-  private retainAccessReceipt(next: AccessReceipt) {
+  private retainAccessReceipt(
+    next: AccessReceipt,
+    result: CanonicalResult,
+    index: CanonicalIndex,
+  ) {
     const nextItems = new Set(next.itemKeys);
     const dominated = [...this.accessReceipts.values()].filter(
       (current) =>
@@ -1380,7 +1469,19 @@ export class CoverageAdapter {
     );
     if (this.accessReceipts.size - dominated.length >= MAX_RETAINED_RECEIPTS)
       return false;
-    if (!this.fitsReplacements(dominated, next)) return false;
+    const accessReceipts = [
+      ...[...this.accessReceipts.values()].filter(
+        (current) => !dominated.includes(current),
+      ),
+      next,
+    ];
+    if (
+      !this.fitsBudget({
+        accessReceipts,
+        frontier: this.nextFrontier(result, index),
+      })
+    )
+      return false;
     for (const current of dominated) this.accessReceipts.delete(current.callId);
     this.accessReceipts.set(next.callId, next);
     this.invalidateAccessEvidence();
@@ -1438,9 +1539,13 @@ export class CoverageAdapter {
     return !this.frontier || result.order > this.frontier.order;
   }
 
-  private rememberAcceptedCall(result: CanonicalResult, index: CanonicalIndex) {
+  private nextFrontier(result: CanonicalResult, index: CanonicalIndex) {
     const prefix = index.prefixes.get(result.order);
-    if (prefix) this.frontier = { order: result.order, prefix };
+    return prefix ? { order: result.order, prefix } : this.frontier;
+  }
+
+  private rememberAcceptedCall(result: CanonicalResult, index: CanonicalIndex) {
+    this.frontier = this.nextFrontier(result, index);
   }
 
   private invalidateEvidence() {
@@ -1451,36 +1556,135 @@ export class CoverageAdapter {
     this.accessEvidenceToken = {};
   }
 
-  private metadataBytes() {
-    return byteLength({
-      pending: [...this.pending.values()],
-      ...(this.frontier ? { frontier: this.frontier } : {}),
-      manifests: [...this.manifests.values()],
-      declarations: [...this.declarations.values()],
-      scriptReads: [...this.scriptReads.values()],
-      listings: [...this.listings.values()],
-      accessReceipts: [...this.accessReceipts.values()],
+  /** Single ordered projection shared by every exact 64KiB preflight. [ref:subtask_adapter_inert_budget] */
+  private budgetState(update: AdapterBudgetUpdate = {}): AdapterBudgetState {
+    const frontier = Object.hasOwn(update, "frontier")
+      ? update.frontier
+      : this.frontier;
+    return {
+      pending: update.pending ?? [...this.pending.values()],
+      manifests: update.manifests ?? [...this.manifests.values()],
+      declarations: update.declarations ?? [...this.declarations.values()],
+      scriptReads: update.scriptReads ?? [...this.scriptReads.values()],
+      listings: update.listings ?? [...this.listings.values()],
+      accessReceipts: update.accessReceipts ?? [
+        ...this.accessReceipts.values(),
+      ],
+      ...(frontier ? { frontier } : {}),
+    };
+  }
+
+  private fitsBudget(update: AdapterBudgetUpdate = {}) {
+    return ownDataBytes(this.budgetState(update)) <= MAX_METADATA_BYTES;
+  }
+
+  private replaceValue<Value>(
+    values: readonly Value[],
+    current: Value | undefined,
+    next: Value,
+  ) {
+    if (current === undefined) return [...values, next];
+    const index = values.indexOf(current);
+    return index < 0
+      ? [...values, next]
+      : values.map((value, position) => (position === index ? next : value));
+  }
+
+  private fitsAdditional(value: Candidate) {
+    return this.fitsBudget({
+      pending: [...this.pending.values(), value],
     });
   }
 
-  private fitsAdditional(value: unknown) {
-    return this.metadataBytes() + byteLength(value) <= MAX_METADATA_BYTES;
-  }
-
-  private fitsReplacement(current: unknown, next: unknown) {
-    return this.fitsReplacements(current === undefined ? [] : [current], next);
-  }
-
-  private fitsReplacements(currents: readonly unknown[], next: unknown) {
-    return (
-      this.metadataBytes() -
-        currents.reduce<number>(
-          (bytes, current) => bytes + byteLength(current),
-          0,
-        ) +
-        byteLength(next) <=
-      MAX_METADATA_BYTES
+  private fitsManifestReplacement(
+    prior: Manifest | undefined,
+    next: Manifest,
+    result: CanonicalResult,
+    index: CanonicalIndex,
+  ) {
+    const manifests = this.replaceValue(
+      [...this.manifests.values()],
+      prior,
+      next,
     );
+    const listings = [...this.listings.values()].filter(
+      (listing) => listing.resourcePath !== next.resourcePath,
+    );
+    return this.fitsBudget({
+      manifests,
+      listings,
+      accessReceipts: this.retainedAccessReceiptsFor(listings, manifests),
+      frontier: this.nextFrontier(result, index),
+    });
+  }
+
+  private fitsDeclarationReplacement(
+    prior: ScriptDeclaration | undefined,
+    next: ScriptDeclaration,
+    result: CanonicalResult,
+    index: CanonicalIndex,
+  ) {
+    const declarations = this.replaceValue(
+      [...this.declarations.values()],
+      prior,
+      next,
+    );
+    const scriptReads = [...this.scriptReads.values()].filter(
+      (scriptRead) => scriptRead.scriptPath !== next.scriptPath,
+    );
+    const listings = [...this.listings.values()].filter(
+      (listing) => listing.scriptPath !== next.scriptPath,
+    );
+    const manifests = [...this.manifests.values()];
+    return this.fitsBudget({
+      declarations,
+      scriptReads,
+      listings,
+      accessReceipts: this.retainedAccessReceiptsFor(listings, manifests),
+      frontier: this.nextFrontier(result, index),
+    });
+  }
+
+  private fitsScriptReadReplacement(
+    prior: ScriptRead | undefined,
+    next: ScriptRead,
+    result: CanonicalResult,
+    index: CanonicalIndex,
+  ) {
+    const scriptReads = this.replaceValue(
+      [...this.scriptReads.values()],
+      prior,
+      next,
+    );
+    const listings = [...this.listings.values()].filter(
+      (listing) => listing.scriptPath !== next.scriptPath,
+    );
+    const manifests = [...this.manifests.values()];
+    return this.fitsBudget({
+      scriptReads,
+      listings,
+      accessReceipts: this.retainedAccessReceiptsFor(listings, manifests),
+      frontier: this.nextFrontier(result, index),
+    });
+  }
+
+  private fitsListingReplacement(
+    prior: Listing | undefined,
+    next: Listing,
+    result: CanonicalResult,
+    index: CanonicalIndex,
+  ) {
+    const listings = this.replaceValue(
+      [...this.listings.values()],
+      prior,
+      next,
+    );
+    const manifests = [...this.manifests.values()];
+    return this.fitsBudget({
+      listings,
+      accessReceipts: this.retainedAccessReceiptsFor(listings, manifests),
+      frontier: this.nextFrontier(result, index),
+    });
   }
 
   private omit(scope: "semantic" | "access" | "both" = "semantic") {

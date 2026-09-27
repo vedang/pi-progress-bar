@@ -9,6 +9,7 @@ import type { SubtaskProposalRequest } from "../src/analysis/subtask-proposal";
 import type { encodeSubtaskCheckpoint } from "../src/core/hybrid-checkpoint";
 import { Monitor } from "../src/core/monitor";
 import extension from "../src/index";
+import { CoverageAdapter } from "../src/sources/coverage";
 import { coverageNames } from "./fixtures/coverage";
 import { coverageHost } from "./fixtures/coverage-host";
 import { jevReply } from "./fixtures/hybrid-monitor";
@@ -89,6 +90,26 @@ it("production extension on real Pi yields22children and changing item/batch acc
       return Response.json(response);
     }),
   );
+  const adapterStarts: unknown[] = [];
+  const adapterStart = CoverageAdapter.prototype.start;
+  vi.spyOn(CoverageAdapter.prototype, "start").mockImplementation(function (
+    this: CoverageAdapter,
+    ...args
+  ) {
+    const before = this.accessEvidence();
+    adapterStart.apply(this, args);
+    const after = this.accessEvidence();
+    adapterStarts.push({
+      tool: args[0].toolName,
+      mappedBefore: before.mapped.reduce(
+        (n, resource) => n + resource.itemKeys.length,
+        0,
+      ),
+      activeAfter: after.active.map((call) => call.itemKeys.length),
+      confirmedBefore: before.confirmed.length,
+      omissions: after.omissions,
+    });
+  });
   const activities: number[] = [];
   const original = Monitor.prototype.observeCoverageToolStart;
   const coverageStarts = vi
@@ -277,6 +298,7 @@ it("production extension on real Pi yields22children and changing item/batch acc
           JSON.stringify({
             subtaskGates,
             proposedLists,
+            adapterStarts,
             versions: [...new Set(checkpoints().map((saved) => saved.version))],
             parents: checkpoints().at(-1)?.state.tasks.length,
             journal: checkpoints()
@@ -300,7 +322,7 @@ it("production extension on real Pi yields22children and changing item/batch acc
         (child) => child.status === "pending",
       ),
     ).toBe(true);
-    expect(activities).toContain(1);
+    expect(activities, JSON.stringify(adapterStarts)).toContain(1);
     expect(activities).toContain(2);
     expect(JSON.stringify(saved)).not.toContain("PRIVATE_SYNTHETIC_CELL");
   } finally {

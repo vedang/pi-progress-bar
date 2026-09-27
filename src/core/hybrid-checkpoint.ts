@@ -65,6 +65,7 @@ import {
 } from "./subtask-journal";
 import {
   type SubtaskCheckpoint,
+  type SubtaskGroupSnapshot,
   SubtaskStore,
   subtaskCheckpointIsValid,
 } from "./subtasks";
@@ -2347,12 +2348,23 @@ export function encodeSubtaskCheckpoint(
   return detachSubtaskData(checkpoint);
 }
 
+/** [ref:subtask_independent_trigger] Currentness belongs to this restore candidate. */
+export interface SubtaskRestoreContext {
+  state: HybridState;
+  group?: SubtaskGroupSnapshot;
+}
+
+type SubtaskJobCurrentness = (
+  record: SubtaskPhaseRecord,
+  candidate: SubtaskRestoreContext,
+) => boolean;
+
 function journalRecordIsCurrent(
   record: SubtaskPhaseRecord,
   state: HybridState,
-  listRevisions: ReadonlyMap<string, number>,
+  groups: ReadonlyMap<string, SubtaskGroupSnapshot>,
   resolve: (entryId: string) => Observation | undefined,
-  isCurrentJob: ((record: SubtaskPhaseRecord) => boolean) | undefined,
+  isCurrentJob: SubtaskJobCurrentness | undefined,
 ) {
   const parent = state.tasks.find((task) => task.id === record.parentTaskId);
   if (!parent) return false;
@@ -2360,7 +2372,8 @@ function journalRecordIsCurrent(
   const requiredListRevision = acceptedProposal
     ? record.proposal?.listRevision
     : record.listRevision;
-  const actualListRevision = listRevisions.get(record.parentTaskId);
+  const group = groups.get(record.parentTaskId);
+  const actualListRevision = group?.listRevision;
   const listRevisionIsCurrent = acceptedProposal
     ? actualListRevision !== undefined &&
       actualListRevision === requiredListRevision
@@ -2374,7 +2387,12 @@ function journalRecordIsCurrent(
   )
     return false;
   try {
-    return isCurrentJob(detachSubtaskData(record)) === true;
+    return (
+      isCurrentJob(
+        detachSubtaskData(record),
+        detachSubtaskData({ state, ...(group === undefined ? {} : { group }) }),
+      ) === true
+    );
   } catch {
     return false;
   }
@@ -2389,7 +2407,7 @@ export function restoreSubtaskCheckpoint(
   sourceId: string,
   resolve: (entryId: string) => Observation | undefined,
   preceding: (entryId: string) => readonly Observation[],
-  isCurrentJob?: (record: SubtaskPhaseRecord) => boolean,
+  isCurrentJob?: SubtaskJobCurrentness,
 ):
   | { state: HybridState; monitor?: SubtaskMonitorCheckpointMetadata }
   | undefined {
@@ -2419,10 +2437,8 @@ export function restoreSubtaskCheckpoint(
         sourceCurrent: (source) => !!canonicalSource(source, resolve),
       });
       if (!store) return;
-      const listRevisions = new Map(
-        store
-          .snapshot()
-          .groups.map((group) => [group.parentTaskId, group.listRevision]),
+      const groups = new Map(
+        store.snapshot().groups.map((group) => [group.parentTaskId, group]),
       );
       const journal = restoreSubtaskJournal(
         monitor.subtasks.journal,
@@ -2430,7 +2446,7 @@ export function restoreSubtaskCheckpoint(
           journalRecordIsCurrent(
             record,
             restoredState,
-            listRevisions,
+            groups,
             resolve,
             isCurrentJob,
           ),

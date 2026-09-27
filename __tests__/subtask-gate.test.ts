@@ -70,6 +70,82 @@ function fixture(
 const ticket = { dispatch: 1, at: 123 };
 
 describe("conversation-grounded per-parent subtask gate", () => {
+  it("separates the independent trigger from the list changed by admission", () => {
+    const h = fixture();
+    const trigger = Reflect.get(h.batch, "triggerHash");
+    expect(trigger).toMatch(/^[a-f0-9]{64}$/);
+    const store = new SubtaskStore();
+    expect(store.admit(subtaskAdmission())).toEqual({ accepted: true });
+    h.options.group = store.snapshot().groups[0];
+    const after = buildSubtaskGate(h.options);
+    expect(after).toBeDefined();
+    if (!after) throw new Error("Expected post-admission gate");
+    expect(Reflect.get(after, "triggerHash")).toBe(trigger);
+    expect(after.contextHash).not.toBe(h.batch.contextHash);
+    expect(after.identity).not.toBe(h.batch.identity);
+    expect(
+      applySubtaskGate(h.batch, h.result, h.options, ticket),
+    ).toBeUndefined();
+  });
+
+  it.each(["earlier", "order", "omissions", "model", "parent"])(
+    "changes the independent trigger on %s changes with the same latest message",
+    (change) => {
+      const h = fixture();
+      const first: Observation = {
+        id: "first",
+        role: "user",
+        text: "Compare cost",
+        hash: subtaskHash("Compare cost"),
+      };
+      const second: Observation = {
+        id: "second",
+        role: "user",
+        text: "Compare reliability",
+        hash: subtaskHash("Compare reliability"),
+      };
+      h.observations.push(first, second);
+      h.options.earlier = [first, second];
+      const before = buildSubtaskGate(h.options);
+      if (!before) throw new Error("Expected earlier-context gate");
+      expect(Reflect.get(before, "triggerHash")).toMatch(/^[a-f0-9]{64}$/);
+      if (change === "earlier") {
+        first.text = "Compare operating cost";
+        first.hash = subtaskHash(first.text);
+      }
+      if (change === "order") h.options.earlier.reverse();
+      if (change === "omissions")
+        h.options.omissions = ["Older context unavailable"];
+      if (change === "model") h.options.selectedModel = "fixture/other";
+      if (change === "parent")
+        h.options.parent = {
+          ...h.options.parent,
+          label: "Recommend a reliable deployment approach",
+        };
+      const after = buildSubtaskGate(h.options);
+      if (!after) throw new Error("Expected changed-context gate");
+      expect(after.source).toEqual(before.source);
+      expect(Reflect.get(after, "triggerHash")).not.toBe(
+        Reflect.get(before, "triggerHash"),
+      );
+    },
+  );
+
+  it("copies trigger provenance into decisions and rejects forged trigger permission", () => {
+    const h = fixture();
+    const record = applySubtaskGate(h.batch, h.result, h.options, ticket);
+    expect(record).toMatchObject({
+      triggerHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(record && Reflect.get(record, "triggerHash")).toBe(
+      Reflect.get(h.batch, "triggerHash"),
+    );
+    const forged = { ...h.batch, triggerHash: subtaskHash("foreign trigger") };
+    expect(
+      applySubtaskGate(forged, h.result, h.options, ticket),
+    ).toBeUndefined();
+  });
+
   it("permits grounded reword/removal-only refinement without requiring additional steps", () => {
     const h = fixture(
       "Reword the comparison step for clarity and remove the recommendation step; do not add work.",

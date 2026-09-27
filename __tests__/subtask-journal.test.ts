@@ -22,6 +22,7 @@ function record(): SubtaskPhaseRecord {
     listRevision: 0,
     source: subtaskSource(),
     contextHash: subtaskHash("context"),
+    ...{ triggerHash: subtaskHash("trigger") },
     gateModel: "jev-1.13.0",
     selectedModel: "fixture/selected",
     phase: "gate-ready",
@@ -59,6 +60,33 @@ function decided() {
 }
 
 describe("durable generic decomposition phases", () => {
+  it("requires the independent trigger without a legacy restore fallback", () => {
+    const data = journal();
+    Reflect.deleteProperty(data.records[0], "triggerHash");
+    expect(subtaskJournalIsValid(data)).toBe(false);
+    expect(restoreSubtaskJournal(data, () => true)).toBeUndefined();
+  });
+  it("preserves a detached trigger through journal restore", () => {
+    const data = journal();
+    expect(subtaskJournalIsValid(data)).toBe(true);
+    const restored = restoreSubtaskJournal(data, () => true);
+    expect(restored?.records[0]).toMatchObject({
+      triggerHash: subtaskHash("trigger"),
+    });
+    Reflect.set(data.records[0], "triggerHash", subtaskHash("changed"));
+    expect(restored?.records[0]).toMatchObject({
+      triggerHash: subtaskHash("trigger"),
+    });
+  });
+  it.each(["", "not-a-hash", "a".repeat(65), 1, null])(
+    "rejects malformed trigger %s",
+    (triggerHash) => {
+      const data = journal();
+      Reflect.set(data.records[0], "triggerHash", triggerHash);
+      expect(subtaskJournalIsValid(data)).toBe(false);
+    },
+  );
+
   it("snapshots wallet before a currentness callback mutates the original journal", () => {
     const data = decided();
     const before = structuredClone(data);

@@ -6,6 +6,7 @@ import type { ExecutionVisibilitySnapshot } from "../core/execution-visibility";
 import type {
   CoverageMonitorSnapshot,
   PresentationSnapshot,
+  SubtaskMonitorSnapshot,
 } from "../core/monitor";
 
 export interface WidgetSnapshot {
@@ -15,6 +16,8 @@ export interface WidgetSnapshot {
   visibility?: ExecutionVisibilitySnapshot;
   /** Optional read-only coverage sidecar; never task-board authority. */
   coverage?: CoverageMonitorSnapshot;
+  /** Optional generic child sidecar; never parent completion authority. */
+  subtasks?: SubtaskMonitorSnapshot;
 }
 
 /** Existing safe health-label utility; board owns where it is displayed. */

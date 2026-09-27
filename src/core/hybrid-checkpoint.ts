@@ -2291,6 +2291,25 @@ function validSubtaskCheckpointEnvelope(
   );
 }
 
+/** Read only validated strict-v11 metadata; never accepts a legacy envelope. */
+export function subtaskMonitorCheckpointMetadata(
+  data: unknown,
+): SubtaskMonitorCheckpointMetadata | undefined {
+  try {
+    const detached = strictDetachedData(data);
+    if (
+      detached === STRICT_DATA_REJECTED ||
+      !detached ||
+      !validSubtaskCheckpointEnvelope(detached) ||
+      !detached.monitor
+    )
+      return;
+    return detachSubtaskData(detached.monitor);
+  } catch {
+    return;
+  }
+}
+
 /** Staged v11 classification only. It intentionally has no legacy fallback. */
 export function subtaskCheckpointStorageStatus(
   data: unknown,

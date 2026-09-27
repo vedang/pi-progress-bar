@@ -12,7 +12,12 @@ import {
   type SubtaskProposalRequest,
 } from "../analysis/subtask-proposal";
 import type { SubtaskEvidence } from "../sources/coverage";
-import type { HybridTask, Observation, SourceRef } from "./hybrid-state";
+import type {
+  HybridState,
+  HybridTask,
+  Observation,
+  SourceRef,
+} from "./hybrid-state";
 import {
   nextSubtaskPhase,
   restoreSubtaskJournal,
@@ -123,6 +128,87 @@ const sameSource = (left: SourceRef, right: SourceRef) =>
   left.start === right.start &&
   left.end === right.end &&
   left.quoteHash === right.quoteHash;
+
+const withoutGroup = (options: SubtaskGateOptions): SubtaskGateOptions => {
+  const { group: _group, ...bare } = options;
+  return bare;
+};
+
+const recordMatchesBatch = (
+  record: SubtaskPhaseRecord,
+  batch: SubtaskGateBatch,
+) =>
+  record.identity === batch.identity &&
+  record.parentTaskId === batch.parentTaskId &&
+  record.parentRevision === batch.parentRevision &&
+  record.parentSourceDigest === batch.parentSourceDigest &&
+  record.listRevision === batch.listRevision &&
+  sameSource(record.source, batch.source) &&
+  record.contextHash === batch.contextHash &&
+  record.triggerHash === batch.triggerHash &&
+  record.gateModel === batch.gateModel &&
+  record.selectedModel === batch.selectedModel;
+
+const recordSuppressesAccepted = (
+  record: SubtaskPhaseRecord,
+  bare: SubtaskGateBatch,
+  group: SubtaskSnapshot["groups"][number] | undefined,
+) =>
+  record.phase === "proposal-decided" &&
+  record.state === "complete" &&
+  record.proposal?.outcome === "accepted" &&
+  group !== undefined &&
+  group.parentTaskId === bare.parentTaskId &&
+  group.parentRevision === bare.parentRevision &&
+  group.listRevision === record.proposal.listRevision &&
+  record.parentTaskId === bare.parentTaskId &&
+  record.parentRevision === bare.parentRevision &&
+  record.parentSourceDigest === bare.parentSourceDigest &&
+  record.triggerHash === bare.triggerHash &&
+  record.selectedModel === bare.selectedModel &&
+  sameSource(record.source, bare.source);
+
+/**
+ * Shared restore currentness bridge. The candidate is caller-owned detached
+ * data; this function deliberately never consults a live Monitor/store.
+ */
+export function subtaskRuntimeRecordIsCurrent(
+  record: SubtaskPhaseRecord,
+  current: SubtaskRuntimeCurrent,
+  candidate: {
+    state: Pick<HybridState, "tasks">;
+    group?: SubtaskSnapshot["groups"][number];
+  },
+): boolean {
+  const parent = candidate.state.tasks.find(
+    (task) => task.id === record.parentTaskId,
+  );
+  if (!parent?.included || typeof current.selectedModel !== "string")
+    return false;
+  const group = candidate.group;
+  if (
+    group &&
+    (group.parentTaskId !== parent.id ||
+      group.parentRevision !== parent.revision)
+  )
+    return false;
+  const options: SubtaskGateOptions = {
+    parent,
+    ...(group === undefined ? {} : { group }),
+    latest: current.latest,
+    earlier: current.earlier,
+    omissions: current.omissions,
+    selectedModel: current.selectedModel,
+    resolve: current.resolve,
+    ...(current.evidence === undefined ? {} : { evidence: current.evidence }),
+  };
+  if (record.proposal?.outcome === "accepted") {
+    const bare = buildSubtaskGate(withoutGroup(options));
+    return !!bare && recordSuppressesAccepted(record, bare, group);
+  }
+  const batch = buildSubtaskGate(options);
+  return !!batch && recordMatchesBatch(record, batch);
+}
 
 const hash = (value: string) =>
   createHash("sha256").update(value, "utf8").digest("hex");
@@ -741,8 +827,7 @@ export class SubtaskRuntime {
   }
 
   private withoutGroup(prepared: CurrentParent): SubtaskGateOptions {
-    const { group: _group, ...options } = prepared.options;
-    return options;
+    return withoutGroup(prepared.options);
   }
 
   private exactBatch(
@@ -762,41 +847,17 @@ export class SubtaskRuntime {
     current: SubtaskRuntimeCurrent,
     store: SubtaskStore,
   ): boolean {
-    const parent = current.parents.find(
-      (candidate) => candidate.id === record.parentTaskId,
-    );
-    if (!parent?.included || typeof current.selectedModel !== "string")
-      return false;
     const group = store
       .snapshot()
       .groups.find(
         (candidate) =>
-          candidate.parentTaskId === parent.id &&
-          candidate.parentRevision === parent.revision,
+          candidate.parentTaskId === record.parentTaskId &&
+          candidate.parentRevision === record.parentRevision,
       );
-    const options: SubtaskGateOptions = {
-      parent,
+    return subtaskRuntimeRecordIsCurrent(record, current, {
+      state: { tasks: [...current.parents] },
       ...(group === undefined ? {} : { group }),
-      latest: current.latest,
-      earlier: current.earlier,
-      omissions: current.omissions,
-      selectedModel: current.selectedModel,
-      resolve: current.resolve,
-      ...(current.evidence === undefined ? {} : { evidence: current.evidence }),
-    };
-    if (record.proposal?.outcome === "accepted") {
-      const bare = buildSubtaskGate(
-        this.withoutGroup({
-          current,
-          parent,
-          ...(group === undefined ? {} : { group }),
-          options,
-        }),
-      );
-      return !!bare && this.recordSuppressesAccepted(record, bare, group);
-    }
-    const batch = buildSubtaskGate(options);
-    return !!batch && this.recordMatchesBatch(record, batch);
+    });
   }
 
   private acceptedSuppressed(
@@ -816,39 +877,14 @@ export class SubtaskRuntime {
     bare: SubtaskGateBatch,
     group: SubtaskSnapshot["groups"][number] | undefined,
   ): boolean {
-    return (
-      record.phase === "proposal-decided" &&
-      record.state === "complete" &&
-      record.proposal?.outcome === "accepted" &&
-      group !== undefined &&
-      group.parentTaskId === bare.parentTaskId &&
-      group.parentRevision === bare.parentRevision &&
-      group.listRevision === record.proposal.listRevision &&
-      record.parentTaskId === bare.parentTaskId &&
-      record.parentRevision === bare.parentRevision &&
-      record.parentSourceDigest === bare.parentSourceDigest &&
-      record.triggerHash === bare.triggerHash &&
-      record.selectedModel === bare.selectedModel &&
-      sameSource(record.source, bare.source)
-    );
+    return recordSuppressesAccepted(record, bare, group);
   }
 
   private recordMatchesBatch(
     record: SubtaskPhaseRecord,
     batch: SubtaskGateBatch,
   ): boolean {
-    return (
-      record.identity === batch.identity &&
-      record.parentTaskId === batch.parentTaskId &&
-      record.parentRevision === batch.parentRevision &&
-      record.parentSourceDigest === batch.parentSourceDigest &&
-      record.listRevision === batch.listRevision &&
-      sameSource(record.source, batch.source) &&
-      record.contextHash === batch.contextHash &&
-      record.triggerHash === batch.triggerHash &&
-      record.gateModel === batch.gateModel &&
-      record.selectedModel === batch.selectedModel
-    );
+    return recordMatchesBatch(record, batch);
   }
 
   private gateMayDispatch(batch: SubtaskGateBatch): boolean {

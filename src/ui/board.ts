@@ -436,6 +436,7 @@ class TaskBoard implements BoardComponent {
           ]),
       ...this.wrapLines(`Task: ${task.label}`, width),
       ...this.wrapLines(`Assessment: ${this.provenance(task)}`, width),
+      ...this.subtaskLines(task, width),
       ...this.coverageLines(task, width),
       ...this.detailValueLines("Task Title", task.details?.title, width),
       ...this.detailValueLines("Description", task.details?.description, width),
@@ -473,6 +474,49 @@ class TaskBoard implements BoardComponent {
         : this.wrapLines("• No task-local transitions", width, "dim")),
     );
     return { pinned, body, actions: visibility.actions };
+  }
+
+  /** Generic subtasks remain a passive sidecar of one exact parent revision. */
+  private subtaskLines(task: BoardTask, width: number) {
+    const groups = (this.snapshot.subtasks?.groups ?? []).filter(
+      (group) =>
+        group.parentTaskId === task.taskId &&
+        group.parentRevision === task.revision,
+    );
+    if (!groups.length) return [];
+    const lines = [...this.wrapLines("Subtasks:", width)];
+    for (const group of groups) {
+      const completed = group.children.filter(
+        (child) => child.status === "reported-completed",
+      ).length;
+      const blocked = group.children.filter(
+        (child) => child.status === "reported-blocked",
+      ).length;
+      const pending = group.children.filter(
+        (child) => child.status === "pending",
+      ).length;
+      const total = group.complete
+        ? (group.knownTotal ?? group.children.length)
+        : "unknown total";
+      lines.push(
+        ...this.wrapLines(
+          `• Reported complete ${completed} / ${total} · ${pending} pending · ${blocked} blocked`,
+          width,
+        ),
+      );
+      for (const child of group.children) {
+        const status =
+          child.status === "reported-completed"
+            ? "reported complete"
+            : child.status === "reported-blocked"
+              ? "reported blocked"
+              : "pending";
+        lines.push(...this.wrapLines(`• ${child.label} · ${status}`, width));
+      }
+      for (const omission of group.omissions)
+        lines.push(...this.wrapLines(`• ${omission}`, width, "warning"));
+    }
+    return lines;
   }
 
   private coverageParentIdentity(task: BoardTask | undefined) {

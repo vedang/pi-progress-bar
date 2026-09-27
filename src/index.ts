@@ -22,6 +22,7 @@ import {
 import { ReconciliationController } from "./advisory/reconciliation";
 import { Monitor } from "./core/monitor";
 import { selectedModelExtractor } from "./core/selected-model";
+import { selectedModelSubtasks } from "./core/subtask-selected-model";
 import { command } from "./ui/commands";
 import { createUiController, type UiController } from "./ui/controller";
 import { createUiHost } from "./ui/host";
@@ -92,7 +93,7 @@ export default function progressBar(pi: ExtensionAPI): void {
         presentation,
         board: monitor.boardSnapshot(),
         visibility: monitor.visibilitySnapshot(),
-        coverage: monitor.coverageSnapshot(),
+        subtasks: monitor.subtaskSnapshot(),
       };
       if (!controller) {
         // Host contexts may be freshly wrapped for every event. Only explicit
@@ -118,6 +119,14 @@ export default function progressBar(pi: ExtensionAPI): void {
       sourceId: () =>
         context?.sessionManager.getSessionId() ?? "unbound-session",
       extract: selectedModelExtractor(() => {
+        if (!context) throw new Error("No active Pi context");
+        return context;
+      }),
+      selectedModel: () =>
+        context?.model
+          ? `${context.model.provider}/${context.model.id}`
+          : undefined,
+      proposeSubtasks: selectedModelSubtasks(() => {
         if (!context) throw new Error("No active Pi context");
         return context;
       }),
@@ -337,14 +346,12 @@ export default function progressBar(pi: ExtensionAPI): void {
     delivery?.onContext(ctx.sessionManager.getBranch());
     observe(ctx);
     monitor.confirmVisibilityBranch(ctx.sessionManager.getBranch());
-    monitor.confirmCoverageBranch(ctx.sessionManager.getBranch());
   });
   pi.on("turn_end", (event, ctx) => {
     context = ctx;
     monitor.observeActivityTurnEnd(event.message);
     observe(ctx);
     monitor.confirmVisibilityBranch(ctx.sessionManager.getBranch());
-    monitor.confirmCoverageBranch(ctx.sessionManager.getBranch());
   });
   pi.on("before_agent_start", (event, ctx) => {
     context = ctx;
@@ -382,7 +389,6 @@ export default function progressBar(pi: ExtensionAPI): void {
     // controller readiness/deadline handling.
     observe(ctx);
     monitor.confirmVisibilityBranch(ctx.sessionManager.getBranch());
-    monitor.confirmCoverageBranch(ctx.sessionManager.getBranch());
     monitor.visibilityRunSettled();
     const origin = delivery?.onAgentSettled(ctx.sessionManager.getBranch());
     delivery?.onCorrectionRunInvalidated();
@@ -419,11 +425,6 @@ export default function progressBar(pi: ExtensionAPI): void {
       event.toolName,
       event.args,
       ctx.sessionManager.getLeafId() ?? undefined,
-    );
-    monitor.observeCoverageToolStart(
-      event.toolCallId,
-      event.toolName,
-      event.args,
     );
     monitor.setActivity("Tool active");
     const correction = correctionAdapter.start(
@@ -471,7 +472,6 @@ export default function progressBar(pi: ExtensionAPI): void {
       event.result,
       event.isError,
     );
-    monitor.observeCoverageToolEnd(event.toolCallId, event.toolName);
     monitor.observeVisibilityToolEnd(event.toolCallId);
     monitor.setActivity(ctx.isIdle() ? "Idle" : "Agent active");
   });

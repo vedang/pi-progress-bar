@@ -57,6 +57,8 @@ import {
 } from "../analysis/gateway";
 import { type HealthSnapshot, healthSnapshot } from "../analysis/health";
 import { implementationFromResult } from "../analysis/implementation";
+import type { SubtaskGateBatch } from "../analysis/subtask-gate";
+import type { SubtaskProposalRequest } from "../analysis/subtask-proposal";
 import {
   detailQuestionKeys,
   detailReceipt,
@@ -110,15 +112,18 @@ import {
   type CoverageReportDispatchCheckpoint,
   type CoverageReportJobCheckpoint,
   checkpointBytes,
-  checkpointStorageStatus,
+  commitSubtaskCheckpoint,
   encodeCheckpoint,
+  encodeSubtaskCheckpoint,
   type HealthCard,
   type HealthCoverage,
   type HealthFields,
   MAX_CHECKPOINT_BYTES,
   type MonitorCheckpointMetadata,
-  monitorCheckpointMetadata,
-  restoreCheckpoint,
+  restoreSubtaskCheckpoint,
+  type SubtaskRestoreContext,
+  subtaskCheckpointStorageStatus,
+  subtaskMonitorCheckpointMetadata,
 } from "./hybrid-checkpoint";
 import { requestHash } from "./hybrid-proof";
 import {
@@ -130,6 +135,15 @@ import {
   observationRef,
   tasksNewestFirst,
 } from "./hybrid-state";
+import type { SubtaskPhaseRecord } from "./subtask-journal";
+import {
+  type SubtaskProposalTransportResult,
+  SubtaskRuntime,
+  type SubtaskRuntimeCheckpoint,
+  type SubtaskRuntimeCurrent,
+  subtaskRuntimeRecordIsCurrent,
+} from "./subtask-runtime";
+import { type SubtaskSnapshot, SubtaskStore } from "./subtasks";
 import type { Ledger } from "./types";
 
 export interface SelectedModelResult {
@@ -146,6 +160,14 @@ export interface MonitorOptions {
     signal: AbortSignal,
     onDispatch?: (at: number) => void,
   ) => Promise<SelectedModelResult>;
+  /** Optional selected host model identity for generic subtask proposals. */
+  selectedModel?: () => string | undefined;
+  /** Optional selected-host transport; missing transport never affects mandatory work. */
+  proposeSubtasks?: (
+    request: SubtaskProposalRequest,
+    signal: AbortSignal,
+    onDispatch?: (at: number) => boolean,
+  ) => Promise<SubtaskProposalTransportResult>;
   /** Runtime-only grounded-detail gate; production enables it and tests may disable it. */
   richDetailsEnabled?: boolean;
   /** Accepted correction advice is runtime-only and delivered by the host seam. */
@@ -349,6 +371,9 @@ export interface CoverageMonitorSnapshot extends CoverageSnapshot {
   omissions: number;
   exhausted: boolean;
 }
+
+/** Detached generic sidecar projection. It cannot change parent task state. */
+export type SubtaskMonitorSnapshot = Readonly<SubtaskSnapshot>;
 
 export type AdvisorySettlementReason =
   | "disabled"
@@ -585,6 +610,9 @@ export class Monitor {
   private readonly detailGateway: JevGateway;
   /** Coverage report classification has isolated retries, accounting, and flight. */
   private readonly coverageGateway: JevGateway;
+  /** Generic subtask gate has its own durable runtime admission callback. */
+  private readonly subtaskGateway: JevGateway;
+  private subtaskGateDispatch?: (at: number) => boolean;
   /** Optional corrective binding has its own one-flight transport authority. */
   private readonly correctionGateway: JevGateway;
   /** Visibility transport and spend are isolated from semantic/advisory telemetry. */
@@ -662,6 +690,12 @@ export class Monitor {
     jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
     extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
   };
+  /** Runtime owns subtask store/journal; Monitor owns envelope publication. */
+  private subtaskRuntime?: SubtaskRuntime;
+  private subtaskFlight?: Promise<void>;
+  private subtaskOwners: string[] = [];
+  private subtaskWakeKey?: string;
+  private pendingSubtaskCheckpoint?: SubtaskRuntimeCheckpoint;
 
   private reader?: () => readonly unknown[];
   private cwd?: string;
@@ -768,6 +802,13 @@ export class Monitor {
       beforeDispatch: (at) => this.recordCoverageJevDispatch(at),
       onPermanentError: () => this.note("jev-unavailable"),
     });
+    this.subtaskGateway = new JevGateway({
+      fetch: (url, init) => globalThis.fetch(url, init),
+      getApiKey: () => process.env.TYPESAFE_API_KEY,
+      // SubtaskRuntime commits dispatch proof before this callback returns true.
+      beforeDispatch: (at) => this.subtaskGateDispatch?.(at) === true,
+      onPermanentError: () => this.note("jev-unavailable"),
+    });
     this.correctionGateway = new JevGateway({
       fetch: (url, init) => globalThis.fetch(url, init),
       getApiKey: () => process.env.TYPESAFE_API_KEY,
@@ -789,6 +830,7 @@ export class Monitor {
       },
     });
     this.correctionController = this.newCorrectionController();
+    this.installSubtaskRuntime(this.emptySubtaskCheckpoint());
   }
 
   /** Display focus never establishes tool evidence authority. */
@@ -876,6 +918,11 @@ export class Monitor {
       omissions: this.coverageOmissions,
       exhausted: this.coverageDispatches >= 1024,
     };
+  }
+
+  /** Detached generic sidecar view. Reading it never schedules or mutates. */
+  subtaskSnapshot(): SubtaskMonitorSnapshot {
+    return this.subtaskRuntime?.snapshot() ?? new SubtaskStore().snapshot();
   }
 
   /** Provisional declared calls dispatch immediately; final reconciliation is turn-bound. */
@@ -1158,6 +1205,11 @@ export class Monitor {
       this.activityGateway.pause();
       this.detailGateway.pause();
       this.coverageGateway.pause();
+      this.subtaskRuntime?.invalidate();
+      this.subtaskGateway.pause();
+      this.subtaskGateDispatch = undefined;
+      this.subtaskOwners = [];
+      this.subtaskWakeKey = undefined;
       this.resetCoverageRuntime();
       this.correctionGateway.pause();
       this.dropVisibilityFlight();
@@ -1169,11 +1221,13 @@ export class Monitor {
       this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
       this.coverageGateway.enable(this.identity());
+      this.subtaskGateway.enable(this.subtaskIdentity());
       this.correctionGateway.enable(this.identity());
       this.visibilityGateway.enable(this.visibilityIdentity());
       this.wakeCoverage(true);
       this.waitingForWake = false;
       this.requeue(pass);
+      if (!this.queued.length) this.wakeSubtasks(pass, true);
       this.drain();
     }
     this.publish();
@@ -1208,14 +1262,15 @@ export class Monitor {
       if (this.queued.length) {
         this.idleDoneInvalidated = true;
         this.cancelHealth();
-      }
+        this.invalidateSubtasks();
+      } else this.wakeSubtasks(pass);
       if (healthChanged) this.publish();
       this.drain();
     }
   }
 
   checkpoint(): unknown {
-    return encodeCheckpoint(this.state, this.metadata());
+    return encodeSubtaskCheckpoint(this.state, this.subtaskMetadata());
   }
 
   private restoreSourceMatches(data: unknown, sourceId: string) {
@@ -1329,6 +1384,11 @@ export class Monitor {
     this.activityGateway.pause();
     this.detailGateway.pause();
     this.coverageGateway.pause();
+    this.subtaskRuntime?.invalidate();
+    this.subtaskGateway.pause();
+    this.subtaskGateDispatch = undefined;
+    this.subtaskOwners = [];
+    this.subtaskWakeKey = undefined;
     this.correctionGateway.pause();
     this.resetVisibility();
     this.resetCoverageRuntime();
@@ -1451,7 +1511,7 @@ export class Monitor {
     } else this.settledContext = [];
 
     if (work.kind === "restore") {
-      const restored = restoreCheckpoint(
+      const restored = restoreSubtaskCheckpoint(
         work.data,
         work.sourceId,
         (entryId) => this.resolveObservation(pass, entryId),
@@ -1459,10 +1519,13 @@ export class Monitor {
           work.target?.id === entryId
             ? this.settledContext
             : this.rehydratePreceding(pass, entryId),
+        (record, candidate) =>
+          this.subtaskRestoreCurrent(record, candidate, pass),
       );
       if (restored) {
-        this.state = copyState(restored);
-        this.mergeTelemetry(work.metadata, work, pass);
+        this.state = copyState(restored.state);
+        this.replaceSubtaskRuntime(restored.monitor?.subtasks);
+        this.mergeTelemetry(restored.monitor, work, pass);
         this.latchHistoricalCatchup = true;
         if (this.directCanonicalAmendment(pass) || this.pendingContextAmended())
           this.resetState(work.sourceId, false);
@@ -1521,12 +1584,14 @@ export class Monitor {
     this.activityGateway.enable(this.identity());
     this.detailGateway.enable(this.identity());
     this.coverageGateway.enable(this.identity());
+    this.subtaskGateway.enable(this.subtaskIdentity());
     this.correctionGateway.enable(this.identity());
     this.visibilityGateway.enable(this.visibilityIdentity());
     this.wakeCoverage();
     this.rememberVisibilityFrontier(pass);
     this.requeue(pass, true);
     if (this.queued.length) this.idleDoneInvalidated = true;
+    else this.wakeSubtasks(pass, true);
     this.save();
     this.refreshBeads();
     this.finishControl(work);
@@ -1540,12 +1605,16 @@ export class Monitor {
     preserveControls = false,
     reader?: () => readonly unknown[],
   ) {
-    const storage = checkpointStorageStatus(data);
+    const storage = subtaskCheckpointStorageStatus(data);
     const prior = this.controlWork;
+    const restored =
+      storage === "supported"
+        ? subtaskMonitorCheckpointMetadata(data)
+        : undefined;
     const desired = preserveControls
       ? (prior?.wantEnabled ?? this.enabled)
       : storage === "supported"
-        ? (monitorCheckpointMetadata(data)?.enabled ?? true)
+        ? (restored?.enabled ?? true)
         : true;
     this.finishControl(prior);
     this.controlWork = undefined;
@@ -1570,8 +1639,7 @@ export class Monitor {
       kind: "restore",
       wantEnabled: desired,
       sourceId,
-      metadata:
-        storage === "supported" ? monitorCheckpointMetadata(data) : undefined,
+      metadata: storage === "supported" ? restored : undefined,
       data,
       preserveControls,
       telemetry: this.captureTelemetry(this.state.sourceId),
@@ -1998,6 +2066,7 @@ export class Monitor {
   /** Semantic authority resets on amendment; billing lifetime resets only by source. */
   private resetState(sourceId: string, resetTelemetry = true) {
     this.invalidateCorrections();
+    this.replaceSubtaskRuntime();
     this.state = emptyState(sourceId);
     this.coverage = new CoverageStore();
     this.resetCoverageRuntime();
@@ -2175,17 +2244,308 @@ export class Monitor {
     };
   }
 
+  /** Strict-v11 monitor projection; generic sidecar replaces legacy coverage. */
+  private subtaskMetadata(
+    enabled = this.enabled,
+    healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
+    state: HybridState = this.state,
+    prospectiveIdleDoneTaskId?: string,
+    taskDetails: ReadonlyMap<string, TaskDetailRecord> = this.taskDetails,
+    runtimeCheckpoint:
+      | Readonly<SubtaskRuntimeCheckpoint>
+      | undefined = this.subtaskRuntime?.checkpoint(),
+  ) {
+    const idleDoneTaskId = this.idleDoneTaskIdFor(
+      state,
+      prospectiveIdleDoneTaskId,
+    );
+    const component = runtimeCheckpoint
+      ? {
+          state: structuredClone(runtimeCheckpoint.state),
+          journal: structuredClone(runtimeCheckpoint.journal),
+        }
+      : undefined;
+    const hasSubtasks =
+      !!component &&
+      (component.state.groups.length > 0 ||
+        component.state.nextGroupId !== 1 ||
+        component.state.nextChildId !== 1 ||
+        component.journal.dispatches > 0 ||
+        component.journal.records.length > 0);
+    return {
+      enabled,
+      usage: {
+        jev: validUsage(this.usage.jev),
+        extraction: validUsage(this.usage.extraction),
+      },
+      ...(this.lastJevCallAt ? { lastJevCallAt: this.lastJevCallAt } : {}),
+      ...(this.lastExtractionCallAt
+        ? { lastExtractionCallAt: this.lastExtractionCallAt }
+        : {}),
+      ...(idleDoneTaskId ? { idleDoneTaskId } : {}),
+      ...(healthCards.size
+        ? { healthCards: [...healthCards.values()].map(copyHealthCard) }
+        : {}),
+      ...(this.options.richDetailsEnabled && taskDetails.size
+        ? { taskDetails: [...taskDetails.values()].map(copyDetailRecord) }
+        : {}),
+      ...(hasSubtasks ? { subtasks: component } : {}),
+    };
+  }
+
   /** Every new durable semantic state must also support durable OFF control. */
   private falseProjectionFits(state = this.state) {
     try {
-      checkpointBytes(state, this.metadata(false, this.healthCards, state));
-      return (
-        checkpointBytes(state, this.metadata(false, this.healthCards, state)) <=
-        MAX_CHECKPOINT_BYTES
+      encodeSubtaskCheckpoint(
+        state,
+        this.subtaskMetadata(false, this.healthCards, state),
       );
+      return true;
     } catch {
       return false;
     }
+  }
+
+  private emptySubtaskCheckpoint(): SubtaskRuntimeCheckpoint {
+    return {
+      state: new SubtaskStore().checkpoint(),
+      journal: {
+        version: 1,
+        dispatches: 0,
+        usage: {
+          jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
+          extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
+        },
+        records: [],
+      },
+    };
+  }
+
+  /** Install only after prior runtime flight drains; no coordinator overlap. */
+  private installSubtaskRuntime(initial: SubtaskRuntimeCheckpoint) {
+    this.pendingSubtaskCheckpoint = undefined;
+    this.subtaskRuntime = new SubtaskRuntime({
+      initial: structuredClone(initial),
+      current: () => this.subtaskCurrent(this.state),
+      gate: (batch, signal, onDispatch) =>
+        this.evaluateSubtaskGate(batch, signal, onDispatch),
+      propose: (request, signal, onDispatch) => {
+        const propose = this.options.proposeSubtasks;
+        return propose
+          ? propose(request, signal, (at) => onDispatch(at) === true)
+          : Promise.resolve(undefined);
+      },
+      commit: (candidate) => this.commitSubtaskCandidate(candidate),
+      onPublish: () => this.publish(),
+    });
+  }
+
+  /** Fence old transport first; replacement waits for its runtime reservation. */
+  private replaceSubtaskRuntime(checkpoint?: SubtaskRuntimeCheckpoint) {
+    const next = structuredClone(checkpoint ?? this.emptySubtaskCheckpoint());
+    this.subtaskRuntime?.invalidate();
+    this.subtaskGateway.invalidate();
+    this.subtaskGateDispatch = undefined;
+    this.subtaskOwners = [];
+    this.subtaskWakeKey = undefined;
+    if (this.subtaskFlight) {
+      this.pendingSubtaskCheckpoint = next;
+      return;
+    }
+    this.installSubtaskRuntime(next);
+  }
+
+  private subtaskIdentity() {
+    return `${this.state.sourceId}:${this.epoch}:subtasks`;
+  }
+
+  /** Complete bounded canonical context, read only after mandatory settlement. */
+  private subtaskCurrent(
+    state: HybridState,
+    pass = this.beginCanonicalPass(),
+    restoring = false,
+  ): SubtaskRuntimeCurrent | undefined {
+    if (
+      (!restoring &&
+        (!this.enabled ||
+          this.processing ||
+          this.queued.length > 0 ||
+          !!this.state.pending ||
+          this.state.scopeUnresolved)) ||
+      !this.options.proposeSubtasks
+    )
+      return;
+    let selectedModel: string | undefined;
+    try {
+      selectedModel = this.options.selectedModel?.();
+    } catch {
+      return;
+    }
+    if (typeof selectedModel !== "string" || !selectedModel) return;
+    const cursor = state.cursor;
+    if (!cursor) return;
+    const latest = pass.observation(cursor.id);
+    if (
+      !latest ||
+      latest.hash !== cursor.hash ||
+      latest.role !== cursor.role ||
+      Buffer.byteLength(latest.text, "utf8") > 12 * 1024
+    )
+      return;
+
+    const earlier: Observation[] = [];
+    const omissions: string[] = [];
+    const latestIndex = pass.indexOf(latest.id);
+    let index = latestIndex - 1;
+    while (index >= 0 && earlier.length < 16) {
+      const header = pass.headers[index--];
+      if (!header) continue;
+      const observation = pass.observation(header.id);
+      if (!observation) continue;
+      const candidate = [observation, ...earlier];
+      if (Buffer.byteLength(JSON.stringify(candidate), "utf8") > 12 * 1024) {
+        omissions.push(
+          "Older canonical observations omitted because full bounded context exceeded 12 KiB",
+        );
+        break;
+      }
+      earlier.unshift({ ...observation });
+    }
+    if (index >= 0)
+      omissions.push(
+        earlier.length >= 16
+          ? "Older canonical observations omitted after 16 retained observations"
+          : "Older canonical observations omitted by bounded canonical context",
+      );
+    return {
+      sourceId: state.sourceId,
+      enabled: restoring ? true : this.enabled,
+      parents: copyState(state).tasks,
+      latest: { ...latest },
+      earlier,
+      omissions,
+      selectedModel,
+      resolve: (entryId) => {
+        const observation = pass.observation(entryId);
+        return observation ? { ...observation } : undefined;
+      },
+    };
+  }
+
+  /** Restore callback uses only validated detached candidate state/group. */
+  private subtaskRestoreCurrent(
+    record: SubtaskPhaseRecord,
+    candidate: SubtaskRestoreContext,
+    pass: CanonicalPass,
+  ) {
+    const current = this.subtaskCurrent(candidate.state, pass, true);
+    return (
+      !!current && subtaskRuntimeRecordIsCurrent(record, current, candidate)
+    );
+  }
+
+  /** Runtime candidate overlays strict-v11 metadata without swapping live state. */
+  private commitSubtaskCandidate(candidate: SubtaskRuntimeCheckpoint): boolean {
+    const saved = commitSubtaskCheckpoint(
+      this.state,
+      this.subtaskMetadata(
+        this.enabled,
+        this.healthCards,
+        this.state,
+        undefined,
+        this.taskDetails,
+        candidate,
+      ),
+      (checkpoint) => {
+        this.persist(checkpoint);
+        return true;
+      },
+    );
+    return saved !== undefined;
+  }
+
+  private async evaluateSubtaskGate(
+    batch: SubtaskGateBatch,
+    signal: AbortSignal,
+    onDispatch: (at: number) => boolean,
+  ): Promise<ValidatedResult | undefined> {
+    if (!this.enabled || signal.aborted || this.subtaskGateway.isPaused) return;
+    const dispatch = onDispatch;
+    this.subtaskGateDispatch = dispatch;
+    const abort = () => this.subtaskGateway.invalidate();
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      return await this.subtaskGateway.evaluate(
+        batch.request,
+        this.subtaskIdentity(),
+        true,
+      );
+    } finally {
+      signal.removeEventListener("abort", abort);
+      if (this.subtaskGateDispatch === dispatch)
+        this.subtaskGateDispatch = undefined;
+    }
+  }
+
+  /** Named cursor/model/restore wakes only. No timer or self-requeue exists. */
+  private wakeSubtasks(pass: CanonicalPass, force = false) {
+    const current = this.subtaskCurrent(this.state, pass);
+    if (!current) {
+      this.subtaskOwners = [];
+      return;
+    }
+    const key = JSON.stringify({
+      sourceId: current.sourceId,
+      latest: current.latest,
+      parents: current.parents
+        .filter((parent) => parent.included)
+        .map((parent) => [parent.id, parent.revision, parent.source]),
+      selectedModel: current.selectedModel,
+    });
+    if (!force && key === this.subtaskWakeKey) return;
+    this.subtaskWakeKey = key;
+    this.subtaskOwners = current.parents
+      .filter((parent) => parent.included)
+      .slice(0, 20)
+      .map((parent) => parent.id);
+  }
+
+  private invalidateSubtasks() {
+    this.subtaskRuntime?.invalidate();
+    this.subtaskGateway.invalidate();
+    this.subtaskGateDispatch = undefined;
+    this.subtaskOwners = [];
+    this.subtaskWakeKey = undefined;
+  }
+
+  private drainSubtasks() {
+    if (
+      !this.enabled ||
+      this.processing ||
+      this.queued.length ||
+      this.state.pending ||
+      this.subtaskFlight ||
+      !this.subtaskRuntime
+    )
+      return false;
+    const parentTaskId = this.subtaskOwners.shift();
+    if (!parentTaskId) return false;
+    const runtime = this.subtaskRuntime;
+    const flight = runtime.run(parentTaskId);
+    this.subtaskFlight = flight;
+    void flight.finally(() => {
+      if (this.subtaskFlight !== flight) return;
+      this.subtaskFlight = undefined;
+      if (this.pendingSubtaskCheckpoint) {
+        const next = this.pendingSubtaskCheckpoint;
+        this.pendingSubtaskCheckpoint = undefined;
+        this.installSubtaskRuntime(next);
+        if (this.enabled) this.subtaskGateway.enable(this.subtaskIdentity());
+      }
+      this.publish();
+      this.drain();
+    });
+    return true;
   }
 
   /** One bounded wake, rescheduled only by a named advancing frontier. */
@@ -2723,38 +3083,6 @@ export class Monitor {
     return `${owner.id}:${owner.revision}:${owner.sourceDigest}`;
   }
 
-  /** Candidate owner reservation is not a semantic path-to-parent association. */
-  private coverageIntentTarget(observation: Observation) {
-    if (
-      ![
-        ...observation.text.matchAll(
-          /[^\s"'`]+\.(?:xls|xlsx|xlsm|xlsb|ods)\b/giu,
-        ),
-      ].length
-    )
-      return;
-    const groups = this.coverage.snapshot().groups;
-    const owners = this.state.tasks.flatMap((parent) =>
-      !parent.included ||
-      groups.some(
-        (group) =>
-          group.parentTaskId === parent.id &&
-          group.parentRevision === parent.revision,
-      )
-        ? []
-        : [
-            {
-              id: parent.id,
-              revision: parent.revision,
-              sourceDigest: visibilityTaskSourceDigest(parent),
-            },
-          ],
-    );
-    return owners.length
-      ? { key: sha256(JSON.stringify(owners)), owners }
-      : undefined;
-  }
-
   private coverageIntentJobCurrent(
     job: CoverageIntentJob,
     pass = this.beginCanonicalPass(),
@@ -2812,27 +3140,6 @@ export class Monitor {
     );
   }
 
-  /** Count one ordered union of optional work; completed receipt history owns no slot. */
-  private coveragePendingJobCount() {
-    return this.coverageQueue.length;
-  }
-
-  /** Durable and in-flight intent authority is owner-based, not queue-based. */
-  private coverageIntentOverlaps(
-    owners: readonly CoverageIntentParentBinding[],
-  ) {
-    const ownerKeys = new Set(
-      owners.map((owner) => this.coverageOwnerKey(owner)),
-    );
-    return new Set(
-      [...this.coverageIntentJobs].flatMap(([key, job]) =>
-        job.owners.some((owner) => ownerKeys.has(this.coverageOwnerKey(owner)))
-          ? [key]
-          : [],
-      ),
-    );
-  }
-
   /** Keep one latest authority per owner while retaining legal queue order. */
   private normalizeCoverageIntentOverlaps() {
     const jobs = [...this.coverageIntentJobs.entries()];
@@ -2869,101 +3176,6 @@ export class Monitor {
     }
     this.fenceCoverageIntentJobs(superseded);
     return superseded.size;
-  }
-
-  /** Queue selected-model ingress only when an ungrouped parent candidate remains. */
-  private scheduleCoverageIntent(observation: Observation) {
-    if (!this.enabled) return;
-    const target = this.coverageIntentTarget(observation);
-    if (!target) return;
-    // A newer owner reservation invalidates every old state, including a
-    // dispatched job whose queue slot was intentionally released.
-    const superseded = this.coverageIntentOverlaps(target.owners);
-    if (superseded.size) {
-      this.fenceCoverageIntentJobs(superseded);
-      this.recordCoverageOmission(1, true);
-    }
-    // Budget prevents only new transport. It never restores superseded work.
-    if (this.coverageDispatches >= 1024) {
-      this.recordCoverageOmission(1, true);
-      return;
-    }
-    const originalJobs = this.coverageIntentJobs;
-    const originalRequests = this.coverageIntentRequests;
-    const originalQueue = this.coverageQueue;
-    const item = { kind: "intent" as const, key: target.key };
-    const position = this.coverageQueuePosition(item, target.owners);
-    if (position < 0 && this.coveragePendingJobCount() >= 20) {
-      this.recordCoverageOmission(1, true);
-      return;
-    }
-    const jobs = new Map(originalJobs);
-    const requests = new Map(originalRequests);
-    const queue = originalQueue.map((candidate) => ({ ...candidate }));
-    const occupied = position < 0 ? undefined : queue[position];
-    if (occupied?.kind === "report") {
-      // A current report owner cannot normally be an intent candidate. Fence anyway.
-      this.recordCoverageOmission();
-      const prior = this.coverageJobs.get(occupied.key);
-      if (prior) this.coverageJobs.delete(occupied.key);
-      if (
-        this.coverageFlight?.kind === "report" &&
-        this.coverageFlight.jobIdentity === prior?.identity
-      ) {
-        this.coverageFlight = undefined;
-        this.coverageGateway.invalidate();
-      }
-    }
-    if (position < 0) queue.push(item);
-    else queue[position] = item;
-    const request = this.coverageIntents.begin(
-      this.state,
-      observation,
-      this.coverageEpoch,
-    );
-    if (!request) {
-      this.coverageIntentJobs = jobs;
-      this.coverageIntentRequests = requests;
-      this.coverageQueue = queue.filter(
-        (candidate) =>
-          !(candidate.kind === "intent" && candidate.key === target.key),
-      );
-      this.recordCoverageOmission(1, true);
-      return;
-    }
-    const job = this.coverageIntents.jobSnapshot(
-      request,
-      target.key,
-      target.owners,
-    );
-    if (!job) {
-      this.coverageIntents.cancel(request);
-      this.coverageIntentJobs = jobs;
-      this.coverageIntentRequests = requests;
-      this.coverageQueue = queue.filter(
-        (candidate) =>
-          !(candidate.kind === "intent" && candidate.key === target.key),
-      );
-      this.recordCoverageOmission(1, true);
-      return;
-    }
-    jobs.set(target.key, job);
-    requests.set(target.key, request);
-    this.coverageIntentJobs = jobs;
-    this.coverageIntentRequests = requests;
-    this.coverageQueue = queue;
-    if (this.persistCoverageState()) return;
-    this.coverageIntents.cancel(request);
-    // Failed replacement persistence must leave neither old nor new cache runnable.
-    jobs.delete(target.key);
-    requests.delete(target.key);
-    this.coverageIntentJobs = jobs;
-    this.coverageIntentRequests = requests;
-    this.coverageQueue = queue.filter(
-      (candidate) =>
-        !(candidate.kind === "intent" && candidate.key === target.key),
-    );
-    this.recordCoverageOmission(1, true);
   }
 
   /** Build report supersession before semantic cursor persistence; no provider work starts here. */
@@ -5502,6 +5714,7 @@ export class Monitor {
       return;
     }
     if (this.healthFlight) return;
+    if (this.drainSubtasks()) return;
     const coverage = this.nextCoverageWork();
     const detail = this.nextDetailWork();
     if (coverage && (!detail || this.optionalTurn === "coverage")) {
@@ -5569,7 +5782,7 @@ export class Monitor {
     const { observation, epoch, requestContext } = active;
     const priorTasks = this.state.tasks.map((task) => structuredClone(task));
     try {
-      const next = await processObservation(
+      const produced = await processObservation(
         this.state,
         observation,
         {
@@ -5580,6 +5793,7 @@ export class Monitor {
         },
         requestContext,
       );
+      const next = this.retainUnchangedTaskAssessments(produced, priorTasks);
       if (!this.enabled || epoch !== this.epoch) return;
       this.commit(next, undefined, observation);
       if (next.capacity === "limit") {
@@ -5599,13 +5813,11 @@ export class Monitor {
           this.retryObservation = undefined;
         // Cursor progression, including overflow, owns bounded context parity.
         this.rememberPreceding(requestContext, observation);
-        // Coverage intent is an independently bounded optional request. It never
-        // reruns mandatory extraction or changes this committed semantic state.
-        this.scheduleCoverageIntent(observation);
-        // A named committed cursor wake permits parked optional jobs. It occurs
-        // before `finally` drains, never while semantic `processing` is true.
+        // Generic subtasks are woken in `finally`, after `processing` clears.
+        // They share no parent-task extraction or tool prerequisite.
+        // Historical coverage remains inert during generic live cutover.
+        // A named committed cursor wake permits parked optional jobs.
         this.parkedDetails.clear();
-        this.wakeCoverage();
         this.rebuildDetailValues();
         if (
           this.catchupTarget?.id === observation.id &&
@@ -5672,11 +5884,43 @@ export class Monitor {
           this.reconcileHealthCards(pass);
           this.reconcileTaskDetails(pass);
           this.requeue(pass);
+          if (this.queued.length) this.invalidateSubtasks();
+          else this.wakeSubtasks(pass, true);
         }
         this.publish();
       }
       this.drain();
     }
+  }
+
+  /** A no-op mandatory assessment cannot mutate parent task presentation. */
+  private retainUnchangedTaskAssessments(
+    next: HybridState,
+    previousTasks: readonly HybridTask[],
+  ): HybridState {
+    const previous = new Map(previousTasks.map((task) => [task.id, task]));
+    return {
+      ...next,
+      tasks: next.tasks.map((task) => {
+        const prior = previous.get(task.id);
+        if (
+          !prior ||
+          prior.label !== task.label ||
+          prior.kind !== task.kind ||
+          prior.basis !== task.basis ||
+          prior.status !== task.status ||
+          prior.included !== task.included ||
+          prior.revision !== task.revision ||
+          !sameSource(prior.source, task.source)
+        )
+          return task;
+        const retained = { ...task };
+        if (prior.latestAssessment)
+          retained.latestAssessment = structuredClone(prior.latestAssessment);
+        else delete retained.latestAssessment;
+        return retained;
+      }),
+    };
   }
 
   private nextDetailWork() {
@@ -6619,8 +6863,11 @@ export class Monitor {
     if (this.card) this.card = { ...copyCard(this.card), retained: true };
     try {
       // A fixed local block must preserve the same durable OFF guarantee.
-      encodeCheckpoint(rejected, this.metadata(false));
-      const checkpoint = encodeCheckpoint(rejected, this.metadata());
+      encodeSubtaskCheckpoint(rejected, this.subtaskMetadata(false));
+      const checkpoint = encodeSubtaskCheckpoint(
+        rejected,
+        this.subtaskMetadata(),
+      );
       this.state = copyState(rejected);
       this.persist(checkpoint);
     } catch {
@@ -6719,9 +6966,9 @@ export class Monitor {
       this.coverageQueue = coveragePlan.queue;
       this.recordCoverageOmission(coveragePlan.omissions);
       try {
-        encodeCheckpoint(
+        encodeSubtaskCheckpoint(
           state,
-          this.metadata(
+          this.subtaskMetadata(
             false,
             candidateCards,
             state,
@@ -6729,9 +6976,9 @@ export class Monitor {
             candidateDetails,
           ),
         );
-        encodeCheckpoint(
+        encodeSubtaskCheckpoint(
           state,
-          this.metadata(
+          this.subtaskMetadata(
             this.enabled,
             candidateCards,
             state,
@@ -6764,9 +7011,9 @@ export class Monitor {
     let checkpoint: unknown;
     try {
       // No new semantic state may fit only while ON: OFF control is durable.
-      encodeCheckpoint(
+      encodeSubtaskCheckpoint(
         state,
-        this.metadata(
+        this.subtaskMetadata(
           false,
           candidateCards,
           state,
@@ -6774,9 +7021,9 @@ export class Monitor {
           candidateDetails,
         ),
       );
-      checkpoint = encodeCheckpoint(
+      checkpoint = encodeSubtaskCheckpoint(
         state,
-        this.metadata(
+        this.subtaskMetadata(
           this.enabled,
           candidateCards,
           state,
@@ -6790,9 +7037,9 @@ export class Monitor {
         candidateDetails = this.detailsForState(state);
         this.taskDetails = candidateDetails;
         try {
-          encodeCheckpoint(
+          encodeSubtaskCheckpoint(
             state,
-            this.metadata(
+            this.subtaskMetadata(
               false,
               candidateCards,
               state,
@@ -6800,9 +7047,9 @@ export class Monitor {
               candidateDetails,
             ),
           );
-          checkpoint = encodeCheckpoint(
+          checkpoint = encodeSubtaskCheckpoint(
             state,
-            this.metadata(
+            this.subtaskMetadata(
               this.enabled,
               candidateCards,
               state,

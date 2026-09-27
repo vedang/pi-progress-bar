@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   nextSubtaskPhase,
   restoreSubtaskJournal,
@@ -60,6 +60,107 @@ function decided() {
 }
 
 describe("durable generic decomposition phases", () => {
+  it.each([
+    "ready",
+    "gate-dispatched",
+    "gate-failed",
+    "yes",
+    "proposal-dispatched",
+    "proposal-failed",
+    "accepted",
+    "noop",
+  ])(
+    "retains superseded %s proof without permission or unfinished ownership",
+    (mode) => {
+      const data =
+        mode === "ready" || mode.startsWith("gate-") ? journal() : decided();
+      const item = data.records[0];
+      if (mode.startsWith("gate-")) {
+        data.dispatches = 1;
+        data.usage.jev.calls = 1;
+        item.gate = {
+          requestHash: subtaskHash("old-gate"),
+          dispatch: 1,
+          at: 10,
+          outcome: mode === "gate-failed" ? "failed" : "dispatched",
+          usage: { inputTokens: 0, outputTokens: 0 },
+        };
+      }
+      if (
+        mode.startsWith("proposal-") ||
+        mode === "accepted" ||
+        mode === "noop"
+      ) {
+        data.dispatches = 2;
+        data.usage.extraction.calls = 1;
+        item.phase =
+          mode === "accepted" || mode === "noop"
+            ? "proposal-decided"
+            : "gate-decided";
+        item.proposal = {
+          requestHash: subtaskHash("old-proposal"),
+          dispatch: 2,
+          at: 11,
+          outcome:
+            mode === "proposal-dispatched"
+              ? "dispatched"
+              : mode === "proposal-failed"
+                ? "failed"
+                : mode === "accepted"
+                  ? "accepted"
+                  : "noop",
+          ...(mode === "accepted" ? { listRevision: 1 } : {}),
+          usage: { inputTokens: 0, outputTokens: 0 },
+        };
+      }
+      Object.assign(item, { state: "superseded" });
+      data.records.push({
+        ...record(),
+        identity: subtaskHash("new-owner"),
+        contextHash: subtaskHash("new-context"),
+        triggerHash: subtaskHash("new-trigger"),
+      });
+      expect(subtaskJournalIsValid(data)).toBe(true);
+      const callback = vi.fn(() => true);
+      const restored = required(restoreSubtaskJournal(data, callback));
+      expect(restored).toEqual(data);
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(nextSubtaskPhase(restored, item.identity)).toBeUndefined();
+      expect(nextSubtaskPhase(restored, data.records[1].identity)).toBe("gate");
+      const invalid = structuredClone(data);
+      Object.assign(invalid.records[0], { parkedUntil: 99 });
+      expect(subtaskJournalIsValid(invalid)).toBe(false);
+      if (item.gate) {
+        const malformed = structuredClone(data);
+        Reflect.deleteProperty(
+          malformed.records[0].gate as object,
+          "requestHash",
+        );
+        expect(subtaskJournalIsValid(malformed)).toBe(false);
+      }
+    },
+  );
+  it("clears only obsolete parked deadline when retiring noncurrent proof", () => {
+    const data = journal();
+    data.dispatches = 1;
+    data.usage.jev.calls = 1;
+    Object.assign(data.records[0], {
+      state: "parked",
+      parkedUntil: 100,
+      gate: {
+        requestHash: subtaskHash("gate"),
+        dispatch: 1,
+        at: 10,
+        outcome: "failed",
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+    });
+    const before = structuredClone(data.records[0]);
+    Reflect.deleteProperty(before, "parkedUntil");
+    expect(restoreSubtaskJournal(data, () => false)?.records).toEqual([
+      { ...before, state: "superseded" },
+    ]);
+  });
   it("requires the independent trigger without a legacy restore fallback", () => {
     const data = journal();
     Reflect.deleteProperty(data.records[0], "triggerHash");
@@ -95,7 +196,9 @@ describe("durable generic decomposition phases", () => {
       data.usage.jev = { calls: 0, inputTokens: 0, outputTokens: 0 };
       return false;
     });
-    expect(restored?.records).toEqual([]);
+    expect(restored?.records).toEqual(
+      before.records.map((item) => ({ ...item, state: "superseded" })),
+    );
     expect(restored?.dispatches).toBe(before.dispatches);
     expect(restored?.usage).toEqual(before.usage);
   });
@@ -191,17 +294,22 @@ describe("durable generic decomposition phases", () => {
     expect(restored?.dispatches).toBe(1);
     expect(nextSubtaskPhase(required(restored), item.identity)).toBeUndefined();
   });
-  it("prunes stale authority but retains lifetime charges and usage", () => {
+  it("retires stale authority into history while retaining lifetime charges and usage", () => {
     const data = decided();
     const restored = restoreSubtaskJournal(data, () => false);
-    expect(restored?.records).toEqual([]);
+    expect(restored?.records).toEqual(
+      data.records.map((item) => ({ ...item, state: "superseded" })),
+    );
+    expect(
+      nextSubtaskPhase(required(restored), data.records[0].identity),
+    ).toBeUndefined();
     expect(restored?.dispatches).toBe(1);
     expect(restored?.usage).toEqual(data.usage);
     expect(
       restoreSubtaskJournal(data, () => {
         throw new Error("unavailable");
       })?.records,
-    ).toEqual([]);
+    ).toEqual(data.records.map((item) => ({ ...item, state: "superseded" })));
   });
   it("a new changed context can be ready despite a retained old negative", () => {
     const data = decided();

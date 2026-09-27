@@ -149,6 +149,8 @@ describe("disconnected strict v11 generic subtask envelope", () => {
     [1, 1, "noop", false],
     [0, 1, "accepted", true],
     [0, 0, "accepted", true],
+    [0, 1, "accepted", "canonical-pruning"],
+    [0, 1, "accepted", "superseded-history"],
   ] as const)(
     "restores proposal frontier %s→%s %s, missing list=%s",
     async (prior, resultRevision, outcome, missing) => {
@@ -173,9 +175,13 @@ describe("disconnected strict v11 generic subtask envelope", () => {
           }),
         ).toEqual({ accepted: true });
       }
-      monitor.subtasks.state = missing
-        ? new SubtaskStore().checkpoint()
-        : store.checkpoint();
+      monitor.subtasks.state =
+        missing === true || missing === "superseded-history"
+          ? new SubtaskStore().checkpoint()
+          : store.checkpoint();
+      if (missing === "canonical-pruning")
+        monitor.subtasks.state.groups[0].children[0].source =
+          subtaskSource("stale-child");
       const source = parent.source;
       const data = monitor.subtasks.journal;
       data.dispatches = 2;
@@ -224,6 +230,8 @@ describe("disconnected strict v11 generic subtask envelope", () => {
           },
         },
       ];
+      if (missing === "superseded-history")
+        Object.assign(data.records[0], { state: "superseded" });
       const candidates: unknown[] = [];
       const restored = restoreSubtaskCheckpoint(
         encodeSubtaskCheckpoint(state, monitor),
@@ -236,7 +244,11 @@ describe("disconnected strict v11 generic subtask envelope", () => {
         },
       );
       expect(restored?.monitor?.subtasks?.journal.records).toEqual(
-        missing ? [] : data.records,
+        missing === true
+          ? []
+          : missing === "canonical-pruning"
+            ? data.records.map((item) => ({ ...item, state: "superseded" }))
+            : data.records,
       );
       expect(restored?.monitor?.subtasks?.journal.dispatches).toBe(2);
       expect(candidates).toEqual(
@@ -356,7 +368,12 @@ describe("disconnected strict v11 generic subtask envelope", () => {
     expect(result?.state).toEqual(state);
     expect(result?.monitor?.subtasks?.state.groups).toEqual([]);
     expect(result?.monitor?.subtasks?.state.nextGroupId).toBe(2);
-    expect(result?.monitor?.subtasks?.journal.records).toEqual([]);
+    expect(result?.monitor?.subtasks?.journal.records).toEqual(
+      monitor.subtasks.journal.records.map((item) => ({
+        ...item,
+        state: "superseded",
+      })),
+    );
     expect(result?.monitor?.subtasks?.journal.dispatches).toBe(1);
   });
   it("rejects hidden serialization hooks without executing them", async () => {

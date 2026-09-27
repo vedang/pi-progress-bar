@@ -11,7 +11,10 @@ import {
   reusableSubtaskGate,
 } from "../src/analysis/subtask-gate";
 import type { Observation } from "../src/core/hybrid-state";
-import type { SubtaskJournalCheckpoint } from "../src/core/subtask-journal";
+import {
+  type SubtaskJournalCheckpoint,
+  subtaskJournalIsValid,
+} from "../src/core/subtask-journal";
 import { SubtaskStore } from "../src/core/subtasks";
 import {
   subtaskAdmission,
@@ -439,6 +442,10 @@ describe("conversation-grounded per-parent subtask gate", () => {
       expect(reusableSubtaskGate(structuredClone(journal), batch)).toEqual(
         record,
       );
+      const retired = structuredClone(journal);
+      Object.assign(retired.records[0], { state: "superseded" });
+      expect(subtaskJournalIsValid(retired)).toBe(true);
+      expect(reusableSubtaskGate(retired, batch)).toBeUndefined();
       options.latest.text += " New requirement.";
       options.latest.hash = subtaskHash(options.latest.text);
       const next = buildSubtaskGate(options);

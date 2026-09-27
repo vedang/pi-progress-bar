@@ -171,6 +171,87 @@ function associatedFixture() {
 }
 
 describe("durable generic subtask runtime", () => {
+  it.each([false, true])(
+    "retains exact A→B→A charged history without stale permission (reload: %s)",
+    async (reload) => {
+      const h = fixture();
+      h.choose("no");
+      const gate = h.gate.getMockImplementation();
+      if (!gate) throw new Error("Missing gate");
+      h.gate.mockImplementationOnce(async (...args) => {
+        await gate(...args);
+        throw new Error("failed A");
+      });
+      let runtime = h.create();
+      await runtime.run(h.parent.id);
+      const originalModel = h.options.selectedModel;
+      const a = structuredClone(runtime.checkpoint().journal.records[0]);
+      expect(a).toMatchObject({
+        state: "dispatched",
+        gate: { outcome: "dispatched", dispatch: 1 },
+      });
+      h.options.selectedModel = "fixture/other";
+      if (reload) runtime = h.create(runtime.checkpoint());
+      await runtime.run(h.parent.id);
+      expect(runtime.checkpoint().journal.records).toContainEqual({
+        ...a,
+        state: "superseded",
+      });
+      expect(h.network.mock.calls).toEqual([["gate"], ["gate"]]);
+      h.options.selectedModel = originalModel;
+      if (reload) runtime = h.create(runtime.checkpoint());
+      await runtime.run(h.parent.id);
+      expect(h.network.mock.calls).toEqual([["gate"], ["gate"]]);
+      expect(h.propose).not.toHaveBeenCalled();
+      expect(runtime.checkpoint().journal.dispatches).toBe(2);
+      expect(runtime.checkpoint().journal.records).toHaveLength(2);
+    },
+  );
+  it.each(["refused", "post-save-invalidated"])(
+    "retires old ownership only with atomic new charge: %s",
+    async (mode) => {
+      const h = fixture();
+      h.choose("no");
+      const gate = h.gate.getMockImplementation();
+      if (!gate) throw new Error("Missing gate");
+      h.gate.mockImplementationOnce(async (...args) => {
+        await gate(...args);
+        throw new Error("failed A");
+      });
+      const runtime = h.create();
+      await runtime.run(h.parent.id);
+      const before = runtime.checkpoint();
+      const saveCount = h.commit.mock.calls.length;
+      h.options.selectedModel = "fixture/other";
+      h.commit.mockImplementation((candidate) => {
+        if (mode === "refused") return false;
+        h.saved.push(structuredClone(candidate));
+        runtime.invalidate();
+        return true;
+      });
+      await runtime.run(h.parent.id);
+      expect(h.commit).toHaveBeenCalledTimes(saveCount + 1);
+      expect(h.network.mock.calls).toEqual([["gate"]]);
+      expect(h.propose).not.toHaveBeenCalled();
+      if (mode === "refused") expect(runtime.checkpoint()).toEqual(before);
+      else {
+        expect(runtime.checkpoint().journal.dispatches).toBe(2);
+        expect(runtime.checkpoint().journal.records).toContainEqual({
+          ...before.journal.records[0],
+          state: "superseded",
+        });
+        expect(runtime.checkpoint().journal.records).toContainEqual(
+          expect.objectContaining({
+            state: "dispatched",
+            gate: expect.objectContaining({
+              dispatch: 2,
+              outcome: "dispatched",
+            }),
+          }),
+        );
+      }
+    },
+  );
   it("admits a fresh metadata trigger after a stale gate drains without refunding or replaying its charge", async () => {
     const h = fixture(3);
     const gate = h.gate.getMockImplementation();

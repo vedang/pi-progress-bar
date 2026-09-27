@@ -26,6 +26,7 @@ import {
   restoreSubtaskJournal,
   type SubtaskJournalCheckpoint,
   type SubtaskPhaseRecord,
+  type SubtaskReportAttempt,
   subtaskJournalIsValid,
   supersedeSubtaskRecord,
 } from "./subtask-journal";
@@ -115,6 +116,7 @@ const emptyJournal = (): SubtaskJournalCheckpoint => ({
     extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
   },
   records: [],
+  reports: [],
 });
 
 const deepFreeze = <Value>(
@@ -128,6 +130,12 @@ const deepFreeze = <Value>(
 };
 
 const detached = <Value>(value: Value): Value => structuredClone(value);
+
+/** Preserve durable report history when decomposition records are replaced. */
+const copyReportAttempts = (
+  attempts: readonly SubtaskReportAttempt[],
+): SubtaskReportAttempt[] =>
+  structuredClone(attempts) as SubtaskReportAttempt[];
 
 const sameSource = (left: SourceRef, right: SourceRef) =>
   left.entryId === right.entryId &&
@@ -1103,6 +1111,12 @@ export class SubtaskRuntime {
 
   private replaceRecord(record: SubtaskPhaseRecord): SubtaskJournalCheckpoint {
     const journal = detached(this.journal);
+    journal.reports = journal.reports.map((report) => ({
+      ...report,
+      source: { ...report.source },
+      childIds: [...report.childIds],
+      attempts: copyReportAttempts(report.attempts),
+    }));
     const index = journal.records.findIndex(
       (candidate) => candidate.identity === record.identity,
     );

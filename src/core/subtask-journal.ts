@@ -11,6 +11,8 @@ const MAX_NUMERIC_ID_CODE_UNITS = 32;
 
 const digest = /^[a-f0-9]{64}$/;
 const taskId = /^task:[1-9]\d*$/;
+const groupId = /^subtask-group:[1-9]\d*$/;
+const childId = /^subtask-child:[1-9]\d*$/;
 const controlCharacter = /[\p{Cc}\p{Cf}]/u;
 const whitespaceCharacter = /^\s$/u;
 
@@ -75,6 +77,60 @@ export interface SubtaskPhaseRecord {
   proposal?: SubtaskProposalReceipt;
 }
 
+type SubtaskReportState =
+  | "ready"
+  | "dispatched"
+  | "parked"
+  | "permanent"
+  | "complete"
+  | "superseded";
+type SubtaskReportOutcome = "dispatched" | "decided" | "retryable" | "failed";
+type SubtaskReportChoice =
+  | "completed"
+  | "retracted"
+  | "blocked"
+  | "unchanged"
+  | "uncertain";
+type SubtaskReportScope = "item" | "set" | "none";
+
+/** Content-free normalized outcome from one C06 child assessment. */
+interface SubtaskReportAssessment {
+  childId: string;
+  choice: SubtaskReportChoice;
+  scope: SubtaskReportScope;
+  confidence: number;
+  probability: number;
+  accepted: boolean;
+}
+
+/** One charged Jev report chunk; payload and report text never persist here. */
+export interface SubtaskReportAttempt {
+  identity: string;
+  requestHash: string;
+  childIds: string[];
+  dispatch: number;
+  at: number;
+  outcome: SubtaskReportOutcome;
+  usage: SubtaskReceiptUsage;
+  assessments?: SubtaskReportAssessment[];
+}
+
+/** Durable report owner. `childIds` is the full ordered target roster. */
+export interface SubtaskReportJob {
+  identity: string;
+  parentTaskId: string;
+  parentRevision: number;
+  parentSourceDigest: string;
+  groupId: string;
+  listRevision: number;
+  source: SourceRef;
+  model: string;
+  childIds: string[];
+  state: SubtaskReportState;
+  parkedUntil?: number;
+  attempts: SubtaskReportAttempt[];
+}
+
 export interface SubtaskJournalCheckpoint {
   version: typeof JOURNAL_VERSION;
   dispatches: number;
@@ -83,6 +139,7 @@ export interface SubtaskJournalCheckpoint {
     extraction: SubtaskUsage;
   };
   records: SubtaskPhaseRecord[];
+  reports: SubtaskReportJob[];
 }
 
 const plainDataRecord = (value: unknown): value is Record<string, unknown> => {
@@ -193,6 +250,9 @@ const validSourceRef = (value: unknown): value is SourceRef =>
   value.end > value.start &&
   validHash(value.quoteHash);
 
+const validChildId = (value: unknown): value is string =>
+  numericIdIsValid(value, childId);
+
 const validUsage = (value: unknown): value is SubtaskUsage =>
   hasExactKeys(value, ["calls", "inputTokens", "outputTokens"]) &&
   nonNegativeInteger(value.calls) &&
@@ -270,6 +330,219 @@ const validProposalReceipt = (
     value.outcome === "noop" ||
     value.outcome === "failed"
   );
+};
+
+const unit = (value: unknown): value is number =>
+  typeof value === "number" &&
+  Number.isFinite(value) &&
+  value >= 0 &&
+  value <= 1;
+
+const validReportAssessment = (
+  value: unknown,
+): value is SubtaskReportAssessment => {
+  if (
+    !hasExactKeys(value, [
+      "childId",
+      "choice",
+      "scope",
+      "confidence",
+      "probability",
+      "accepted",
+    ]) ||
+    !validChildId(value.childId) ||
+    (value.choice !== "completed" &&
+      value.choice !== "retracted" &&
+      value.choice !== "blocked" &&
+      value.choice !== "unchanged" &&
+      value.choice !== "uncertain") ||
+    (value.scope !== "item" &&
+      value.scope !== "set" &&
+      value.scope !== "none") ||
+    !unit(value.confidence) ||
+    !unit(value.probability) ||
+    typeof value.accepted !== "boolean"
+  )
+    return false;
+  const transition =
+    value.choice === "completed" ||
+    value.choice === "retracted" ||
+    value.choice === "blocked";
+  if ((value.scope === "none") !== !transition) return false;
+  return (
+    !value.accepted ||
+    (transition && value.confidence >= 0.5 && value.probability >= 0.8)
+  );
+};
+
+const sameChildIds = (left: readonly string[], right: readonly string[]) =>
+  left.length === right.length &&
+  left.every((childId, i) => childId === right[i]);
+
+const validReportAttempt = (value: unknown): value is SubtaskReportAttempt => {
+  if (!plainDataRecord(value)) return false;
+  const decided = value.outcome === "decided";
+  if (
+    !hasExactKeys(
+      value,
+      decided
+        ? [
+            "identity",
+            "requestHash",
+            "childIds",
+            "dispatch",
+            "at",
+            "outcome",
+            "usage",
+            "assessments",
+          ]
+        : [
+            "identity",
+            "requestHash",
+            "childIds",
+            "dispatch",
+            "at",
+            "outcome",
+            "usage",
+          ],
+    ) ||
+    !validHash(value.identity) ||
+    !validHash(value.requestHash) ||
+    !densePlainArray(value.childIds, 1, 20) ||
+    !value.childIds.every(validChildId) ||
+    new Set(value.childIds).size !== value.childIds.length ||
+    !positiveInteger(value.dispatch) ||
+    !finiteNonNegative(value.at) ||
+    !validReceiptUsage(value.usage)
+  )
+    return false;
+  if (!decided)
+    return (
+      value.outcome === "dispatched" ||
+      value.outcome === "retryable" ||
+      value.outcome === "failed"
+    );
+  const childIds = value.childIds as string[];
+  const assessments = value.assessments as unknown[];
+  return (
+    densePlainArray(assessments, childIds.length, 20) &&
+    assessments.every(validReportAssessment) &&
+    assessments.every(
+      (assessment, index) => assessment.childId === childIds[index],
+    )
+  );
+};
+
+const validReportJob = (value: unknown): value is SubtaskReportJob => {
+  if (
+    !hasExactKeys(
+      value,
+      [
+        "identity",
+        "parentTaskId",
+        "parentRevision",
+        "parentSourceDigest",
+        "groupId",
+        "listRevision",
+        "source",
+        "model",
+        "childIds",
+        "state",
+        "attempts",
+      ],
+      ["parkedUntil"],
+    ) ||
+    !validHash(value.identity) ||
+    !numericIdIsValid(value.parentTaskId, taskId) ||
+    !positiveInteger(value.parentRevision) ||
+    !validHash(value.parentSourceDigest) ||
+    !numericIdIsValid(value.groupId, groupId) ||
+    !positiveInteger(value.listRevision) ||
+    !validSourceRef(value.source) ||
+    value.model !== "jev-1.13.0" ||
+    !densePlainArray(value.childIds, 1, 64) ||
+    !value.childIds.every(validChildId) ||
+    new Set(value.childIds).size !== value.childIds.length ||
+    (value.state !== "ready" &&
+      value.state !== "dispatched" &&
+      value.state !== "parked" &&
+      value.state !== "permanent" &&
+      value.state !== "complete" &&
+      value.state !== "superseded") ||
+    !densePlainArray(value.attempts, 0, MAX_RECEIPTS) ||
+    !value.attempts.every(validReportAttempt)
+  )
+    return false;
+
+  const hasParkedUntil = Object.hasOwn(value, "parkedUntil");
+  if (
+    (value.state === "parked" &&
+      (!hasParkedUntil || !nonNegativeInteger(value.parkedUntil))) ||
+    (value.state !== "parked" && hasParkedUntil)
+  )
+    return false;
+
+  const rosterIndex = new Map(value.childIds.map((childId, i) => [childId, i]));
+  const covered = new Set<string>();
+  let priorDispatch = 0;
+  for (let index = 0; index < value.attempts.length; index++) {
+    const attempt = value.attempts[index];
+    if (attempt.dispatch <= priorDispatch) return false;
+    priorDispatch = attempt.dispatch;
+    let previousIndex = -1;
+    for (const childId of attempt.childIds) {
+      const position = rosterIndex.get(childId);
+      if (position === undefined || position <= previousIndex) return false;
+      previousIndex = position;
+    }
+    const overlaps = value.attempts
+      .slice(0, index)
+      .filter((prior) =>
+        prior.childIds.some((childId) => attempt.childIds.includes(childId)),
+      );
+    if (
+      overlaps.length &&
+      !overlaps.every(
+        (prior) =>
+          prior.outcome === "retryable" &&
+          prior.requestHash === attempt.requestHash &&
+          prior.identity === attempt.identity &&
+          sameChildIds(prior.childIds, attempt.childIds),
+      )
+    )
+      return false;
+    if (attempt.outcome === "decided") {
+      if (attempt.childIds.some((childId) => covered.has(childId)))
+        return false;
+      for (const childId of attempt.childIds) covered.add(childId);
+    }
+  }
+
+  const complete = covered.size === value.childIds.length;
+  const latest = value.attempts.at(-1);
+  if (value.state === "superseded") return true;
+  switch (value.state) {
+    case "ready":
+      return (
+        !complete && (latest === undefined || latest.outcome === "decided")
+      );
+    case "parked":
+      return (
+        !complete &&
+        (latest === undefined ||
+          latest.outcome === "decided" ||
+          latest.outcome === "retryable")
+      );
+    case "dispatched":
+      return !complete && latest?.outcome === "dispatched";
+    case "permanent":
+      return (
+        !complete &&
+        (latest?.outcome === "dispatched" || latest?.outcome === "failed")
+      );
+    case "complete":
+      return complete && latest?.outcome === "decided";
+  }
 };
 
 const acceptedYes = (gate: SubtaskGateReceipt) =>
@@ -400,7 +673,13 @@ const validJournalShape = (
   value: unknown,
 ): value is SubtaskJournalCheckpoint => {
   if (
-    !hasExactKeys(value, ["version", "dispatches", "usage", "records"]) ||
+    !hasExactKeys(value, [
+      "version",
+      "dispatches",
+      "usage",
+      "records",
+      "reports",
+    ]) ||
     value.version !== JOURNAL_VERSION ||
     !nonNegativeInteger(value.dispatches) ||
     value.dispatches > MAX_DISPATCHES ||
@@ -409,17 +688,29 @@ const validJournalShape = (
     !validUsage(value.usage.extraction) ||
     value.usage.jev.calls + value.usage.extraction.calls !== value.dispatches ||
     !densePlainArray(value.records, 0, MAX_RECORDS) ||
-    !value.records.every(validRecord)
+    !value.records.every(validRecord) ||
+    !densePlainArray(value.reports, 0, MAX_RECORDS) ||
+    !value.reports.every(validReportJob) ||
+    value.records.length + value.reports.length > MAX_RECORDS
   )
     return false;
 
   const records = value.records;
-  if (new Set(records.map((record) => record.identity)).size !== records.length)
-    return false;
+  const reports = value.reports;
+  const identities = [
+    ...records.map((record) => record.identity),
+    ...reports.map((report) => report.identity),
+  ];
+  if (new Set(identities).size !== identities.length) return false;
 
-  const unfinished = records.filter(
-    (record) => record.state !== "complete" && record.state !== "superseded",
-  );
+  const unfinished = [
+    ...records.filter(
+      (record) => record.state !== "complete" && record.state !== "superseded",
+    ),
+    ...reports.filter(
+      (report) => report.state !== "complete" && report.state !== "superseded",
+    ),
+  ];
   if (
     unfinished.length > MAX_UNFINISHED_OWNERS ||
     new Set(unfinished.map((record) => record.parentTaskId)).size !==
@@ -427,12 +718,17 @@ const validJournalShape = (
   )
     return false;
 
-  const receipts = records.flatMap((record) => [
-    ...(record.gate === undefined ? [] : [["jev", record.gate] as const]),
-    ...(record.proposal === undefined
-      ? []
-      : [["extraction", record.proposal] as const]),
-  ]);
+  const receipts = [
+    ...records.flatMap((record) => [
+      ...(record.gate === undefined ? [] : [["jev", record.gate] as const]),
+      ...(record.proposal === undefined
+        ? []
+        : [["extraction", record.proposal] as const]),
+    ]),
+    ...reports.flatMap((report) =>
+      report.attempts.map((attempt) => ["jev", attempt] as const),
+    ),
+  ];
   if (receipts.length > MAX_RECEIPTS) return false;
 
   const ordinals = new Set<number>();
@@ -555,6 +851,49 @@ const cloneProposal = (
   usage: cloneReceiptUsage(proposal.usage),
 });
 
+const cloneReportAssessment = (
+  assessment: SubtaskReportAssessment,
+): SubtaskReportAssessment => ({
+  childId: assessment.childId,
+  choice: assessment.choice,
+  scope: assessment.scope,
+  confidence: assessment.confidence,
+  probability: assessment.probability,
+  accepted: assessment.accepted,
+});
+
+const cloneReportAttempt = (
+  attempt: SubtaskReportAttempt,
+): SubtaskReportAttempt => ({
+  identity: attempt.identity,
+  requestHash: attempt.requestHash,
+  childIds: [...attempt.childIds],
+  dispatch: attempt.dispatch,
+  at: attempt.at,
+  outcome: attempt.outcome,
+  usage: cloneReceiptUsage(attempt.usage),
+  ...(attempt.assessments === undefined
+    ? {}
+    : { assessments: attempt.assessments.map(cloneReportAssessment) }),
+});
+
+const cloneReportJob = (report: SubtaskReportJob): SubtaskReportJob => ({
+  identity: report.identity,
+  parentTaskId: report.parentTaskId,
+  parentRevision: report.parentRevision,
+  parentSourceDigest: report.parentSourceDigest,
+  groupId: report.groupId,
+  listRevision: report.listRevision,
+  source: cloneSource(report.source),
+  model: report.model,
+  childIds: [...report.childIds],
+  state: report.state,
+  ...(report.parkedUntil === undefined
+    ? {}
+    : { parkedUntil: report.parkedUntil }),
+  attempts: report.attempts.map(cloneReportAttempt),
+});
+
 const cloneRecord = (record: SubtaskPhaseRecord): SubtaskPhaseRecord => ({
   identity: record.identity,
   parentTaskId: record.parentTaskId,
@@ -593,6 +932,7 @@ const cloneJournal = (
     extraction: cloneUsage(journal.usage.extraction),
   },
   records: journal.records.map(cloneRecord),
+  reports: journal.reports.map(cloneReportJob),
 });
 
 /** Retire only scheduling authority; receipts and identity remain history. */
@@ -604,6 +944,20 @@ export const supersedeSubtaskRecord = (
     superseded.state = "superseded";
     delete superseded.parkedUntil;
     return validRecord(superseded) ? superseded : undefined;
+  } catch {
+    return;
+  }
+};
+
+/** Retire report scheduling authority while retaining charged history. */
+const supersedeSubtaskReportJob = (
+  report: SubtaskReportJob,
+): SubtaskReportJob | undefined => {
+  try {
+    const superseded = cloneReportJob(report);
+    superseded.state = "superseded";
+    delete superseded.parkedUntil;
+    return validReportJob(superseded) ? superseded : undefined;
   } catch {
     return;
   }
@@ -659,11 +1013,13 @@ export const pruneIncoherentAcceptedSubtaskRecords = (
 export const restoreSubtaskJournal = (
   data: unknown,
   isCurrent: (record: SubtaskPhaseRecord) => boolean,
+  isCurrentReport?: (report: SubtaskReportJob) => boolean,
 ): SubtaskJournalCheckpoint | undefined => {
   if (!subtaskJournalIsValid(data) || typeof isCurrent !== "function") return;
 
+  // Clone before either callback. Callbacks receive clones and cannot mutate
+  // caller-owned history or the candidate that will be returned.
   const journal = cloneJournal(data);
-  const current = isCurrent;
   const records: SubtaskPhaseRecord[] = [];
   for (const record of journal.records) {
     if (record.state === "superseded") {
@@ -673,7 +1029,7 @@ export const restoreSubtaskJournal = (
     let restored: SubtaskPhaseRecord | undefined;
     try {
       restored =
-        current(cloneRecord(record)) === true
+        isCurrent(cloneRecord(record)) === true
           ? cloneRecord(record)
           : supersedeSubtaskRecord(record);
     } catch {
@@ -683,7 +1039,28 @@ export const restoreSubtaskJournal = (
     if (restored.state === "dispatched") restored.state = "permanent";
     records.push(restored);
   }
-  return {
+
+  const reports: SubtaskReportJob[] = [];
+  for (const report of journal.reports) {
+    if (report.state === "superseded") {
+      reports.push(cloneReportJob(report));
+      continue;
+    }
+    let restored: SubtaskReportJob | undefined;
+    try {
+      restored =
+        isCurrentReport?.(cloneReportJob(report)) === true
+          ? cloneReportJob(report)
+          : supersedeSubtaskReportJob(report);
+    } catch {
+      restored = supersedeSubtaskReportJob(report);
+    }
+    if (!restored) return;
+    if (restored.state === "dispatched") restored.state = "permanent";
+    reports.push(restored);
+  }
+
+  const restored: SubtaskJournalCheckpoint = {
     version: JOURNAL_VERSION,
     dispatches: journal.dispatches,
     usage: {
@@ -691,7 +1068,9 @@ export const restoreSubtaskJournal = (
       extraction: cloneUsage(journal.usage.extraction),
     },
     records,
+    reports,
   };
+  return subtaskJournalIsValid(restored) ? restored : undefined;
 };
 
 /** Pure eligibility selector. It schedules nothing and never changes journal data. */

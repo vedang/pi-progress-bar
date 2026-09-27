@@ -2299,7 +2299,8 @@ export class Monitor {
         component.state.nextGroupId !== 1 ||
         component.state.nextChildId !== 1 ||
         component.journal.dispatches > 0 ||
-        component.journal.records.length > 0);
+        component.journal.records.length > 0 ||
+        component.journal.reports.length > 0);
     return {
       enabled,
       usage: {
@@ -2345,6 +2346,7 @@ export class Monitor {
           extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
         },
         records: [],
+        reports: [],
       },
     };
   }

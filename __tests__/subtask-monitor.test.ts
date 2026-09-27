@@ -90,7 +90,12 @@ it("uses optional canonical metadata through the same generic gate and binds rea
       answers: Record<string, unknown>;
     };
     if (request.questions["subtask:0"]) {
-      const need = Boolean(request.state.evidence);
+      const need = Boolean(
+        request.state &&
+          typeof request.state === "object" &&
+          "evidence" in request.state &&
+          request.state.evidence,
+      );
       response.answers["subtask:0"] = {
         type: "choice",
         choice: need ? "yes" : "no",

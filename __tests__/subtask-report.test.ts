@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { MODEL, type ValidatedResult } from "../src/analysis/gateway";
 import {
   type SubtaskReportBatch,
+  type SubtaskReportReceipt,
   subtaskReportBatches,
   subtaskReportDecisions,
 } from "../src/analysis/subtask-report";
@@ -45,6 +46,73 @@ afterEach(() => {
   expect(vi.mocked(fetch)).not.toHaveBeenCalled();
 });
 
+it("adapts chunk-local source observations without dropping full-roster obligations", () => {
+  const f = subtaskReportFixture();
+  const children = f.options.group.children.map((child, i) => {
+    const id = `child-source-${i}`;
+    const text = `${child.label}. ${"Supporting canonical requirements. ".repeat(36)}`;
+    f.observations.set(id, { id, role: "user", text, hash: subtaskHash(text) });
+    return {
+      kind: "reword" as const,
+      id: child.id,
+      label: child.label,
+      source: subtaskSource(id, text),
+    };
+  });
+  expect(
+    f.store.admit({
+      parent: f.options.parent,
+      expectedListRevision: f.options.group.listRevision,
+      source: f.options.group.source,
+      proof: f.options.group.proof,
+      children,
+      removals: [],
+      complete: true,
+      knownTotal: children.length,
+    }),
+  ).toEqual({ accepted: true });
+  f.options.group = f.store.snapshot().groups[0];
+  const batches = subtaskReportBatches(f.options);
+  expect(batches.flatMap((batch) => batch.childIds)).toEqual(
+    f.options.group.children.map((child) => child.id),
+  );
+  expect(batches.length).toBeGreaterThan(2);
+  for (const batch of batches) {
+    const input = JSON.stringify(batch.request);
+    expect(Buffer.byteLength(input)).toBeLessThanOrEqual(24576);
+    for (const child of f.options.group.children) {
+      expect(input).toContain(child.id);
+      expect(input).toContain(child.label);
+      const observation = required(f.observations.get(child.source.entryId));
+      if (batch.childIds.includes(child.id))
+        expect(input).toContain(observation.text);
+      else expect(input).not.toContain(observation.text);
+    }
+    expect(
+      subtaskReportDecisions(batch, reply(batch), f.options).reports,
+    ).toHaveLength(batch.childIds.length);
+  }
+});
+it.each(["list", "parent", "child"])(
+  "fences %s mutation inside a currentness resolver callback",
+  (change) => {
+    const f = subtaskReportFixture();
+    const batch = required(subtaskReportBatches(f.options)[0]);
+    const resolve = f.options.resolve;
+    f.options.resolve = (id) => {
+      if (id === "goal") {
+        if (change === "list") f.options.group.listRevision++;
+        if (change === "parent") f.options.parent.included = false;
+        if (change === "child")
+          f.options.group.children[0].label = "Replaced obligation";
+      }
+      return resolve(id);
+    };
+    expect(subtaskReportDecisions(batch, reply(batch), f.options)).toEqual({
+      reports: [],
+    });
+  },
+);
 it("builds a no-tool 22-child report in 20+2 immutable bounded questions", () => {
   const f = subtaskReportFixture();
   const before = structuredClone(f.options.parent);
@@ -90,6 +158,8 @@ it("applies only assessed complete-set children and keeps identities stable afte
   const batches = subtaskReportBatches(f.options);
   const first = required(batches[0]);
   const decisions = subtaskReportDecisions(first, reply(first), f.options);
+  const receipt: SubtaskReportReceipt | undefined = decisions.receipt;
+  expect(receipt?.childIds).toEqual(first.childIds);
   expect(decisions.reports).toHaveLength(20);
   for (const report of decisions.reports)
     expect(f.store.report(report)).toEqual({ accepted: true });

@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { ownDataJson } from "./own-data-json";
+
 export const MODEL = "jev-1.13.0";
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 export const MAX_REQUEST_BYTES = 24 * 1024;
@@ -275,12 +277,16 @@ export class JevGateway {
       return;
     }
     let body: string;
+    let requestForValidation: EvaluationRequest;
     try {
-      body = JSON.stringify(request);
-      const questions = Object.values(request.questions);
+      const serialized = ownDataJson(request, MAX_REQUEST_BYTES);
+      if (!serialized || Buffer.byteLength(serialized.json) > MAX_REQUEST_BYTES)
+        throw new Error("Invalid request");
+      body = serialized.json;
+      requestForValidation = serialized.value as EvaluationRequest;
+      const questions = Object.values(requestForValidation.questions);
       if (
-        request.model !== MODEL ||
-        Buffer.byteLength(body) > MAX_REQUEST_BYTES ||
+        requestForValidation.model !== MODEL ||
         questions.length < 1 ||
         questions.length > MAX_QUESTIONS ||
         questions.some(
@@ -414,7 +420,7 @@ export class JevGateway {
         }
         return validate(
           await readBounded(response, controller.signal),
-          request,
+          requestForValidation,
         );
       };
       const result = await Promise.race([work(), timeout, cancelled]);

@@ -48,6 +48,49 @@ export interface CoverageAdapterSnapshot {
   omissions: number;
 }
 
+/** Names-only passive metadata; it never assigns or completes generic subtasks. */
+export interface SubtaskEvidence {
+  resources: Array<{
+    resourceKey: string;
+    revision: number;
+    complete: boolean;
+    knownTotal?: number;
+    items: Array<{ key: string; label: string }>;
+    source: { entryId: string; messageHash: string; callHash: string };
+  }>;
+  omissions: number;
+}
+
+interface SubtaskEvidenceAttestation {
+  current: () => boolean;
+}
+
+/** Original snapshots alone receive this non-serializable adapter attestation. */
+const subtaskEvidenceAttestations = new WeakMap<
+  object,
+  SubtaskEvidenceAttestation
+>();
+
+/** True only for an unchanged original snapshot issued by its adapter. */
+export const isCurrentSubtaskEvidence = (value: unknown): boolean => {
+  if (!value || typeof value !== "object") return false;
+  try {
+    return subtaskEvidenceAttestations.get(value)?.current() === true;
+  } catch {
+    return false;
+  }
+};
+
+const deepFreeze = <Value>(
+  value: Value,
+  seen = new WeakSet<object>(),
+): Value => {
+  if (!value || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value)) deepFreeze(child, seen);
+  return Object.freeze(value);
+};
+
 interface CanonicalHeader {
   entryId: string;
   callId: string;
@@ -621,6 +664,8 @@ const sameReceipt = (value: ToolReceipt, index: CanonicalIndex) => {
 export class CoverageAdapter {
   private epoch: number | undefined;
   private omissions = 0;
+  /** Rotated when any metadata-visible canonical fact changes. */
+  private evidenceToken = {};
   private nextStartOrder = 1;
   private readonly pending = new Map<string, Candidate>();
   /** One hash-bound canonical frontier blocks reacceptance without call-ID history. */
@@ -641,7 +686,7 @@ export class CoverageAdapter {
     const candidate = this.candidate(input, this.nextStartOrder++);
     if (!candidate) return;
     if (this.pending.size >= MAX_PENDING || !this.fitsAdditional(candidate)) {
-      this.omissions++;
+      this.omit();
       return;
     }
     this.pending.set(input.toolCallId, candidate);
@@ -679,7 +724,7 @@ export class CoverageAdapter {
       this.pending.delete(callId);
       const current = matching.length === 1 ? matching[0] : undefined;
       if (!current?.valid || current.toolName !== candidate.toolName) {
-        this.omissions++;
+        this.omit();
         continue;
       }
       ready.push({ candidate, result: current });
@@ -709,7 +754,39 @@ export class CoverageAdapter {
     return { pendingCount: this.pending.size, omissions: this.omissions };
   }
 
+  /**
+   * Return only current confirmed manifest names and scalar receipts. Adapter
+   * paths, raw call IDs, raw tool bodies, mappings, and activity stay private.
+   */
+  metadata(): SubtaskEvidence | undefined {
+    if (!this.manifests.size) return;
+    const evidence = deepFreeze({
+      resources: [...this.manifests.values()].map((manifest) => ({
+        resourceKey: manifest.resourceKey,
+        revision: manifest.revision,
+        complete: true,
+        items: manifest.items.map((item) => ({
+          key: item.key,
+          label: item.label,
+        })),
+        source: {
+          entryId: manifest.entryId,
+          messageHash: manifest.contentHash,
+          callHash: sha256(manifest.callId),
+        },
+      })),
+      omissions: this.omissions,
+    });
+    if (byteLength(evidence) > MAX_METADATA_BYTES) return;
+    const token = this.evidenceToken;
+    subtaskEvidenceAttestations.set(evidence, {
+      current: () => this.evidenceToken === token && this.manifests.size > 0,
+    });
+    return evidence;
+  }
+
   reset(epoch: number) {
+    this.invalidateEvidence();
     this.epoch = epoch;
     this.omissions = 0;
     this.nextStartOrder = 1;
@@ -846,6 +923,7 @@ export class CoverageAdapter {
       )
         return this.omit();
       this.manifests.set(candidate.resourcePath, next);
+      this.invalidateEvidence();
       this.rememberAcceptedCall(result, index);
       this.listings.delete(candidate.resourcePath);
       this.rebuildMappings();
@@ -1016,8 +1094,12 @@ export class CoverageAdapter {
   }
 
   private revalidate(index: CanonicalIndex) {
+    let metadataChanged = false;
     for (const [path, manifest] of this.manifests)
-      if (!sameReceipt(manifest, index)) this.manifests.delete(path);
+      if (!sameReceipt(manifest, index)) {
+        this.manifests.delete(path);
+        metadataChanged = true;
+      }
     for (const [path, declaration] of this.declarations)
       if (!sameReceipt(declaration, index)) this.declarations.delete(path);
     for (const [path, scriptRead] of this.scriptReads) {
@@ -1047,6 +1129,7 @@ export class CoverageAdapter {
       )
         this.listings.delete(resourcePath);
     }
+    if (metadataChanged) this.invalidateEvidence();
     this.rebuildMappings();
     this.clearInvalidPendingActivities();
   }
@@ -1150,6 +1233,10 @@ export class CoverageAdapter {
     if (prefix) this.frontier = { order: result.order, prefix };
   }
 
+  private invalidateEvidence() {
+    this.evidenceToken = {};
+  }
+
   private metadataBytes() {
     return byteLength({
       pending: [...this.pending.values()],
@@ -1176,6 +1263,7 @@ export class CoverageAdapter {
 
   private omit() {
     this.omissions++;
+    this.invalidateEvidence();
   }
 
   private result(): CoverageAdapterResult {

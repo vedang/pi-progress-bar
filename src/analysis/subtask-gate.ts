@@ -7,6 +7,10 @@ import type {
 import { subtaskJournalIsValid } from "../core/subtask-journal";
 import type { SubtaskSnapshot } from "../core/subtasks";
 import {
+  isCurrentSubtaskEvidence,
+  type SubtaskEvidence,
+} from "../sources/coverage";
+import {
   type EvaluationRequest,
   MAX_REQUEST_BYTES,
   MODEL,
@@ -22,6 +26,8 @@ const MAX_OMISSION_SCALARS = 512;
 const MAX_SELECTED_MODEL_SCALARS = 512;
 const MAX_SELECTED_MODEL_BYTES = 4 * 1024;
 const MAX_IDENTIFIER_SCALARS = 512;
+const MAX_RETAINED_EVIDENCE_RESOURCES = 16;
+const MAX_SUBTASK_EVIDENCE_BYTES = 64 * 1024;
 const MAX_NUMERIC_ID_CODE_UNITS = 32;
 const MAX_DISPATCH = 1024;
 const GATE_RUBRIC_VERSION = "subtask-need-v1";
@@ -45,6 +51,7 @@ interface SubtaskGateState {
   earlier: Observation[];
   omissions: string[];
   selectedModel: string;
+  evidence?: SubtaskEvidence;
 }
 
 export interface SubtaskGateOptions {
@@ -55,6 +62,7 @@ export interface SubtaskGateOptions {
   omissions: readonly string[];
   selectedModel: string;
   resolve: (entryId: string) => Observation | undefined;
+  evidence?: SubtaskEvidence;
 }
 
 /** Immutable one-parent Jev request plus content-free C02 record bindings. */
@@ -462,6 +470,71 @@ const validOmissions = (value: unknown): value is string[] =>
 const validSelectedModel = (value: unknown): value is string =>
   validText(value, MAX_SELECTED_MODEL_SCALARS, MAX_SELECTED_MODEL_BYTES);
 
+/** Detached metadata validation deliberately does not copy adapter capability. */
+const validSubtaskEvidence = (value: unknown): value is SubtaskEvidence => {
+  const serialized = ownDataJson(value, MAX_SUBTASK_EVIDENCE_BYTES);
+  if (
+    !serialized ||
+    Buffer.byteLength(serialized.json, "utf8") > MAX_SUBTASK_EVIDENCE_BYTES ||
+    !hasExactKeys(value, ["resources", "omissions"]) ||
+    !densePlainArray(value.resources, 1, MAX_RETAINED_EVIDENCE_RESOURCES) ||
+    !nonNegativeInteger(value.omissions)
+  )
+    return false;
+  if (
+    !value.resources.every(
+      (resource) =>
+        hasExactKeys(
+          resource,
+          ["resourceKey", "revision", "complete", "items", "source"],
+          ["knownTotal"],
+        ) &&
+        validHash(resource.resourceKey) &&
+        positiveInteger(resource.revision) &&
+        typeof resource.complete === "boolean" &&
+        (!Object.hasOwn(resource, "knownTotal") ||
+          nonNegativeInteger(resource.knownTotal)) &&
+        densePlainArray(resource.items, 1, 64) &&
+        resource.items.every(
+          (item) =>
+            hasExactKeys(item, ["key", "label"]) &&
+            validHash(item.key) &&
+            validText(item.label, 240, 240 * 4),
+        ) &&
+        new Set(resource.items.map((item) => (item as RecordValue).key))
+          .size === resource.items.length &&
+        hasExactKeys(resource.source, ["entryId", "messageHash", "callHash"]) &&
+        validText(resource.source.entryId, MAX_IDENTIFIER_SCALARS) &&
+        validHash(resource.source.messageHash) &&
+        validHash(resource.source.callHash),
+    )
+  )
+    return false;
+  return (
+    new Set(
+      value.resources.map((resource) => (resource as RecordValue).resourceKey),
+    ).size === value.resources.length
+  );
+};
+
+const cloneSubtaskEvidence = (evidence: SubtaskEvidence): SubtaskEvidence => ({
+  resources: evidence.resources.map((resource) => ({
+    resourceKey: resource.resourceKey,
+    revision: resource.revision,
+    complete: resource.complete,
+    ...(resource.knownTotal === undefined
+      ? {}
+      : { knownTotal: resource.knownTotal }),
+    items: resource.items.map((item) => ({ key: item.key, label: item.label })),
+    source: {
+      entryId: resource.source.entryId,
+      messageHash: resource.source.messageHash,
+      callHash: resource.source.callHash,
+    },
+  })),
+  omissions: evidence.omissions,
+});
+
 const captureState = (
   value: unknown,
   normalizedParentOnly: boolean,
@@ -478,7 +551,7 @@ const captureState = (
         "omissions",
         "selectedModel",
       ],
-      ["group"],
+      ["group", "evidence"],
     ) ||
     !validParent(value.parent, !normalizedParentOnly) ||
     !validObservation(value.parentSource, MAX_REQUEST_BYTES) ||
@@ -490,7 +563,10 @@ const captureState = (
     !validSelectedModel(value.selectedModel) ||
     (Object.hasOwn(value, "group") &&
       value.group !== undefined &&
-      !validGroup(value.group))
+      !validGroup(value.group)) ||
+    (Object.hasOwn(value, "evidence") &&
+      value.evidence !== undefined &&
+      !validSubtaskEvidence(value.evidence))
   )
     return;
 
@@ -500,6 +576,11 @@ const captureState = (
     groupValue === undefined
       ? undefined
       : cloneGroup(groupValue as SubtaskGroup);
+  const evidenceValue = value.evidence;
+  const evidence =
+    evidenceValue === undefined
+      ? undefined
+      : cloneSubtaskEvidence(evidenceValue as SubtaskEvidence);
   if (
     !parent.included ||
     (requireParentSourceMatch &&
@@ -518,12 +599,15 @@ const captureState = (
     earlier: value.earlier.map(cloneObservation),
     omissions: [...value.omissions],
     selectedModel: value.selectedModel,
+    ...(evidence === undefined ? {} : { evidence }),
   };
 };
 
 interface CapturedOptions {
   state: SubtaskGateState;
   resolve: (entryId: string) => Observation | undefined;
+  /** Original object carries capability; state contains detached metadata only. */
+  evidence?: SubtaskEvidence;
 }
 
 /** Snapshot every caller field before the sole callback boundary. */
@@ -532,15 +616,19 @@ const captureOptions = (value: unknown): CapturedOptions | undefined => {
     !hasExactKeys(
       value,
       ["parent", "latest", "earlier", "omissions", "selectedModel", "resolve"],
-      ["group"],
+      ["group", "evidence"],
     ) ||
     typeof value.resolve !== "function"
   )
     return;
+  const evidence = value.evidence;
+  // Authenticate original adapter object before any detached serialization.
+  if (evidence !== undefined && !isCurrentSubtaskEvidence(evidence)) return;
   const state = captureState(
     {
       parent: value.parent,
       ...(Object.hasOwn(value, "group") ? { group: value.group } : {}),
+      ...(evidence === undefined ? {} : { evidence }),
       parentSource: {
         id: "pending-parent-source",
         role: "user",
@@ -561,6 +649,9 @@ const captureOptions = (value: unknown): CapturedOptions | undefined => {
   return {
     state,
     resolve: value.resolve as (entryId: string) => Observation | undefined,
+    ...(evidence === undefined
+      ? {}
+      : { evidence: evidence as SubtaskEvidence }),
   };
 };
 
@@ -605,6 +696,12 @@ const canonicalState = (
     if (!observation || !sameObservation(observation, supplied)) return;
     earlier.push(observation);
   }
+  // Resolver callbacks may fence adapter authority; verify proof after them.
+  if (
+    captured.evidence !== undefined &&
+    !isCurrentSubtaskEvidence(captured.evidence)
+  )
+    return;
   return {
     parent: normalizeParent(captured.state.parent),
     ...(captured.state.group === undefined
@@ -615,6 +712,9 @@ const canonicalState = (
     earlier,
     omissions: [...captured.state.omissions],
     selectedModel: captured.state.selectedModel,
+    ...(captured.state.evidence === undefined
+      ? {}
+      : { evidence: cloneSubtaskEvidence(captured.state.evidence) }),
   };
 };
 
@@ -637,6 +737,7 @@ const stateContextHash = (state: SubtaskGateState) =>
       earlier: state.earlier,
       omissions: state.omissions,
       selectedModel: state.selectedModel,
+      ...(state.evidence === undefined ? {} : { evidence: state.evidence }),
     }),
   );
 
@@ -663,6 +764,9 @@ const buildBatch = (state: SubtaskGateState): SubtaskGateBatch | undefined => {
       earlier: state.earlier.map(cloneObservation),
       omissions: [...state.omissions],
       selectedModel: state.selectedModel,
+      ...(state.evidence === undefined
+        ? {}
+        : { evidence: cloneSubtaskEvidence(state.evidence) }),
     },
     questions: { [QUESTION_ID]: question() },
   };

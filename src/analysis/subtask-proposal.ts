@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-
 import type { HybridTask, Observation, SourceRef } from "../core/hybrid-state";
 import {
   nextSubtaskPhase,
@@ -8,6 +7,10 @@ import {
   subtaskJournalIsValid,
 } from "../core/subtask-journal";
 import type { SubtaskAdmission, SubtaskSnapshot } from "../core/subtasks";
+import {
+  isCurrentSubtaskEvidence,
+  type SubtaskEvidence,
+} from "../sources/coverage";
 import { ownDataJson } from "./own-data-json";
 import {
   buildSubtaskGate,
@@ -40,6 +43,7 @@ interface SubtaskProposalInput {
   context: Observation[];
   omissions: string[];
   selectedModel: string;
+  evidence?: SubtaskEvidence;
 }
 
 export interface SubtaskProposalRequest {
@@ -56,6 +60,8 @@ interface ProposalRequestProof {
   inputJson: string;
   batchJson: string;
   gate: SubtaskPhaseRecord;
+  /** Original adapter evidence capability, never serialized in request input. */
+  evidence?: SubtaskEvidence;
 }
 
 interface GateState {
@@ -66,6 +72,7 @@ interface GateState {
   earlier: Observation[];
   omissions: string[];
   selectedModel: string;
+  evidence?: SubtaskEvidence;
 }
 
 interface ParsedRange {
@@ -449,6 +456,7 @@ const inputFor = (
     context: contextFor(state),
     omissions: [...state.omissions],
     selectedModel: state.selectedModel,
+    ...(state.evidence === undefined ? {} : { evidence: state.evidence }),
   };
   const json = serialized(input, MAX_REQUEST_BYTES);
   return json ? (JSON.parse(json) as SubtaskProposalInput) : undefined;
@@ -486,10 +494,31 @@ const currentOptionsSnapshot = (
   options: SubtaskGateOptions,
 ): string | undefined => serialized(options, MAX_CAPTURE_BYTES);
 
+const INVALID_EVIDENCE = Symbol("invalid-subtask-evidence");
+
+/** Capture original capability before options are detached or resolvers run. */
+const evidenceCapability = (
+  options: unknown,
+): SubtaskEvidence | undefined | typeof INVALID_EVIDENCE => {
+  if (!plainDataRecord(options)) return INVALID_EVIDENCE;
+  const descriptor = Object.getOwnPropertyDescriptor(options, "evidence");
+  if (!descriptor) return;
+  if (!("value" in descriptor) || !descriptor.enumerable)
+    return INVALID_EVIDENCE;
+  const evidence = descriptor.value;
+  return evidence === undefined || isCurrentSubtaskEvidence(evidence)
+    ? (evidence as SubtaskEvidence | undefined)
+    : INVALID_EVIDENCE;
+};
+
 /** Build twice around resolver callbacks; any mutable/contextual callback fails closed. */
 const currentBatch = (
   options: SubtaskGateOptions,
-): { batch: SubtaskGateBatch; json: string } | undefined => {
+):
+  | { batch: SubtaskGateBatch; json: string; evidence?: SubtaskEvidence }
+  | undefined => {
+  const evidence = evidenceCapability(options);
+  if (evidence === INVALID_EVIDENCE) return;
   const before = currentOptionsSnapshot(options);
   if (!before) return;
   const first = buildSubtaskGate(options);
@@ -507,8 +536,18 @@ const currentBatch = (
     return;
   const firstJson = serialized(first, MAX_CAPTURE_BYTES);
   const secondJson = serialized(second, MAX_CAPTURE_BYTES);
-  if (!firstJson || !secondJson || firstJson !== secondJson) return;
-  return { batch: second, json: secondJson };
+  if (
+    !firstJson ||
+    !secondJson ||
+    firstJson !== secondJson ||
+    (evidence !== undefined && !isCurrentSubtaskEvidence(evidence))
+  )
+    return;
+  return {
+    batch: second,
+    json: secondJson,
+    ...(evidence === undefined ? {} : { evidence }),
+  };
 };
 
 const availableProposal = (
@@ -530,6 +569,7 @@ const requestFrom = (
   batch: SubtaskGateBatch,
   batchJson: string,
   record: SubtaskPhaseRecord,
+  evidence?: SubtaskEvidence,
 ): SubtaskProposalRequest | undefined => {
   const input = inputFor(batch);
   if (!input) return;
@@ -541,6 +581,7 @@ const requestFrom = (
     inputJson,
     batchJson,
     gate: deepFreeze(cloneGateReceipt(record)),
+    ...(evidence === undefined ? {} : { evidence }),
   });
   return request;
 };
@@ -568,7 +609,7 @@ export const buildSubtaskProposal = (
     const record = availableProposal(current.batch, capturedJournal);
     return record === undefined
       ? undefined
-      : requestFrom(current.batch, current.json, record);
+      : requestFrom(current.batch, current.json, record, current.evidence);
   } catch {
     return;
   }
@@ -585,6 +626,8 @@ export const isValidatedSubtaskProposalRequest = (
     proof !== undefined &&
     request.input === proof.input &&
     request.requestHash === sha256(proof.inputJson) &&
+    (proof.evidence === undefined ||
+      isCurrentSubtaskEvidence(proof.evidence)) &&
     deeplyFrozen(request)
   );
 };
@@ -1024,8 +1067,15 @@ const currentForProof = (
   proof: ProposalRequestProof,
   options: SubtaskGateOptions,
 ): SubtaskGateBatch | undefined => {
+  if (proof.evidence !== undefined && !isCurrentSubtaskEvidence(proof.evidence))
+    return;
   const current = currentBatch(options);
-  if (!current || current.json !== proof.batchJson) return;
+  if (
+    !current ||
+    current.json !== proof.batchJson ||
+    current.evidence !== proof.evidence
+  )
+    return;
   const input = inputFor(current.batch);
   if (!input) return;
   const inputJson = serialized(input, MAX_REQUEST_BYTES);

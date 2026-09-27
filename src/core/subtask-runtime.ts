@@ -57,6 +57,8 @@ export interface SubtaskProposalTransportResult {
   usage: { inputTokens: number; outputTokens: number };
 }
 
+export type SubtaskPhysicalFlightObserver = (drain: Promise<void>) => void;
+
 export interface SubtaskRuntimeOptions {
   initial: SubtaskRuntimeCheckpoint;
   current: () => SubtaskRuntimeCurrent | undefined;
@@ -64,11 +66,13 @@ export interface SubtaskRuntimeOptions {
     batch: SubtaskGateBatch,
     signal: AbortSignal,
     onDispatch: (at: number) => boolean,
+    onPhysicalFlight: SubtaskPhysicalFlightObserver,
   ) => Promise<ValidatedResult | undefined>;
   propose: (
     request: SubtaskProposalRequest,
     signal: AbortSignal,
     onDispatch: (at: number) => boolean,
+    onPhysicalFlight: SubtaskPhysicalFlightObserver,
   ) => Promise<SubtaskProposalTransportResult | undefined>;
   commit: (candidate: SubtaskRuntimeCheckpoint) => boolean;
   onPublish: (snapshot: Readonly<SubtaskSnapshot>) => void;
@@ -396,6 +400,7 @@ export class SubtaskRuntime {
     let ticket: Ticket | undefined;
     let dispatched = false;
     let result: ValidatedResult | undefined;
+    const physicalDrains: Promise<void>[] = [];
 
     try {
       result = await this.options.gate(
@@ -436,10 +441,12 @@ export class SubtaskRuntime {
           dispatched = true;
           return true;
         },
+        (drain) => this.retainPhysicalDrain(physicalDrains, drain),
       );
     } catch {
-      return;
+      // The dispatched receipt remains durable; drain still owns flight release.
     }
+    await this.awaitPhysicalDrains(physicalDrains);
 
     if (!dispatched || !ticket) return;
     const usage = gateUsageOf(result);
@@ -525,6 +532,7 @@ export class SubtaskRuntime {
     let ticket: Ticket | undefined;
     let dispatched = false;
     let result: SubtaskProposalTransportResult | undefined;
+    const physicalDrains: Promise<void>[] = [];
     try {
       result = await this.options.propose(
         request,
@@ -569,10 +577,12 @@ export class SubtaskRuntime {
           dispatched = true;
           return true;
         },
+        (drain) => this.retainPhysicalDrain(physicalDrains, drain),
       );
     } catch {
-      return;
+      // The dispatched receipt remains durable; drain still owns flight release.
     }
+    await this.awaitPhysicalDrains(physicalDrains);
 
     if (!dispatched || !ticket) return;
     const usage = usageOf(result);
@@ -1062,6 +1072,19 @@ export class SubtaskRuntime {
     if (index < 0) journal.records.push(detached(record));
     else journal.records[index] = detached(record);
     return journal;
+  }
+
+  /** Observed drains carry no provider data and never reject into scheduling. */
+  private retainPhysicalDrain(drains: Promise<void>[], drain: Promise<void>) {
+    try {
+      drains.push(Promise.resolve(drain).catch(() => undefined));
+    } catch {
+      // Ignore a transport observer contract violation.
+    }
+  }
+
+  private async awaitPhysicalDrains(drains: readonly Promise<void>[]) {
+    await Promise.all(drains);
   }
 
   private commitCandidate(

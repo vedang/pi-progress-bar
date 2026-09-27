@@ -137,6 +137,7 @@ import {
 } from "./hybrid-state";
 import type { SubtaskPhaseRecord } from "./subtask-journal";
 import {
+  type SubtaskPhysicalFlightObserver,
   type SubtaskProposalTransportResult,
   SubtaskRuntime,
   type SubtaskRuntimeCheckpoint,
@@ -167,6 +168,7 @@ export interface MonitorOptions {
     request: SubtaskProposalRequest,
     signal: AbortSignal,
     onDispatch?: (at: number) => boolean,
+    onPhysicalFlight?: SubtaskPhysicalFlightObserver,
   ) => Promise<SubtaskProposalTransportResult>;
   /** Runtime-only grounded-detail gate; production enables it and tests may disable it. */
   richDetailsEnabled?: boolean;
@@ -613,6 +615,7 @@ export class Monitor {
   /** Generic subtask gate has its own durable runtime admission callback. */
   private readonly subtaskGateway: JevGateway;
   private subtaskGateDispatch?: (at: number) => boolean;
+  private subtaskPhysicalFlight?: SubtaskPhysicalFlightObserver;
   /** Optional corrective binding has its own one-flight transport authority. */
   private readonly correctionGateway: JevGateway;
   /** Visibility transport and spend are isolated from semantic/advisory telemetry. */
@@ -807,6 +810,13 @@ export class Monitor {
       getApiKey: () => process.env.TYPESAFE_API_KEY,
       // SubtaskRuntime commits dispatch proof before this callback returns true.
       beforeDispatch: (at) => this.subtaskGateDispatch?.(at) === true,
+      onPhysicalFlight: (drain) => {
+        try {
+          this.subtaskPhysicalFlight?.(drain);
+        } catch {
+          // Observation is never gateway dispatch authority.
+        }
+      },
       onPermanentError: () => this.note("jev-unavailable"),
     });
     this.correctionGateway = new JevGateway({
@@ -2327,12 +2337,17 @@ export class Monitor {
     this.subtaskRuntime = new SubtaskRuntime({
       initial: structuredClone(initial),
       current: () => this.subtaskCurrent(this.state),
-      gate: (batch, signal, onDispatch) =>
-        this.evaluateSubtaskGate(batch, signal, onDispatch),
-      propose: (request, signal, onDispatch) => {
+      gate: (batch, signal, onDispatch, onPhysicalFlight) =>
+        this.evaluateSubtaskGate(batch, signal, onDispatch, onPhysicalFlight),
+      propose: (request, signal, onDispatch, onPhysicalFlight) => {
         const propose = this.options.proposeSubtasks;
         return propose
-          ? propose(request, signal, (at) => onDispatch(at) === true)
+          ? propose(
+              request,
+              signal,
+              (at) => onDispatch(at) === true,
+              onPhysicalFlight,
+            )
           : Promise.resolve(undefined);
       },
       commit: (candidate) => this.commitSubtaskCandidate(candidate),
@@ -2468,10 +2483,12 @@ export class Monitor {
     batch: SubtaskGateBatch,
     signal: AbortSignal,
     onDispatch: (at: number) => boolean,
+    onPhysicalFlight: SubtaskPhysicalFlightObserver,
   ): Promise<ValidatedResult | undefined> {
     if (!this.enabled || signal.aborted || this.subtaskGateway.isPaused) return;
     const dispatch = onDispatch;
     this.subtaskGateDispatch = dispatch;
+    this.subtaskPhysicalFlight = onPhysicalFlight;
     const abort = () => this.subtaskGateway.invalidate();
     signal.addEventListener("abort", abort, { once: true });
     try {
@@ -2484,6 +2501,8 @@ export class Monitor {
       signal.removeEventListener("abort", abort);
       if (this.subtaskGateDispatch === dispatch)
         this.subtaskGateDispatch = undefined;
+      if (this.subtaskPhysicalFlight === onPhysicalFlight)
+        this.subtaskPhysicalFlight = undefined;
     }
   }
 

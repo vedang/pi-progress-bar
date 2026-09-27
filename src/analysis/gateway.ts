@@ -67,6 +67,8 @@ interface Options {
   onDispatch?: (at: number) => void;
   /** Return false to fence optional transport before fetch. */
   beforeDispatch?: (at: number) => boolean;
+  /** Optional observer for underlying work after logical cancellation settles. */
+  onPhysicalFlight?: (drain: Promise<void>) => void;
   onPermanentError?: (message: string) => void;
 }
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -423,7 +425,20 @@ export class JevGateway {
           requestForValidation,
         );
       };
-      const result = await Promise.race([work(), timeout, cancelled]);
+      const physical = work();
+      // Preserve existing logical cancellation/timeout behavior while exposing
+      // the full underlying work lifetime to optional transport owners.
+      try {
+        this.options.onPhysicalFlight?.(
+          physical.then(
+            () => undefined,
+            () => undefined,
+          ),
+        );
+      } catch {
+        // Observation is never transport admission authority.
+      }
+      const result = await Promise.race([physical, timeout, cancelled]);
       if (generation !== this.generation) return;
       if (result) {
         this.seen.set(hash, true);

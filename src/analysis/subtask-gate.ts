@@ -1123,7 +1123,7 @@ export const reusableSubtaskGate = (
     const record = journal.records.find(
       (item) => item.identity === batch.identity,
     );
-    if (!record) return;
+    if (!record || record.state === "superseded") return;
     if (
       record.phase !== "gate-decided" ||
       record.parentTaskId !== batch.parentTaskId ||

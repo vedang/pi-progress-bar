@@ -21,10 +21,12 @@ import type {
 import { SubtaskAccess, type SubtaskAccessSnapshot } from "./subtask-access";
 import {
   nextSubtaskPhase,
+  pruneIncoherentAcceptedSubtaskRecords,
   restoreSubtaskJournal,
   type SubtaskJournalCheckpoint,
   type SubtaskPhaseRecord,
   subtaskJournalIsValid,
+  supersedeSubtaskRecord,
 } from "./subtask-journal";
 import {
   type SubtaskCheckpoint,
@@ -160,7 +162,7 @@ const recordSuppressesAccepted = (
   group: SubtaskSnapshot["groups"][number] | undefined,
 ) =>
   record.phase === "proposal-decided" &&
-  record.state === "complete" &&
+  (record.state === "complete" || record.state === "superseded") &&
   record.proposal?.outcome === "accepted" &&
   group !== undefined &&
   group.parentTaskId === bare.parentTaskId &&
@@ -391,17 +393,6 @@ export class SubtaskRuntime {
       return this.runProposal(prepared, batch, existing, flight);
     if (phase !== "gate") return;
 
-    // No silent eviction: another unfinished identity for this parent blocks a
-    // fresh context until a later policy layer explicitly resolves it.
-    if (
-      !existing &&
-      this.journal.records.some(
-        (record) =>
-          record.parentTaskId === parentTaskId && record.state !== "complete",
-      )
-    )
-      return;
-
     return this.runGate(prepared, batch, flight);
   }
 
@@ -434,7 +425,11 @@ export class SubtaskRuntime {
             at,
           };
           const record = this.gateDispatched(batch, nextTicket);
-          const journal = this.chargedJournal("jev", record);
+          const journal = this.chargedJournal(
+            "jev",
+            record,
+            batch.parentTaskId,
+          );
           if (!journal || !this.commitCandidate(this.store, journal))
             return false;
 
@@ -687,7 +682,7 @@ export class SubtaskRuntime {
       "accepted",
       admitted.listRevision,
     );
-    const journal = this.finalJournal("extraction", record, usage);
+    const journal = this.finalJournal("extraction", record, usage, true);
     if (!journal || !this.commitCandidate(candidate, journal)) return;
     if (
       !this.exactBatch(
@@ -732,12 +727,20 @@ export class SubtaskRuntime {
       return false;
     }
 
+    const rawJournal = pruneIncoherentAcceptedSubtaskRecords(
+      this.initial.journal,
+      this.initial.state.groups,
+    );
+    if (!rawJournal) {
+      this.initializationBlocked = true;
+      return false;
+    }
     const store = SubtaskStore.restore(this.initial.state, {
       parents: current.parents,
       sourceCurrent: (source) => this.sourceIsCurrent(current, source),
     });
     if (!store) return false;
-    const journal = restoreSubtaskJournal(this.initial.journal, (record) =>
+    const journal = restoreSubtaskJournal(rawJournal, (record) =>
       this.restoredRecordIsCurrent(record, current, store),
     );
     if (!journal) {
@@ -1056,9 +1059,22 @@ export class SubtaskRuntime {
   private chargedJournal(
     bucket: UsageBucket,
     record: SubtaskPhaseRecord,
+    retireParentTaskId?: string,
   ): SubtaskJournalCheckpoint | undefined {
     if (this.journal.dispatches >= 1024) return;
     const journal = this.replaceRecord(record);
+    if (
+      retireParentTaskId &&
+      !this.retireRecords(
+        journal,
+        (current) =>
+          current.identity !== record.identity &&
+          current.parentTaskId === retireParentTaskId &&
+          current.state !== "complete" &&
+          current.state !== "superseded",
+      )
+    )
+      return;
     journal.dispatches += 1;
     journal.usage[bucket].calls += 1;
     return subtaskJournalIsValid(journal) ? journal : undefined;
@@ -1068,9 +1084,24 @@ export class SubtaskRuntime {
     bucket: UsageBucket,
     record: SubtaskPhaseRecord,
     usage: Usage | undefined,
+    retireAcceptedFrontiers = false,
   ): SubtaskJournalCheckpoint | undefined {
     if (!usage) return;
     const journal = this.replaceRecord(record);
+    if (
+      retireAcceptedFrontiers &&
+      record.proposal?.outcome === "accepted" &&
+      !this.retireRecords(
+        journal,
+        (current) =>
+          current.identity !== record.identity &&
+          current.state !== "superseded" &&
+          current.parentTaskId === record.parentTaskId &&
+          current.proposal?.outcome === "accepted" &&
+          current.proposal.listRevision !== record.proposal?.listRevision,
+      )
+    )
+      return;
     journal.usage[bucket].inputTokens += usage.inputTokens;
     journal.usage[bucket].outputTokens += usage.outputTokens;
     if (!Number.isSafeInteger(journal.usage[bucket].inputTokens)) return;
@@ -1092,6 +1123,25 @@ export class SubtaskRuntime {
     if (index < 0) journal.records.push(detached(record));
     else journal.records[index] = detached(record);
     return journal;
+  }
+
+  /** Stage all history retirement before replacing a commit candidate journal. */
+  private retireRecords(
+    journal: SubtaskJournalCheckpoint,
+    shouldRetire: (record: SubtaskPhaseRecord) => boolean,
+  ): boolean {
+    const records: SubtaskPhaseRecord[] = [];
+    for (const current of journal.records) {
+      if (!shouldRetire(current)) {
+        records.push(current);
+        continue;
+      }
+      const superseded = supersedeSubtaskRecord(current);
+      if (!superseded) return false;
+      records.push(superseded);
+    }
+    journal.records = records;
+    return true;
   }
 
   /** Observed drains carry no provider data and never reject into scheduling. */

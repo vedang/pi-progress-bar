@@ -20,7 +20,8 @@ type SubtaskPhaseState =
   | "dispatched"
   | "parked"
   | "permanent"
-  | "complete";
+  | "complete"
+  | "superseded";
 type SubtaskGateChoice = "yes" | "no" | "uncertain";
 type SubtaskGateOutcome = "dispatched" | "decided" | "failed";
 type SubtaskProposalOutcome = "dispatched" | "accepted" | "noop" | "failed";
@@ -324,7 +325,8 @@ const validRecord = (value: unknown): value is SubtaskPhaseRecord => {
       value.state !== "dispatched" &&
       value.state !== "parked" &&
       value.state !== "permanent" &&
-      value.state !== "complete")
+      value.state !== "complete" &&
+      value.state !== "superseded")
   )
     return false;
 
@@ -345,27 +347,31 @@ const validRecord = (value: unknown): value is SubtaskPhaseRecord => {
     return false;
 
   const record = value as unknown as SubtaskPhaseRecord;
+  const superseded = record.state === "superseded";
   switch (record.phase) {
     case "gate-ready": {
       if (hasProposal) return false;
-      if (!hasGate) return record.state === "ready";
+      if (!hasGate) return superseded || record.state === "ready";
       const gate = record.gate;
       if (!gate || gate.outcome === "decided") return false;
-      return validAttemptState(record.state, gate.outcome);
+      return superseded || validAttemptState(record.state, gate.outcome);
     }
     case "gate-decided": {
       const gate = record.gate;
       if (!hasGate || !gate || gate.outcome !== "decided") return false;
       if (!hasProposal)
-        return acceptedYes(gate)
-          ? record.state === "ready"
-          : record.state === "complete";
+        return (
+          superseded ||
+          (acceptedYes(gate)
+            ? record.state === "ready"
+            : record.state === "complete")
+        );
       const proposal = record.proposal;
       if (!acceptedYes(gate) || !proposal || proposal.dispatch <= gate.dispatch)
         return false;
       if (proposal.outcome !== "dispatched" && proposal.outcome !== "failed")
         return false;
-      return validAttemptState(record.state, proposal.outcome);
+      return superseded || validAttemptState(record.state, proposal.outcome);
     }
     case "proposal-decided": {
       const gate = record.gate;
@@ -377,7 +383,7 @@ const validRecord = (value: unknown): value is SubtaskPhaseRecord => {
         !hasProposal ||
         !proposal ||
         proposal.dispatch <= gate.dispatch ||
-        record.state !== "complete" ||
+        (!superseded && record.state !== "complete") ||
         (proposal.outcome !== "accepted" && proposal.outcome !== "noop")
       )
         return false;
@@ -411,7 +417,9 @@ const validJournalShape = (
   if (new Set(records.map((record) => record.identity)).size !== records.length)
     return false;
 
-  const unfinished = records.filter((record) => record.state !== "complete");
+  const unfinished = records.filter(
+    (record) => record.state !== "complete" && record.state !== "superseded",
+  );
   if (
     unfinished.length > MAX_UNFINISHED_OWNERS ||
     new Set(unfinished.map((record) => record.parentTaskId)).size !==
@@ -587,6 +595,56 @@ const cloneJournal = (
   records: journal.records.map(cloneRecord),
 });
 
+/** Retire only scheduling authority; receipts and identity remain history. */
+export const supersedeSubtaskRecord = (
+  record: SubtaskPhaseRecord,
+): SubtaskPhaseRecord | undefined => {
+  try {
+    const superseded = cloneRecord(record);
+    superseded.state = "superseded";
+    delete superseded.parkedUntil;
+    return validRecord(superseded) ? superseded : undefined;
+  } catch {
+    return;
+  }
+};
+
+export interface SubtaskAcceptedGroupFrontier {
+  parentTaskId: string;
+  parentRevision: number;
+  listRevision: number;
+}
+
+/**
+ * Reject only raw, nonsuperseded accepted authority whose serialized resulting
+ * group never existed. Canonical pruning later may still retire coherent proof.
+ */
+export const pruneIncoherentAcceptedSubtaskRecords = (
+  journal: SubtaskJournalCheckpoint,
+  groups: readonly SubtaskAcceptedGroupFrontier[],
+): SubtaskJournalCheckpoint | undefined => {
+  try {
+    if (!subtaskJournalIsValid(journal)) return;
+    const pruned = cloneJournal(journal);
+    pruned.records = pruned.records.filter((record) => {
+      if (
+        record.state === "superseded" ||
+        record.proposal?.outcome !== "accepted"
+      )
+        return true;
+      return groups.some(
+        (group) =>
+          group.parentTaskId === record.parentTaskId &&
+          group.parentRevision === record.parentRevision &&
+          group.listRevision === record.proposal?.listRevision,
+      );
+    });
+    return subtaskJournalIsValid(pruned) ? pruned : undefined;
+  } catch {
+    return;
+  }
+};
+
 /**
  * Drop stale authority without refunding the lifetime wallet. A crash after a
  * charged dispatch is terminal until a later explicit recovery policy exists.
@@ -599,16 +657,25 @@ export const restoreSubtaskJournal = (
 
   const journal = cloneJournal(data);
   const current = isCurrent;
-  const records = journal.records.flatMap((record) => {
-    try {
-      if (current(cloneRecord(record)) !== true) return [];
-    } catch {
-      return [];
+  const records: SubtaskPhaseRecord[] = [];
+  for (const record of journal.records) {
+    if (record.state === "superseded") {
+      records.push(cloneRecord(record));
+      continue;
     }
-    const restored = cloneRecord(record);
+    let restored: SubtaskPhaseRecord | undefined;
+    try {
+      restored =
+        current(cloneRecord(record)) === true
+          ? cloneRecord(record)
+          : supersedeSubtaskRecord(record);
+    } catch {
+      restored = supersedeSubtaskRecord(record);
+    }
+    if (!restored) return;
     if (restored.state === "dispatched") restored.state = "permanent";
-    return [restored];
-  });
+    records.push(restored);
+  }
   return {
     version: JOURNAL_VERSION,
     dispatches: journal.dispatches,
@@ -628,7 +695,7 @@ export const nextSubtaskPhase = (
   if (!subtaskJournalIsValid(journal) || journal.dispatches >= MAX_DISPATCHES)
     return;
   const record = journal.records.find((item) => item.identity === identity);
-  if (!record) return;
+  if (!record || record.state === "superseded") return;
   if (
     record.phase === "gate-ready" &&
     record.state === "ready" &&

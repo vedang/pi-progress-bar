@@ -58,6 +58,7 @@ import {
   taskLabelIsValid,
 } from "./hybrid-state";
 import {
+  pruneIncoherentAcceptedSubtaskRecords,
   restoreSubtaskJournal,
   type SubtaskJournalCheckpoint,
   type SubtaskPhaseRecord,
@@ -2467,6 +2468,11 @@ export function restoreSubtaskCheckpoint(
 
     const monitor = detachSubtaskData(detached.monitor);
     if (monitor.subtasks) {
+      const rawJournal = pruneIncoherentAcceptedSubtaskRecords(
+        monitor.subtasks.journal,
+        monitor.subtasks.state.groups,
+      );
+      if (!rawJournal) return;
       const store = SubtaskStore.restore(monitor.subtasks.state, {
         parents: restoredState.tasks,
         sourceCurrent: (source) => !!canonicalSource(source, resolve),
@@ -2475,16 +2481,14 @@ export function restoreSubtaskCheckpoint(
       const groups = new Map(
         store.snapshot().groups.map((group) => [group.parentTaskId, group]),
       );
-      const journal = restoreSubtaskJournal(
-        monitor.subtasks.journal,
-        (record) =>
-          journalRecordIsCurrent(
-            record,
-            restoredState,
-            groups,
-            resolve,
-            isCurrentJob,
-          ),
+      const journal = restoreSubtaskJournal(rawJournal, (record) =>
+        journalRecordIsCurrent(
+          record,
+          restoredState,
+          groups,
+          resolve,
+          isCurrentJob,
+        ),
       );
       if (!journal) return;
       monitor.subtasks = { state: store.checkpoint(), journal };

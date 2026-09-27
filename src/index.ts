@@ -237,6 +237,9 @@ export default function progressBar(pi: ExtensionAPI): void {
   const observe = (ctx: ExtensionContext) => {
     context = ctx;
     monitor.observe(() => ctx.sessionManager.getBranch());
+    // Tool payloads remain ingress only. Confirm adapter facts from the fresh
+    // host canonical branch after Monitor observes its mandatory state.
+    monitor.confirmCoverageBranch(ctx.sessionManager.getBranch());
     reconciliation?.refresh();
   };
   const settle = (origin: SettlementOrigin | undefined) => {
@@ -426,6 +429,11 @@ export default function progressBar(pi: ExtensionAPI): void {
       event.args,
       ctx.sessionManager.getLeafId() ?? undefined,
     );
+    monitor.observeCoverageToolStart(
+      event.toolCallId,
+      event.toolName,
+      event.args,
+    );
     monitor.setActivity("Tool active");
     const correction = correctionAdapter.start(
       event.toolCallId,
@@ -472,6 +480,7 @@ export default function progressBar(pi: ExtensionAPI): void {
       event.result,
       event.isError,
     );
+    monitor.observeCoverageToolEnd(event.toolCallId, event.toolName);
     monitor.observeVisibilityToolEnd(event.toolCallId);
     monitor.setActivity(ctx.isIdle() ? "Idle" : "Agent active");
   });

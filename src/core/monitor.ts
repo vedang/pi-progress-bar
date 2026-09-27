@@ -1290,7 +1290,7 @@ export class Monitor {
       if (this.queued.length) {
         this.idleDoneInvalidated = true;
         this.cancelHealth();
-        this.invalidateSubtasks();
+        this.invalidateSubtaskWork();
       } else this.wakeSubtasks(pass);
       if (healthChanged) this.publish();
       this.drain();
@@ -2570,8 +2570,8 @@ export class Monitor {
       .map((parent) => parent.id);
   }
 
-  private invalidateSubtasks() {
-    this.subtaskRuntime?.resetAccess();
+  /** Cancel stale generic work without clearing durable access associations. */
+  private invalidateSubtaskWork() {
     this.subtaskRuntime?.invalidate();
     this.subtaskGateway.invalidate();
     this.subtaskGateDispatch = undefined;
@@ -5947,7 +5947,7 @@ export class Monitor {
           this.reconcileHealthCards(pass);
           this.reconcileTaskDetails(pass);
           this.requeue(pass);
-          if (this.queued.length) this.invalidateSubtasks();
+          if (this.queued.length) this.invalidateSubtaskWork();
           else this.wakeSubtasks(pass, true);
         }
         this.publish();

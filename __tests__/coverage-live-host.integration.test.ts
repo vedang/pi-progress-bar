@@ -5,7 +5,8 @@ import type { Context } from "@earendil-works/pi-ai";
 import { expect, it, vi } from "vitest";
 import type { ExtractionInput } from "../src/analysis/extractor";
 import type { EvaluationRequest } from "../src/analysis/gateway";
-import type { encodeCheckpoint } from "../src/core/hybrid-checkpoint";
+import type { SubtaskProposalRequest } from "../src/analysis/subtask-proposal";
+import type { encodeSubtaskCheckpoint } from "../src/core/hybrid-checkpoint";
 import { Monitor } from "../src/core/monitor";
 import extension from "../src/index";
 import { coverageNames } from "./fixtures/coverage";
@@ -41,10 +42,12 @@ it("production extension on real Pi yields22children and changing item/batch acc
       .getBranch()
       .flatMap((entry) =>
         entry.type === "custom" && entry.customType === "pi-progress-bar"
-          ? [entry.data as ReturnType<typeof encodeCheckpoint>]
+          ? [entry.data as ReturnType<typeof encodeSubtaskCheckpoint>]
           : [],
       );
   let firstGate = true;
+  let subtaskGates = 0;
+  let proposedLists = 0;
   vi.stubEnv("TYPESAFE_API_KEY", "offline-only");
   vi.stubGlobal(
     "fetch",
@@ -67,18 +70,37 @@ it("production extension on real Pi yields22children and changing item/batch acc
           },
         };
       }
+      if (request.questions["subtask:0"]) {
+        subtaskGates++;
+        const need = Boolean(
+          request.state &&
+            typeof request.state === "object" &&
+            "evidence" in request.state &&
+            request.state.evidence &&
+            !("group" in request.state),
+        );
+        response.answers["subtask:0"] = {
+          type: "choice",
+          choice: need ? "yes" : "no",
+          confidence: 1,
+          probabilities: { yes: need ? 1 : 0, no: need ? 0 : 1, uncertain: 0 },
+        };
+      }
       return Response.json(response);
     }),
   );
   const activities: number[] = [];
   const original = Monitor.prototype.observeCoverageToolStart;
-  vi.spyOn(Monitor.prototype, "observeCoverageToolStart").mockImplementation(
-    function (this: Monitor, ...args) {
+  const coverageStarts = vi
+    .spyOn(Monitor.prototype, "observeCoverageToolStart")
+    .mockImplementation(function (this: Monitor, ...args) {
       original.apply(this, args);
-      for (const current of this.coverageSnapshot().current)
-        activities.push(current.childIds.length);
-    },
-  );
+      for (const group of this.subtaskAccessSnapshot().groups)
+        activities.push(
+          group.children.filter((child) => child.activeCallHashes.length > 0)
+            .length,
+        );
+    });
   const steps = [
     fauxToolCall("bash", {
       command: "unzip -p docs/plan.xlsx xl/workbook.xml",
@@ -102,54 +124,80 @@ it("production extension on real Pi yields22children and changing item/batch acc
         : undefined;
     // Route by the actual extraction payload, independent of system-message representation.
     const input = content?.startsWith("{")
-      ? (JSON.parse(content) as ExtractionInput)
+      ? (JSON.parse(content) as
+          | ExtractionInput
+          | SubtaskProposalRequest["input"])
       : undefined;
+    if (input && "parents" in input) {
+      proposedLists++;
+      const contextIndex = input.context.findIndex(
+        (item) => item.text === text,
+      );
+      expect(contextIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        input.evidence?.resources[0].items.map((item) => item.label),
+      ).toEqual(coverageNames);
+      expect(
+        checkpoints()
+          .at(-1)
+          ?.monitor?.subtasks?.journal.records.some(
+            (record) =>
+              record.gate?.choice === "yes" &&
+              record.proposal?.outcome === "dispatched",
+          ),
+      ).toBe(true);
+      return fauxAssistantMessage(
+        JSON.stringify({
+          proposals: [
+            {
+              parentIndex: 0,
+              complete: true,
+              removals: [],
+              children: coverageNames.map((label, itemIndex) => ({
+                kind: "add",
+                label,
+                evidence: [{ contextIndex, start: 0, end: text.length }],
+                association: { resourceIndex: 0, itemIndex },
+              })),
+            },
+          ],
+        }),
+      );
+    }
     if (
       input &&
+      "tasks" in input &&
       typeof input.instructions === "string" &&
       Array.isArray(input.tasks)
     ) {
       return fauxAssistantMessage(
-        JSON.stringify(
-          input.instructions.includes("parentIndices")
-            ? {
-                intents: [
-                  {
-                    parentIndices: [0],
-                    quote: text,
-                    resource: "docs/plan.xlsx",
-                    kind: "unconditional-enumerable",
-                  },
-                ],
-              }
-            : {
-                add: input.tasks.length
-                  ? []
-                  : [
-                      {
-                        label: "Summarize workbook",
-                        kind: "response",
-                        basis: "explicit",
-                        quote: text,
-                      },
-                    ],
-                revise: [],
-                archive: [],
-                restore: [],
-                unresolved: false,
-              },
-        ),
+        JSON.stringify({
+          add: input.tasks.length
+            ? []
+            : [
+                {
+                  label: "Summarize workbook",
+                  kind: "response",
+                  basis: "explicit",
+                  quote: text,
+                },
+              ],
+          revise: [],
+          archive: [],
+          restore: [],
+          unresolved: false,
+        }),
       );
     }
-    if (step === 4)
-      await vi.waitFor(
-        () =>
-          expect(
-            checkpoints().at(-1)?.monitor?.coverage?.state.groups[0]?.children,
-          ).toHaveLength(22),
-        { timeout: 4000, interval: 10 },
+    // Generic decomposition is asynchronous, unlike the retired inventory
+    // bypass. Settle the discovery turn before asking the host to read items.
+    if (step === 4) {
+      step++;
+      return fauxAssistantMessage(
+        "Inventory and exports are ready; review remains pending.",
       );
-    const call = steps[step++];
+    }
+    const call = steps[step > 4 ? step++ - 1 : step++];
     return call
       ? fauxAssistantMessage([call], { stopReason: "toolUse" })
       : fauxAssistantMessage(
@@ -221,18 +269,34 @@ it("production extension on real Pi yields22children and changing item/batch acc
       onError: (error) => errors.push(error),
     });
     await session.prompt(text);
+    expect(coverageStarts).toHaveBeenCalledTimes(4);
     await vi.waitFor(
       () =>
         expect(
-          checkpoints().at(-1)?.monitor?.coverage?.state.groups[0]?.children,
+          checkpoints().at(-1)?.monitor?.subtasks?.state.groups[0]?.children,
+          JSON.stringify({
+            subtaskGates,
+            proposedLists,
+            versions: [...new Set(checkpoints().map((saved) => saved.version))],
+            parents: checkpoints().at(-1)?.state.tasks.length,
+            journal: checkpoints()
+              .at(-1)
+              ?.monitor?.subtasks?.journal.records.map((record) => ({
+                phase: record.phase,
+                state: record.state,
+                gate: record.gate?.outcome,
+                proposal: record.proposal?.outcome,
+              })),
+          }),
         ).toHaveLength(22),
       { timeout: 4000, interval: 10 },
     );
+    await session.prompt("Continue the requested review.");
     expect(errors).toEqual([]);
     const saved = checkpoints().at(-1);
     expect(saved?.state.tasks).toHaveLength(1);
     expect(
-      saved?.monitor?.coverage?.state.groups[0].children.every(
+      saved?.monitor?.subtasks?.state.groups[0].children.every(
         (child) => child.status === "pending",
       ),
     ).toBe(true);

@@ -30,10 +30,12 @@ Main format/check pass, with the three existing activity-label warnings. Full un
 
 Read-only scout `464ec31e` mapped the original case titles to generic invariants and identified C06 report/C07 scheduler/C09 projection dependencies. This is advisory evidence, not a keeper decision: its claim that positive generic admission/drain/restore tests are missing overlooks the already implemented C05 tests. Main must validate exact keeper coverage and each proposed port. Do not use that report to waive gates, delete or disable tests, or assert that all failures are obsolete.
 
+Oracle `83da0447` confirmed the sequencing constraint: progress may record expected REDs, but that is not acceptance or permission to skip tests. Finish bounded C05 ports/cleanup first. If preserved positive report/recovery/fairness tests still require C06/C07, request an explicit owner sequencing exception before starting blocked stages or changing dependency order. Existing generic atomicity/drain keepers are not substitutes for those report integrations.
+
 ## Additional acceptance blockers
 
 - Legacy `CoverageStore`, `coverageSnapshot`, intent/report scheduler methods and v10 codec paths remain in source. Their removal was requested and remains incomplete; this is not an approved fallback.
-- C04 live association/access binding remains absent.
+- Runtime/Monitor association binding implemented in `325157dc`; Main passed 24 tests. Production `index.ts` still omits passive tool ingress. Main's port of the original 22-child actual-host test reproduces four tool starts expected/zero observed; this remains a C05 blocker. The port uses generic accepted-yes proposals and post-settlement reads, retaining one parent, 22 pending children, exact item/batch access and private-body exclusion.
 - Full unit/integration/installed-host verification and independent whole-C05 review remain required.
 - Mock/host mechanics do not replace fresh C10 semantic evaluation. No paid calls or release readiness claimed.
 

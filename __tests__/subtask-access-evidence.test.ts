@@ -88,6 +88,25 @@ describe("bounded canonical subtask access attestations", () => {
     expect(isCurrentSubtaskAccessEvidence(old)).toBe(false);
     expect(f.adapter.accessEvidence().confirmed).toEqual([]);
   });
+  it("revokes confirmations when their extraction mapping is amended", () => {
+    const f = subtaskAccessFixture();
+    f.run("read-first", "read", { path: "extracted/r0-0.txt" }, "body");
+    const old = f.adapter.accessEvidence();
+    const listing = f.entries.find((item) => item.id === "result-list-0");
+    if (!listing) throw new Error("Expected extraction mapping");
+    listing.message.content[0].text =
+      "One rows 2 nonempty rows 1 file extracted/different.txt";
+    f.adapter.confirm(f.entries, 1);
+    expect(isCurrentSubtaskAccessEvidence(old)).toBe(false);
+    expect(
+      f.adapter
+        .accessEvidence()
+        .confirmed.some(
+          (receipt) =>
+            receipt.resourceKey === subtaskHash("docs/resource-0.xlsx"),
+        ),
+    ).toBe(false);
+  });
   it("replaces wholly dominated receipts across more than16 repeated reads", () => {
     const f = subtaskAccessFixture();
     const semantic = f.adapter.metadata();

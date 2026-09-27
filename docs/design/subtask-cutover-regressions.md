@@ -2,6 +2,14 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## Verified parked-owner repair and remaining sequencing gate
+
+Source `b961ab21` validates report-owner authority at named canonical wakes and consumes captured ownership during physical settlement. Main independently passed **45/45** report/Monitor/bounds tests (`c07-invalid-owner-main-green.log`). Worker reported680 broad passes,1883 unit passes/50 original coverage failures, and83 integration passes; these do not constitute whole-stage acceptance or resolve the historically intermittent correction failure.
+
+The remaining assertion-level ports include C08/C09 functionality, not just fixture syntax. `coverage-monitor.test.ts` preserves omitted-work UI, selected-parent child presentation and detached bounded reconciliation gaps; production generic UI is only the minimal C05 projection, and `advisorySettlementSnapshot()` still obtains its optional rows from legacy `reconciliationCoverage()`. C08 owns generic presentation/omissions and C09 owns exact-parent generic reconciliation. Strict removal of the legacy store/scheduler/v10 graph must preserve these assertions in their real generic consumers, not a compatibility wrapper or disconnected keeper.
+
+The prior owner exception authorizes only C06/C07 implementation overlap with unaccepted C05. It explicitly does not authorize broader reorder. Main requests an additional **C08/C09 implementation-only overlap** to complete the preserved ports and remove obsolete paths. C05–C09 retain separate closure criteria, full gates, independent whole-stage review and manual prerequisites; no test omission, acceptance waiver or C10/N06 semantic shortcut is proposed. Until the owner decides, C08/C09 implementation remains blocked; unrelated eligible ports/host diagnosis can proceed.
+
 ## Invalid parked-owner follow-up (`c9105e86`)
 
 Main independently confirmed the earlier report/Monitor/bounds gate **44/44 passed**. Worker reported full unit1882/50 and integration82/1 (RPC correction blocker remains), not stage acceptance.

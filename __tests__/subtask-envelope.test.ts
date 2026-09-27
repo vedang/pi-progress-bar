@@ -127,14 +127,16 @@ describe("disconnected strict v11 generic subtask envelope", () => {
       }
       data.records = [item];
       const checkpoint = encodeSubtaskCheckpoint(state, monitor);
+      const candidates: unknown[] = [];
       const restored = restoreSubtaskCheckpoint(
         checkpoint,
         state.sourceId,
         resolve,
         () => [],
-        () => true,
+        (...args: unknown[]) => { candidates.push(args[1]); return true; },
       );
       expect(restored?.monitor?.subtasks?.journal).toEqual(data);
+      expect(candidates).toEqual([{ state }]);
     },
   );
   it.each([
@@ -219,17 +221,26 @@ describe("disconnected strict v11 generic subtask envelope", () => {
           },
         },
       ];
+      const candidates: unknown[] = [];
       const restored = restoreSubtaskCheckpoint(
         encodeSubtaskCheckpoint(state, monitor),
         state.sourceId,
         resolve,
         () => [],
-        () => true,
+        (...args: unknown[]) => { candidates.push(args[1]); return true; },
       );
       expect(restored?.monitor?.subtasks?.journal.records).toEqual(
         missing ? [] : data.records,
       );
       expect(restored?.monitor?.subtasks?.journal.dispatches).toBe(2);
+      expect(candidates).toEqual(missing ? [] : [{ state, group: store.snapshot().groups[0] }]);
+      const candidate = candidates[0];
+      if (candidate && typeof candidate === "object") {
+        Reflect.get(candidate, "state").tasks[0].label = "Mutated callback state";
+        Reflect.get(candidate, "group").children[0].label = "Mutated callback group";
+        expect(restored?.state).toEqual(state);
+        expect(restored?.monitor?.subtasks?.state).toEqual(monitor.subtasks.state);
+      }
     },
   );
   it("does not commit an exact ON boundary that cannot persist OFF", () => {

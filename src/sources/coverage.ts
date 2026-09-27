@@ -1303,7 +1303,6 @@ export class CoverageAdapter {
     if (metadataChanged) this.invalidateEvidence();
     this.rebuildMappings();
     this.revalidateAccessReceipts(index);
-    this.clearInvalidPendingActivities();
   }
 
   private mappingState(
@@ -1363,6 +1362,7 @@ export class CoverageAdapter {
     for (const path of next.ambiguousFiles) this.ambiguousFiles.add(path);
     if (before !== this.mappingFingerprint()) this.invalidateAccessEvidence();
     this.dropAccessReceiptsWithoutCurrentMapping();
+    this.clearInvalidPendingActivities();
   }
 
   private accessReceiptMappingCurrent(
@@ -1391,20 +1391,24 @@ export class CoverageAdapter {
     );
   }
 
-  private retainedAccessReceiptsFor(
+  private retainedMappingFactsFor(
     listings: readonly Listing[],
     manifests: readonly Manifest[],
+    pending = [...this.pending.values()],
     receipts = [...this.accessReceipts.values()],
   ) {
     const { fileMappings } = this.mappingState(listings, manifests);
-    return receipts.filter((receipt) =>
-      this.accessReceiptMappingCurrent(
-        receipt,
-        listings,
-        manifests,
-        fileMappings,
+    return {
+      pending: this.retainedPendingActivitiesFor(fileMappings, pending),
+      accessReceipts: receipts.filter((receipt) =>
+        this.accessReceiptMappingCurrent(
+          receipt,
+          listings,
+          manifests,
+          fileMappings,
+        ),
       ),
-    );
+    };
   }
 
   private dropAccessReceiptsWithoutCurrentMapping() {
@@ -1432,9 +1436,10 @@ export class CoverageAdapter {
 
   private contentActivityCurrent(
     candidate: Extract<Candidate, { kind: "content-read" }>,
+    fileMappings: ReadonlyMap<string, FileMapping> = this.fileMappings,
   ) {
     return candidate.activity.files.every((path, index) => {
-      const mapping = this.fileMappings.get(path);
+      const mapping = fileMappings.get(path);
       return (
         mapping?.resourceKey === candidate.activity.resourceKey &&
         mapping.listingDigest === candidate.activity.listingDigest &&
@@ -1443,17 +1448,24 @@ export class CoverageAdapter {
     });
   }
 
+  private retainedPendingActivitiesFor(
+    fileMappings: ReadonlyMap<string, FileMapping>,
+    pending = [...this.pending.values()],
+  ) {
+    return pending.filter(
+      (candidate) =>
+        candidate.kind !== "content-read" ||
+        this.contentActivityCurrent(candidate, fileMappings),
+    );
+  }
+
   private clearInvalidPendingActivities() {
-    let changed = false;
-    for (const [callId, candidate] of this.pending)
-      if (
-        candidate.kind === "content-read" &&
-        !this.contentActivityCurrent(candidate)
-      ) {
-        this.pending.delete(callId);
-        changed = true;
-      }
-    if (changed) this.invalidateAccessEvidence();
+    const retained = this.retainedPendingActivitiesFor(this.fileMappings);
+    if (retained.length === this.pending.size) return;
+    this.pending.clear();
+    for (const candidate of retained)
+      this.pending.set(candidate.callId, candidate);
+    this.invalidateAccessEvidence();
   }
 
   private retainAccessReceipt(
@@ -1610,10 +1622,12 @@ export class CoverageAdapter {
     const listings = [...this.listings.values()].filter(
       (listing) => listing.resourcePath !== next.resourcePath,
     );
+    const retained = this.retainedMappingFactsFor(listings, manifests);
     return this.fitsBudget({
+      pending: retained.pending,
       manifests,
       listings,
-      accessReceipts: this.retainedAccessReceiptsFor(listings, manifests),
+      accessReceipts: retained.accessReceipts,
       frontier: this.nextFrontier(result, index),
     });
   }
@@ -1636,11 +1650,13 @@ export class CoverageAdapter {
       (listing) => listing.scriptPath !== next.scriptPath,
     );
     const manifests = [...this.manifests.values()];
+    const retained = this.retainedMappingFactsFor(listings, manifests);
     return this.fitsBudget({
+      pending: retained.pending,
       declarations,
       scriptReads,
       listings,
-      accessReceipts: this.retainedAccessReceiptsFor(listings, manifests),
+      accessReceipts: retained.accessReceipts,
       frontier: this.nextFrontier(result, index),
     });
   }
@@ -1660,10 +1676,12 @@ export class CoverageAdapter {
       (listing) => listing.scriptPath !== next.scriptPath,
     );
     const manifests = [...this.manifests.values()];
+    const retained = this.retainedMappingFactsFor(listings, manifests);
     return this.fitsBudget({
+      pending: retained.pending,
       scriptReads,
       listings,
-      accessReceipts: this.retainedAccessReceiptsFor(listings, manifests),
+      accessReceipts: retained.accessReceipts,
       frontier: this.nextFrontier(result, index),
     });
   }
@@ -1680,9 +1698,11 @@ export class CoverageAdapter {
       next,
     );
     const manifests = [...this.manifests.values()];
+    const retained = this.retainedMappingFactsFor(listings, manifests);
     return this.fitsBudget({
+      pending: retained.pending,
       listings,
-      accessReceipts: this.retainedAccessReceiptsFor(listings, manifests),
+      accessReceipts: retained.accessReceipts,
       frontier: this.nextFrontier(result, index),
     });
   }

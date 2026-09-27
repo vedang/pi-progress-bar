@@ -107,6 +107,23 @@ it.each([false, true])(
           probabilities: { yes: need ? 1 : 0, no: need ? 0 : 1, uncertain: 0 },
         };
       }
+      // This conversation reports inventory readiness, not child completion.
+      // Report questions are now live; do not inherit the generic mock's first
+      // composite choice (completed-item) for this access-only control.
+      for (const [key, question] of Object.entries(request.questions)) {
+        if (!key.startsWith("subtask:subtask-child:")) continue;
+        response.answers[key] = {
+          type: "choice",
+          choice: "unchanged",
+          confidence: 1,
+          probabilities: Object.fromEntries(
+            Object.keys(question.criteria).map((choice) => [
+              choice,
+              choice === "unchanged" ? 1 : 0,
+            ]),
+          ),
+        };
+      }
       return Response.json(response);
     });
     async function tool(

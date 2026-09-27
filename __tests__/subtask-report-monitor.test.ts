@@ -315,24 +315,95 @@ it.each(["unrelated", "corrective"])(
     );
     await vi.advanceTimersByTimeAsync(11000);
     expect(h.calls).toHaveLength(2);
-    h.observe();
-    await vi.advanceTimersByTimeAsync(200);
-    expect(
-      h.calls.map((request) => [
-        sourceId(request),
-        Object.keys(request.questions).length,
-      ]),
-    ).toEqual([
-      ["report-a", 20],
-      ["report-a", 2],
-      ["report-a", 2],
-      ["report-b", 20],
-      ["report-b", 2],
-    ]);
-    expect(h.statuses()).toEqual(
-      Array(22).fill(kind === "corrective" ? "pending" : "reported-completed"),
-    );
-    expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(5);
+    // Observe the REAL predicate; do not override the capacity decision.
+    const capacity = vi.spyOn(checkpointCodec, "canCommitSubtaskCheckpoint");
+    try {
+      h.observe();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(
+        h.calls
+          .slice(0, 3)
+          .map((request) => [
+            sourceId(request),
+            Object.keys(request.questions).length,
+          ]),
+      ).toEqual([
+        ["report-a", 20],
+        ["report-a", 2],
+        ["report-a", 2],
+      ]);
+      const later = h.calls.slice(3);
+      expect(later.length).toBeGreaterThan(0);
+      expect(later.length).toBeLessThanOrEqual(22);
+      expect(
+        later.every(
+          (request) =>
+            sourceId(request) === "report-b" &&
+            Object.keys(request.questions).length > 0 &&
+            Object.keys(request.questions).length <= 20,
+        ),
+      ).toBe(true);
+      const covered = later.flatMap((request) =>
+        Object.keys(request.questions),
+      );
+      const roster = h.calls
+        .slice(0, 2)
+        .flatMap((request) => Object.keys(request.questions));
+      expect(covered).toEqual(roster); // Ordered, disjoint, complete; no rebilling.
+      expect(new Set(covered).size).toBe(22);
+      const checks = capacity.mock.calls.flatMap(
+        ([, metadata, reserve], index) => {
+          const component = metadata?.subtasks;
+          const attempt = component?.journal.reports
+            .find((job) => job.source.entryId === "report-b")
+            ?.attempts.at(-1);
+          if (!component || !attempt || !reserve) return [];
+          return [
+            {
+              count: attempt.childIds.length,
+              accepted: capacity.mock.results[index]?.value,
+              reservedBytes:
+                Buffer.byteLength(JSON.stringify(component)) +
+                reserve.storeBytes +
+                reserve.journalBytes,
+            },
+          ];
+        },
+      );
+      // Retained A history plus the unchanged conservative reserve does not fit B20.
+      expect(
+        checks.some(
+          (check) =>
+            check.count === 20 &&
+            check.accepted === false &&
+            check.reservedBytes > 65536,
+        ),
+      ).toBe(true);
+      expect(
+        checks.some(
+          (check) =>
+            check.count < 20 &&
+            check.accepted === true &&
+            check.reservedBytes <= 65536,
+        ),
+      ).toBe(true);
+      expect(h.statuses()).toEqual(
+        Array(22).fill(
+          kind === "corrective" ? "pending" : "reported-completed",
+        ),
+      );
+      const journal = h.checkpoint().monitor?.subtasks?.journal;
+      expect(
+        journal?.reports.map((job) => [job.source.entryId, job.state]),
+      ).toEqual([
+        ["report-a", "complete"],
+        ["report-b", "complete"],
+      ]);
+      expect(journal?.dispatches).toBe(h.calls.length);
+      expect(journal?.usage.jev.calls).toBe(h.calls.length);
+    } finally {
+      capacity.mockRestore();
+    }
   },
 );
 it("coalesces pending candidates to latest C without claiming B was assessed", async () => {

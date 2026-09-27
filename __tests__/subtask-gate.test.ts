@@ -17,6 +17,7 @@ import {
   subtaskAdmission,
   subtaskHash,
   subtaskParent,
+  subtaskSource,
 } from "./fixtures/subtasks";
 
 function fixture(
@@ -85,6 +86,67 @@ describe("conversation-grounded per-parent subtask gate", () => {
     expect(instructions).toMatch(/reword/i);
     expect(instructions).toMatch(/remov/i);
     // Rubric coverage only; semantic quality still requires C10 fresh evaluation.
+  });
+
+  it("preserves admission provenance after same-revision parent wording changes while fencing old gate authority", () => {
+    const h = fixture();
+    const store = new SubtaskStore();
+    expect(store.admit(subtaskAdmission())).toEqual({ accepted: true });
+    h.options.group = store.snapshot().groups[0];
+    const originalGroup = structuredClone(h.options.group);
+    const before = buildSubtaskGate(h.options);
+    if (!before) throw new Error("Expected original gate");
+    const source = subtaskSource("wording", "Recommendation for deployment");
+    h.options.parent = {
+      ...h.options.parent,
+      label: "Deployment recommendation",
+      source,
+    };
+    h.options.latest = {
+      id: source.entryId,
+      role: source.role,
+      hash: source.messageHash,
+      text: "Recommendation for deployment",
+    };
+    h.observations.push(h.options.latest);
+    store.reconcile([h.options.parent]);
+    h.options.group = store.snapshot().groups[0];
+    expect(h.options.group).toEqual(originalGroup);
+    const current = buildSubtaskGate(h.options);
+    if (!current)
+      throw new Error(
+        "Same-revision wording must not strand legitimate group refinement",
+      );
+    expect(current.parentSourceDigest).not.toBe(
+      originalGroup.parentSourceDigest,
+    );
+    expect(current.identity).not.toBe(before.identity);
+    expect(
+      applySubtaskGate(before, h.result, h.options, ticket),
+    ).toBeUndefined();
+    expect(
+      applySubtaskGate(current, h.result, h.options, ticket),
+    ).toMatchObject({
+      parentSourceDigest: current.parentSourceDigest,
+      parentRevision: h.options.parent.revision,
+      state: "ready",
+    });
+    expect(store.snapshot().groups[0]).toEqual(originalGroup);
+  });
+
+  it("rejects a changed group provenance digest between gate build and apply", () => {
+    const h = fixture();
+    const store = new SubtaskStore();
+    store.admit(subtaskAdmission());
+    h.options.group = store.snapshot().groups[0];
+    const batch = buildSubtaskGate(h.options);
+    if (!batch) throw new Error("Expected current group gate");
+    h.options.group.parentSourceDigest = subtaskHash(
+      "foreign admission provenance",
+    );
+    expect(
+      applySubtaskGate(batch, h.result, h.options, ticket),
+    ).toBeUndefined();
   });
 
   it("accepts nonempty canonical earlier context and preserves source roles/order", () => {

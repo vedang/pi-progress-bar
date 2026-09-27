@@ -111,7 +111,6 @@ import {
   type CoverageQueueCheckpoint,
   type CoverageReportDispatchCheckpoint,
   type CoverageReportJobCheckpoint,
-  checkpointBytes,
   commitSubtaskCheckpoint,
   encodeCheckpoint,
   encodeSubtaskCheckpoint,
@@ -122,6 +121,7 @@ import {
   type MonitorCheckpointMetadata,
   restoreSubtaskCheckpoint,
   type SubtaskRestoreContext,
+  subtaskCheckpointBytes,
   subtaskCheckpointStorageStatus,
   subtaskMonitorCheckpointMetadata,
 } from "./hybrid-checkpoint";
@@ -6007,13 +6007,13 @@ export class Monitor {
     candidate.set(record.taskId, this.maximumDetailRecord(record));
     try {
       const metadata = this.capacityMetadata(
-        this.card,
+        undefined,
         this.healthCards,
         this.state,
         undefined,
         candidate,
       );
-      if (checkpointBytes(this.state, metadata) <= MAX_CHECKPOINT_BYTES)
+      if (subtaskCheckpointBytes(this.state, metadata) <= MAX_CHECKPOINT_BYTES)
         return true;
     } catch {
       // Optional records need a full exact storage proof before dispatch.
@@ -6112,13 +6112,13 @@ export class Monitor {
       try {
         // This optional transaction has no semantic state change. Persist the
         // receipt and accepted tokens as one checkpoint or retain neither.
-        encodeCheckpoint(
+        encodeSubtaskCheckpoint(
           this.state,
-          this.metadata(false, this.healthCards, this.state),
+          this.subtaskMetadata(false, this.healthCards, this.state),
         );
-        const checkpoint = encodeCheckpoint(
+        const checkpoint = encodeSubtaskCheckpoint(
           this.state,
-          this.metadata(this.enabled, this.healthCards, this.state),
+          this.subtaskMetadata(this.enabled, this.healthCards, this.state),
         );
         this.persist(checkpoint);
         this.parkedDetails.delete(updated.taskId);
@@ -6589,29 +6589,57 @@ export class Monitor {
     }
   }
 
-  /** Saturating metadata bounds every dispatch and usage persistence boundary. */
+  /**
+   * Strict v11 capacity projection retained at this named seam for admission
+   * callers. It contains no legacy coverage payload or fallback codec.
+   */
   private capacityMetadata(
     _card = this.card,
     healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
     state: HybridState = this.state,
     prospectiveIdleDoneTaskId?: string,
     taskDetails: ReadonlyMap<string, TaskDetailRecord> = this.taskDetails,
-  ): MonitorCheckpointMetadata {
-    const maximum = Number.MAX_SAFE_INTEGER;
-    // Existing cards are durable facts. The supplied candidate map already
-    // contains the exact prospective replacement/new card.
-    const maximumHealthCards = [...healthCards.values()].map(copyHealthCard);
-    const maximumTaskDetails = this.options.richDetailsEnabled
-      ? [...taskDetails.values()].map((record) =>
-          this.maximumDetailRecord(record),
-        )
-      : [];
-    const idleDoneTaskId = this.idleDoneTaskIdFor(
+  ) {
+    return this.subtaskCapacityMetadata(
+      healthCards,
       state,
       prospectiveIdleDoneTaskId,
+      taskDetails,
     );
+  }
+
+  /** Saturating v11 metadata bounds every dispatch and usage persistence boundary. */
+  private subtaskCapacityMetadata(
+    healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
+    state: HybridState = this.state,
+    prospectiveIdleDoneTaskId?: string,
+    taskDetails: ReadonlyMap<string, TaskDetailRecord> = this.taskDetails,
+  ) {
+    const maximum = Number.MAX_SAFE_INTEGER;
+    const maximumHealthCards = new Map(
+      [...healthCards.values()].map((card) => [
+        card.taskId,
+        copyHealthCard(card),
+      ]),
+    );
+    const maximumTaskDetails = new Map(
+      this.options.richDetailsEnabled
+        ? [...taskDetails.values()].map((record) => [
+            record.taskId,
+            this.maximumDetailRecord(record),
+          ])
+        : [],
+    );
+    // Start from the live v11 sidecar projection so capacity checks never omit
+    // accepted generic subtask state while sizing an unrelated transaction.
     return {
-      enabled: false,
+      ...this.subtaskMetadata(
+        false,
+        maximumHealthCards,
+        state,
+        prospectiveIdleDoneTaskId,
+        maximumTaskDetails,
+      ),
       usage: {
         jev: {
           calls: maximum,
@@ -6626,9 +6654,6 @@ export class Monitor {
       },
       lastJevCallAt: maximum,
       lastExtractionCallAt: maximum,
-      ...(idleDoneTaskId ? { idleDoneTaskId } : {}),
-      ...(maximumHealthCards.length ? { healthCards: maximumHealthCards } : {}),
-      ...(maximumTaskDetails.length ? { taskDetails: maximumTaskDetails } : {}),
     };
   }
 
@@ -6664,7 +6689,7 @@ export class Monitor {
   private capacityEnvelope(
     phase: AdmissionPlan["phase"] | "health",
     candidate: HybridState,
-    card = this.retainedCardFor(candidate),
+    _card = this.retainedCardFor(candidate),
     schemaBytes = 0,
     requests = 1,
     healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
@@ -6678,23 +6703,22 @@ export class Monitor {
       prospectiveIdleDoneTaskId ?? this.prospectiveIdleDoneTaskIdFor(candidate);
     // Dispatch persists existing facts and selector until the result commits.
     // Core-only admission explicitly substitutes its pre-dispatch eviction map.
-    const current = this.metadata(
+    const current = this.subtaskMetadata(
       this.enabled,
       this.healthCards,
       this.state,
       undefined,
       this.taskDetails,
     );
-    const oldCard = this.retainedCardFor(this.state);
     const dispatch = this.capacityMetadata(
-      oldCard,
+      undefined,
       dispatchHealthCards,
       this.state,
       undefined,
       dispatchTaskDetails,
     );
     const accepted = this.capacityMetadata(
-      card ?? this.retainedCardFor(candidate),
+      undefined,
       healthCards,
       candidate,
       selector,
@@ -6703,20 +6727,20 @@ export class Monitor {
     const currentLimit = { ...this.state, capacity: "limit" as const };
     const candidateLimit = { ...candidate, capacity: "limit" as const };
     const boundaries = {
-      current: checkpointBytes(this.state, current),
-      [`${phase}-current`]: checkpointBytes(this.state, dispatch),
-      [`${phase}-timestamp`]: checkpointBytes(this.state, dispatch),
-      [`${phase}-usage`]: checkpointBytes(this.state, dispatch),
+      current: subtaskCheckpointBytes(this.state, current),
+      [`${phase}-current`]: subtaskCheckpointBytes(this.state, dispatch),
+      [`${phase}-timestamp`]: subtaskCheckpointBytes(this.state, dispatch),
+      [`${phase}-usage`]: subtaskCheckpointBytes(this.state, dispatch),
       ...Object.fromEntries(
         Array.from({ length: requests }, (_, index) => [
           `${phase}-request-${index + 1}-timestamp`,
-          checkpointBytes(this.state, dispatch),
+          subtaskCheckpointBytes(this.state, dispatch),
         ]),
       ),
-      [`${phase}-accepted`]: checkpointBytes(candidate, accepted),
+      [`${phase}-accepted`]: subtaskCheckpointBytes(candidate, accepted),
       [`${phase}-limit-marker`]: Math.max(
-        checkpointBytes(currentLimit, dispatch),
-        checkpointBytes(candidateLimit, accepted),
+        subtaskCheckpointBytes(currentLimit, dispatch),
+        subtaskCheckpointBytes(candidateLimit, accepted),
       ),
     };
     return {
@@ -7533,9 +7557,13 @@ export class Monitor {
     candidateCards.set(task.id, card);
     // Health receipt order never owns selection, including all-done refreshes.
     try {
-      encodeCheckpoint(
+      encodeSubtaskCheckpoint(
         this.state,
-        this.metadata(this.enabled, candidateCards, this.state),
+        this.subtaskMetadata(false, candidateCards, this.state),
+      );
+      encodeSubtaskCheckpoint(
+        this.state,
+        this.subtaskMetadata(this.enabled, candidateCards, this.state),
       );
     } catch {
       this.note("health-capacity-skipped");

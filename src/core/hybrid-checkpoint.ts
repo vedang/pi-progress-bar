@@ -2333,11 +2333,7 @@ export function subtaskCheckpointStorageStatus(
   }
 }
 
-/**
- * Encode strict v11 staged data without changing the active v10 codec or
- * reserving optional bytes when no optional projection is present.
- */
-export function encodeSubtaskCheckpoint(
+function stagedSubtaskCheckpoint(
   state: HybridState,
   monitor?: SubtaskMonitorCheckpointMetadata,
 ): SubtaskCheckpointEnvelope {
@@ -2362,6 +2358,26 @@ export function encodeSubtaskCheckpoint(
   };
   if (!validSubtaskCheckpointEnvelope(checkpoint))
     throw new Error("Invalid hybrid subtask checkpoint");
+  return checkpoint;
+}
+
+/** Exact v11 byte count before capacity denial; it never invokes v10 codecs. */
+export function subtaskCheckpointBytes(
+  state: HybridState,
+  monitor?: SubtaskMonitorCheckpointMetadata,
+) {
+  return subtaskByteLength(stagedSubtaskCheckpoint(state, monitor));
+}
+
+/**
+ * Encode strict v11 staged data without changing the active v10 codec or
+ * reserving optional bytes when no optional projection is present.
+ */
+export function encodeSubtaskCheckpoint(
+  state: HybridState,
+  monitor?: SubtaskMonitorCheckpointMetadata,
+): SubtaskCheckpointEnvelope {
+  const checkpoint = stagedSubtaskCheckpoint(state, monitor);
   if (subtaskByteLength(checkpoint) > MAX_CHECKPOINT_BYTES)
     throw new Error("Hybrid subtask checkpoint exceeds v11 bounds");
   return detachSubtaskData(checkpoint);

@@ -15,7 +15,7 @@ import type {
 import * as pinnedPi from "@earendil-works/pi-coding-agent";
 import { expect, it, vi } from "vitest";
 import { processObservation } from "../src/core/hybrid";
-import { encodeCheckpoint } from "../src/core/hybrid-checkpoint";
+import { encodeSubtaskCheckpoint } from "../src/core/hybrid-checkpoint";
 import { emptyState } from "../src/core/hybrid-state";
 import progressBar from "../src/index";
 import { addPatch, backend, observation } from "./fixtures/hybrid";
@@ -100,7 +100,10 @@ async function host(
       source,
       backend(addPatch(source)),
     );
-    manager.appendCustomEntry("pi-progress-bar", encodeCheckpoint(state));
+    manager.appendCustomEntry(
+      "pi-progress-bar",
+      encodeSubtaskCheckpoint(state),
+    );
   }
   const runtime = await pi.ModelRuntime.create({
     credentials: new InMemoryCredentialStore(),

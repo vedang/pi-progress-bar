@@ -2,6 +2,14 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## Reporting-layer batch gates and additional host ports
+
+After gateway `8c5c3c4c`, Main independently passed39 gateway tests. `make format`/`make check` pass (three existing warnings). `make test` stops at **1845 passed /50 failed**, exactly coverage-monitor6, coverage-scheduler34 and coverage-storage-monitor10; integration must be run separately.
+
+Separate complete integration run: **76 passed /7 failed**. Main found the actual advisory-host production seed still used the v10 encoder and the canonical host-selected-model index assertion still expected10. Ported only those fixtures/expectations to strict v11; all correction, deadline, lifecycle and canonicality assertions retained. Complete integration after ports: **82 passed /1 failed**. Remaining failure: TUI production correction during builtin attempted start, `correctionCalls`0 vs1 (`advisory-host.integration.test.ts:773`). One bounded targeted diagnostic ran both TUI/RPC correction cases:2/2 passed (other tests excluded by filter). This does NOT establish the remaining failure's cause or waive full integration acceptance; retain it as an unresolved intermittent host blocker, distinct from the older line655 deadline evidence. No arbitrary timeout increase or source workaround introduced.
+
+Artifacts remain in the active task directory: `c07-layer-batch-{format,check,test,integration}.log`, `c05-host-v11-port-{format,check,integration,correction-diagnostic}.log`. Provider semantics/manual acceptance/complete-stage reviews remain outstanding.
+
 ## Candidate and drain verification
 
 - Live candidate: `f84b36f6`; physical-drain repair: `6c4cc21e`.

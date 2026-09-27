@@ -234,7 +234,7 @@ it("uses canonical context rather than preappend message_end, through the host-s
   expect(args[2]).toMatchObject({ maxRetries: 0, maxTokens: 2048 });
   expect(args[2].signal).toBeInstanceOf(AbortSignal);
   expect(JSON.stringify(args[1])).not.toContain("offline-key");
-  expect(h.checkpoints.at(-1)).toMatchObject({ version: 10 });
+  expect(h.checkpoints.at(-1)).toMatchObject({ version: 11 });
   expect(JSON.stringify(h.checkpoints.at(-1))).toContain("Implement parser");
 });
 it("enables calibrated grounded details on the production extension path", async () => {

@@ -62,24 +62,27 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
 });
-async function fixture(details = false, throwingModel = false) {
+async function fixture(
+  details = false,
+  throwingModel = false,
+  parentCount = 1,
+) {
   const h = monitorHarness([branchEntry("goal", goal)], {
     richDetailsEnabled: details,
     extractionText: (input) =>
       JSON.stringify({
         add: input.tasks.length
           ? []
-          : [
-              {
-                label: "Deliver agreed plan",
-                kind: "response",
-                basis: "explicit",
-                quote: goal,
-                ...(details
-                  ? { details: { title: { quote: labels[21] } } }
-                  : {}),
-              },
-            ],
+          : Array.from({ length: parentCount }, (_, index) => ({
+              label:
+                parentCount === 1
+                  ? "Deliver agreed plan"
+                  : `Deliver agreed plan ${index + 1}`,
+              kind: "response",
+              basis: "explicit",
+              quote: goal,
+              ...(details ? { details: { title: { quote: labels[21] } } } : {}),
+            })),
         revise: [],
         archive: [],
         restore: [],
@@ -127,23 +130,23 @@ async function fixture(details = false, throwingModel = false) {
   h.start();
   await h.settle("goal");
   await vi.advanceTimersByTimeAsync(100);
-  expect(h.monitor.state.tasks).toHaveLength(1);
-  const parent = h.monitor.state.tasks[0];
+  expect(h.monitor.state.tasks).toHaveLength(parentCount);
   const store = new SubtaskStore();
-  expect(
-    store.admit({
-      ...subtaskAdmission(labels),
-      parent,
-      source: parent.source,
-      complete: true,
-      knownTotal: 22,
-      children: labels.map((label) => ({
-        kind: "add",
-        label,
+  for (const parent of h.monitor.state.tasks)
+    expect(
+      store.admit({
+        ...subtaskAdmission(labels),
+        parent,
         source: parent.source,
-      })),
-    }),
-  ).toEqual({ accepted: true });
+        complete: true,
+        knownTotal: 22,
+        children: labels.map((label) => ({
+          kind: "add",
+          label,
+          source: parent.source,
+        })),
+      }),
+    ).toEqual({ accepted: true });
   const saved = checkpoint();
   if (!saved.monitor) throw new Error("Missing monitor metadata");
   saved.monitor.subtasks = {
@@ -184,6 +187,89 @@ async function fixture(details = false, throwingModel = false) {
         .groups[0]?.children.map((child) => child.status),
   };
 }
+it("restores a mid-wave checkpoint without one parent's report suppressing another parent's same-source work", async () => {
+  const h = await fixture(false, false, 2);
+  const [first, second] = h.monitor.state.tasks;
+  let midway: Envelope | undefined;
+  h.save.mockImplementation((raw: unknown) => {
+    const candidate = raw as Envelope;
+    const reports = candidate.monitor?.subtasks?.journal.reports;
+    if (
+      reports?.length === 1 &&
+      reports[0].parentTaskId === first.id &&
+      reports[0].state === "ready" &&
+      reports[0].attempts.some((attempt) => attempt.outcome === "decided")
+    )
+      midway = structuredClone(candidate);
+  });
+  h.append("report", reportText);
+  await h.settle("report");
+  await vi.advanceTimersByTimeAsync(200);
+  expect(midway).toBeDefined();
+  if (!midway) throw new Error("Missing actual mid-wave durable checkpoint");
+  expect(subtaskCheckpointStorageStatus(midway)).toBe("supported");
+  const secondGroup = midway.monitor?.subtasks?.state.groups.find(
+    (group) => group.parentTaskId === second.id,
+  );
+  expect(
+    secondGroup?.children.every((child) => child.status === "pending"),
+  ).toBe(true);
+  const savedJob = midway.monitor?.subtasks?.journal.reports[0];
+  if (!savedJob || !secondGroup)
+    throw new Error("Missing saved group authority");
+  const alreadyDecided = new Set(
+    savedJob.attempts
+      .filter((attempt) => attempt.outcome === "decided")
+      .flatMap((attempt) => attempt.childIds),
+  );
+  const expectedKeys = [
+    ...savedJob.childIds.filter((id) => !alreadyDecided.has(id)),
+    ...secondGroup.children.map((child) => child.id),
+  ].map((id) => `subtask:${id}`);
+  h.save.mockReset();
+  h.calls.splice(0);
+  await h.monitor.restore("/nonexistent-hybrid-test", midway, false, h.reader);
+  await vi.advanceTimersByTimeAsync(200);
+  const covered = h.calls.flatMap((request) => Object.keys(request.questions));
+  expect(covered).toEqual(expectedKeys);
+  expect(new Set(covered).size).toBe(expectedKeys.length);
+  expect(
+    h.calls.every(
+      (request) =>
+        sourceId(request) === "report" &&
+        Object.keys(request.questions).length <= 20,
+    ),
+  ).toBe(true);
+  const journal = h.checkpoint().monitor?.subtasks?.journal;
+  expect(
+    journal?.reports
+      .filter((job) => job.state === "complete")
+      .map((job) => job.parentTaskId)
+      .sort(),
+  ).toEqual([first.id, second.id].sort());
+  expect(journal?.dispatches).toBe(
+    (midway.monitor?.subtasks?.journal.dispatches ?? 0) + h.calls.length,
+  );
+});
+it("projects restored groups without rereading the host from passive getters", async () => {
+  const h = await fixture();
+  let reads = 0;
+  let disposed = false;
+  h.monitor.observe(() => {
+    reads++;
+    if (disposed) throw new Error("Disposed host reader");
+    return h.reader();
+  });
+  await vi.advanceTimersByTimeAsync(100);
+  reads = 0;
+  for (let i = 0; i < 4; i++)
+    expect(h.monitor.subtaskSnapshot().groups[0]?.children).toHaveLength(22);
+  expect(reads).toBe(0);
+  disposed = true;
+  expect(() => h.monitor.subtaskSnapshot()).not.toThrow();
+  expect(reads).toBe(0);
+  expect(h.calls).toHaveLength(0);
+});
 it.each([false, true])(
   "runs a finite20+2 wave after semantics/health without proposal credentials (throwing resolver:%s)",
   async (throwing) => {

@@ -2,6 +2,20 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## Monitor wiring review and gates (`05bef5cf`, unaccepted)
+
+Worker reported674 focused consumer passes and host validation. Main independently ran format/check (pass;3 historical warnings), complete unit **1871 passed/57 failed**, and complete pinned integration **83/83 passed**. Installed-host targeted coverage-live/subtask-drain/subtask-live: **5/5 passed**. Latest full integration pass does not diagnose or erase the prior intermittent TUI failure.
+
+Unit failure accounting, before the additional getter RED: original50 legacy failures +2 newly failing coverage metadata omission controls +4 mandatory bounded-read regressions +1 new cross-parent report RED. Do not label all57 as legacy. Main compared pre-wiring `7135b59f` source against the identical existing bounds/fifth-review/coverage-monitor tests:25 passed/6 old coverage failures; all six newly failing existing controls passed before wiring. Source was restored byte-identically after the comparison.
+
+Main review REDs:
+- Capture an actual durable mid-wave checkpoint with parent1's first20 decided and parent2's same-source report not yet dispatched. Reload resumes parent1's last2 but silently omits parent2's22. Source-only `known.some(sameSource)` dedupe crosses parent/group authority; no source-semantic mock change involved.
+- Restored-group passive getters read the host four times across four snapshots; they must project without reopening a reader (including after disposal). Snapshot fallback currently calls `beginCanonicalPass`/`subtaskCurrent`.
+- Existing blank/thinking payload tests read10000 vs bound256, and duplicate hooks read68 vs bound8. Preserve assertions and bounded canonical work; do not increase limits or fake empty restored projections.
+- Existing metadata byte/candidate omission controls now return0 vs positive before wiring; isolate unintended eager optional context/evidence consumption rather than restoring legacy semantic fallback.
+
+Focused new+existing review gate: **6 failed/35 passed**, including the additional getter RED. Source repair and full reruns remain required. Logs: `c07-monitor-main-{format,check,test,integration,installed}.log`, `c07-monitor-{parent-red,review-red,pre-regressions}.log`. No whole-stage acceptance or deferred-audit claim.
+
 ## Reporting-layer batch gates and additional host ports
 
 After gateway `8c5c3c4c`, Main independently passed39 gateway tests. `make format`/`make check` pass (three existing warnings). `make test` stops at **1845 passed /50 failed**, exactly coverage-monitor6, coverage-scheduler34 and coverage-storage-monitor10; integration must be run separately.

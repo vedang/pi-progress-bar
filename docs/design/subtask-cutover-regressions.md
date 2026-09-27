@@ -2,6 +2,17 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## Repair review (`9603ef0d`, still unaccepted)
+
+Main confirmed format/checkPASS (three old warnings) and complete unit **1879 passed/50 known coverage failures** before adding the next REDs. Complete pinned integration this time **81 passed/2 failed**: both TUI and RPC builtin attempted-start correction cases report0 vs1 at `advisory-host.integration.test.ts:773`. Earlier83-pass runs do not waive this reproducible intermittent blocker.
+
+The earlier authority/getter tests now pass, but Main froze three additional active-work regressions:
+- With a real restored22-child group (not absent optional capability),10,000 blank/thinking entries still cause10,000 payload reads in one canonical boundary, over256. Require bounded discovery AND eventual genuine20+2 coverage; skipping empty optional work alone is insufficient.
+- A settled parent revision invalidates its stored group, but raw group-parent membership suppresses new decomposition; proposer calls0 vs1 despite valid new semantic parent authority.
+- Even with unchanged parent revision, named refinement followed by a completed neutral report never reaches fresh decomposition; proposer calls0 vs1. Existing-group membership is not a permanent report-owner lock. Preserve ready/parked saved-report priority, but permit retained decomposition opportunities when that owner is finished or invalid.
+
+Focused gate **3 failed/22 passed**, format/checkPASS. Main owns the test additions, including valid proposal dispatch/provenance plumbing; no source patches or timeout/limit changes. Logs `c07-repair-main-{format,check,test,integration}.log`, `c07-active-owner-{format,check,red}.log`. Historical50 ports, host diagnosis, complete reviews and manual acceptance remain ahead.
+
 ## Monitor wiring review and gates (`05bef5cf`, unaccepted)
 
 Worker reported674 focused consumer passes and host validation. Main independently ran format/check (pass;3 historical warnings), complete unit **1871 passed/57 failed**, and complete pinned integration **83/83 passed**. Installed-host targeted coverage-live/subtask-drain/subtask-live: **5/5 passed**. Latest full integration pass does not diagnose or erase the prior intermittent TUI failure.

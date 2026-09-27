@@ -7,6 +7,7 @@ import {
   subtaskCheckpointStorageStatus,
 } from "../src/core/hybrid-checkpoint";
 import type { SourceRef } from "../src/core/hybrid-state";
+import type { MonitorOptions } from "../src/core/monitor";
 import { SubtaskStore } from "../src/core/subtasks";
 import { backend, noPatch, observation } from "./fixtures/hybrid";
 import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
@@ -66,6 +67,7 @@ async function fixture(
   details = false,
   throwingModel = false,
   parentCount = 1,
+  monitorOptions: Partial<MonitorOptions> = {},
 ) {
   const h = monitorHarness([branchEntry("goal", goal)], {
     richDetailsEnabled: details,
@@ -94,7 +96,7 @@ async function fixture(
             throw new Error("No proposal credentials");
           },
         }
-      : {},
+      : monitorOptions,
   });
   running.push(h);
   const calls: EvaluationRequest[] = [];
@@ -270,6 +272,165 @@ it("projects restored groups without rereading the host from passive getters", a
   expect(reads).toBe(0);
   expect(h.calls).toHaveLength(0);
 });
+it("bounds blank-history reads when restored report groups really exist", async () => {
+  const h = await fixture();
+  let reads = 0,
+    boundaryStart = 0,
+    maximumBoundaryReads = 0;
+  const reader = h.reader.getMockImplementation();
+  if (!reader) throw new Error("Missing reader");
+  h.reader.mockImplementation(() => {
+    boundaryStart = reads;
+    return reader();
+  });
+  const invisible = Array.from({ length: 10000 }, (_, index) => ({
+    type: "message",
+    id: `invisible-${index}`,
+    message: {
+      role: "assistant",
+      get content() {
+        reads++;
+        maximumBoundaryReads = Math.max(
+          maximumBoundaryReads,
+          reads - boundaryStart,
+        );
+        return index % 2
+          ? [{ type: "thinking", thinking: "private" }]
+          : [{ type: "text", text: "   " }];
+      },
+    },
+  }));
+  h.replace([
+    ...h.reader(),
+    ...invisible,
+    branchEntry("report", reportText, "assistant"),
+  ]);
+  expect(reads).toBeLessThanOrEqual(256);
+  for (let step = 0; step < 1000; step++) {
+    await vi.advanceTimersByTimeAsync(1);
+    expect(maximumBoundaryReads).toBeLessThanOrEqual(256);
+    if (h.monitor.state.cursor?.id === "report") break;
+  }
+  await h.settle("report");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(maximumBoundaryReads).toBeLessThanOrEqual(256);
+  expect(
+    h.calls.map((request) => Object.keys(request.questions).length),
+  ).toEqual([20, 2]);
+  expect(h.statuses()).toEqual(Array(22).fill("reported-completed"));
+});
+it.each([false, true])(
+  "allows fresh decomposition of an existing group after named input (parent revised: %s)",
+  async (revised) => {
+    let available = false;
+    const amendment = revised
+      ? "Revise the plan to include deployment and recovery."
+      : "Break the agreed plan into deployment and recovery steps.";
+    const proposeSubtasks = vi.fn<
+      NonNullable<MonitorOptions["proposeSubtasks"]>
+    >(async (request, signal, onDispatch, onPhysicalFlight) => {
+      onPhysicalFlight?.(Promise.resolve());
+      if (onDispatch?.(Date.now()) === false || signal.aborted)
+        throw new Error("Vetoed");
+      const contextIndex = request.input.context.findIndex(
+        (item) => item.text === amendment,
+      );
+      return {
+        provider: "fixture",
+        model: "selected",
+        requestHash: request.requestHash,
+        usage: { inputTokens: 1, outputTokens: 1 },
+        text: JSON.stringify({
+          proposals: [
+            {
+              parentIndex: 0,
+              complete: false,
+              removals: [],
+              children: ["Plan deployment", "Plan recovery"].map((label) => ({
+                kind: "add",
+                label,
+                evidence: [{ contextIndex, start: 0, end: amendment.length }],
+              })),
+            },
+          ],
+        }),
+      };
+    });
+    const h = await fixture(false, false, 1, {
+      selectedModel: () => (available ? "fixture/selected" : undefined),
+      proposeSubtasks,
+    });
+    available = true;
+    h.setChoice("unchanged");
+    const parent = structuredClone(h.monitor.state.tasks[0]);
+    const original = h.fetch.getMockImplementation();
+    if (!original) throw new Error("Missing transport");
+    h.fetch.mockImplementation(async (url, init) => {
+      const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+      if (request.questions.gate || request.questions["subtask:0"]) {
+        const response = await original(url, init);
+        const data = (await response.json()) as {
+          answers: Record<string, unknown>;
+        };
+        const key = request.questions.gate ? "gate" : "subtask:0";
+        const choice =
+          key === "gate" ? (revised ? "changed" : "unchanged") : "yes";
+        data.answers[key] = {
+          type: "choice",
+          choice,
+          confidence: 1,
+          probabilities: Object.fromEntries(
+            Object.keys(request.questions[key].criteria).map((item) => [
+              item,
+              item === choice ? 1 : 0,
+            ]),
+          ),
+        };
+        return Response.json(data);
+      }
+      return original(url, init);
+    });
+    h.extract.mockImplementation(async (_input, _signal, onDispatch) => {
+      onDispatch?.(Date.now());
+      return {
+        text: JSON.stringify({
+          add: [],
+          revise: [
+            {
+              id: parent.id,
+              label: "Deliver deployment and recovery plan",
+              requirementsChanged: true,
+              quote: amendment,
+            },
+          ],
+          archive: [],
+          restore: [],
+          unresolved: false,
+        }),
+        provider: "offline",
+        model: "fixture",
+        usage: { inputTokens: 3, outputTokens: 2 },
+      };
+    });
+    h.append("amendment", amendment, "user");
+    await h.settle("amendment");
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.monitor.state.tasks[0].revision).toBe(
+      parent.revision + Number(revised),
+    );
+    expect(proposeSubtasks).toHaveBeenCalledTimes(1);
+    expect(h.monitor.subtaskSnapshot().groups).toHaveLength(1);
+    expect(h.monitor.subtaskSnapshot().groups[0]).toMatchObject({
+      parentTaskId: parent.id,
+      parentRevision: parent.revision + Number(revised),
+    });
+    expect(
+      h.monitor
+        .subtaskSnapshot()
+        .groups[0].children.map((child) => child.label),
+    ).toEqual([...(revised ? [] : labels), "Plan deployment", "Plan recovery"]);
+  },
+);
 it.each([false, true])(
   "runs a finite20+2 wave after semantics/health without proposal credentials (throwing resolver:%s)",
   async (throwing) => {

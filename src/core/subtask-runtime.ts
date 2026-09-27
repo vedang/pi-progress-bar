@@ -18,6 +18,7 @@ import type {
   Observation,
   SourceRef,
 } from "./hybrid-state";
+import { SubtaskAccess, type SubtaskAccessSnapshot } from "./subtask-access";
 import {
   nextSubtaskPhase,
   restoreSubtaskJournal,
@@ -274,6 +275,8 @@ const validRuntimeCheckpoint = (
 export class SubtaskRuntime {
   private initial?: SubtaskRuntimeCheckpoint;
   private store = new SubtaskStore();
+  /** Runtime-only C04 associations stay attached to this stable store owner. */
+  private access = new SubtaskAccess(this.store);
   private journal = emptyJournal();
   private initialized = false;
   private initializationBlocked = false;
@@ -340,6 +343,16 @@ export class SubtaskRuntime {
   /** Detached read-only generic list view; callers receive no store authority. */
   snapshot(): Readonly<SubtaskSnapshot> {
     return deepFreeze(this.store.snapshot());
+  }
+
+  /** Read-only C04 access projection; evidence can neither admit nor report work. */
+  accessSnapshot(originalAccessEvidence: unknown): SubtaskAccessSnapshot {
+    return this.access.snapshot(originalAccessEvidence);
+  }
+
+  /** Clear runtime-only associations without touching durable groups or journal. */
+  resetAccess(): void {
+    this.access.reset();
   }
 
   private async runFlight(parentTaskId: string, flight: Flight): Promise<void> {
@@ -686,9 +699,14 @@ export class SubtaskRuntime {
     )
       return;
 
-    // Save succeeded before either mutable owner changes or publication.
-    this.store = candidate;
+    // Save succeeded and currentness survived its callback. Adopt through the
+    // stable authoritative store so existing runtime-only links for other
+    // groups remain resolvable; never expose a candidate before this point.
+    if (!this.store.admit(applied.admission).accepted) return;
     this.journal = journal;
+    // `applied` is the original accepted result carrying the private C04 plan.
+    // Binding is optional and cannot change durable admission or journal state.
+    this.access.bind(applied);
     try {
       this.options.onPublish(this.snapshot());
     } catch {
@@ -728,6 +746,8 @@ export class SubtaskRuntime {
     }
 
     this.store = store;
+    // Reload obtains no original proposal capability, so it starts unlinked.
+    this.access = new SubtaskAccess(store);
     this.journal = journal;
     this.sourceId = current.sourceId;
     this.initialized = true;

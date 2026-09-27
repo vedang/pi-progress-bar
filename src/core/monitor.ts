@@ -75,7 +75,11 @@ import {
   beadsPresentation,
   readBeadsExport,
 } from "../sources/beads";
-import { CoverageAdapter } from "../sources/coverage";
+import {
+  CoverageAdapter,
+  isCurrentSubtaskEvidence,
+  type SubtaskEvidence,
+} from "../sources/coverage";
 import { EvidenceStore, redEvidenceLabel } from "../sources/evidence";
 import {
   type CanonicalFrontier,
@@ -135,6 +139,7 @@ import {
   observationRef,
   tasksNewestFirst,
 } from "./hybrid-state";
+import type { SubtaskAccessSnapshot } from "./subtask-access";
 import type { SubtaskPhaseRecord } from "./subtask-journal";
 import {
   type SubtaskPhysicalFlightObserver,
@@ -697,6 +702,8 @@ export class Monitor {
   private subtaskRuntime?: SubtaskRuntime;
   private subtaskFlight?: Promise<void>;
   private subtaskOwners: string[] = [];
+  /** One adapter-issued capability stays stable until canonical metadata changes. */
+  private subtaskEvidence?: SubtaskEvidence;
   private subtaskWakeKey?: string;
   private pendingSubtaskCheckpoint?: SubtaskRuntimeCheckpoint;
 
@@ -875,21 +882,23 @@ export class Monitor {
 
   /**
    * Re-read active canonical branch after host append. Tool listener payloads
-   * remain unauthoritative; admitted inventory/access is persisted atomically.
+   * remain passive adapter ingress; metadata may only wake generic evaluation.
    */
   confirmCoverageBranch(entries: readonly unknown[]): void {
     if (!this.enabled) return;
     const pass = new CanonicalPass(entries);
-    this.reconcileCoverageCanonical(pass);
-    this.reconcileCoverageReportJournal(pass);
-    this.reconcileCoverageIntentJournal(pass);
-    const accepted = this.coverageAdapter.confirm(entries, this.coverageEpoch);
-    this.prunePendingCoverage(pass);
-    this.enqueueCoverageAdapterResult(accepted, pass);
-    this.admitPendingCoverage(pass);
-    // Inventory admission can group an owner after pre-admission reconciliation.
-    this.reconcileCoverageIntentJournal(pass);
-    this.wakeCoverage();
+    try {
+      const accepted = this.coverageAdapter.confirm(
+        pass.entries,
+        this.coverageEpoch,
+      );
+      // Keep bounded passive adapter ingress visible, but do not admit it into
+      // CoverageStore, schedule legacy intent/report work, or wake a provider.
+      this.enqueueCoverageAdapterResult(accepted, pass);
+    } catch {
+      // Optional adapter confirmation never changes mandatory scheduling.
+    }
+    this.wakeSubtasks(pass);
     this.drain();
     this.publish();
   }
@@ -933,6 +942,15 @@ export class Monitor {
   /** Detached generic sidecar view. Reading it never schedules or mutates. */
   subtaskSnapshot(): SubtaskMonitorSnapshot {
     return this.subtaskRuntime?.snapshot() ?? new SubtaskStore().snapshot();
+  }
+
+  /** Detached C04 access view. It cannot admit, report, or schedule subtasks. */
+  subtaskAccessSnapshot(): SubtaskAccessSnapshot {
+    return (
+      this.subtaskRuntime?.accessSnapshot(
+        this.coverageAdapter.accessEvidence(),
+      ) ?? { groups: [], omissions: 0 }
+    );
   }
 
   /** Provisional declared calls dispatch immediately; final reconciliation is turn-bound. */
@@ -2358,6 +2376,7 @@ export class Monitor {
   /** Fence old transport first; replacement waits for its runtime reservation. */
   private replaceSubtaskRuntime(checkpoint?: SubtaskRuntimeCheckpoint) {
     const next = structuredClone(checkpoint ?? this.emptySubtaskCheckpoint());
+    this.subtaskRuntime?.resetAccess();
     this.subtaskRuntime?.invalidate();
     this.subtaskGateway.invalidate();
     this.subtaskGateDispatch = undefined;
@@ -2408,6 +2427,26 @@ export class Monitor {
     )
       return;
 
+    let evidence: SubtaskEvidence | undefined;
+    if (!restoring) {
+      try {
+        // Capability must come from a fresh confirmation of this exact active
+        // canonical branch, never listener payloads or stored adapter state.
+        this.coverageAdapter.confirm(pass.entries, this.coverageEpoch);
+        const confirmed = this.coverageAdapter.metadata();
+        if (!confirmed) this.subtaskEvidence = undefined;
+        else if (
+          !this.subtaskEvidence ||
+          !isCurrentSubtaskEvidence(this.subtaskEvidence)
+        )
+          this.subtaskEvidence = confirmed;
+        evidence = this.subtaskEvidence;
+      } catch {
+        this.subtaskEvidence = undefined;
+        // No-file generic work remains eligible if optional adapter fails closed.
+      }
+    }
+
     const earlier: Observation[] = [];
     const omissions: string[] = [];
     const latestIndex = pass.indexOf(latest.id);
@@ -2440,6 +2479,7 @@ export class Monitor {
       earlier,
       omissions,
       selectedModel,
+      ...(evidence === undefined ? {} : { evidence }),
       resolve: (entryId) => {
         const observation = pass.observation(entryId);
         return observation ? { ...observation } : undefined;
@@ -2516,10 +2556,11 @@ export class Monitor {
     const key = JSON.stringify({
       sourceId: current.sourceId,
       latest: current.latest,
-      parents: current.parents
-        .filter((parent) => parent.included)
-        .map((parent) => [parent.id, parent.revision, parent.source]),
+      earlier: current.earlier,
+      omissions: current.omissions,
+      parents: current.parents,
       selectedModel: current.selectedModel,
+      ...(current.evidence === undefined ? {} : { evidence: current.evidence }),
     });
     if (!force && key === this.subtaskWakeKey) return;
     this.subtaskWakeKey = key;
@@ -2530,6 +2571,7 @@ export class Monitor {
   }
 
   private invalidateSubtasks() {
+    this.subtaskRuntime?.resetAccess();
     this.subtaskRuntime?.invalidate();
     this.subtaskGateway.invalidate();
     this.subtaskGateDispatch = undefined;
@@ -2937,7 +2979,7 @@ export class Monitor {
     );
   }
 
-  /** Candidate insert/replacement is atomic across one shared queue budget. */
+  /** Passive candidate insert/replacement keeps one shared bounded ingress. */
   private enqueuePendingInventory(inventory: CoverageInventory) {
     const existing = this.pendingCoverageInventories.findIndex(
       (candidate) =>
@@ -4318,6 +4360,8 @@ export class Monitor {
     this.coverageFlight = undefined;
     this.coverageGateway.invalidate();
     this.coverageAdapter.reset(this.coverageEpoch);
+    this.subtaskEvidence = undefined;
+    this.subtaskRuntime?.resetAccess();
     this.pendingCoverageInventories = [];
     this.pendingCoverageAccess = [];
     this.coverageAdapterOmissions = 0;

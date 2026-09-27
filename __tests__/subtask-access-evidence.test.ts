@@ -107,6 +107,40 @@ describe("bounded canonical subtask access attestations", () => {
         ),
     ).toBe(false);
   });
+  it("drops only mapping-stale active reads after successful same-item listing replacement", () => {
+    const f = subtaskAccessFixture();
+    f.adapter.start(
+      {
+        toolCallId: "old-map",
+        toolName: "read",
+        args: { path: "extracted/r0-0.txt" },
+      },
+      1,
+    );
+    f.adapter.start(
+      {
+        toolCallId: "other-resource",
+        toolName: "read",
+        args: { path: "extracted/r1-0.txt" },
+      },
+      1,
+    );
+    const previous = f.adapter.accessEvidence();
+    f.run(
+      "new-listing",
+      "bash",
+      { command: "bash export-0.sh docs/resource-0.xlsx" },
+      "One rows 3 nonempty rows 1 file extracted/r0-0.txt",
+    );
+    expect(isCurrentSubtaskAccessEvidence(previous)).toBe(false);
+    expect(
+      f.adapter.accessEvidence().active.map((item) => item.callHash),
+    ).toEqual([subtaskHash("other-resource")]);
+    expect(f.adapter.activity().map((item) => item.callId)).toEqual([
+      "other-resource",
+    ]);
+    expect(f.adapter.accessEvidence().confirmed).toEqual([]);
+  });
   it("replaces wholly dominated receipts across more than16 repeated reads", () => {
     const f = subtaskAccessFixture();
     const semantic = f.adapter.metadata();

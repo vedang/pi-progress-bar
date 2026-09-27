@@ -172,6 +172,53 @@ function boundary(kind: "pending" | "manifest" | "receipt", overflow: number) {
 }
 
 describe("hook-free exact shared adapter budget", () => {
+  it("includes mapping-stale pending cleanup in exact listing replacement preflight", () => {
+    const f = seed(),
+      probe = seed();
+    const args = { command: "bash export-0.sh docs/resource-0.xlsx" };
+    const path = `extracted/${"x".repeat(650)}.txt`;
+    const text = `One rows 3 nonempty rows 1 file ${path}\nTwo rows 2 nonempty rows 1 file extracted/r0-1.txt`;
+    for (const item of [f, probe]) {
+      item.adapter.start(
+        {
+          toolCallId: "stale-read",
+          toolName: "read",
+          args: { path: "extracted/r0-0.txt" },
+        },
+        1,
+      );
+      item.adapter.start(
+        { toolCallId: "replacement", toolName: "bash", args },
+        1,
+      );
+    }
+    probe.run("replacement", "bash", args, text);
+    const next = internal(probe.adapter).listings.get("docs/resource-0.xlsx");
+    if (!next) throw new Error("Expected ordinary replacement");
+    const old = internal(f.adapter).listings.get("docs/resource-0.xlsx");
+    const stale = internal(f.adapter).pending.get("stale-read");
+    const candidate = internal(f.adapter).pending.get("replacement");
+    const before = state(f.adapter);
+    before.pending = [...before.pending, { fixture: true }];
+    const after = {
+      ...before,
+      pending: before.pending.filter(
+        (item) => item !== stale && item !== candidate,
+      ),
+      listings: before.listings.map((item) => (item === old ? next : item)),
+      frontier: internal(probe.adapter).frontier,
+    };
+    const delta = bytes(after) - bytes(before);
+    if (delta < 0)
+      throw new Error("Fixture must require reclaimed pending capacity");
+    fillTo(f.adapter, 65536 - delta);
+    f.run("replacement", "bash", args, text);
+    expect(internal(f.adapter).listings.get("docs/resource-0.xlsx")).toEqual(
+      next,
+    );
+    expect(f.adapter.activity()).toEqual([]);
+    expect(bytes(state(f.adapter))).toBe(65536);
+  });
   it.each(["pending", "manifest", "receipt"] as const)(
     "accepts exact65536-byte %s post-state",
     (kind) => {

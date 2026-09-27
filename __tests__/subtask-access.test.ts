@@ -37,6 +37,43 @@ describe("explicit resource associations and isolated child access", () => {
     expect(JSON.stringify(projection)).not.toContain("extracted/");
     expect(f.parent.status).toBe("not-started");
   });
+  it("does not publish old-mapping activity as observed under a fresh mapping", () => {
+    const f = bound();
+    f.adapter.start(
+      {
+        toolCallId: "old-map",
+        toolName: "read",
+        args: { path: "extracted/r0-0.txt" },
+      },
+      1,
+    );
+    f.adapter.start(
+      {
+        toolCallId: "still-current",
+        toolName: "read",
+        args: { path: "extracted/r1-0.txt" },
+      },
+      1,
+    );
+    f.run(
+      "new-listing",
+      "bash",
+      { command: "bash export-0.sh docs/resource-0.xlsx" },
+      "One rows 3 nonempty rows 1 file extracted/r0-0.txt",
+    );
+    const rows = f.access.snapshot(f.adapter.accessEvidence()).groups[0]
+      .children;
+    expect(rows[0]).toMatchObject({
+      status: "no-observation",
+      activeCallHashes: [],
+    });
+    expect(rows[1].activeCallHashes).toHaveLength(1);
+    expect(
+      f.store
+        .snapshot()
+        .groups[0].children.every((child) => child.status === "pending"),
+    ).toBe(true);
+  });
   it("requires original accepted result and actual successful admission", () => {
     const f = subtaskAccessFixture();
     const access = new SubtaskAccess(f.store);

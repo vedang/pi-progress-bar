@@ -726,6 +726,8 @@ export class Monitor {
     string,
     { decided: Set<string>; advances: number }
   >();
+  /** Named-wake validated report owners; drains never reopen host authority. */
+  private subtaskActiveReportParents = new Set<string>();
   private subtaskScheduleGeneration = 0;
   private subtaskOptionalTurn: "subtask" | "detail" = "subtask";
   /** One adapter-issued capability stays stable until canonical metadata changes. */
@@ -2431,6 +2433,7 @@ export class Monitor {
     this.subtaskReportCandidates.clear();
     this.subtaskReportBlocked.clear();
     this.subtaskReportFrontiers.clear();
+    this.subtaskActiveReportParents.clear();
     this.subtaskScheduleGeneration += 1;
     this.subtaskWakeKey = undefined;
     if (this.subtaskFlight) {
@@ -2883,20 +2886,72 @@ export class Monitor {
     }
   }
 
-  /** Report authority blocks its own decomposition until terminal or invalid. */
-  private activeSubtaskReportParentIds() {
-    const parents = new Set(
-      this.subtaskReportOwners.map((owner) => owner.parentTaskId),
-    );
-    for (const report of this.subtaskRuntime?.checkpoint().journal.reports ??
-      [])
+  /** Named canonical authority decides whether a report may retain its parent. */
+  private refreshActiveSubtaskReportParents(current: SubtaskRuntimeCurrent) {
+    const runtime = this.subtaskRuntime;
+    const store = runtime
+      ? this.restoredSubtaskStore(runtime, current)
+      : undefined;
+    const groups = store?.snapshot().groups ?? [];
+    const parents = new Set<string>();
+    for (const owner of this.subtaskReportOwners) {
+      const parent = current.parents.find(
+        (candidate) =>
+          candidate.id === owner.parentTaskId && candidate.included,
+      );
+      const candidate = this.subtaskReportCandidates.get(owner.parentTaskId);
       if (
-        report.state === "ready" ||
-        report.state === "parked" ||
-        report.state === "dispatched"
+        parent &&
+        owner.source &&
+        candidate &&
+        sameSource(owner.source, candidate.source) &&
+        groups.some(
+          (group) =>
+            group.parentTaskId === parent.id &&
+            group.parentRevision === parent.revision,
+        )
+      )
+        parents.add(owner.parentTaskId);
+    }
+    for (const report of runtime?.checkpoint().journal.reports ?? []) {
+      if (
+        report.state !== "ready" &&
+        report.state !== "parked" &&
+        report.state !== "dispatched"
+      )
+        continue;
+      const group = groups.find((candidate) => candidate.id === report.groupId);
+      if (
+        subtaskRuntimeReportIsCurrent(report, current, {
+          state: { tasks: [...current.parents] },
+          ...(group === undefined ? {} : { group }),
+        })
       )
         parents.add(report.parentTaskId);
-    return parents;
+    }
+    this.subtaskActiveReportParents = parents;
+  }
+
+  /** Physical drains use only ownership captured by a named canonical wake. */
+  private activeSubtaskReportParentIds() {
+    return this.subtaskActiveReportParents;
+  }
+
+  private settleCapturedSubtaskReportParents(runtime: SubtaskRuntime) {
+    const queued = new Set(
+      this.subtaskReportOwners.map((owner) => owner.parentTaskId),
+    );
+    for (const parentTaskId of this.subtaskActiveReportParents) {
+      if (queued.has(parentTaskId)) continue;
+      const report = this.reportJobForParent(runtime, parentTaskId);
+      if (
+        !report ||
+        (report.state !== "ready" &&
+          report.state !== "parked" &&
+          report.state !== "dispatched")
+      )
+        this.subtaskActiveReportParents.delete(parentTaskId);
+    }
   }
 
   /** Named cursor/model/restore wakes only. No timer or self-requeue exists. */
@@ -2919,6 +2974,7 @@ export class Monitor {
       return;
     }
     if (hasReports) this.wakeSubtaskReports(pass, current);
+    this.refreshActiveSubtaskReportParents(current);
     const key = JSON.stringify({
       sourceId: current.sourceId,
       latest: current.latest,
@@ -3052,8 +3108,10 @@ export class Monitor {
         this.installSubtaskRuntime(next);
         if (this.enabled) this.subtaskGateway.enable(this.subtaskIdentity());
       }
-      if (this.enabled && this.subtaskRuntime)
+      if (this.enabled && this.subtaskRuntime) {
         this.wakeCapturedSubtaskReportCandidates(this.subtaskRuntime);
+        this.settleCapturedSubtaskReportParents(this.subtaskRuntime);
+      }
       this.publish();
       this.drain();
     });

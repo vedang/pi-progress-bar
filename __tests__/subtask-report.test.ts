@@ -50,12 +50,13 @@ it("adapts chunk-local source observations without dropping full-roster obligati
   const f = subtaskReportFixture();
   const children = f.options.group.children.map((child, i) => {
     const id = `child-source-${i}`;
-    const text = `${child.label}. ${"Supporting canonical requirements. ".repeat(36)}`;
+    const label = `${child.label} with validation`;
+    const text = `${label}. ${"Supporting canonical requirements. ".repeat(36)}`;
     f.observations.set(id, { id, role: "user", text, hash: subtaskHash(text) });
     return {
       kind: "reword" as const,
       id: child.id,
-      label: child.label,
+      label,
       source: subtaskSource(id, text),
     };
   });
@@ -72,6 +73,13 @@ it("adapts chunk-local source observations without dropping full-roster obligati
     }),
   ).toEqual({ accepted: true });
   f.options.group = f.store.snapshot().groups[0];
+  expect(f.options.group.listRevision).toBe(2);
+  expect(f.options.group.children.map((child) => child.source.entryId)).toEqual(
+    children.map((child) => child.source.entryId),
+  );
+  expect(
+    new Set(f.options.group.children.map((child) => child.source.entryId)).size,
+  ).toBe(22);
   const batches = subtaskReportBatches(f.options);
   expect(batches.flatMap((batch) => batch.childIds)).toEqual(
     f.options.group.children.map((child) => child.id),
@@ -81,7 +89,7 @@ it("adapts chunk-local source observations without dropping full-roster obligati
     const input = JSON.stringify(batch.request);
     expect(Buffer.byteLength(input)).toBeLessThanOrEqual(24576);
     for (const child of f.options.group.children) {
-      expect(input).toContain(child.id);
+      expect(input).toContain(JSON.stringify(child.id));
       expect(input).toContain(child.label);
       const observation = required(f.observations.get(child.source.entryId));
       if (batch.childIds.includes(child.id))

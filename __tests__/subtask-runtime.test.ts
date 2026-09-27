@@ -5,6 +5,7 @@ import type { buildSubtaskProposal } from "../src/analysis/subtask-proposal";
 import type { SubtaskJournalCheckpoint } from "../src/core/subtask-journal";
 import { SubtaskRuntime } from "../src/core/subtask-runtime";
 import { SubtaskStore } from "../src/core/subtasks";
+import { subtaskAccessFixture } from "./fixtures/subtask-access";
 import { subtaskProposalFixture } from "./fixtures/subtask-proposal";
 
 type Component = {
@@ -38,6 +39,9 @@ function fixture() {
     omissions: h.options.omissions,
     selectedModel: h.options.selectedModel,
     resolve: h.options.resolve,
+    ...(h.options.evidence === undefined
+      ? {}
+      : { evidence: h.options.evidence }),
   });
   const commit = vi.fn((candidate: Component) => {
     saved.push(structuredClone(candidate));
@@ -150,7 +154,132 @@ function fixture() {
   };
 }
 
+function associatedFixture() {
+  const h = fixture();
+  const evidence = subtaskAccessFixture([["One", "Two"]]);
+  h.options.evidence = evidence.adapter.metadata();
+  const original = h.propose.getMockImplementation();
+  if (!original) throw new Error("Missing proposal transport");
+  h.propose.mockImplementation(async (...args) => ({
+    ...(await original(...args)),
+    text: evidence.propose([
+      { resourceIndex: 0, itemIndex: 0 },
+      { resourceIndex: 0, itemIndex: 1 },
+    ]).raw,
+  }));
+  return { ...h, evidence };
+}
+
 describe("durable generic subtask runtime", () => {
+  it("binds explicit access only after committed generic admission, never as completion", async () => {
+    const h = associatedFixture();
+    const runtime = h.create();
+    const parent = structuredClone(h.parent);
+    h.commit.mockImplementation((candidate) => {
+      if (candidate.state.groups.length)
+        expect(runtime.snapshot().groups).toEqual([]);
+      h.saved.push(structuredClone(candidate));
+      return true;
+    });
+    await runtime.run(h.parent.id);
+    expect(runtime.snapshot().groups[0]?.children).toHaveLength(2);
+    expect(
+      runtime
+        .accessSnapshot(h.evidence.adapter.accessEvidence())
+        .groups[0]?.children.map((child) => child.status),
+    ).toEqual(["no-observation", "no-observation"]);
+    h.evidence.run(
+      "read-one",
+      "read",
+      { path: "extracted/r0-0.txt" },
+      "private body",
+    );
+    expect(
+      runtime
+        .accessSnapshot(h.evidence.adapter.accessEvidence())
+        .groups[0]?.children.map((child) => child.status),
+    ).toEqual(["observed", "no-observation"]);
+    expect(
+      runtime.snapshot().groups[0].children.map((child) => child.status),
+    ).toEqual(["pending", "pending"]);
+    expect(h.parent).toEqual(parent);
+  });
+  it("does not publish candidate access bindings after admission storage refusal", async () => {
+    const h = associatedFixture();
+    h.commit.mockImplementation((candidate) => {
+      if (candidate.state.groups.length) return false;
+      h.saved.push(structuredClone(candidate));
+      return true;
+    });
+    const runtime = h.create();
+    await runtime.run(h.parent.id);
+    expect(
+      runtime.accessSnapshot(h.evidence.adapter.accessEvidence()).groups,
+    ).toEqual([]);
+    expect(runtime.checkpoint().journal.dispatches).toBe(2);
+  });
+  it("reload retains generic children and charges but never reconstructs runtime access links", async () => {
+    const h = associatedFixture();
+    const runtime = h.create();
+    await runtime.run(h.parent.id);
+    const restored = h.create(runtime.checkpoint());
+    await restored.run(h.parent.id);
+    expect(restored.snapshot().groups[0]?.children).toHaveLength(2);
+    expect(
+      restored
+        .accessSnapshot(h.evidence.adapter.accessEvidence())
+        .groups[0]?.children.map((child) => child.status),
+    ).toEqual(["unavailable", "unavailable"]);
+    expect(h.gate).toHaveBeenCalledTimes(1);
+    expect(h.propose).toHaveBeenCalledTimes(1);
+  });
+  it("accepted retain-only refinement without associations removes prior access links", async () => {
+    const h = associatedFixture();
+    const runtime = h.create();
+    await runtime.run(h.parent.id);
+    const before = runtime.snapshot();
+    h.options.omissions = ["New independent context"];
+    h.propose.mockImplementation(async (request, signal, onDispatch) => {
+      if (!onDispatch(102) || signal.aborted) throw new Error("vetoed");
+      return {
+        provider: "fixture",
+        model: "selected",
+        requestHash: request.requestHash,
+        usage: { inputTokens: 1, outputTokens: 1 },
+        text: h.evidence.propose([undefined, undefined], "task:1", true).raw,
+      };
+    });
+    await runtime.run(h.parent.id);
+    expect(runtime.snapshot().groups[0].listRevision).toBe(
+      before.groups[0].listRevision,
+    );
+    expect(runtime.snapshot().groups[0].children).toEqual(
+      before.groups[0].children,
+    );
+    expect(
+      runtime
+        .accessSnapshot(h.evidence.adapter.accessEvidence())
+        .groups[0]?.children.map((child) => child.status),
+    ).toEqual(["unavailable", "unavailable"]);
+    expect(h.propose).toHaveBeenCalledTimes(2);
+    expect(runtime.checkpoint().journal.dispatches).toBe(4);
+  });
+  it("reset clears access links without changing durable facts or opening a new paid job", async () => {
+    const h = associatedFixture();
+    const runtime = h.create();
+    await runtime.run(h.parent.id);
+    const before = runtime.checkpoint();
+    runtime.resetAccess();
+    expect(
+      runtime
+        .accessSnapshot(h.evidence.adapter.accessEvidence())
+        .groups[0]?.children.map((child) => child.status),
+    ).toEqual(["unavailable", "unavailable"]);
+    expect(runtime.checkpoint()).toEqual(before);
+    await runtime.run(h.parent.id);
+    expect(h.propose).toHaveBeenCalledTimes(1);
+  });
+
   it("retains gate reservation when logical gateway cancellation precedes fetch drain", async () => {
     const h = fixture();
     let release = () => {};

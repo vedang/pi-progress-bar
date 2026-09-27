@@ -21,10 +21,14 @@ Main format/check pass, with the three existing activity-label warnings. Full un
 
 | Suite | Failing cases | Classification / next action |
 |---|---:|---|
-| task-details-replay | 1 | **Production bug.** Accepted detail receipt transaction still writes v10. Main strengthened the existing atomic receipt/usage test to require both prior and accepted saves be v11. Integration owner repairs all live mandatory health/detail preflights and writes to use the strict v11 envelope and preserve the subtask component. |
+| task-details-replay | 0 after repair | **Confirmed production bug repaired in `087dc4f1`.** Accepted detail receipt transaction wrote v10. Main strengthened the atomic receipt/usage test to require both prior and accepted saves be v11; Main independently passed 69 detail/runtime/envelope tests after repair. Worker full unit result: 1672 passes, exact 50 remaining coverage failures. |
 | coverage-monitor | 6 | Workbook-specific integration assertions. Main must map individually to generic admission, passive access, lifecycle, UI and later reconciliation requirements before any rewrite. |
 | coverage-scheduler | 34 | Mixed old intent/report scheduling, recovery, capacity and ownership assertions. Main must preserve applicable safety cases and explicitly identify C06/C07/C09 dependencies; not all are harmless obsolete expectations. |
 | coverage-storage-monitor | 10 | Inventory-specific restore assertions plus durable wallet/provenance protections. Main must port the safety properties to generic store/journal restore; access links are runtime-only under C04. |
+
+## Mapping status
+
+Read-only scout `464ec31e` mapped the original case titles to generic invariants and identified C06 report/C07 scheduler/C09 projection dependencies. This is advisory evidence, not a keeper decision: its claim that positive generic admission/drain/restore tests are missing overlooks the already implemented C05 tests. Main must validate exact keeper coverage and each proposed port. Do not use that report to waive gates, delete or disable tests, or assert that all failures are obsolete.
 
 ## Additional acceptance blockers
 

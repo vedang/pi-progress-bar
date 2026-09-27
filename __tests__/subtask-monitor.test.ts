@@ -20,6 +20,169 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+it("uses optional canonical metadata through the same generic gate and binds read-only access after publication", async () => {
+  const text = "Compare operating costs and risks, then recommend deployment.";
+  const proposeSubtasks = vi.fn(
+    async (
+      request: SubtaskProposalRequest,
+      signal: AbortSignal,
+      onDispatch?: (at: number) => boolean,
+      onPhysicalFlight?: (drain: Promise<void>) => void,
+    ) => {
+      if (onDispatch?.(Date.now()) === false || signal.aborted)
+        throw new Error("vetoed");
+      onPhysicalFlight?.(Promise.resolve());
+      expect(request.input.evidence?.resources[0].items).toHaveLength(2);
+      const contextIndex = request.input.context.findIndex(
+        (item) => item.text === text,
+      );
+      return {
+        provider: "fixture",
+        model: "selected",
+        requestHash: request.requestHash,
+        usage: { inputTokens: 1, outputTokens: 1 },
+        text: JSON.stringify({
+          proposals: [
+            {
+              parentIndex: 0,
+              complete: false,
+              removals: [],
+              children: [
+                "Compare operating costs",
+                "Assess deployment risks",
+              ].map((label, itemIndex) => ({
+                kind: "add",
+                label,
+                evidence: [{ contextIndex, start: 0, end: text.length }],
+                association: { resourceIndex: 0, itemIndex },
+              })),
+            },
+          ],
+        }),
+      };
+    },
+  );
+  const h = monitorHarness([branchEntry("goal", text)], {
+    extractionText: () =>
+      JSON.stringify({
+        add: [
+          {
+            label: "Recommend deployment",
+            kind: "response",
+            basis: "explicit",
+            quote: text,
+          },
+        ],
+        revise: [],
+        archive: [],
+        restore: [],
+        unresolved: false,
+      }),
+    monitorOptions: {
+      selectedModel: () => "fixture/selected",
+      proposeSubtasks,
+    },
+  });
+  running.push(h);
+  h.fetch.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+    const response = (await jevReply(request).json()) as {
+      answers: Record<string, unknown>;
+    };
+    if (request.questions["subtask:0"]) {
+      const need = Boolean(request.state.evidence);
+      response.answers["subtask:0"] = {
+        type: "choice",
+        choice: need ? "yes" : "no",
+        confidence: 1,
+        probabilities: { yes: need ? 1 : 0, no: need ? 0 : 1, uncertain: 0 },
+      };
+    }
+    return Response.json(response);
+  });
+  async function tool(
+    id: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    body: string,
+  ) {
+    h.monitor.observeCoverageToolStart(id, toolName, args);
+    h.monitor.observeCoverageToolEnd(id, toolName);
+    h.replace([
+      ...h.reader(),
+      {
+        type: "message",
+        id: `result-${id}`,
+        message: {
+          role: "toolResult",
+          toolCallId: id,
+          toolName,
+          content: [{ type: "text", text: body }],
+          isError: false,
+        },
+      },
+    ]);
+    h.monitor.confirmCoverageBranch(h.reader());
+    await vi.advanceTimersByTimeAsync(100);
+  }
+  h.start();
+  await h.settle("goal");
+  expect(proposeSubtasks).not.toHaveBeenCalled();
+  const parents = structuredClone(h.monitor.state.tasks);
+  await tool(
+    "manifest",
+    "bash",
+    { command: "unzip -p docs/resource.xlsx xl/workbook.xml" },
+    '<workbook><sheets><sheet name="One"/><sheet name="Two"/></sheets></workbook>',
+  );
+  expect(proposeSubtasks).toHaveBeenCalledTimes(1);
+  expect(h.monitor.subtaskSnapshot().groups[0]?.children).toHaveLength(2);
+  await tool(
+    "write-script",
+    "write",
+    { path: "export.sh", content: "script" },
+    "written",
+  );
+  await tool("read-script", "read", { path: "export.sh" }, "script");
+  await tool(
+    "listing",
+    "bash",
+    { command: "bash export.sh docs/resource.xlsx" },
+    "One rows 2 nonempty rows 1 file extracted/one.txt\nTwo rows 2 nonempty rows 1 file extracted/two.txt",
+  );
+  const calls = h.fetch.mock.calls.length;
+  await tool(
+    "read-one",
+    "read",
+    { path: "extracted/one.txt" },
+    "PRIVATE_ACCESS_BODY",
+  );
+  expect(
+    h.monitor
+      .subtaskAccessSnapshot()
+      .groups[0]?.children.map((child) => child.status),
+  ).toEqual(["observed", "no-observation"]);
+  expect(
+    h.monitor
+      .subtaskSnapshot()
+      .groups[0].children.every((child) => child.status === "pending"),
+  ).toBe(true);
+  expect(h.monitor.state.tasks).toEqual(parents);
+  expect(h.fetch).toHaveBeenCalledTimes(calls);
+  expect(proposeSubtasks).toHaveBeenCalledTimes(1);
+  expect(JSON.stringify(h.monitor.checkpoint())).not.toContain(
+    "PRIVATE_ACCESS_BODY",
+  );
+  h.monitor.turnOff();
+  expect(
+    h.monitor
+      .subtaskAccessSnapshot()
+      .groups.every((group) =>
+        group.children.every((child) => child.status === "unavailable"),
+      ),
+  ).toBe(true);
+});
+
 it("runs generic decomposition after unchanged mandatory semantics without tools or a second parent extraction", async () => {
   const text = "Compare operating costs and risks, then recommend deployment.";
   let need = false;

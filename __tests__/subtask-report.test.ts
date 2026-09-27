@@ -46,6 +46,63 @@ afterEach(() => {
   expect(vi.mocked(fetch)).not.toHaveBeenCalled();
 });
 
+it("shares a canonical job identity across bounded child selections and chunk sizes", () => {
+  const f = subtaskReportFixture();
+  const full = subtaskReportBatches(f.options);
+  const ids = [f.options.group.children[0].id, f.options.group.children[21].id];
+  const selected = subtaskReportBatches(f.options, {
+    childIds: ids,
+    maxQuestions: 1,
+  });
+  expect(selected.map((batch) => batch.childIds)).toEqual(
+    ids.map((id) => [id]),
+  );
+  const jobIdentity = required(full[0]).jobIdentity;
+  expect(jobIdentity).toMatch(/^[a-f0-9]{64}$/);
+  for (const batch of [...full, ...selected]) {
+    expect(batch.jobIdentity).toBe(jobIdentity);
+    expect(
+      subtaskReportDecisions(batch, reply(batch), f.options).receipt
+        ?.jobIdentity,
+    ).toBe(jobIdentity);
+    const input = JSON.stringify(batch.request);
+    for (const child of f.options.group.children)
+      expect(input).toContain(JSON.stringify(child.id));
+  }
+  expect(required(selected[0]).identity).not.toBe(required(full[0]).identity);
+});
+it.each(["foreign", "duplicate", "reversed", "zero", "large", "fractional"])(
+  "rejects invalid report selection %s",
+  (mode) => {
+    const f = subtaskReportFixture();
+    const ids = f.options.group.children.slice(0, 2).map((child) => child.id);
+    const selection = { childIds: ids, maxQuestions: 20 };
+    if (mode === "foreign") selection.childIds = ["subtask-child:999"];
+    if (mode === "duplicate") selection.childIds = [ids[0], ids[0]];
+    if (mode === "reversed") selection.childIds = [...ids].reverse();
+    if (mode === "zero") selection.maxQuestions = 0;
+    if (mode === "large") selection.maxQuestions = 21;
+    if (mode === "fractional") selection.maxQuestions = 1.5;
+    expect(subtaskReportBatches(f.options, selection)).toEqual([]);
+  },
+);
+it("retains full-roster duplicate ambiguity when selecting just one child", () => {
+  const f = subtaskReportFixture(["Review proposal", "Review proposal"]);
+  const batch = required(
+    subtaskReportBatches(f.options, {
+      childIds: [f.options.group.children[0].id],
+      maxQuestions: 1,
+    })[0],
+  );
+  const decisions = subtaskReportDecisions(
+    batch,
+    reply(batch, "completed-item"),
+    f.options,
+  );
+  expect(decisions.reports).toEqual([]);
+  expect(decisions.receipt?.assessments).toHaveLength(1);
+  expect(decisions.receipt?.assessments[0].accepted).toBe(false);
+});
 it("adapts chunk-local source observations without dropping full-roster obligations", () => {
   const f = subtaskReportFixture();
   const children = f.options.group.children.map((child, i) => {

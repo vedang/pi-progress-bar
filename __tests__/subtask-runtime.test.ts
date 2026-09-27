@@ -19,6 +19,7 @@ const empty = (): Component => ({
     version: 1,
     dispatches: 0,
     records: [],
+    reports: [],
     usage: {
       jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
       extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },

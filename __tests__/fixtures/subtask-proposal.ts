@@ -87,6 +87,7 @@ export function subtaskProposalFixture(
       extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
     },
     records: [record],
+    reports: [],
   };
   return {
     parent,

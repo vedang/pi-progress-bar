@@ -438,6 +438,7 @@ describe("conversation-grounded per-parent subtask gate", () => {
           extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
         },
         records: [record],
+        reports: [],
       };
       expect(reusableSubtaskGate(structuredClone(journal), batch)).toEqual(
         record,

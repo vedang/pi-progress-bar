@@ -30,6 +30,7 @@ const journal = (): SubtaskJournalCheckpoint => ({
   dispatches: 0,
   usage: usage(),
   records: [],
+  reports: [],
 });
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
 async function fixture() {

@@ -8,6 +8,7 @@ import {
 } from "../core/subtask-journal";
 import {
   type SubtaskAdmission,
+  type SubtaskGroupSnapshot,
   type SubtaskSnapshot,
   SubtaskStore,
 } from "../core/subtasks";
@@ -62,7 +63,7 @@ export type SubtaskProposalResult =
 /** Resolved code-owned child links from one original accepted model result. */
 export interface ResolvedSubtaskAssociationPlan {
   admission: SubtaskAdmission;
-  group: SubtaskSnapshot["groups"][number];
+  group: SubtaskGroupSnapshot;
   evidence?: SubtaskEvidence;
   associations: Array<{
     childId: string;

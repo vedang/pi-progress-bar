@@ -81,7 +81,7 @@ interface SubtaskRetiredChildSnapshot extends SubtaskChildSnapshot {
   };
 }
 
-interface SubtaskGroupSnapshot {
+export interface SubtaskGroupSnapshot {
   id: string;
   parentTaskId: string;
   parentRevision: number;

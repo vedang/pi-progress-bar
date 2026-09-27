@@ -62,6 +62,7 @@ import {
   restoreSubtaskJournal,
   type SubtaskJournalCheckpoint,
   type SubtaskPhaseRecord,
+  type SubtaskReportJob,
   subtaskJournalIsValid,
 } from "./subtask-journal";
 import {
@@ -2525,6 +2526,44 @@ type SubtaskJobCurrentness = (
   candidate: SubtaskRestoreContext,
 ) => boolean;
 
+type SubtaskReportCurrentness = (
+  report: SubtaskReportJob,
+  candidate: SubtaskRestoreContext,
+) => boolean;
+
+function journalReportIsCurrent(
+  report: SubtaskReportJob,
+  state: HybridState,
+  groups: ReadonlyMap<string, SubtaskGroupSnapshot>,
+  resolve: (entryId: string) => Observation | undefined,
+  isCurrentReport: SubtaskReportCurrentness | undefined,
+) {
+  const parent = state.tasks.find((task) => task.id === report.parentTaskId);
+  const group = groups.get(report.parentTaskId);
+  if (
+    !parent?.included ||
+    parent.revision !== report.parentRevision ||
+    !group ||
+    group.id !== report.groupId ||
+    group.parentTaskId !== parent.id ||
+    group.parentRevision !== parent.revision ||
+    group.listRevision !== report.listRevision ||
+    !canonicalSource(report.source, resolve) ||
+    typeof isCurrentReport !== "function"
+  )
+    return false;
+  try {
+    return (
+      isCurrentReport(
+        detachSubtaskData(report),
+        detachSubtaskData({ state, group }),
+      ) === true
+    );
+  } catch {
+    return false;
+  }
+}
+
 function journalRecordIsCurrent(
   record: SubtaskPhaseRecord,
   state: HybridState,
@@ -2574,6 +2613,7 @@ export function restoreSubtaskCheckpoint(
   resolve: (entryId: string) => Observation | undefined,
   preceding: (entryId: string) => readonly Observation[],
   isCurrentJob?: SubtaskJobCurrentness,
+  isCurrentReport?: SubtaskReportCurrentness,
 ):
   | { state: HybridState; monitor?: SubtaskMonitorCheckpointMetadata }
   | undefined {
@@ -2611,14 +2651,24 @@ export function restoreSubtaskCheckpoint(
       const groups = new Map(
         store.snapshot().groups.map((group) => [group.parentTaskId, group]),
       );
-      const journal = restoreSubtaskJournal(rawJournal, (record) =>
-        journalRecordIsCurrent(
-          record,
-          restoredState,
-          groups,
-          resolve,
-          isCurrentJob,
-        ),
+      const journal = restoreSubtaskJournal(
+        rawJournal,
+        (record) =>
+          journalRecordIsCurrent(
+            record,
+            restoredState,
+            groups,
+            resolve,
+            isCurrentJob,
+          ),
+        (report) =>
+          journalReportIsCurrent(
+            report,
+            restoredState,
+            groups,
+            resolve,
+            isCurrentReport,
+          ),
       );
       if (!journal) return;
       monitor.subtasks = { state: store.checkpoint(), journal };

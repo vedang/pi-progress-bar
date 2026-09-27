@@ -235,6 +235,59 @@ const recordSuppressesAccepted = (
  * Shared restore currentness bridge. The candidate is caller-owned detached
  * data; this function deliberately never consults a live Monitor/store.
  */
+export function subtaskRuntimeReportIsCurrent(
+  report: SubtaskReportJob,
+  current: SubtaskRuntimeCurrent,
+  candidate: {
+    state: Pick<HybridState, "tasks">;
+    group?: SubtaskSnapshot["groups"][number];
+  },
+): boolean {
+  try {
+    const parent = candidate.state.tasks.find(
+      (task) => task.id === report.parentTaskId,
+    );
+    const group = candidate.group;
+    if (
+      !parent?.included ||
+      parent.revision !== report.parentRevision ||
+      !group ||
+      group.id !== report.groupId ||
+      group.parentTaskId !== parent.id ||
+      group.parentRevision !== parent.revision ||
+      group.listRevision !== report.listRevision
+    )
+      return false;
+    const observation = current.resolve(report.source.entryId);
+    if (!observation) return false;
+    const batches = subtaskReportBatches({
+      parent,
+      group,
+      report: observation,
+      resolve: current.resolve,
+    });
+    const batch = batches[0];
+    return (
+      !!batch &&
+      batches.every((item) => item.jobIdentity === batch.jobIdentity) &&
+      report.identity === batch.jobIdentity &&
+      report.parentTaskId === batch.parentTaskId &&
+      report.parentRevision === batch.parentRevision &&
+      report.parentSourceDigest === batch.parentSourceDigest &&
+      report.groupId === batch.groupId &&
+      report.listRevision === batch.listRevision &&
+      report.model === batch.request.model &&
+      sameSource(report.source, batch.source) &&
+      report.childIds.length === group.children.length &&
+      report.childIds.every(
+        (childId, index) => childId === group.children[index]?.id,
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function subtaskRuntimeRecordIsCurrent(
   record: SubtaskPhaseRecord,
   current: SubtaskRuntimeCurrent,
@@ -1441,14 +1494,6 @@ export class SubtaskRuntime {
     current: SubtaskRuntimeCurrent,
     store: SubtaskStore,
   ): boolean {
-    if (
-      !this.parentsAreAuthoritative(current) ||
-      !this.sourceIsCurrent(current, report.source)
-    )
-      return false;
-    const parent = current.parents.find(
-      (candidate) => candidate.id === report.parentTaskId,
-    );
     const group = store
       .snapshot()
       .groups.find(
@@ -1457,40 +1502,10 @@ export class SubtaskRuntime {
           candidate.parentTaskId === report.parentTaskId &&
           candidate.parentRevision === report.parentRevision,
       );
-    if (
-      !parent?.included ||
-      !group ||
-      group.listRevision !== report.listRevision
-    )
-      return false;
-    let observation: Observation | undefined;
-    try {
-      observation = current.resolve(report.source.entryId);
-    } catch {
-      return false;
-    }
-    if (!observation) return false;
-    const batches = subtaskReportBatches({
-      parent,
-      group,
-      report: observation,
-      resolve: current.resolve,
+    return subtaskRuntimeReportIsCurrent(report, current, {
+      state: { tasks: [...current.parents] },
+      ...(group === undefined ? {} : { group }),
     });
-    const batch = batches[0];
-    return (
-      !!batch &&
-      batches.every(
-        (candidate) => candidate.jobIdentity === batch.jobIdentity,
-      ) &&
-      report.identity === batch.jobIdentity &&
-      report.parentSourceDigest === batch.parentSourceDigest &&
-      report.model === batch.request.model &&
-      sameSource(report.source, batch.source) &&
-      report.childIds.length === group.children.length &&
-      report.childIds.every(
-        (childId, index) => childId === group.children[index]?.id,
-      )
-    );
   }
 
   private acceptedSuppressed(

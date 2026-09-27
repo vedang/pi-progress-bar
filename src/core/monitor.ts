@@ -535,6 +535,8 @@ const presentationCard = (
 });
 const MAX_HEALTH_REQUIREMENTS_BYTES = 4 * 1024;
 const MAX_CORRECTION_FACTS = 20;
+/** Blank/thinking history cannot force unbounded optional context reads. */
+const MAX_SUBTASK_CONTEXT_CANDIDATES = 64;
 
 const boundedHealthText = (text: string, maxBytes: number) => {
   if (Buffer.byteLength(text) <= maxBytes) return text;
@@ -2502,8 +2504,14 @@ export class Monitor {
     const omissions: string[] = [];
     const latestIndex = pass.indexOf(latest.id);
     let index = latestIndex - 1;
-    while (index >= 0 && earlier.length < 16) {
+    let inspected = 0;
+    while (
+      index >= 0 &&
+      earlier.length < 16 &&
+      inspected < MAX_SUBTASK_CONTEXT_CANDIDATES
+    ) {
       const header = pass.headers[index--];
+      inspected += 1;
       if (!header) continue;
       const observation = pass.observation(header.id);
       if (!observation) continue;
@@ -2520,7 +2528,7 @@ export class Monitor {
       omissions.push(
         earlier.length >= 16
           ? "Older canonical observations omitted after 16 retained observations"
-          : "Older canonical observations omitted by bounded canonical context",
+          : "Older canonical observations omitted after bounded candidate discovery",
       );
     return {
       sourceId: state.sourceId,
@@ -2723,26 +2731,22 @@ export class Monitor {
     const admission = pass.indexOf(group.source.entryId);
     const cursor = this.state.cursor ? pass.indexOf(this.state.cursor.id) : -1;
     if (admission < 0 || cursor <= admission) return;
-    let source: SourceRef | undefined;
-    for (let index = admission + 1; index <= cursor; index += 1) {
-      const header = pass.headers[index];
-      if (!header) continue;
-      const observation = pass.observation(header.id);
-      if (
-        observation &&
-        Buffer.byteLength(observation.text, "utf8") <= 12 * 1024
-      )
-        source = this.reportSource(observation);
-    }
-    if (!source) return;
+    const report = current.latest;
+    if (
+      report.id !== this.state.cursor?.id ||
+      report.hash !== this.state.cursor.hash ||
+      report.role !== this.state.cursor.role ||
+      Buffer.byteLength(report.text, "utf8") > 12 * 1024
+    )
+      return;
+    const source = this.reportSource(report);
     const parent = current.parents.find(
       (candidate) =>
         candidate.id === group.parentTaskId &&
         candidate.revision === group.parentRevision &&
         candidate.included,
     );
-    const report = current.resolve(source.entryId);
-    if (!parent || !report) return;
+    if (!parent) return;
     const identity = subtaskReportBatches({
       parent,
       group,
@@ -2879,6 +2883,22 @@ export class Monitor {
     }
   }
 
+  /** Report authority blocks its own decomposition until terminal or invalid. */
+  private activeSubtaskReportParentIds() {
+    const parents = new Set(
+      this.subtaskReportOwners.map((owner) => owner.parentTaskId),
+    );
+    for (const report of this.subtaskRuntime?.checkpoint().journal.reports ??
+      [])
+      if (
+        report.state === "ready" ||
+        report.state === "parked" ||
+        report.state === "dispatched"
+      )
+        parents.add(report.parentTaskId);
+    return parents;
+  }
+
   /** Named cursor/model/restore wakes only. No timer or self-requeue exists. */
   private wakeSubtasks(pass: CanonicalPass, force = false) {
     const reportParentIds = new Set(
@@ -2910,14 +2930,16 @@ export class Monitor {
     });
     if (!force && key === this.subtaskWakeKey) return;
     this.subtaskWakeKey = key;
+    const activeReportParents = this.activeSubtaskReportParentIds();
+    const owners = new Set(activeReportParents);
     this.subtaskOwners =
       current.selectedModel && this.options.proposeSubtasks
-        ? current.parents
-            .filter(
-              (parent) => parent.included && !reportParentIds.has(parent.id),
-            )
-            .slice(0, Math.max(0, 20 - reportParentIds.size))
-            .map((parent) => parent.id)
+        ? current.parents.flatMap((parent) => {
+            if (!parent.included) return [];
+            if (!owners.has(parent.id) && owners.size >= 20) return [];
+            owners.add(parent.id);
+            return [parent.id];
+          })
         : [];
   }
 
@@ -2987,7 +3009,15 @@ export class Monitor {
     )
       return false;
     const report = this.subtaskReportOwners.shift();
-    const parentTaskId = report?.parentTaskId ?? this.subtaskOwners.shift();
+    const generic = report
+      ? undefined
+      : this.subtaskOwners.findIndex(
+          (parentTaskId) =>
+            !this.activeSubtaskReportParentIds().has(parentTaskId),
+        );
+    let parentTaskId = report?.parentTaskId;
+    if (!parentTaskId && generic !== undefined && generic >= 0)
+      parentTaskId = this.subtaskOwners.splice(generic, 1)[0];
     if (!parentTaskId) return false;
     const runtime = this.subtaskRuntime;
     const before = report

@@ -1,0 +1,1084 @@
+import { createHash } from "node:crypto";
+import type { ValidatedResult } from "../analysis/gateway";
+import {
+  applySubtaskGate,
+  buildSubtaskGate,
+  type SubtaskGateBatch,
+  type SubtaskGateOptions,
+} from "../analysis/subtask-gate";
+import {
+  applySubtaskProposal,
+  buildSubtaskProposal,
+  type SubtaskProposalRequest,
+} from "../analysis/subtask-proposal";
+import type { SubtaskEvidence } from "../sources/coverage";
+import type { HybridTask, Observation, SourceRef } from "./hybrid-state";
+import {
+  nextSubtaskPhase,
+  restoreSubtaskJournal,
+  type SubtaskJournalCheckpoint,
+  type SubtaskPhaseRecord,
+  subtaskJournalIsValid,
+} from "./subtask-journal";
+import {
+  type SubtaskCheckpoint,
+  type SubtaskSnapshot,
+  SubtaskStore,
+  subtaskCheckpointIsValid,
+} from "./subtasks";
+
+export interface SubtaskRuntimeCheckpoint {
+  state: SubtaskCheckpoint;
+  journal: SubtaskJournalCheckpoint;
+}
+
+export interface SubtaskRuntimeCurrent {
+  sourceId: string;
+  enabled: boolean;
+  parents: readonly HybridTask[];
+  latest: Observation;
+  earlier: readonly Observation[];
+  omissions: readonly string[];
+  selectedModel?: string;
+  resolve: (entryId: string) => Observation | undefined;
+  evidence?: SubtaskEvidence;
+}
+
+export interface SubtaskProposalTransportResult {
+  text: string;
+  model: string;
+  provider: string;
+  requestHash: string;
+  usage: { inputTokens: number; outputTokens: number };
+}
+
+export interface SubtaskRuntimeOptions {
+  initial: SubtaskRuntimeCheckpoint;
+  current: () => SubtaskRuntimeCurrent | undefined;
+  gate: (
+    batch: SubtaskGateBatch,
+    signal: AbortSignal,
+    onDispatch: (at: number) => boolean,
+  ) => Promise<ValidatedResult | undefined>;
+  propose: (
+    request: SubtaskProposalRequest,
+    signal: AbortSignal,
+    onDispatch: (at: number) => boolean,
+  ) => Promise<SubtaskProposalTransportResult | undefined>;
+  commit: (candidate: SubtaskRuntimeCheckpoint) => boolean;
+  onPublish: (snapshot: Readonly<SubtaskSnapshot>) => void;
+}
+
+interface CurrentParent {
+  current: SubtaskRuntimeCurrent;
+  parent: HybridTask;
+  group?: SubtaskSnapshot["groups"][number];
+  options: SubtaskGateOptions;
+}
+
+interface Flight {
+  controller: AbortController;
+  epoch: number;
+  promise: Promise<void>;
+}
+
+interface Ticket {
+  dispatch: number;
+  at: number;
+}
+
+interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+type UsageBucket = "jev" | "extraction";
+
+const emptyJournal = (): SubtaskJournalCheckpoint => ({
+  version: 1,
+  dispatches: 0,
+  usage: {
+    jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
+    extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
+  },
+  records: [],
+});
+
+const deepFreeze = <Value>(
+  value: Value,
+  seen = new WeakSet<object>(),
+): Value => {
+  if (!value || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value)) deepFreeze(child, seen);
+  return Object.freeze(value);
+};
+
+const detached = <Value>(value: Value): Value => structuredClone(value);
+
+const sameSource = (left: SourceRef, right: SourceRef) =>
+  left.entryId === right.entryId &&
+  left.messageHash === right.messageHash &&
+  left.role === right.role &&
+  left.start === right.start &&
+  left.end === right.end &&
+  left.quoteHash === right.quoteHash;
+
+const hash = (value: string) =>
+  createHash("sha256").update(value, "utf8").digest("hex");
+
+const safeNonNegative = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+const finiteNonNegative = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0;
+
+const plainRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value &&
+  typeof value === "object" &&
+  !Array.isArray(value) &&
+  Object.getPrototypeOf(value) === Object.prototype &&
+  Object.values(Object.getOwnPropertyDescriptors(value)).every(
+    (descriptor) => "value" in descriptor && descriptor.enumerable,
+  );
+
+const fieldValue = (record: Record<string, unknown>, key: string) =>
+  Object.getOwnPropertyDescriptor(record, key)?.value;
+
+const usageOf = (value: unknown): Usage | undefined => {
+  if (!plainRecord(value)) return;
+  const usage = fieldValue(value, "usage");
+  if (!plainRecord(usage)) return;
+  const inputTokens = fieldValue(usage, "inputTokens");
+  const outputTokens = fieldValue(usage, "outputTokens");
+  return safeNonNegative(inputTokens) && safeNonNegative(outputTokens)
+    ? { inputTokens, outputTokens }
+    : undefined;
+};
+
+const gateUsageOf = (value: unknown): Usage | undefined => {
+  if (!plainRecord(value)) return;
+  const usage = fieldValue(value, "usage");
+  if (!plainRecord(usage)) return;
+  const inputTokens = fieldValue(usage, "input_tokens");
+  const outputTokens = fieldValue(usage, "output_tokens");
+  return safeNonNegative(inputTokens) && safeNonNegative(outputTokens)
+    ? { inputTokens, outputTokens }
+    : undefined;
+};
+
+/**
+ * Disconnected C05 coordinator. It owns only generic sidecar store/journal
+ * state; Monitor remains owner of mandatory state and full-envelope storage.
+ */
+export class SubtaskRuntime {
+  private initial?: SubtaskRuntimeCheckpoint;
+  private store = new SubtaskStore();
+  private journal = emptyJournal();
+  private initialized = false;
+  private initializationBlocked = false;
+  private sourceId?: string;
+  private sourceFenced = false;
+  private epoch = 0;
+  private flight?: Flight;
+
+  constructor(private readonly options: SubtaskRuntimeOptions) {
+    // Isolate restored caller data now, but defer source-current restoration
+    // until a run supplies the authoritative parent set.
+    try {
+      this.initial = detached(options.initial);
+    } catch {
+      this.initializationBlocked = true;
+    }
+  }
+
+  /** Run no more than one physical optional transport flight at a time. */
+  run(parentTaskId: string): Promise<void> {
+    if (this.flight) return this.flight.promise;
+
+    const controller = new AbortController();
+    const flight: Flight = {
+      controller,
+      epoch: this.epoch,
+      promise: Promise.resolve(),
+    };
+    // Reserve before consulting any caller callback. Reentrant save callbacks
+    // therefore observe this same flight instead of opening another one.
+    this.flight = flight;
+    flight.promise = this.runFlight(parentTaskId, flight).finally(() => {
+      if (this.flight === flight) this.flight = undefined;
+    });
+    return flight.promise;
+  }
+
+  /** Fence current work without releasing its physical reservation early. */
+  invalidate(): void {
+    this.epoch += 1;
+    this.flight?.controller.abort();
+  }
+
+  /** Detached read-only durable component for later full-v11 integration. */
+  checkpoint(): Readonly<SubtaskRuntimeCheckpoint> {
+    return deepFreeze({
+      state: this.store.checkpoint(),
+      journal: detached(this.journal),
+    });
+  }
+
+  /** Detached read-only generic list view; callers receive no store authority. */
+  snapshot(): Readonly<SubtaskSnapshot> {
+    return deepFreeze(this.store.snapshot());
+  }
+
+  private async runFlight(parentTaskId: string, flight: Flight): Promise<void> {
+    const current = this.readCurrent();
+    if (!current || !this.initialize(current, flight)) return;
+    if (!current.enabled || !this.flightIsCurrent(flight)) return;
+
+    const prepared = this.currentParent(parentTaskId, flight, current.sourceId);
+    if (!prepared) return;
+
+    // Accepted admission changes the list binding. Its independent trigger,
+    // not old full-group reconstruction, is terminal suppression authority.
+    const bare = buildSubtaskGate(this.withoutGroup(prepared));
+    if (bare) {
+      const confirmed = this.currentParent(
+        parentTaskId,
+        flight,
+        current.sourceId,
+      );
+      const confirmedBare =
+        confirmed && buildSubtaskGate(this.withoutGroup(confirmed));
+      if (!confirmedBare || confirmedBare.identity !== bare.identity) return;
+      if (this.acceptedSuppressed(parentTaskId, bare, confirmed.group)) return;
+    }
+
+    const batch = buildSubtaskGate(prepared.options);
+    if (!batch) return;
+    const existing = this.journal.records.find((record) =>
+      this.recordMatchesBatch(record, batch),
+    );
+    const phase = existing
+      ? nextSubtaskPhase(this.journal, batch.identity)
+      : "gate";
+
+    if (phase === "proposal" && existing)
+      return this.runProposal(prepared, batch, existing, flight);
+    if (phase !== "gate") return;
+
+    // No silent eviction: another unfinished identity for this parent blocks a
+    // fresh context until a later policy layer explicitly resolves it.
+    if (
+      !existing &&
+      this.journal.records.some(
+        (record) =>
+          record.parentTaskId === parentTaskId && record.state !== "complete",
+      )
+    )
+      return;
+
+    return this.runGate(prepared, batch, flight);
+  }
+
+  private async runGate(
+    prepared: CurrentParent,
+    batch: SubtaskGateBatch,
+    flight: Flight,
+  ): Promise<void> {
+    let ticket: Ticket | undefined;
+    let dispatched = false;
+    let result: ValidatedResult | undefined;
+
+    try {
+      result = await this.options.gate(
+        batch,
+        flight.controller.signal,
+        (at) => {
+          if (dispatched || !finiteNonNegative(at)) return false;
+          const current = this.exactBatch(
+            batch,
+            prepared.parent.id,
+            flight,
+            prepared.current.sourceId,
+          );
+          if (!current || !this.gateMayDispatch(batch)) return false;
+
+          const nextTicket: Ticket = {
+            dispatch: this.journal.dispatches + 1,
+            at,
+          };
+          const record = this.gateDispatched(batch, nextTicket);
+          const journal = this.chargedJournal("jev", record);
+          if (!journal || !this.commitCandidate(this.store, journal))
+            return false;
+
+          this.journal = journal;
+          ticket = nextTicket;
+          dispatched = true;
+          return true;
+        },
+      );
+    } catch {
+      return;
+    }
+
+    if (!dispatched || !ticket) return;
+    const usage = gateUsageOf(result);
+    const current = this.exactBatch(
+      batch,
+      prepared.parent.id,
+      flight,
+      prepared.current.sourceId,
+    );
+    if (!current || !result) {
+      this.saveGateFailure(
+        batch,
+        ticket,
+        usage,
+        flight,
+        prepared.current.sourceId,
+      );
+      return;
+    }
+
+    const decision = applySubtaskGate(batch, result, current.options, ticket);
+    if (
+      !decision ||
+      !this.exactBatch(
+        batch,
+        prepared.parent.id,
+        flight,
+        prepared.current.sourceId,
+      )
+    ) {
+      this.saveGateFailure(
+        batch,
+        ticket,
+        usage,
+        flight,
+        prepared.current.sourceId,
+      );
+      return;
+    }
+
+    const journal = this.finalJournal("jev", decision, usage);
+    if (!journal || !this.commitCandidate(this.store, journal)) return;
+    this.journal = journal;
+
+    if (decision.state === "ready") {
+      const next = this.exactBatch(
+        batch,
+        prepared.parent.id,
+        flight,
+        prepared.current.sourceId,
+      );
+      if (next) await this.runProposal(next, batch, decision, flight);
+    }
+  }
+
+  private async runProposal(
+    prepared: CurrentParent,
+    batch: SubtaskGateBatch,
+    gateRecord: SubtaskPhaseRecord,
+    flight: Flight,
+  ): Promise<void> {
+    const request = buildSubtaskProposal(batch, this.journal, prepared.options);
+    if (
+      !request ||
+      !this.exactBatch(
+        batch,
+        prepared.parent.id,
+        flight,
+        prepared.current.sourceId,
+      )
+    )
+      return;
+
+    let ticket: Ticket | undefined;
+    let dispatched = false;
+    let result: SubtaskProposalTransportResult | undefined;
+    try {
+      result = await this.options.propose(
+        request,
+        flight.controller.signal,
+        (at) => {
+          if (dispatched || !finiteNonNegative(at)) return false;
+          const current = this.exactBatch(
+            batch,
+            prepared.parent.id,
+            flight,
+            prepared.current.sourceId,
+          );
+          if (!current || !this.proposalMayDispatch(batch, gateRecord))
+            return false;
+
+          const nextTicket: Ticket = {
+            dispatch: this.journal.dispatches + 1,
+            at,
+          };
+          const record = this.proposalDispatched(
+            gateRecord,
+            request,
+            nextTicket,
+          );
+          const journal = this.chargedJournal("extraction", record);
+          if (!journal || !this.commitCandidate(this.store, journal))
+            return false;
+
+          this.journal = journal;
+          ticket = nextTicket;
+          dispatched = true;
+          return true;
+        },
+      );
+    } catch {
+      return;
+    }
+
+    if (!dispatched || !ticket) return;
+    const usage = usageOf(result);
+    const current = this.exactBatch(
+      batch,
+      prepared.parent.id,
+      flight,
+      prepared.current.sourceId,
+    );
+    if (!current || !this.validProposalResult(result, request, batch)) {
+      this.saveProposalFailure(
+        gateRecord,
+        request,
+        ticket,
+        usage,
+        flight,
+        prepared.current.sourceId,
+      );
+      return;
+    }
+
+    const applied = applySubtaskProposal(request, result.text, current.options);
+    if (
+      !applied ||
+      !this.exactBatch(
+        batch,
+        prepared.parent.id,
+        flight,
+        prepared.current.sourceId,
+      )
+    ) {
+      this.saveProposalFailure(
+        gateRecord,
+        request,
+        ticket,
+        usage,
+        flight,
+        prepared.current.sourceId,
+      );
+      return;
+    }
+
+    if (applied.status === "noop") {
+      const record = this.proposalFinal(gateRecord, request, ticket, "noop");
+      const journal = this.finalJournal("extraction", record, usage);
+      if (!journal || !this.commitCandidate(this.store, journal)) return;
+      this.journal = journal;
+      return;
+    }
+
+    const candidate = this.cloneStore(current.current);
+    if (!candidate?.admit(applied.admission).accepted) {
+      this.saveProposalFailure(
+        gateRecord,
+        request,
+        ticket,
+        usage,
+        flight,
+        prepared.current.sourceId,
+      );
+      return;
+    }
+    const admitted = candidate.resolveAdmission(applied.admission);
+    if (!admitted) {
+      this.saveProposalFailure(
+        gateRecord,
+        request,
+        ticket,
+        usage,
+        flight,
+        prepared.current.sourceId,
+      );
+      return;
+    }
+
+    const record = this.proposalFinal(
+      gateRecord,
+      request,
+      ticket,
+      "accepted",
+      admitted.listRevision,
+    );
+    const journal = this.finalJournal("extraction", record, usage);
+    if (!journal || !this.commitCandidate(candidate, journal)) return;
+
+    // Save succeeded before either mutable owner changes or publication.
+    this.store = candidate;
+    this.journal = journal;
+    try {
+      this.options.onPublish(this.snapshot());
+    } catch {
+      // Observers never alter an already durable admission.
+    }
+  }
+
+  private initialize(current: SubtaskRuntimeCurrent, flight: Flight): boolean {
+    if (this.sourceFenced || this.initializationBlocked) return false;
+    if (this.initialized) {
+      if (this.sourceId === current.sourceId) return true;
+      this.sourceFenced = true;
+      this.epoch += 1;
+      flight.controller.abort();
+      return false;
+    }
+    if (
+      !this.initial ||
+      !subtaskCheckpointIsValid(this.initial.state) ||
+      !subtaskJournalIsValid(this.initial.journal)
+    ) {
+      this.initializationBlocked = true;
+      return false;
+    }
+
+    const store = SubtaskStore.restore(this.initial.state, {
+      parents: current.parents,
+      sourceCurrent: (source) => this.sourceIsCurrent(current, source),
+    });
+    if (!store) return false;
+    const journal = restoreSubtaskJournal(this.initial.journal, (record) =>
+      this.restoredRecordIsCurrent(record, current, store),
+    );
+    if (!journal) {
+      this.initializationBlocked = true;
+      return false;
+    }
+
+    this.store = store;
+    this.journal = journal;
+    this.sourceId = current.sourceId;
+    this.initialized = true;
+    return this.flightIsCurrent(flight);
+  }
+
+  private readCurrent(): SubtaskRuntimeCurrent | undefined {
+    try {
+      const current = this.options.current();
+      if (
+        !current ||
+        typeof current.sourceId !== "string" ||
+        !current.sourceId ||
+        typeof current.enabled !== "boolean" ||
+        !Array.isArray(current.parents) ||
+        !Array.isArray(current.earlier) ||
+        !Array.isArray(current.omissions) ||
+        typeof current.resolve !== "function" ||
+        !current.latest
+      )
+        return;
+      if (
+        current.selectedModel !== undefined &&
+        typeof current.selectedModel !== "string"
+      )
+        return;
+      return current;
+    } catch {
+      return;
+    }
+  }
+
+  private currentParent(
+    parentTaskId: string,
+    flight: Flight,
+    expectedSourceId: string,
+  ): CurrentParent | undefined {
+    if (!this.flightIsCurrent(flight) || this.sourceFenced) return;
+    const current = this.readCurrent();
+    if (!current) return;
+    if (
+      current.sourceId !== expectedSourceId ||
+      current.sourceId !== this.sourceId
+    ) {
+      this.sourceFenced = true;
+      this.epoch += 1;
+      flight.controller.abort();
+      return;
+    }
+    if (!current.enabled || !this.reconcile(current)) return;
+    return this.parentFrom(parentTaskId, current, this.store);
+  }
+
+  private parentFrom(
+    parentTaskId: string,
+    current: SubtaskRuntimeCurrent,
+    store: SubtaskStore,
+  ): CurrentParent | undefined {
+    if (!this.parentsAreAuthoritative(current)) return;
+    store.reconcile(current.parents);
+    const parent = current.parents.find(
+      (candidate) => candidate.id === parentTaskId,
+    );
+    if (!parent?.included || typeof current.selectedModel !== "string") return;
+    const group = store
+      .snapshot()
+      .groups.find(
+        (candidate) =>
+          candidate.parentTaskId === parent.id &&
+          candidate.parentRevision === parent.revision,
+      );
+    const options: SubtaskGateOptions = {
+      parent,
+      ...(group === undefined ? {} : { group }),
+      latest: current.latest,
+      earlier: current.earlier,
+      omissions: current.omissions,
+      selectedModel: current.selectedModel,
+      resolve: current.resolve,
+      ...(current.evidence === undefined ? {} : { evidence: current.evidence }),
+    };
+    return {
+      current,
+      parent,
+      ...(group === undefined ? {} : { group }),
+      options,
+    };
+  }
+
+  private reconcile(current: SubtaskRuntimeCurrent): boolean {
+    if (!this.parentsAreAuthoritative(current)) return false;
+    this.store.reconcile(current.parents);
+    return true;
+  }
+
+  private parentsAreAuthoritative(current: SubtaskRuntimeCurrent): boolean {
+    try {
+      return (
+        SubtaskStore.restore(new SubtaskStore().checkpoint(), {
+          parents: current.parents,
+          sourceCurrent: () => true,
+        }) !== undefined
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private withoutGroup(prepared: CurrentParent): SubtaskGateOptions {
+    const { group: _group, ...options } = prepared.options;
+    return options;
+  }
+
+  private exactBatch(
+    batch: SubtaskGateBatch,
+    parentTaskId: string,
+    flight: Flight,
+    sourceId: string,
+  ): CurrentParent | undefined {
+    const current = this.currentParent(parentTaskId, flight, sourceId);
+    if (!current) return;
+    const rebuilt = buildSubtaskGate(current.options);
+    return rebuilt && rebuilt.identity === batch.identity ? current : undefined;
+  }
+
+  private restoredRecordIsCurrent(
+    record: SubtaskPhaseRecord,
+    current: SubtaskRuntimeCurrent,
+    store: SubtaskStore,
+  ): boolean {
+    const parent = current.parents.find(
+      (candidate) => candidate.id === record.parentTaskId,
+    );
+    if (!parent?.included || typeof current.selectedModel !== "string")
+      return false;
+    const group = store
+      .snapshot()
+      .groups.find(
+        (candidate) =>
+          candidate.parentTaskId === parent.id &&
+          candidate.parentRevision === parent.revision,
+      );
+    const options: SubtaskGateOptions = {
+      parent,
+      ...(group === undefined ? {} : { group }),
+      latest: current.latest,
+      earlier: current.earlier,
+      omissions: current.omissions,
+      selectedModel: current.selectedModel,
+      resolve: current.resolve,
+      ...(current.evidence === undefined ? {} : { evidence: current.evidence }),
+    };
+    if (record.proposal?.outcome === "accepted") {
+      const bare = buildSubtaskGate(
+        this.withoutGroup({
+          current,
+          parent,
+          ...(group === undefined ? {} : { group }),
+          options,
+        }),
+      );
+      return !!bare && this.recordSuppressesAccepted(record, bare, group);
+    }
+    const batch = buildSubtaskGate(options);
+    return !!batch && this.recordMatchesBatch(record, batch);
+  }
+
+  private acceptedSuppressed(
+    parentTaskId: string,
+    bare: SubtaskGateBatch,
+    group: SubtaskSnapshot["groups"][number] | undefined,
+  ): boolean {
+    return this.journal.records.some(
+      (record) =>
+        record.parentTaskId === parentTaskId &&
+        this.recordSuppressesAccepted(record, bare, group),
+    );
+  }
+
+  private recordSuppressesAccepted(
+    record: SubtaskPhaseRecord,
+    bare: SubtaskGateBatch,
+    group: SubtaskSnapshot["groups"][number] | undefined,
+  ): boolean {
+    return (
+      record.phase === "proposal-decided" &&
+      record.state === "complete" &&
+      record.proposal?.outcome === "accepted" &&
+      group !== undefined &&
+      group.parentTaskId === bare.parentTaskId &&
+      group.parentRevision === bare.parentRevision &&
+      group.listRevision === record.proposal.listRevision &&
+      record.parentTaskId === bare.parentTaskId &&
+      record.parentRevision === bare.parentRevision &&
+      record.parentSourceDigest === bare.parentSourceDigest &&
+      record.triggerHash === bare.triggerHash &&
+      record.selectedModel === bare.selectedModel &&
+      sameSource(record.source, bare.source)
+    );
+  }
+
+  private recordMatchesBatch(
+    record: SubtaskPhaseRecord,
+    batch: SubtaskGateBatch,
+  ): boolean {
+    return (
+      record.identity === batch.identity &&
+      record.parentTaskId === batch.parentTaskId &&
+      record.parentRevision === batch.parentRevision &&
+      record.parentSourceDigest === batch.parentSourceDigest &&
+      record.listRevision === batch.listRevision &&
+      sameSource(record.source, batch.source) &&
+      record.contextHash === batch.contextHash &&
+      record.triggerHash === batch.triggerHash &&
+      record.gateModel === batch.gateModel &&
+      record.selectedModel === batch.selectedModel
+    );
+  }
+
+  private gateMayDispatch(batch: SubtaskGateBatch): boolean {
+    if (this.journal.dispatches >= 1024) return false;
+    const record = this.journal.records.find(
+      (candidate) => candidate.identity === batch.identity,
+    );
+    return (
+      record === undefined ||
+      (record.phase === "gate-ready" &&
+        record.state === "ready" &&
+        record.gate === undefined &&
+        record.proposal === undefined)
+    );
+  }
+
+  private proposalMayDispatch(
+    batch: SubtaskGateBatch,
+    gateRecord: SubtaskPhaseRecord,
+  ): boolean {
+    if (this.journal.dispatches >= 1024) return false;
+    const record = this.journal.records.find(
+      (candidate) => candidate.identity === batch.identity,
+    );
+    return (
+      record !== undefined &&
+      record.phase === "gate-decided" &&
+      record.state === "ready" &&
+      record.proposal === undefined &&
+      record.gate?.outcome === "decided" &&
+      record.gate.requestHash === gateRecord.gate?.requestHash
+    );
+  }
+
+  private gateDispatched(
+    batch: SubtaskGateBatch,
+    ticket: Ticket,
+  ): SubtaskPhaseRecord {
+    return {
+      identity: batch.identity,
+      parentTaskId: batch.parentTaskId,
+      parentRevision: batch.parentRevision,
+      parentSourceDigest: batch.parentSourceDigest,
+      listRevision: batch.listRevision,
+      source: detached(batch.source),
+      contextHash: batch.contextHash,
+      triggerHash: batch.triggerHash,
+      gateModel: batch.gateModel,
+      selectedModel: batch.selectedModel,
+      phase: "gate-ready",
+      state: "dispatched",
+      gate: {
+        requestHash: batch.requestHash,
+        dispatch: ticket.dispatch,
+        at: ticket.at,
+        outcome: "dispatched",
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+    };
+  }
+
+  private proposalDispatched(
+    gateRecord: SubtaskPhaseRecord,
+    request: SubtaskProposalRequest,
+    ticket: Ticket,
+  ): SubtaskPhaseRecord {
+    return {
+      ...detached(gateRecord),
+      phase: "gate-decided",
+      state: "dispatched",
+      proposal: {
+        requestHash: request.requestHash,
+        dispatch: ticket.dispatch,
+        at: ticket.at,
+        outcome: "dispatched",
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+    };
+  }
+
+  private proposalFinal(
+    gateRecord: SubtaskPhaseRecord,
+    request: SubtaskProposalRequest,
+    ticket: Ticket,
+    outcome: "accepted" | "noop",
+    listRevision?: number,
+  ): SubtaskPhaseRecord {
+    return {
+      ...detached(gateRecord),
+      phase: "proposal-decided",
+      state: "complete",
+      proposal: {
+        requestHash: request.requestHash,
+        dispatch: ticket.dispatch,
+        at: ticket.at,
+        outcome,
+        ...(outcome === "accepted" ? { listRevision } : {}),
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+    } as SubtaskPhaseRecord;
+  }
+
+  private gateFailure(
+    batch: SubtaskGateBatch,
+    ticket: Ticket,
+  ): SubtaskPhaseRecord {
+    return {
+      ...this.gateDispatched(batch, ticket),
+      state: "permanent",
+      gate: {
+        requestHash: batch.requestHash,
+        dispatch: ticket.dispatch,
+        at: ticket.at,
+        outcome: "failed",
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+    };
+  }
+
+  private proposalFailure(
+    gateRecord: SubtaskPhaseRecord,
+    request: SubtaskProposalRequest,
+    ticket: Ticket,
+  ): SubtaskPhaseRecord {
+    return {
+      ...detached(gateRecord),
+      phase: "gate-decided",
+      state: "permanent",
+      proposal: {
+        requestHash: request.requestHash,
+        dispatch: ticket.dispatch,
+        at: ticket.at,
+        outcome: "failed",
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+    };
+  }
+
+  private chargedJournal(
+    bucket: UsageBucket,
+    record: SubtaskPhaseRecord,
+  ): SubtaskJournalCheckpoint | undefined {
+    if (this.journal.dispatches >= 1024) return;
+    const journal = this.replaceRecord(record);
+    journal.dispatches += 1;
+    journal.usage[bucket].calls += 1;
+    return subtaskJournalIsValid(journal) ? journal : undefined;
+  }
+
+  private finalJournal(
+    bucket: UsageBucket,
+    record: SubtaskPhaseRecord,
+    usage: Usage | undefined,
+  ): SubtaskJournalCheckpoint | undefined {
+    if (!usage) return;
+    const journal = this.replaceRecord(record);
+    journal.usage[bucket].inputTokens += usage.inputTokens;
+    journal.usage[bucket].outputTokens += usage.outputTokens;
+    if (!Number.isSafeInteger(journal.usage[bucket].inputTokens)) return;
+    if (!Number.isSafeInteger(journal.usage[bucket].outputTokens)) return;
+    const stored = journal.records.find(
+      (candidate) => candidate.identity === record.identity,
+    );
+    const receipt = bucket === "jev" ? stored?.gate : stored?.proposal;
+    if (!receipt) return;
+    receipt.usage = { ...usage };
+    return subtaskJournalIsValid(journal) ? journal : undefined;
+  }
+
+  private replaceRecord(record: SubtaskPhaseRecord): SubtaskJournalCheckpoint {
+    const journal = detached(this.journal);
+    const index = journal.records.findIndex(
+      (candidate) => candidate.identity === record.identity,
+    );
+    if (index < 0) journal.records.push(detached(record));
+    else journal.records[index] = detached(record);
+    return journal;
+  }
+
+  private commitCandidate(
+    store: SubtaskStore,
+    journal: SubtaskJournalCheckpoint,
+  ): boolean {
+    if (!subtaskJournalIsValid(journal)) return false;
+    let state: SubtaskCheckpoint;
+    try {
+      state = store.checkpoint();
+    } catch {
+      return false;
+    }
+    const candidate = deepFreeze({ state, journal: detached(journal) });
+    try {
+      return this.options.commit(candidate) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private saveGateFailure(
+    batch: SubtaskGateBatch,
+    ticket: Ticket,
+    usage: Usage | undefined,
+    flight: Flight,
+    sourceId: string,
+  ): void {
+    if (!this.maySaveLateUsage(flight, sourceId)) return;
+    const journal = this.finalJournal(
+      "jev",
+      this.gateFailure(batch, ticket),
+      usage,
+    );
+    if (journal && this.commitCandidate(this.store, journal))
+      this.journal = journal;
+  }
+
+  private saveProposalFailure(
+    gateRecord: SubtaskPhaseRecord,
+    request: SubtaskProposalRequest,
+    ticket: Ticket,
+    usage: Usage | undefined,
+    flight: Flight,
+    sourceId: string,
+  ): void {
+    if (!this.maySaveLateUsage(flight, sourceId)) return;
+    const journal = this.finalJournal(
+      "extraction",
+      this.proposalFailure(gateRecord, request, ticket),
+      usage,
+    );
+    if (journal && this.commitCandidate(this.store, journal))
+      this.journal = journal;
+  }
+
+  private maySaveLateUsage(flight: Flight, sourceId: string): boolean {
+    if (!this.flightIsCurrent(flight) || this.sourceFenced) return false;
+    const current = this.readCurrent();
+    if (!current || current.sourceId !== sourceId) return false;
+    return true;
+  }
+
+  private validProposalResult(
+    value: unknown,
+    request: SubtaskProposalRequest,
+    batch: SubtaskGateBatch,
+  ): value is SubtaskProposalTransportResult {
+    if (!plainRecord(value) || !usageOf(value)) return false;
+    const provider = fieldValue(value, "provider");
+    const model = fieldValue(value, "model");
+    return (
+      typeof fieldValue(value, "text") === "string" &&
+      typeof provider === "string" &&
+      typeof model === "string" &&
+      fieldValue(value, "requestHash") === request.requestHash &&
+      `${provider}/${model}` === batch.selectedModel
+    );
+  }
+
+  private cloneStore(current: SubtaskRuntimeCurrent): SubtaskStore | undefined {
+    try {
+      // Current store was already validated internally. Preserve immutable old
+      // provenance while rebuilding only current parent authority for admission.
+      return SubtaskStore.restore(this.store.checkpoint(), {
+        parents: current.parents,
+        sourceCurrent: () => true,
+      });
+    } catch {
+      return;
+    }
+  }
+
+  private sourceIsCurrent(
+    current: SubtaskRuntimeCurrent,
+    source: SourceRef,
+  ): boolean {
+    try {
+      const observation = current.resolve(source.entryId);
+      return (
+        !!observation &&
+        observation.id === source.entryId &&
+        observation.hash === source.messageHash &&
+        observation.role === source.role &&
+        typeof observation.text === "string" &&
+        Number.isSafeInteger(source.start) &&
+        Number.isSafeInteger(source.end) &&
+        source.start >= 0 &&
+        source.end > source.start &&
+        source.end <= observation.text.length &&
+        hash(observation.text) === observation.hash &&
+        hash(observation.text.slice(source.start, source.end)) ===
+          source.quoteHash
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private flightIsCurrent(flight: Flight): boolean {
+    return (
+      this.flight === flight &&
+      this.epoch === flight.epoch &&
+      !flight.controller.signal.aborted
+    );
+  }
+}

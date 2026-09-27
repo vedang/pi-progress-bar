@@ -212,7 +212,7 @@ interface SubtaskCheckpointMetadata {
 }
 
 /** v11 staged monitor projection. It deliberately has no legacy coverage field. */
-interface SubtaskMonitorCheckpointMetadata {
+export interface SubtaskMonitorCheckpointMetadata {
   enabled: boolean;
   usage: {
     jev: { calls: number; inputTokens: number; outputTokens: number };
@@ -2368,6 +2368,136 @@ export function subtaskCheckpointBytes(
   monitor?: SubtaskMonitorCheckpointMetadata,
 ) {
   return subtaskByteLength(stagedSubtaskCheckpoint(state, monitor));
+}
+
+interface SubtaskCheckpointReserve {
+  storeBytes: number;
+  journalBytes: number;
+}
+
+const ownSubtaskCheckpointReserve = (
+  value: unknown,
+): value is SubtaskCheckpointReserve => {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  )
+    return false;
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== 2 ||
+    !keys.includes("storeBytes") ||
+    !keys.includes("journalBytes")
+  )
+    return false;
+  const store = Object.getOwnPropertyDescriptor(value, "storeBytes");
+  const journal = Object.getOwnPropertyDescriptor(value, "journalBytes");
+  if (
+    !store ||
+    !journal ||
+    !("value" in store) ||
+    !("value" in journal) ||
+    !store.enumerable ||
+    !journal.enumerable
+  )
+    return false;
+  return nonNegativeInteger(store.value) && nonNegativeInteger(journal.value);
+};
+
+const safeSubtaskByteSum = (
+  ...values: readonly number[]
+): number | undefined => {
+  let sum = 0;
+  for (const value of values) {
+    if (!nonNegativeInteger(value) || value > Number.MAX_SAFE_INTEGER - sum)
+      return;
+    sum += value;
+  }
+  return sum;
+};
+
+const subtaskBytesFit = (bytes: number, reserve: number, limit: number) => {
+  const total = safeSubtaskByteSum(bytes, reserve);
+  return total !== undefined && total <= limit;
+};
+
+/**
+ * Pure v11 report-capacity preflight. It validates and measures the exact
+ * detached candidate; reserves represent only known final optional growth.
+ */
+export function canCommitSubtaskCheckpoint(
+  state: HybridState,
+  monitor?: SubtaskMonitorCheckpointMetadata,
+  reserve: SubtaskCheckpointReserve = { storeBytes: 0, journalBytes: 0 },
+): boolean {
+  try {
+    if (!ownSubtaskCheckpointReserve(reserve)) return false;
+    const totalReserve = safeSubtaskByteSum(
+      reserve.storeBytes,
+      reserve.journalBytes,
+    );
+    if (totalReserve === undefined) return false;
+
+    const candidate = stagedSubtaskCheckpoint(state, monitor);
+    const candidateMonitor = candidate.monitor;
+    const component = candidateMonitor?.subtasks;
+    if (!component && totalReserve !== 0) return false;
+
+    if (component) {
+      const storeBytes = subtaskByteLength(component.state);
+      const journalBytes = subtaskByteLength(component.journal);
+      const componentBytes = subtaskByteLength(component);
+      if (
+        !subtaskBytesFit(
+          storeBytes,
+          reserve.storeBytes,
+          MAX_SUBTASK_OPTIONAL_BYTES,
+        ) ||
+        !subtaskBytesFit(
+          journalBytes,
+          reserve.journalBytes,
+          MAX_SUBTASK_OPTIONAL_BYTES,
+        ) ||
+        !subtaskBytesFit(
+          componentBytes,
+          totalReserve,
+          MAX_SUBTASK_OPTIONAL_BYTES,
+        )
+      )
+        return false;
+    }
+
+    if (!candidateMonitor)
+      return subtaskBytesFit(
+        subtaskByteLength(candidate),
+        totalReserve,
+        MAX_CHECKPOINT_BYTES,
+      );
+
+    // `false` is one byte larger than `true`; both durable operating modes
+    // must retain the exact candidate and its reserved final growth.
+    const enabled = (value: boolean) =>
+      stagedSubtaskCheckpoint(candidate.state, {
+        ...candidateMonitor,
+        enabled: value,
+      });
+    return (
+      subtaskBytesFit(
+        subtaskByteLength(enabled(true)),
+        totalReserve,
+        MAX_CHECKPOINT_BYTES,
+      ) &&
+      subtaskBytesFit(
+        subtaskByteLength(enabled(false)),
+        totalReserve,
+        MAX_CHECKPOINT_BYTES,
+      )
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**

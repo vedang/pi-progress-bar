@@ -2,6 +2,12 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## Existing-child accounting fixture correction
+
+During the active-owner repair, the worker correctly stopped on Main's same-scope fixture: its request contains22 active children, but the response supplied only two additions. `applySubtaskProposal` requires every existing child to be explicitly retained/reworded/replaced/removed; source must not invent missing operations. Main independently reproduced proposer-called but22-vs24 final labels, then added22 explicit `retain` operations from the request (and asserted zero existing children after parent revision). The two additions and final old22+new2/revised-only2 assertions remain unchanged.
+
+Corrected fixture against baseline `24c6ddf0` source: **3 RED/22 controls passed**. Against paused worker candidate: **25/25 passed**. Worker source restored byte-identically after baseline comparison. No protocol change, no inferred retains, no safety-assertion deletion. Broad validation/source commit and all prior closure blockers still outstanding. Artifacts: `c07-retain-{fixture-diagnostic,candidate-green,baseline-red}.log`.
+
 ## Repair review (`9603ef0d`, still unaccepted)
 
 Main confirmed format/checkPASS (three old warnings) and complete unit **1879 passed/50 known coverage failures** before adding the next REDs. Complete pinned integration this time **81 passed/2 failed**: both TUI and RPC builtin attempted-start correction cases report0 vs1 at `advisory-host.integration.test.ts:773`. Earlier83-pass runs do not waive this reproducible intermittent blocker.

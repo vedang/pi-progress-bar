@@ -335,6 +335,8 @@ it.each([false, true])(
       const contextIndex = request.input.context.findIndex(
         (item) => item.text === amendment,
       );
+      const active = request.input.parents[0]?.group?.children ?? [];
+      expect(active).toHaveLength(revised ? 0 : 22);
       return {
         provider: "fixture",
         model: "selected",
@@ -346,11 +348,17 @@ it.each([false, true])(
               parentIndex: 0,
               complete: false,
               removals: [],
-              children: ["Plan deployment", "Plan recovery"].map((label) => ({
-                kind: "add",
-                label,
-                evidence: [{ contextIndex, start: 0, end: amendment.length }],
-              })),
+              children: [
+                ...active.map((_, childIndex) => ({
+                  kind: "retain",
+                  childIndex,
+                })),
+                ...["Plan deployment", "Plan recovery"].map((label) => ({
+                  kind: "add",
+                  label,
+                  evidence: [{ contextIndex, start: 0, end: amendment.length }],
+                })),
+              ],
             },
           ],
         }),

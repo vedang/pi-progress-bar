@@ -102,6 +102,7 @@ export function monitorHarness(
   options: {
     richDetailsEnabled?: boolean;
     extractionText?: (input: ExtractionInput) => string;
+    monitorOptions?: Partial<MonitorOptions>;
   } = {},
 ) {
   let entries: unknown[] = [...initial];
@@ -142,6 +143,7 @@ export function monitorHarness(
     sourceId: () => "session:test",
     extract,
     richDetailsEnabled: options.richDetailsEnabled ?? false,
+    ...options.monitorOptions,
   };
   const monitor = new Monitor(changed, save, monitorOptions);
   const reader = vi.fn(() => entries);

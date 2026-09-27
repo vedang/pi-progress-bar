@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { encodeCheckpoint } from "../src/core/hybrid-checkpoint";
+import { encodeSubtaskCheckpoint } from "../src/core/hybrid-checkpoint";
 import { type HybridState, observationRef } from "../src/core/hybrid-state";
 import {
   addPatch,
@@ -55,7 +55,7 @@ it("presents completion-event capacity as unresolved, not current progress", asy
   const h = fixture([branchEntry(initialMessage.id, initialMessage.text)]);
   await h.monitor.restore(
     "/nonexistent-hybrid-test",
-    encodeCheckpoint(state, metadata),
+    encodeSubtaskCheckpoint(state, metadata),
     false,
     h.reader,
   );
@@ -86,11 +86,11 @@ it("never admits an in-memory patch or cursor beyond the checkpoint byte bound",
     return { state, source };
   }
   const bytes = Buffer.byteLength(
-    JSON.stringify(encodeCheckpoint(candidate(0).state, metadata)),
+    JSON.stringify(encodeSubtaskCheckpoint(candidate(0).state, metadata)),
   );
   const padding = Math.floor((512 * 1024 - 4500 - bytes) / 898);
   const { state, source } = candidate(padding);
-  const checkpoint = encodeCheckpoint(state, metadata);
+  const checkpoint = encodeSubtaskCheckpoint(state, metadata);
   expect(Buffer.byteLength(JSON.stringify(checkpoint))).toBeGreaterThan(
     500 * 1024,
   );
@@ -294,7 +294,7 @@ it("validates every distinct authoritative accessor once per duplicate hook", as
   h.replace(entries);
   await h.monitor.restore(
     "/nonexistent-hybrid-test",
-    encodeCheckpoint(state, metadata),
+    encodeSubtaskCheckpoint(state, metadata),
     false,
     h.reader,
   );
@@ -392,7 +392,7 @@ it("detects a deep accessor amendment in one hook, without reading unrelated old
   h.replace(entries);
   await h.monitor.restore(
     "/nonexistent-hybrid-test",
-    encodeCheckpoint(state, metadata),
+    encodeSubtaskCheckpoint(state, metadata),
     false,
     h.reader,
   );
@@ -442,7 +442,7 @@ it.each([10, 70])(
     });
     await h.monitor.restore(
       "/nonexistent-hybrid-test",
-      encodeCheckpoint(state, metadata),
+      encodeSubtaskCheckpoint(state, metadata),
       false,
       h.reader,
     );
@@ -567,7 +567,7 @@ it("does not label a single live append after restoration as historical catch-up
   const h = fixture([branchEntry(initialMessage.id, initialMessage.text)]);
   await h.monitor.restore(
     "/nonexistent-hybrid-test",
-    encodeCheckpoint(state, metadata),
+    encodeSubtaskCheckpoint(state, metadata),
     false,
     h.reader,
   );
@@ -629,7 +629,7 @@ it("restores from one reader snapshot even when a second read would return a dif
   h.reader.mockReturnValueOnce([original]).mockReturnValue([revised]);
   await h.monitor.restore(
     "/nonexistent-hybrid-test",
-    encodeCheckpoint(state, metadata),
+    encodeSubtaskCheckpoint(state, metadata),
     false,
     h.reader,
   );

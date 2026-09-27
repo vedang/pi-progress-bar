@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   checkpointBytes,
   MAX_CHECKPOINT_BYTES,
-  monitorCheckpointMetadata,
+  subtaskMonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
 import { normalizedChoiceAssessment } from "../src/core/hybrid-proof";
 import { noPatch, observation } from "./fixtures/hybrid";
@@ -249,7 +249,9 @@ it("detail admission reserves long normalized fractional assessment bytes, not s
     h.monitor,
     [record],
   );
-  const metadata = required(monitorCheckpointMetadata(h.monitor.checkpoint()));
+  const metadata = required(
+    subtaskMonitorCheckpointMetadata(h.monitor.checkpoint()),
+  );
   metadata.taskDetails = [maximum];
   h.monitor.state.scopeError = "";
   const shortSize = checkpointBytes(h.monitor.state, metadata);

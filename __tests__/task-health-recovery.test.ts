@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
-  checkpointStorageStatus,
   MAX_CHECKPOINT_BYTES,
+  subtaskCheckpointStorageStatus,
 } from "../src/core/hybrid-checkpoint";
 import { CanonicalPass } from "../src/sources/messages";
 import { noPatch } from "./fixtures/hybrid";
@@ -71,8 +71,8 @@ it("writes a new version with bounded durable report coverage, never raw report 
     version: number;
     monitor: { healthCards: { provenance: Record<string, unknown> }[] };
   };
-  expect(saved.version).toBe(10);
-  expect(checkpointStorageStatus(saved)).toBe("supported");
+  expect(saved.version).toBe(11);
+  expect(subtaskCheckpointStorageStatus(saved)).toBe("supported");
   for (const card of saved.monitor.healthCards) {
     expect(card.provenance.coverage).toMatchObject({
       references: expect.any(Array),
@@ -355,7 +355,7 @@ it.each(["raw-text", "too-many-refs", "wrong-complete", "unknown-field"])(
       version: number;
       monitor: { healthCards: { provenance: Record<string, unknown> }[] };
     };
-    expect(saved.version).toBe(10);
+    expect(saved.version).toBe(11);
     const coverage = saved.monitor.healthCards[0].provenance.coverage as Record<
       string,
       unknown
@@ -370,7 +370,7 @@ it.each(["raw-text", "too-many-refs", "wrong-complete", "unknown-field"])(
     else if (kind === "wrong-complete") coverage.complete = "yes";
     else coverage.unexpected = true;
     const calls = h.fetch.mock.calls.length;
-    expect(checkpointStorageStatus(saved)).toBe("corrupt");
+    expect(subtaskCheckpointStorageStatus(saved)).toBe("corrupt");
     await reload(h, saved);
     expect(h.monitor.enabled).toBe(false);
     expect(h.fetch).toHaveBeenCalledTimes(calls);

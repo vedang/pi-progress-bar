@@ -3,11 +3,11 @@ import { taskDetailRequest } from "../src/analysis/task-details";
 import { processObservation } from "../src/core/hybrid";
 import {
   checkpointBytes,
-  checkpointStorageStatus,
-  encodeCheckpoint,
+  encodeSubtaskCheckpoint,
   MAX_CHECKPOINT_BYTES,
   type MonitorCheckpointMetadata,
-  monitorCheckpointMetadata,
+  subtaskCheckpointStorageStatus,
+  subtaskMonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
 import { requestHash } from "../src/core/hybrid-proof";
 import { emptyState, type HybridState } from "../src/core/hybrid-state";
@@ -59,17 +59,19 @@ async function ready() {
   return h;
 }
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
-it("uses strict v10; v9 is unsupported without migration", async () => {
+it("uses strict v11; v9 is unsupported without migration", async () => {
   const state = await initial();
-  const cp = encodeCheckpoint(
+  const cp = encodeSubtaskCheckpoint(
     state,
     detailMetadata([detailRecord(required(state.tasks[0]), initialMessage)]),
   );
-  expect(cp.version).toBe(10);
-  expect(checkpointStorageStatus(cp)).toBe("supported");
-  expect(checkpointStorageStatus({ ...cp, version: 9 })).toBe("unsupported");
+  expect(cp.version).toBe(11);
+  expect(subtaskCheckpointStorageStatus(cp)).toBe("supported");
+  expect(subtaskCheckpointStorageStatus({ ...cp, version: 9 })).toBe(
+    "unsupported",
+  );
   expect(
-    savedDetails(monitorCheckpointMetadata(cp) ? cp : undefined),
+    savedDetails(subtaskMonitorCheckpointMetadata(cp) ? cp : undefined),
   ).toHaveLength(1);
   expect(JSON.stringify(cp)).not.toContain('"quote":');
 });
@@ -113,13 +115,13 @@ it.each([
   ],
 ] as const)("strict metadata rejects %s", async (_name, mutate) => {
   const state = await initial();
-  const cp = encodeCheckpoint(
+  const cp = encodeSubtaskCheckpoint(
     state,
     detailMetadata([detailRecord(required(state.tasks[0]), initialMessage)]),
   );
-  expect(checkpointStorageStatus(cp)).toBe("supported");
+  expect(subtaskCheckpointStorageStatus(cp)).toBe("supported");
   mutate(required(savedDetails(cp)[0]));
-  expect(checkpointStorageStatus(cp)).toBe("corrupt");
+  expect(subtaskCheckpointStorageStatus(cp)).toBe("corrupt");
 });
 it("offers exactly once on accepted patch save, never in mandatory pending/core", async () => {
   const saves: {
@@ -215,8 +217,12 @@ it("accepted receipt and usage share save; restoring a covered job never rebills
   expect(firstAccepted).toBeGreaterThan(0);
   const previous = required(h.save.mock.calls[firstAccepted - 1])[0];
   const accepted = required(h.save.mock.calls[firstAccepted])[0];
-  const beforeUsage = required(monitorCheckpointMetadata(previous)).usage.jev;
-  const afterUsage = required(monitorCheckpointMetadata(accepted)).usage.jev;
+  expect(previous).toMatchObject({ version: 11 });
+  expect(accepted).toMatchObject({ version: 11 });
+  const beforeUsage = required(subtaskMonitorCheckpointMetadata(previous)).usage
+    .jev;
+  const afterUsage = required(subtaskMonitorCheckpointMetadata(accepted)).usage
+    .jev;
   expect(afterUsage.inputTokens - beforeUsage.inputTokens).toBe(2);
   expect(afterUsage.outputTokens - beforeUsage.outputTokens).toBe(1);
   h.monitor.turnOff();

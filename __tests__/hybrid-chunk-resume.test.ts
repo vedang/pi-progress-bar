@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { processObservation } from "../src/core/hybrid";
-import { encodeCheckpoint } from "../src/core/hybrid-checkpoint";
+import { encodeSubtaskCheckpoint } from "../src/core/hybrid-checkpoint";
 import { emptyState } from "../src/core/hybrid-state";
 import { addPatch, backend, observation } from "./fixtures/hybrid";
 import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
@@ -41,7 +41,10 @@ it("restores an OFF-interrupted completion chunk without rebilling any accepted 
   const h = monitorHarness(entries);
   running = h;
   h.observe();
-  await h.monitor.restore("/nonexistent-hybrid-test", encodeCheckpoint(state));
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    encodeSubtaskCheckpoint(state),
+  );
   const original = h.fetch.getMockImplementation();
   if (!original) throw new Error("Missing fake");
   let completionCalls = 0;

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { processObservation } from "../src/core/hybrid";
 import {
-  encodeCheckpoint,
-  monitorCheckpointMetadata,
+  encodeSubtaskCheckpoint,
+  subtaskMonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
 import type { HybridState } from "../src/core/hybrid-state";
 import { backend, noPatch, observation } from "./fixtures/hybrid";
@@ -120,9 +120,9 @@ it("restores exact pending context across skipped candidates without unbounded r
       value.pending?.journal.gate && !value.pending.journal.completions.length,
   );
   if (!pending) throw new Error("Missing accepted gate");
-  const checkpoint = encodeCheckpoint(
+  const checkpoint = encodeSubtaskCheckpoint(
     pending,
-    monitorCheckpointMetadata(h.monitor.checkpoint()),
+    subtaskMonitorCheckpointMetadata(h.monitor.checkpoint()),
   );
   h.monitor.stop();
   let reads = 0,

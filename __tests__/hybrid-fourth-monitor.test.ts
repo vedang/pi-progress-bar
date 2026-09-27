@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { extractionInput } from "../src/analysis/extractor";
 import {
   checkpointBytes,
-  encodeCheckpoint,
+  encodeSubtaskCheckpoint,
   type MonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
 import { selectedModelExtractor } from "../src/core/selected-model";
@@ -42,7 +42,7 @@ it.each(["jev", "extraction"] as const)(
     running.push(h);
     await h.monitor.restore(
       "/nonexistent-hybrid-test",
-      encodeCheckpoint(state, metadata),
+      encodeSubtaskCheckpoint(state, metadata),
       false,
       h.reader,
     );
@@ -106,7 +106,7 @@ it("health envelope covers retained old card with prospective dispatch and usage
   running.push(h);
   await h.monitor.restore(
     "/nonexistent-hybrid-test",
-    encodeCheckpoint(state, metadata),
+    encodeSubtaskCheckpoint(state, metadata),
     false,
     h.reader,
   );

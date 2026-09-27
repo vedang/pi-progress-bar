@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { processObservation } from "../src/core/hybrid";
-import { encodeCheckpoint } from "../src/core/hybrid-checkpoint";
+import { encodeSubtaskCheckpoint } from "../src/core/hybrid-checkpoint";
 import { emptyState, type HybridState } from "../src/core/hybrid-state";
 import { selectedModelExtractor } from "../src/core/selected-model";
 import { backend, noPatch, observation } from "./fixtures/hybrid";
@@ -184,7 +184,7 @@ it("resumes an accepted gate with the same earlier evidence, without rebilling t
   ]);
   await h.monitor.restore(
     "/nonexistent-hybrid-test",
-    encodeCheckpoint(gated),
+    encodeSubtaskCheckpoint(gated),
     false,
     h.reader,
   );

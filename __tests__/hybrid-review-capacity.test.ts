@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { processObservation } from "../src/core/hybrid";
 import {
   checkpointBytes,
-  encodeCheckpoint,
+  encodeSubtaskCheckpoint,
   type MonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
 import { type HybridState, observationRef } from "../src/core/hybrid-state";
@@ -93,13 +93,13 @@ async function settledAtBytes(
     state.cursor = { id: source.id, hash: source.hash, role: source.role };
     return { state, source, tail };
   }
-  const zero = size(encodeCheckpoint(candidate(0).state, meta));
+  const zero = size(encodeSubtaskCheckpoint(candidate(0).state, meta));
   const padding = Math.floor((target - zero) / (900 - seed.events.length + 1)); // Filler event refs + cursor.
   expect(padding).toBeGreaterThan(0);
   const partial = candidate(padding);
-  const remainder = target - size(encodeCheckpoint(partial.state, meta));
+  const remainder = target - size(encodeSubtaskCheckpoint(partial.state, meta));
   const result = candidate(padding, remainder);
-  const checkpoint = encodeCheckpoint(result.state, meta);
+  const checkpoint = encodeSubtaskCheckpoint(result.state, meta);
   expect(size(checkpoint)).toBe(target);
   const messages = [
     initialMessage,
@@ -173,7 +173,7 @@ it.each([false, true])(
       );
       state = await acceptGate();
     }
-    const checkpoint = encodeCheckpoint(state, f.meta);
+    const checkpoint = encodeSubtaskCheckpoint(state, f.meta);
     expect(size(checkpoint)).toBe(512 * 1024);
     expect(checkpointBytes(state, { ...f.meta, enabled: false })).toBe(
       512 * 1024 + 1,
@@ -266,7 +266,7 @@ it("finalizes a fully accepted journal above 496KiB without rebilling semantic p
         .length === 3,
   );
   if (!accepted) throw new Error("Missing fully accepted journal");
-  const checkpoint = encodeCheckpoint(accepted, f.meta);
+  const checkpoint = encodeSubtaskCheckpoint(accepted, f.meta);
   expect(size(checkpoint)).toBeGreaterThan(496 * 1024);
   expect(size(checkpoint)).toBeLessThanOrEqual(512 * 1024);
   const h = await restored(f, checkpoint, latest);
@@ -353,7 +353,7 @@ it("accepts a limit-marked large completed journal and clears the marker during 
       state.tasks.every((task) => task.status === "done"),
   );
   if (!accepted) throw new Error("Missing accepted journal");
-  const checkpoint = encodeCheckpoint(accepted, f.meta);
+  const checkpoint = encodeSubtaskCheckpoint(accepted, f.meta);
   Reflect.set(checkpoint.state, "capacity", "limit");
   expect(size(checkpoint)).toBeGreaterThan(496 * 1024);
   expect(size(checkpoint)).toBeLessThanOrEqual(512 * 1024);
@@ -407,7 +407,7 @@ it.each([480, 499])(
     );
     expect(ids.length).toBeGreaterThan(0);
     expect(ids.length).toBeLessThan(20);
-    const checkpoint = encodeCheckpoint(accepted, f.meta);
+    const checkpoint = encodeSubtaskCheckpoint(accepted, f.meta);
     if (kib === 499) expect(size(checkpoint)).toBeGreaterThan(496 * 1024);
     const h = await restored(f, checkpoint, latest);
     h.monitor.turnOn("/nonexistent-hybrid-test");

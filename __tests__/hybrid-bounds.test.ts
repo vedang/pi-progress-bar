@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { processObservation } from "../src/core/hybrid";
 import {
-  encodeCheckpoint,
-  restoreCheckpoint,
+  encodeSubtaskCheckpoint,
+  restoreSubtaskCheckpoint,
 } from "../src/core/hybrid-checkpoint";
 import { emptyState } from "../src/core/hybrid-state";
 import {
@@ -116,7 +116,7 @@ it("does not reread 10k settled historical payloads on ordinary append or duplic
   running.push(h);
   h.observe();
   const last = observation("history-9999", "History 9999.");
-  const checkpoint = encodeCheckpoint(
+  const checkpoint = encodeSubtaskCheckpoint(
     {
       ...emptyState("session:test"),
       cursor: { id: last.id, hash: last.hash, role: last.role },
@@ -223,7 +223,7 @@ it("rejects event-cap mutation before admitting unpersistable completion", async
       revision: 1,
       source: { ...source },
     });
-  expect(() => encodeCheckpoint(state)).not.toThrow();
+  expect(() => encodeSubtaskCheckpoint(state)).not.toThrow();
   const delivery = observation(
     "capacity-delivery",
     "All tasks are complete.",
@@ -235,7 +235,7 @@ it("rejects event-cap mutation before admitting unpersistable completion", async
     backend(noPatch(), { gate: "unchanged", complete: "yes" }),
   );
   expect(next.events.length).toBeLessThanOrEqual(1000);
-  expect(() => encodeCheckpoint(next)).not.toThrow();
+  expect(() => encodeSubtaskCheckpoint(next)).not.toThrow();
   expect(next.tasks.map((t) => t.status)).toEqual(
     state.tasks.map((t) => t.status),
   );
@@ -255,7 +255,7 @@ it.each([false, true])(
       "Work is ongoing.",
       "assistant",
     );
-    const raw = JSON.parse(JSON.stringify(encodeCheckpoint(state)));
+    const raw = JSON.parse(JSON.stringify(encodeSubtaskCheckpoint(state)));
     raw.state.pending = {
       observation: {
         entryId: report.id,
@@ -267,7 +267,7 @@ it.each([false, true])(
       completionHashes: withHash ? ["a".repeat(64)] : [],
     };
     expect(
-      restoreCheckpoint(
+      restoreSubtaskCheckpoint(
         raw,
         "session:test",
         (id) => [initialMessage, report].find((m) => m.id === id),
@@ -289,7 +289,7 @@ it("does not persist malformed model response text through JSON parser exception
     present: true,
     value: "invalid-patch",
   });
-  expect(JSON.stringify(encodeCheckpoint(state))).not.toContain(
+  expect(JSON.stringify(encodeSubtaskCheckpoint(state))).not.toContain(
     "PRIVATE_PROVIDER_SENTINEL",
   );
 });
@@ -324,15 +324,19 @@ it("does not turn a capacity-rejected scope patch into accepted completion work 
   const first = await processObservation(state, message, backend(patch));
   expect(first.cursor).toEqual(state.cursor);
   expect(first.pending?.phase).toBe("extract");
-  const restored = restoreCheckpoint(
-    encodeCheckpoint(first),
+  const restored = restoreSubtaskCheckpoint(
+    encodeSubtaskCheckpoint(first),
     "session:test",
     (id) => [initialMessage, message].find((m) => m.id === id),
     () => [],
   );
   expect(restored).toBeDefined();
   if (!restored) throw new Error("Missing restored blocked state");
-  const next = await processObservation(restored, message, backend(patch));
+  const next = await processObservation(
+    restored.state,
+    message,
+    backend(patch),
+  );
   expect(next.cursor).toEqual(state.cursor);
   expect(next.tasks).toEqual(state.tasks);
   expect(next.events).toEqual(state.events);
@@ -349,7 +353,7 @@ it("notices a changed canonical latest message with the same ID without rereadin
   expect(h.monitor.state.cursor?.hash).toBe(observation("goal", text).hash);
   expect(h.extract.mock.calls.at(-1)?.[0].latest.text).toBe(text);
   expect(
-    restoreCheckpoint(
+    restoreSubtaskCheckpoint(
       h.monitor.checkpoint(),
       "session:test",
       (id) => (id === "goal" ? observation("goal", text) : undefined),

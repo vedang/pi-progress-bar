@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { processObservation } from "../src/core/hybrid";
 import {
-  encodeCheckpoint,
-  monitorCheckpointMetadata,
-  restoreCheckpoint,
+  encodeSubtaskCheckpoint,
+  restoreSubtaskCheckpoint,
+  subtaskMonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
 import type { HybridState } from "../src/core/hybrid-state";
 import { canonicalMessages } from "../src/sources/messages";
@@ -58,7 +58,7 @@ async function pendingFixture() {
       value.pending?.journal.gate && !value.pending.journal.completions.length,
   );
   if (!state) throw new Error("Missing accepted gate");
-  const metadata = monitorCheckpointMetadata(h.monitor.checkpoint());
+  const metadata = subtaskMonitorCheckpointMetadata(h.monitor.checkpoint());
   if (!metadata) throw new Error("Missing metadata");
   return {
     h,
@@ -96,7 +96,7 @@ it.each([false, true])(
     f.h.extract.mockClear();
     const work = f.h.monitor.restore(
       cwd,
-      encodeCheckpoint(f.state, f.metadata),
+      encodeSubtaskCheckpoint(f.state, f.metadata),
       oldEnabled,
       f.h.reader,
     );
@@ -129,7 +129,7 @@ it("restore promise does not resolve before exact context and target state are i
   const work = f.h.monitor
     .restore(
       cwd,
-      encodeCheckpoint(f.state, { ...f.metadata, enabled: false }),
+      encodeSubtaskCheckpoint(f.state, { ...f.metadata, enabled: false }),
       false,
       f.h.reader,
     )
@@ -177,7 +177,7 @@ it("one ON command completes long pending context and never rebills accepted gat
   await finishRestore(
     f.h.monitor.restore(
       cwd,
-      encodeCheckpoint(f.state, { ...f.metadata, enabled: false }),
+      encodeSubtaskCheckpoint(f.state, { ...f.metadata, enabled: false }),
       false,
       f.h.reader,
     ),
@@ -331,9 +331,9 @@ it.each(["lower", "absent"])(
   async (mode) => {
     const { h } = await fixture();
     const before = h.monitor.presentationSnapshot();
-    const metadata = monitorCheckpointMetadata(h.monitor.checkpoint());
+    const metadata = subtaskMonitorCheckpointMetadata(h.monitor.checkpoint());
     if (!metadata) throw new Error("Missing metadata");
-    const lower = encodeCheckpoint(h.monitor.state, {
+    const lower = encodeSubtaskCheckpoint(h.monitor.state, {
       ...metadata,
       lastJevCallAt: 1,
       lastExtractionCallAt: 1,
@@ -404,7 +404,7 @@ it("ON invalidates an accepted pending gate when preceding context changed while
   await finishRestore(
     f.h.monitor.restore(
       cwd,
-      encodeCheckpoint(f.state, { ...f.metadata, enabled: false }),
+      encodeSubtaskCheckpoint(f.state, { ...f.metadata, enabled: false }),
       false,
       f.h.reader,
     ),
@@ -432,7 +432,7 @@ it("ON invalidates an accepted pending gate when preceding context changed while
   const canonical = canonicalMessages(f.entries);
   for (const [saved] of f.h.save.mock.calls) {
     expect(
-      restoreCheckpoint(
+      restoreSubtaskCheckpoint(
         saved,
         f.state.sourceId,
         (id) => canonical.find((item) => item.id === id),
@@ -516,7 +516,7 @@ it("cross-branch restore discards old active references but preserves target acc
   f.h.requests.length = 0;
   await f.h.monitor.restore(
     cwd,
-    encodeCheckpoint(target.state, target.metadata),
+    encodeSubtaskCheckpoint(target.state, target.metadata),
     true,
     f.h.reader,
   );

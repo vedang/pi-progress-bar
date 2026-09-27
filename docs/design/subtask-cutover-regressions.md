@@ -38,6 +38,10 @@ Oracle `83da0447` confirmed the sequencing constraint: progress may record expec
 - Runtime/Monitor association binding implemented in `325157dc`. Host port `b10b490e` exposed missing production ingress; `e0270832` additionally proved ordinary conversation advances dropped access links. Repair `c80f22f0` adds ingress and separates logical invalidation from lifecycle reset. Main passed 47 focused tests and all 5 installed-host admission/drain/access tests. Pinned host passed 4/5, failing the 22-child case before admission. Adapter diagnostics showed 22 mappings and active counts 1/2 when admission succeeded; no adapter change is justified.
 - Full unit/integration/installed-host verification and independent whole-C05 review remain required.
 
+## Latest recovery evidence
+
+`6e367f49` implements the initial approved recovery seam. Main verified 133/133 focused tests and 5/5 host tests on each pinned/installed version. This clears the earlier stale-metadata admission RED, not whole-stage acceptance. Follow-up controls found a parent-revision frontier bug: a new parent revision can restart list revision 1 while the old accepted receipt remains nonsuperseded. New regression checks every persisted component, including gate/proposal dispatch writes, and reload history. Ready-yes retirement, proposal-dispatched retirement, lifetime exhaustion and same-parent list refinement controls pass. Remaining legacy coverage failures, cleanup, full scheduling/report work and independent review remain open.
+
 ## Evidenced sequencing blocker: stale gate owns the parent
 
 After `c80f22f0`, Main reproduced the pinned-host pre-admission failure: one gate charged, no proposal, gate-ready/permanent/failed. An installed-host pass does not clear this failure. Worker removal of the new branch-confirmation hook also reproduced it; that experiment alone does not establish every timing cause.

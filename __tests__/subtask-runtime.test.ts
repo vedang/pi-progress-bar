@@ -25,7 +25,7 @@ const empty = (): Component => ({
     },
   },
 });
-function fixture(expectedProposalDispatch = 2) {
+function fixture(expectedProposalDispatch: number | (() => number) = 2) {
   const h = subtaskProposalFixture();
   const saved: Component[] = [];
   let enabled = true;
@@ -95,7 +95,11 @@ function fixture(expectedProposalDispatch = 2) {
     ) => {
       if (!onDispatch(101) || signal.aborted) throw new Error("vetoed");
       network("proposal");
-      expect(saved.at(-1)?.journal.dispatches).toBe(expectedProposalDispatch);
+      expect(saved.at(-1)?.journal.dispatches).toBe(
+        typeof expectedProposalDispatch === "function"
+          ? expectedProposalDispatch()
+          : expectedProposalDispatch,
+      );
       expect(
         saved
           .at(-1)
@@ -171,6 +175,142 @@ function associatedFixture() {
 }
 
 describe("durable generic subtask runtime", () => {
+  it.each(["ready-yes", "proposal-dispatched"])(
+    "retires %s without granting its old proposal permission",
+    async (mode) => {
+      const h = fixture();
+      const propose = h.propose.getMockImplementation();
+      if (!propose) throw new Error("Missing proposal");
+      h.propose.mockImplementationOnce(async (...args) => {
+        if (mode === "proposal-dispatched") await propose(...args);
+        throw new Error("No proposal result");
+      });
+      const runtime = h.create();
+      await runtime.run(h.parent.id);
+      const old = structuredClone(runtime.checkpoint().journal.records[0]);
+      expect(old).toMatchObject({
+        phase: "gate-decided",
+        state: mode === "ready-yes" ? "ready" : "dispatched",
+        gate: { choice: "yes" },
+      });
+      const charges = runtime.checkpoint().journal.dispatches;
+      expect(charges).toBe(mode === "ready-yes" ? 1 : 2);
+      h.options.selectedModel = "fixture/new-model";
+      h.choose("no");
+      await runtime.run(h.parent.id);
+      expect(runtime.checkpoint().journal.records).toContainEqual({
+        ...old,
+        state: "superseded",
+      });
+      expect(runtime.checkpoint().journal.dispatches).toBe(charges + 1);
+      expect(h.propose).toHaveBeenCalledTimes(1);
+      expect(runtime.snapshot().groups).toEqual([]);
+    },
+  );
+  it("retains superseded charged history at lifetime exhaustion without a fresh network call", async () => {
+    const h = fixture();
+    h.choose("no");
+    const runtime = h.create();
+    await runtime.run(h.parent.id);
+    const initial = structuredClone(runtime.checkpoint());
+    const old = structuredClone(initial.journal.records[0]);
+    initial.journal.dispatches = 1024;
+    initial.journal.usage.jev.calls = 1024;
+    h.options.selectedModel = "fixture/new-model";
+    const restored = h.create(initial);
+    await restored.run(h.parent.id);
+    expect(restored.checkpoint().journal.records).toContainEqual({
+      ...old,
+      state: "superseded",
+    });
+    expect(restored.checkpoint().journal.dispatches).toBe(1024);
+    expect(h.network.mock.calls).toEqual([["gate"]]);
+    expect(h.propose).not.toHaveBeenCalled();
+  });
+  it.each(["refinement", "parent-revision"])(
+    "keeps every committed accepted frontier coherent across %s",
+    async (mode) => {
+      let expectedDispatch = 2;
+      const h = fixture(() => expectedDispatch);
+      const runtime = h.create();
+      await runtime.run(h.parent.id);
+      const oldRecord = structuredClone(
+        runtime.checkpoint().journal.records[0],
+      );
+      const oldGroup = runtime.snapshot().groups[0];
+      expect(oldRecord.proposal?.outcome).toBe("accepted");
+      expectedDispatch = 4;
+      if (mode === "parent-revision") h.parent.revision++;
+      else {
+        h.options.omissions = ["Additional context unavailable"];
+        const original = h.propose.getMockImplementation();
+        if (!original) throw new Error("Missing proposal");
+        h.propose.mockImplementation(async (...args) => {
+          const result = await original(...args);
+          const request = args[0];
+          const contextIndex = request.input.context.findIndex(
+            (item) => item.id === h.latest.id,
+          );
+          return {
+            ...result,
+            text: JSON.stringify({
+              proposals: [
+                {
+                  parentIndex: 0,
+                  complete: false,
+                  removals: [],
+                  children: oldGroup.children.map((child, childIndex) =>
+                    childIndex === 0
+                      ? {
+                          kind: "reword",
+                          childIndex,
+                          label: `${child.label} carefully`,
+                          evidence: [
+                            {
+                              contextIndex,
+                              start: 0,
+                              end: h.latest.text.length,
+                            },
+                          ],
+                        }
+                      : { kind: "retain", childIndex },
+                  ),
+                },
+              ],
+            }),
+          };
+        });
+      }
+      await runtime.run(h.parent.id);
+      expect(runtime.checkpoint().journal.dispatches).toBe(4);
+      expect(runtime.checkpoint().journal.records).toContainEqual({
+        ...oldRecord,
+        state: "superseded",
+      });
+      for (const saved of h.saved)
+        for (const record of saved.journal.records)
+          if (
+            record.state !== "superseded" &&
+            record.proposal?.outcome === "accepted"
+          )
+            expect(
+              saved.state.groups.some(
+                (group) =>
+                  group.parentTaskId === record.parentTaskId &&
+                  group.parentRevision === record.parentRevision &&
+                  group.listRevision === record.proposal?.listRevision,
+              ),
+            ).toBe(true);
+      const history = runtime.checkpoint();
+      const restored = h.create(history);
+      await restored.run(h.parent.id);
+      expect(restored.checkpoint().journal.records).toEqual(
+        history.journal.records,
+      );
+      expect(h.gate).toHaveBeenCalledTimes(2);
+      expect(h.propose).toHaveBeenCalledTimes(2);
+    },
+  );
   it.each([false, true])(
     "retains exact A→B→A charged history without stale permission (reload: %s)",
     async (reload) => {

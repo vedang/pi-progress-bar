@@ -319,9 +319,13 @@ it("bounds blank-history reads when restored report groups really exist", async 
   ).toEqual([20, 2]);
   expect(h.statuses()).toEqual(Array(22).fill("reported-completed"));
 });
-it.each([false, true])(
-  "allows fresh decomposition of an existing group after named input (parent revised: %s)",
-  async (revised) => {
+it.each([
+  { revised: false, parked: false },
+  { revised: true, parked: false },
+  { revised: true, parked: true },
+])(
+  "allows fresh decomposition of an existing group after named input (parent revised: $revised, parked: $parked)",
+  async ({ revised, parked }) => {
     let available = false;
     const amendment = revised
       ? "Revise the plan to include deployment and recovery."
@@ -368,6 +372,16 @@ it.each([false, true])(
       selectedModel: () => (available ? "fixture/selected" : undefined),
       proposeSubtasks,
     });
+    if (parked) {
+      h.setTransport(async () => new Response(null, { status: 503 }));
+      h.append("prior-report", reportText);
+      await h.settle("prior-report");
+      expect(h.checkpoint().monitor?.subtasks?.journal.reports[0].state).toBe(
+        "parked",
+      );
+      expect(h.calls).toHaveLength(1);
+      h.setTransport(undefined);
+    }
     available = true;
     h.setChoice("unchanged");
     const parent = structuredClone(h.monitor.state.tasks[0]);
@@ -422,6 +436,10 @@ it.each([false, true])(
     });
     h.append("amendment", amendment, "user");
     await h.settle("amendment");
+    if (parked) {
+      await vi.advanceTimersByTimeAsync(11000);
+      h.monitor.modelSelected();
+    }
     await vi.advanceTimersByTimeAsync(200);
     expect(h.monitor.state.tasks[0].revision).toBe(
       parent.revision + Number(revised),
@@ -437,6 +455,16 @@ it.each([false, true])(
         .subtaskSnapshot()
         .groups[0].children.map((child) => child.label),
     ).toEqual([...(revised ? [] : labels), "Plan deployment", "Plan recovery"]);
+    if (parked) {
+      const retired = h
+        .checkpoint()
+        .monitor?.subtasks?.journal.reports.find(
+          (job) => job.source.entryId === "prior-report",
+        );
+      expect(retired?.state).toBe("superseded");
+      expect(retired?.attempts).toHaveLength(1);
+      expect(h.calls).toHaveLength(1); // Invalid old report must never retry.
+    }
   },
 );
 it.each([false, true])(

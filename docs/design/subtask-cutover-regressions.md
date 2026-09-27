@@ -2,6 +2,14 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## Invalid parked-owner follow-up (`c9105e86`)
+
+Main independently confirmed the earlier report/Monitor/bounds gate **44/44 passed**. Worker reported full unit1882/50 and integration82/1 (RPC correction blocker remains), not stage acceptance.
+
+Main extended the existing revised-parent scenario with a real HTTP503-parked report before revision. The parent advances to revision2, the gateway delay expires, and an explicit model-selected wake occurs, but fresh proposer calls remain0 vs1. `activeSubtaskReportParentIds()` tests journal state without validating current parent/group/source authority: invalid parked work still locks its parent. Existing no-owner revised and same-scope cases pass. The new assertion also requires old history to become superseded, preserving its one charged attempt and never retrying that invalid report. Do not solve by dropping valid parked ownership, charging an obsolete report, or reopening host readers in physical callbacks.
+
+Artifacts: `c07-active-main-green.log`, `c07-invalid-parked-red.log`. Main owns this additional RED; source repair and full gates remain required.
+
 ## Existing-child accounting fixture correction
 
 During the active-owner repair, the worker correctly stopped on Main's same-scope fixture: its request contains22 active children, but the response supplied only two additions. `applySubtaskProposal` requires every existing child to be explicitly retained/reworded/replaced/removed; source must not invent missing operations. Main independently reproduced proposer-called but22-vs24 final labels, then added22 explicit `retain` operations from the request (and asserted zero existing children after parent revision). The two additions and final old22+new2/revised-only2 assertions remain unchanged.

@@ -102,6 +102,7 @@ const responseText = (response: unknown): string => {
 
   const parts: string[] = [];
   let bytes = 0;
+  let providerTextBytes = 0;
   for (const part of response.content) {
     if (textBlock(part)) {
       const separatorBytes = parts.length ? 1 : 0;
@@ -109,13 +110,14 @@ const responseText = (response: unknown): string => {
       if (bytes + separatorBytes + partBytes > MAX_OUTPUT_BYTES)
         throw unavailable();
       bytes += separatorBytes + partBytes;
+      providerTextBytes += partBytes;
       parts.push(part.text);
       continue;
     }
     if (!thinkingBlock(part)) throw unavailable();
   }
   const text = parts.join("\n");
-  if (!text) throw unavailable();
+  if (!providerTextBytes) throw unavailable();
   return text;
 };
 

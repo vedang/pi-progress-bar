@@ -211,6 +211,13 @@ const textWithinScalarLimit = (value: unknown, limit: number): boolean => {
   let scalars = 0;
   let nonblank = false;
   for (let index = 0; index < value.length; ) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const trail = value.charCodeAt(index + 1);
+      if (!(trail >= 0xdc00 && trail <= 0xdfff)) return false;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
     const codePoint = value.codePointAt(index);
     if (codePoint === undefined) return false;
     const character = String.fromCodePoint(codePoint);
@@ -231,6 +238,13 @@ const labelValidity = (value: unknown): "valid" | AdmissionFailure => {
   let scalars = 0;
   let nonblank = false;
   for (let index = 0; index < value.length; ) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const trail = value.charCodeAt(index + 1);
+      if (!(trail >= 0xdc00 && trail <= 0xdfff)) return "invalid";
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return "invalid";
+    }
     const codePoint = value.codePointAt(index);
     if (codePoint === undefined) return "invalid";
     const character = String.fromCodePoint(codePoint);

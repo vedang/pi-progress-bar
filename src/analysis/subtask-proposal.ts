@@ -182,7 +182,7 @@ const validLabel = (value: unknown): value is string => {
     const unit = value.charCodeAt(index);
     if (unit >= 0xd800 && unit <= 0xdbff) {
       const trail = value.charCodeAt(index + 1);
-      if (trail < 0xdc00 || trail > 0xdfff) return false;
+      if (!(trail >= 0xdc00 && trail <= 0xdfff)) return false;
     } else if (unit >= 0xdc00 && unit <= 0xdfff) {
       return false;
     }
@@ -327,7 +327,7 @@ const proposalSchema = (): RecordValue => ({
                   additionalProperties: false,
                   properties: {
                     kind: { const: "add" },
-                    label: { type: "string", minLength: 1, maxLength: 480 },
+                    label: { type: "string", minLength: 1, maxLength: 240 },
                     evidence: { $ref: "#/$defs/evidence" },
                   },
                 },
@@ -347,7 +347,7 @@ const proposalSchema = (): RecordValue => ({
                   properties: {
                     kind: { enum: ["reword", "replace"] },
                     childIndex: { type: "integer", minimum: 0 },
-                    label: { type: "string", minLength: 1, maxLength: 480 },
+                    label: { type: "string", minLength: 1, maxLength: 240 },
                     evidence: { $ref: "#/$defs/evidence" },
                   },
                 },

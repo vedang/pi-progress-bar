@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ValidatedResult } from "../analysis/gateway";
+import { ownDataJson } from "../analysis/own-data-json";
 import {
   applySubtaskGate,
   buildSubtaskGate,
@@ -1230,7 +1231,13 @@ export class SubtaskRuntime {
     if (!this.options.canCommit) return false;
     const candidate = this.candidateCheckpoint(this.store, journal);
     if (!candidate) return false;
-    const sourceBytes = batch ? JSON.stringify(batch.source).length * 3 : 1024;
+    const serializedSource = batch && ownDataJson(batch.source);
+    if (batch && !serializedSource) return false;
+    // Preserve prior 3-byte-per-code-unit worst-case reserve without invoking
+    // ambient `toJSON`; source refs are part of every final store receipt.
+    const sourceBytes = serializedSource
+      ? serializedSource.json.length * 3
+      : 1024;
     const children = batch?.childIds.length ?? 1;
     const reserve = {
       storeBytes: (sourceBytes + 512) * children + 2048,

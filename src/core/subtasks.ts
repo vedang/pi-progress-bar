@@ -137,6 +137,8 @@ interface SubtaskGroup extends SubtaskGroupSnapshot {
 interface ParentAuthority {
   revision: number;
   included: boolean;
+  /** Current parent source fence; immutable group provenance stays untouched. */
+  sourceDigest: string;
 }
 
 const plainDataRecord = (value: unknown): value is Record<string, unknown> => {
@@ -533,6 +535,23 @@ const cloneRetiredChild = (
   },
 });
 
+const cloneGroupSnapshot = (
+  group: SubtaskGroupSnapshot,
+): SubtaskGroupSnapshot => ({
+  id: group.id,
+  parentTaskId: group.parentTaskId,
+  parentRevision: group.parentRevision,
+  parentSourceDigest: group.parentSourceDigest,
+  listRevision: group.listRevision,
+  source: cloneSource(group.source),
+  proof: cloneProof(group.proof),
+  complete: group.complete,
+  ...(group.knownTotal === undefined ? {} : { knownTotal: group.knownTotal }),
+  children: group.children.map(cloneChild),
+  retired: group.retired.map(cloneRetiredChild),
+  omissions: [...group.omissions],
+});
+
 const cloneSubtaskCheckpoint = (
   checkpoint: SubtaskCheckpoint,
 ): SubtaskCheckpoint => ({
@@ -924,6 +943,41 @@ export class SubtaskStore {
     }
   }
 
+  /**
+   * Resolve only the exact latest admitted list under reconciled current parent
+   * authority. This read-only bridge never substitutes group provenance for a
+   * changed current parent source.
+   */
+  resolveAdmission(
+    input: SubtaskAdmission,
+  ): SubtaskSnapshot["groups"][number] | undefined {
+    try {
+      if (admissionValidity(input) !== "valid") return;
+      const admission = cloneAdmission(input);
+      if (Buffer.byteLength(inertJson(admission), "utf8") > MAX_ADMISSION_BYTES)
+        return;
+      const current = this.currentParents.get(admission.parent.id);
+      const group = this.groups.find(
+        (candidate) =>
+          candidate.parentTaskId === admission.parent.id &&
+          candidate.parentRevision === admission.parent.revision,
+      );
+      if (
+        !this.hasCurrentParentAuthority ||
+        !current ||
+        !group?.included ||
+        !current.included ||
+        current.revision !== admission.parent.revision ||
+        current.sourceDigest !== parentSourceDigest(admission.parent.source) ||
+        group.latestAdmissionDigest !== admissionDigest(admission)
+      )
+        return;
+      return cloneGroupSnapshot(group);
+    } catch {
+      return;
+    }
+  }
+
   reconcile(parents: readonly HybridTask[]): void {
     try {
       if (!densePlainArray(parents, 0, MAX_GROUPS)) return;
@@ -934,6 +988,7 @@ export class SubtaskStore {
         current.set(parent.id, {
           revision: parent.revision,
           included: parent.included,
+          sourceDigest: parentSourceDigest(parent.source),
         });
       }
       const groups = this.groups.flatMap((group) => {
@@ -950,24 +1005,7 @@ export class SubtaskStore {
   }
 
   snapshot(): SubtaskSnapshot {
-    return {
-      groups: this.groups.map((group) => ({
-        id: group.id,
-        parentTaskId: group.parentTaskId,
-        parentRevision: group.parentRevision,
-        parentSourceDigest: group.parentSourceDigest,
-        listRevision: group.listRevision,
-        source: cloneSource(group.source),
-        proof: cloneProof(group.proof),
-        complete: group.complete,
-        ...(group.knownTotal === undefined
-          ? {}
-          : { knownTotal: group.knownTotal }),
-        children: group.children.map(cloneChild),
-        retired: group.retired.map(cloneRetiredChild),
-        omissions: [...group.omissions],
-      })),
-    };
+    return { groups: this.groups.map(cloneGroupSnapshot) };
   }
 
   /**
@@ -1039,6 +1077,7 @@ export class SubtaskStore {
       currentParents.set(snapshot.id, {
         revision: snapshot.revision,
         included: snapshot.included,
+        sourceDigest: parentSourceDigest(snapshot.source),
       });
     }
     const sourceCurrentCallback = options.sourceCurrent;

@@ -6,7 +6,11 @@ import {
   type SubtaskPhaseRecord,
   subtaskJournalIsValid,
 } from "../core/subtask-journal";
-import type { SubtaskAdmission, SubtaskSnapshot } from "../core/subtasks";
+import {
+  type SubtaskAdmission,
+  type SubtaskSnapshot,
+  SubtaskStore,
+} from "../core/subtasks";
 import {
   isCurrentSubtaskEvidence,
   type SubtaskEvidence,
@@ -55,6 +59,18 @@ export type SubtaskProposalResult =
   | { status: "accepted"; admission: SubtaskAdmission }
   | { status: "noop" };
 
+/** Resolved code-owned child links from one original accepted model result. */
+export interface ResolvedSubtaskAssociationPlan {
+  admission: SubtaskAdmission;
+  group: SubtaskSnapshot["groups"][number];
+  evidence?: SubtaskEvidence;
+  associations: Array<{
+    childId: string;
+    resourceKey: string;
+    itemKey: string;
+  }>;
+}
+
 interface ProposalRequestProof {
   input: SubtaskProposalInput;
   inputJson: string;
@@ -81,11 +97,17 @@ interface ParsedRange {
   end: number;
 }
 
+interface ParsedAssociation {
+  resourceIndex: number;
+  itemIndex: number;
+}
+
 interface ParsedOperation {
   kind: "add" | "retain" | "reword" | "replace";
   childIndex?: number;
   label?: string;
   evidence?: ParsedRange[];
+  association?: ParsedAssociation;
 }
 
 interface ParsedRemoval {
@@ -102,7 +124,14 @@ interface ParsedProposal {
   knownTotal?: number;
 }
 
+interface AssociationPlan {
+  admission: SubtaskAdmission;
+  evidence?: SubtaskEvidence;
+  associations: Array<ParsedAssociation & { childPosition: number }>;
+}
+
 const requestProofs = new WeakMap<object, ProposalRequestProof>();
+const associationPlans = new WeakMap<object, AssociationPlan>();
 
 const sha256 = (value: string) =>
   createHash("sha256").update(value, "utf8").digest("hex");
@@ -336,6 +365,7 @@ const proposalSchema = (): RecordValue => ({
                     kind: { const: "add" },
                     label: { type: "string", minLength: 1, maxLength: 240 },
                     evidence: { $ref: "#/$defs/evidence" },
+                    association: { $ref: "#/$defs/association" },
                   },
                 },
                 {
@@ -345,6 +375,7 @@ const proposalSchema = (): RecordValue => ({
                   properties: {
                     kind: { const: "retain" },
                     childIndex: { type: "integer", minimum: 0 },
+                    association: { $ref: "#/$defs/association" },
                   },
                 },
                 {
@@ -356,6 +387,7 @@ const proposalSchema = (): RecordValue => ({
                     childIndex: { type: "integer", minimum: 0 },
                     label: { type: "string", minLength: 1, maxLength: 240 },
                     evidence: { $ref: "#/$defs/evidence" },
+                    association: { $ref: "#/$defs/association" },
                   },
                 },
               ],
@@ -382,6 +414,15 @@ const proposalSchema = (): RecordValue => ({
     },
   },
   $defs: {
+    association: {
+      type: "object",
+      required: ["resourceIndex", "itemIndex"],
+      additionalProperties: false,
+      properties: {
+        resourceIndex: { type: "integer", minimum: 0 },
+        itemIndex: { type: "integer", minimum: 0 },
+      },
+    },
     evidence: {
       type: "array",
       minItems: 1,
@@ -840,28 +881,66 @@ const validEvidence = (
   return ranges;
 };
 
+const validAssociation = (
+  value: unknown,
+  metadata: SubtaskEvidence | undefined,
+): ParsedAssociation | undefined => {
+  if (
+    !metadata ||
+    !hasExactKeys(value, ["resourceIndex", "itemIndex"]) ||
+    !nonNegativeInteger(value.resourceIndex) ||
+    !nonNegativeInteger(value.itemIndex)
+  )
+    return;
+  const resource = metadata.resources[value.resourceIndex];
+  if (!resource?.items[value.itemIndex]) return;
+  return {
+    resourceIndex: value.resourceIndex,
+    itemIndex: value.itemIndex,
+  };
+};
+
 const parseOperation = (
   value: unknown,
   context: readonly Observation[],
+  metadata: SubtaskEvidence | undefined,
 ): ParsedOperation | undefined => {
   if (!plainDataRecord(value)) return;
+  const association = Object.hasOwn(value, "association")
+    ? validAssociation(value.association, metadata)
+    : undefined;
+  if (Object.hasOwn(value, "association") && !association) return;
   switch (value.kind) {
     case "add": {
-      if (!hasExactKeys(value, ["kind", "label", "evidence"])) return;
+      if (!hasExactKeys(value, ["kind", "label", "evidence"], ["association"]))
+        return;
       const evidence = validEvidence(value.evidence, context);
       return validLabel(value.label) && evidence
-        ? { kind: "add", label: value.label, evidence }
+        ? {
+            kind: "add",
+            label: value.label,
+            evidence,
+            ...(association === undefined ? {} : { association }),
+          }
         : undefined;
     }
     case "retain":
-      return hasExactKeys(value, ["kind", "childIndex"]) &&
+      return hasExactKeys(value, ["kind", "childIndex"], ["association"]) &&
         nonNegativeInteger(value.childIndex)
-        ? { kind: "retain", childIndex: value.childIndex }
+        ? {
+            kind: "retain",
+            childIndex: value.childIndex,
+            ...(association === undefined ? {} : { association }),
+          }
         : undefined;
     case "reword":
     case "replace": {
       if (
-        !hasExactKeys(value, ["kind", "childIndex", "label", "evidence"]) ||
+        !hasExactKeys(
+          value,
+          ["kind", "childIndex", "label", "evidence"],
+          ["association"],
+        ) ||
         !nonNegativeInteger(value.childIndex) ||
         !validLabel(value.label)
       )
@@ -873,6 +952,7 @@ const parseOperation = (
             childIndex: value.childIndex,
             label: value.label,
             evidence,
+            ...(association === undefined ? {} : { association }),
           }
         : undefined;
     }
@@ -900,6 +980,7 @@ const parseRemoval = (
 const parseProposal = (
   value: unknown,
   context: readonly Observation[],
+  metadata: SubtaskEvidence | undefined,
 ): ParsedProposal | undefined => {
   if (
     !hasExactKeys(
@@ -920,7 +1001,7 @@ const parseProposal = (
   }
   const children: ParsedOperation[] = [];
   for (const child of value.children) {
-    const parsed = parseOperation(child, context);
+    const parsed = parseOperation(child, context, metadata);
     if (!parsed) return;
     children.push(parsed);
   }
@@ -951,11 +1032,12 @@ const parseProposal = (
 const parsedEnvelope = (
   value: unknown,
   context: readonly Observation[],
+  metadata: SubtaskEvidence | undefined,
 ): ParsedProposal | "noop" | undefined => {
   if (!hasExactKeys(value, ["proposals"]) || !denseArray(value.proposals, 0, 1))
     return;
   if (!value.proposals.length) return "noop";
-  return parseProposal(value.proposals[0], context);
+  return parseProposal(value.proposals[0], context, metadata);
 };
 
 const sourceFor = (
@@ -1063,6 +1145,72 @@ const admissionFor = (
     : deepFreeze(detachedAdmission);
 };
 
+const associationPlanFor = (
+  proposal: ParsedProposal,
+  admission: SubtaskAdmission,
+  evidence: SubtaskEvidence | undefined,
+): AssociationPlan =>
+  deepFreeze({
+    admission,
+    ...(evidence === undefined ? {} : { evidence }),
+    associations: proposal.children.flatMap((operation, childPosition) =>
+      operation.association === undefined
+        ? []
+        : [{ ...operation.association, childPosition }],
+    ),
+  });
+
+/**
+ * Resolve original model association indices only after store admission/current
+ * authority revalidation supplies code-owned child IDs. Clones have no plan.
+ */
+export const resolveSubtaskAssociationPlan = (
+  result: unknown,
+  store: unknown,
+): ResolvedSubtaskAssociationPlan | undefined => {
+  try {
+    if (
+      !result ||
+      typeof result !== "object" ||
+      !(store instanceof SubtaskStore)
+    )
+      return;
+    const plan = associationPlans.get(result);
+    if (
+      !plan ||
+      (plan.evidence !== undefined && !isCurrentSubtaskEvidence(plan.evidence))
+    )
+      return;
+    const group = store.resolveAdmission(plan.admission);
+    if (!group) return;
+    const associations: ResolvedSubtaskAssociationPlan["associations"] = [];
+    for (const association of plan.associations) {
+      const resource = plan.evidence?.resources[association.resourceIndex];
+      const item = resource?.items[association.itemIndex];
+      const child = group.children[association.childPosition];
+      if (!resource || !item || !child) return;
+      associations.push({
+        childId: child.id,
+        resourceKey: resource.resourceKey,
+        itemKey: item.key,
+      });
+    }
+    const admission = detached<SubtaskAdmission>(
+      plan.admission,
+      MAX_RESPONSE_BYTES,
+    );
+    if (!admission) return;
+    return deepFreeze({
+      admission,
+      group,
+      ...(plan.evidence === undefined ? {} : { evidence: plan.evidence }),
+      associations,
+    });
+  } catch {
+    return;
+  }
+};
+
 const currentForProof = (
   proof: ProposalRequestProof,
   options: SubtaskGateOptions,
@@ -1101,7 +1249,11 @@ export const applySubtaskProposal = (
     // Parse untrusted text before resolver callbacks; parser rejects duplicate keys.
     const parsed = parseResponse(raw);
     if (parsed === undefined) return;
-    const envelope = parsedEnvelope(parsed, proof.input.context);
+    const envelope = parsedEnvelope(
+      parsed,
+      proof.input.context,
+      proof.input.evidence,
+    );
     if (envelope === undefined) return;
     const batch = currentForProof(proof, currentOptions);
     if (!batch) return;
@@ -1112,9 +1264,13 @@ export const applySubtaskProposal = (
       batch,
       request.requestHash,
     );
-    return admission === undefined
-      ? undefined
-      : deepFreeze({ status: "accepted" as const, admission });
+    if (admission === undefined) return;
+    const accepted = deepFreeze({ status: "accepted" as const, admission });
+    associationPlans.set(
+      accepted,
+      associationPlanFor(envelope, admission, proof.evidence),
+    );
+    return accepted;
   } catch {
     return;
   }

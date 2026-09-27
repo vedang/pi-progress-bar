@@ -950,7 +950,7 @@ export const supersedeSubtaskRecord = (
 };
 
 /** Retire report scheduling authority while retaining charged history. */
-const supersedeSubtaskReportJob = (
+export const supersedeSubtaskReportJob = (
   report: SubtaskReportJob,
 ): SubtaskReportJob | undefined => {
   try {

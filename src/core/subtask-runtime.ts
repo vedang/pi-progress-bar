@@ -11,6 +11,12 @@ import {
   buildSubtaskProposal,
   type SubtaskProposalRequest,
 } from "../analysis/subtask-proposal";
+import {
+  type SubtaskReportBatch,
+  type SubtaskReportOptions,
+  subtaskReportBatches,
+  subtaskReportDecisions,
+} from "../analysis/subtask-report";
 import type { SubtaskEvidence } from "../sources/coverage";
 import type {
   HybridState,
@@ -27,8 +33,10 @@ import {
   type SubtaskJournalCheckpoint,
   type SubtaskPhaseRecord,
   type SubtaskReportAttempt,
+  type SubtaskReportJob,
   subtaskJournalIsValid,
   supersedeSubtaskRecord,
+  supersedeSubtaskReportJob,
 } from "./subtask-journal";
 import {
   type SubtaskCheckpoint,
@@ -64,6 +72,25 @@ export interface SubtaskProposalTransportResult {
 
 export type SubtaskPhysicalFlightObserver = (drain: Promise<void>) => void;
 
+type SubtaskReportTransportResult =
+  | { kind: "result"; result: ValidatedResult }
+  | { kind: "retryable"; retryAfterMs: number }
+  | { kind: "deferred"; retryAfterMs: number }
+  | { kind: "unavailable" }
+  | { kind: "failed" };
+
+type SubtaskReportTransport = (
+  batch: SubtaskReportBatch,
+  signal: AbortSignal,
+  onDispatch: (at: number) => boolean,
+  onPhysicalFlight: SubtaskPhysicalFlightObserver,
+) => Promise<SubtaskReportTransportResult>;
+
+interface SubtaskReportCommitReserve {
+  storeBytes: number;
+  journalBytes: number;
+}
+
 export interface SubtaskRuntimeOptions {
   initial: SubtaskRuntimeCheckpoint;
   current: () => SubtaskRuntimeCurrent | undefined;
@@ -79,9 +106,28 @@ export interface SubtaskRuntimeOptions {
     onDispatch: (at: number) => boolean,
     onPhysicalFlight: SubtaskPhysicalFlightObserver,
   ) => Promise<SubtaskProposalTransportResult | undefined>;
+  /** Report dispatch remains unavailable until both optional capabilities exist. */
+  report?: SubtaskReportTransport;
+  canCommit?: (
+    candidate: SubtaskRuntimeCheckpoint,
+    reserve: SubtaskReportCommitReserve,
+  ) => boolean;
+  now?: () => number;
   commit: (candidate: SubtaskRuntimeCheckpoint) => boolean;
   onPublish: (snapshot: Readonly<SubtaskSnapshot>) => void;
 }
+
+interface CurrentReport {
+  current: SubtaskRuntimeCurrent;
+  parent: HybridTask;
+  group: SubtaskSnapshot["groups"][number];
+  report: Observation;
+  options: SubtaskReportOptions;
+}
+
+type ReportDecisionsWithReceipt = ReturnType<typeof subtaskReportDecisions> & {
+  receipt: NonNullable<ReturnType<typeof subtaskReportDecisions>["receipt"]>;
+};
 
 interface CurrentParent {
   current: SubtaskRuntimeCurrent;
@@ -330,6 +376,25 @@ export class SubtaskRuntime {
     return flight.promise;
   }
 
+  /** Run one selected durable report chunk. Source omission resumes saved owner. */
+  runReport(parentTaskId: string, source?: SourceRef): Promise<void> {
+    if (this.flight) return this.flight.promise;
+
+    const controller = new AbortController();
+    const flight: Flight = {
+      controller,
+      epoch: this.epoch,
+      promise: Promise.resolve(),
+    };
+    this.flight = flight;
+    flight.promise = this.runReportFlight(parentTaskId, source, flight).finally(
+      () => {
+        if (this.flight === flight) this.flight = undefined;
+      },
+    );
+    return flight.promise;
+  }
+
   /** Fence current work without releasing its physical reservation early. */
   invalidate(): void {
     this.epoch += 1;
@@ -574,7 +639,11 @@ export class SubtaskRuntime {
             request,
             nextTicket,
           );
-          const journal = this.chargedJournal("extraction", record);
+          const journal = this.chargedJournal(
+            "extraction",
+            record,
+            batch.parentTaskId,
+          );
           if (!journal || !this.commitCandidate(this.store, journal))
             return false;
 
@@ -718,6 +787,462 @@ export class SubtaskRuntime {
     }
   }
 
+  private async runReportFlight(
+    parentTaskId: string,
+    source: SourceRef | undefined,
+    flight: Flight,
+  ): Promise<void> {
+    const current = this.readCurrent();
+    if (!current || !this.initialize(current, flight)) return;
+    if (
+      !current.enabled ||
+      !this.flightIsCurrent(flight) ||
+      !this.options.report ||
+      !this.options.canCommit
+    )
+      return;
+
+    let ownerSource = source;
+    if (!ownerSource) {
+      const saved = this.journal.reports.find(
+        (report) =>
+          report.parentTaskId === parentTaskId &&
+          (report.state === "ready" || report.state === "parked"),
+      );
+      if (!saved) return;
+      ownerSource = detached(saved.source);
+    }
+    const prepared = this.currentReport(
+      parentTaskId,
+      ownerSource,
+      flight,
+      current.sourceId,
+    );
+    if (!prepared) return;
+
+    const full = subtaskReportBatches(prepared.options);
+    if (!full.length) return;
+    const identity = full[0]?.jobIdentity;
+    if (!identity || full.some((batch) => batch.jobIdentity !== identity))
+      return;
+    const sameIdentity = this.journal.reports.find(
+      (report) => report.identity === identity,
+    );
+    // Superseded ownership is terminal. A later explicit source must bind a
+    // distinct current report identity rather than revive old authority.
+    if (
+      sameIdentity?.state === "superseded" ||
+      sameIdentity?.state === "complete"
+    )
+      return;
+    if (
+      sameIdentity?.state === "permanent" ||
+      sameIdentity?.state === "dispatched" ||
+      (sameIdentity?.state === "parked" &&
+        !this.reportIsDue(sameIdentity.parkedUntil))
+    )
+      return;
+
+    const remaining = this.reportRemaining(prepared, sameIdentity);
+    if (!remaining.length) return;
+    const batch = this.selectReportBatch(prepared, remaining, identity);
+    if (!batch) return;
+    const owner = sameIdentity ?? this.reportJob(batch, prepared);
+    if (!owner) return;
+    if (
+      !this.exactReport(
+        batch,
+        prepared.parent.id,
+        flight,
+        prepared.current.sourceId,
+      )
+    )
+      return;
+    await this.runReportBatch(prepared, owner, batch, flight);
+  }
+
+  private async runReportBatch(
+    prepared: CurrentReport,
+    owner: SubtaskReportJob,
+    batch: SubtaskReportBatch,
+    flight: Flight,
+  ): Promise<void> {
+    if (!this.options.report || !this.options.canCommit) return;
+    let ticket: Ticket | undefined;
+    let dispatched = false;
+    let outcome: SubtaskReportTransportResult | undefined;
+    let retryUntil: number | undefined;
+    const physicalDrains: Promise<void>[] = [];
+
+    try {
+      outcome = await this.options.report(
+        batch,
+        flight.controller.signal,
+        (at) => {
+          if (dispatched || !finiteNonNegative(at)) return false;
+          const current = this.exactReport(
+            batch,
+            prepared.parent.id,
+            flight,
+            prepared.current.sourceId,
+          );
+          if (!current || !this.reportMayDispatch(owner, batch)) return false;
+          const nextTicket = { dispatch: this.journal.dispatches + 1, at };
+          const report = this.reportDispatched(owner, batch, nextTicket);
+          const journal = this.chargedReportJournal(report);
+          if (!journal || !this.reportCanCommit(journal, batch)) return false;
+          if (
+            !this.exactReport(
+              batch,
+              prepared.parent.id,
+              flight,
+              prepared.current.sourceId,
+            )
+          )
+            return false;
+          if (!this.commitCandidate(this.store, journal)) return false;
+          // Keep charge locally before transport can leave callback.
+          this.journal = journal;
+          if (
+            !this.exactReport(
+              batch,
+              prepared.parent.id,
+              flight,
+              prepared.current.sourceId,
+            )
+          )
+            return false;
+          ticket = nextTicket;
+          dispatched = true;
+          return true;
+        },
+        (drain) => this.retainPhysicalDrain(physicalDrains, drain),
+      );
+      if (!dispatched && outcome?.kind === "deferred")
+        retryUntil = this.reportDeadline(outcome.retryAfterMs);
+      if (dispatched && outcome?.kind === "retryable")
+        retryUntil = this.reportDeadline(outcome.retryAfterMs);
+    } catch {
+      // A transport throw before ticket costs nothing; after ticket it is final.
+    }
+    await this.awaitPhysicalDrains(physicalDrains);
+
+    if (!ticket) {
+      if (retryUntil === undefined) return;
+      const parked = this.reportParked(owner, retryUntil);
+      const journal = this.parkedReportJournal(parked);
+      if (
+        journal &&
+        this.exactReport(
+          batch,
+          prepared.parent.id,
+          flight,
+          prepared.current.sourceId,
+        ) &&
+        this.commitCandidate(this.store, journal)
+      )
+        this.journal = journal;
+      return;
+    }
+
+    if (outcome?.kind === "result") {
+      const current = this.exactReport(
+        batch,
+        prepared.parent.id,
+        flight,
+        prepared.current.sourceId,
+      );
+      const decisions = current
+        ? subtaskReportDecisions(batch, outcome.result, current.options)
+        : undefined;
+      const receipt = decisions?.receipt;
+      if (decisions && receipt && current) {
+        const completeDecisions: ReportDecisionsWithReceipt = {
+          ...decisions,
+          receipt,
+        };
+        const candidate = this.cloneStore(current.current);
+        if (candidate) {
+          const accepted = completeDecisions.reports.every(
+            (report) => candidate.report(report).accepted,
+          );
+          const report = accepted
+            ? this.reportDecided(owner.identity, ticket, completeDecisions)
+            : undefined;
+          const journal = report
+            ? this.finalReportJournal(report, completeDecisions.receipt.usage)
+            : undefined;
+          if (
+            journal &&
+            this.commitCandidate(candidate, journal) &&
+            this.exactReport(
+              batch,
+              prepared.parent.id,
+              flight,
+              prepared.current.sourceId,
+            )
+          ) {
+            for (const decision of completeDecisions.reports)
+              if (!this.store.report(decision).accepted) return;
+            this.journal = journal;
+            try {
+              this.options.onPublish(this.snapshot());
+            } catch {
+              // Publication cannot undo durable report status.
+            }
+            return;
+          }
+        }
+      }
+    } else if (outcome?.kind === "retryable" && retryUntil !== undefined) {
+      const parked = this.reportRetry(owner.identity, ticket, retryUntil);
+      const journal = parked && this.replaceReport(parked);
+      if (
+        journal &&
+        this.maySaveLateUsage(flight, prepared.current.sourceId) &&
+        this.commitCandidate(this.store, journal) &&
+        this.maySaveLateUsage(flight, prepared.current.sourceId)
+      ) {
+        this.journal = journal;
+        return;
+      }
+    }
+    this.saveReportFailure(
+      owner.identity,
+      ticket,
+      flight,
+      prepared.current.sourceId,
+      outcome?.kind === "result" ? usageOf(outcome.result) : undefined,
+    );
+  }
+
+  private currentReport(
+    parentTaskId: string,
+    source: SourceRef,
+    flight: Flight,
+    expectedSourceId: string,
+  ): CurrentReport | undefined {
+    if (!this.flightIsCurrent(flight) || this.sourceFenced) return;
+    const current = this.readCurrent();
+    if (
+      !current ||
+      current.sourceId !== expectedSourceId ||
+      current.sourceId !== this.sourceId
+    ) {
+      this.sourceFenced = true;
+      this.epoch += 1;
+      flight.controller.abort();
+      return;
+    }
+    if (
+      !current.enabled ||
+      !this.reconcile(current) ||
+      !this.sourceIsCurrent(current, source)
+    )
+      return;
+    const parent = current.parents.find(
+      (candidate) => candidate.id === parentTaskId,
+    );
+    if (!parent?.included) return;
+    const group = this.store
+      .snapshot()
+      .groups.find(
+        (candidate) =>
+          candidate.parentTaskId === parent.id &&
+          candidate.parentRevision === parent.revision,
+      );
+    if (!group) return;
+    let report: Observation | undefined;
+    try {
+      report = current.resolve(source.entryId);
+    } catch {
+      return;
+    }
+    if (!report) return;
+    return {
+      current,
+      parent,
+      group,
+      report,
+      options: { parent, group, report, resolve: current.resolve },
+    };
+  }
+
+  private exactReport(
+    batch: SubtaskReportBatch,
+    parentTaskId: string,
+    flight: Flight,
+    sourceId: string,
+  ): CurrentReport | undefined {
+    const current = this.currentReport(
+      parentTaskId,
+      batch.source,
+      flight,
+      sourceId,
+    );
+    if (!current) return;
+    const rebuilt = subtaskReportBatches(current.options, {
+      childIds: batch.childIds,
+      maxQuestions: batch.childIds.length,
+    });
+    return rebuilt.length === 1 &&
+      rebuilt[0]?.identity === batch.identity &&
+      rebuilt[0].jobIdentity === batch.jobIdentity
+      ? current
+      : undefined;
+  }
+
+  private reportRemaining(
+    prepared: CurrentReport,
+    job: SubtaskReportJob | undefined,
+  ): string[] {
+    const roster = prepared.group.children.map((child) => child.id);
+    if (!job) return roster;
+    const source = this.reportJobSource(prepared);
+    if (
+      !source ||
+      job.parentTaskId !== prepared.parent.id ||
+      job.parentRevision !== prepared.parent.revision ||
+      job.groupId !== prepared.group.id ||
+      job.listRevision !== prepared.group.listRevision ||
+      !sameSource(job.source, source) ||
+      job.childIds.length !== roster.length ||
+      job.childIds.some((childId, index) => childId !== roster[index])
+    )
+      return [];
+    const decided = new Set<string>();
+    for (const attempt of job.attempts)
+      if (attempt.outcome === "decided")
+        for (const assessment of attempt.assessments ?? [])
+          decided.add(assessment.childId);
+    return roster.filter((childId) => !decided.has(childId));
+  }
+
+  private selectReportBatch(
+    prepared: CurrentReport,
+    remaining: readonly string[],
+    identity: string,
+  ): SubtaskReportBatch | undefined {
+    const limit = Math.min(20, remaining.length);
+    for (let size = limit; size >= 1; size -= 1) {
+      const batches = subtaskReportBatches(prepared.options, {
+        childIds: remaining.slice(0, size),
+        maxQuestions: size,
+      });
+      const batch = batches.length === 1 ? batches[0] : undefined;
+      if (!batch || batch.jobIdentity !== identity) continue;
+      const owner = this.journal.reports.find(
+        (report) => report.identity === identity,
+      );
+      const report = owner ?? this.reportJob(batch, prepared);
+      if (!report) return;
+      const ticket = {
+        dispatch: this.journal.dispatches + 1,
+        at: this.reportNow(),
+      };
+      const journal = this.chargedReportJournal(
+        this.reportDispatched(report, batch, ticket),
+      );
+      if (!journal || !this.reportCanCommit(journal, batch)) continue;
+      return batch;
+    }
+  }
+
+  private reportJob(
+    batch: SubtaskReportBatch,
+    prepared: CurrentReport,
+  ): SubtaskReportJob | undefined {
+    const source = this.reportJobSource(prepared);
+    if (!source) return;
+    return {
+      identity: batch.jobIdentity,
+      parentTaskId: batch.parentTaskId,
+      parentRevision: batch.parentRevision,
+      parentSourceDigest: batch.parentSourceDigest,
+      groupId: batch.groupId,
+      listRevision: batch.listRevision,
+      source,
+      model: batch.request.model,
+      childIds: prepared.group.children.map((child) => child.id),
+      state: "ready",
+      attempts: [],
+    };
+  }
+
+  private reportJobSource(prepared: CurrentReport): SourceRef | undefined {
+    const first = subtaskReportBatches(prepared.options, {
+      childIds: prepared.group.children.slice(0, 1).map((child) => child.id),
+      maxQuestions: 1,
+    })[0];
+    return first ? detached(first.source) : undefined;
+  }
+
+  private reportMayDispatch(
+    owner: SubtaskReportJob,
+    batch: SubtaskReportBatch,
+  ): boolean {
+    if (this.journal.dispatches >= 1024) return false;
+    const current = this.journal.reports.find(
+      (report) => report.identity === owner.identity,
+    );
+    return (
+      current === undefined ||
+      (current.state === "ready" &&
+        current.attempts.every(
+          (attempt) => attempt.identity !== batch.identity,
+        )) ||
+      (current.state === "parked" &&
+        this.reportIsDue(current.parkedUntil) &&
+        (current.attempts.length === 0 ||
+          current.attempts.at(-1)?.outcome === "retryable"))
+    );
+  }
+
+  private reportIsDue(until: number | undefined): boolean {
+    return until !== undefined && this.reportNow() >= until;
+  }
+
+  private reportNow(): number {
+    try {
+      const value = this.options.now?.() ?? Date.now();
+      return finiteNonNegative(value) ? value : Number.NaN;
+    } catch {
+      return Number.NaN;
+    }
+  }
+
+  private reportDeadline(retryAfterMs: unknown): number | undefined {
+    const now = this.reportNow();
+    if (
+      !finiteNonNegative(retryAfterMs) ||
+      retryAfterMs <= 0 ||
+      !finiteNonNegative(now)
+    )
+      return;
+    const deadline = now + Math.ceil(retryAfterMs);
+    return Number.isSafeInteger(deadline) ? deadline : undefined;
+  }
+
+  private reportCanCommit(
+    journal: SubtaskJournalCheckpoint,
+    batch?: SubtaskReportBatch,
+  ): boolean {
+    if (!this.options.canCommit) return false;
+    const candidate = this.candidateCheckpoint(this.store, journal);
+    if (!candidate) return false;
+    const sourceBytes = batch ? JSON.stringify(batch.source).length * 3 : 1024;
+    const children = batch?.childIds.length ?? 1;
+    const reserve = {
+      storeBytes: (sourceBytes + 512) * children + 2048,
+      journalBytes: (sourceBytes + 256) * children + 2048,
+    };
+    try {
+      return this.options.canCommit(candidate, reserve) === true;
+    } catch {
+      return false;
+    }
+  }
+
   private initialize(current: SubtaskRuntimeCurrent, flight: Flight): boolean {
     if (this.sourceFenced || this.initializationBlocked) return false;
     if (this.initialized) {
@@ -749,8 +1274,10 @@ export class SubtaskRuntime {
       sourceCurrent: (source) => this.sourceIsCurrent(current, source),
     });
     if (!store) return false;
-    const journal = restoreSubtaskJournal(rawJournal, (record) =>
-      this.restoredRecordIsCurrent(record, current, store),
+    const journal = restoreSubtaskJournal(
+      rawJournal,
+      (record) => this.restoredRecordIsCurrent(record, current, store),
+      (report) => this.restoredReportIsCurrent(report, current, store),
     );
     if (!journal) {
       this.initializationBlocked = true;
@@ -900,6 +1427,63 @@ export class SubtaskRuntime {
       state: { tasks: [...current.parents] },
       ...(group === undefined ? {} : { group }),
     });
+  }
+
+  private restoredReportIsCurrent(
+    report: SubtaskReportJob,
+    current: SubtaskRuntimeCurrent,
+    store: SubtaskStore,
+  ): boolean {
+    if (
+      !this.parentsAreAuthoritative(current) ||
+      !this.sourceIsCurrent(current, report.source)
+    )
+      return false;
+    const parent = current.parents.find(
+      (candidate) => candidate.id === report.parentTaskId,
+    );
+    const group = store
+      .snapshot()
+      .groups.find(
+        (candidate) =>
+          candidate.id === report.groupId &&
+          candidate.parentTaskId === report.parentTaskId &&
+          candidate.parentRevision === report.parentRevision,
+      );
+    if (
+      !parent?.included ||
+      !group ||
+      group.listRevision !== report.listRevision
+    )
+      return false;
+    let observation: Observation | undefined;
+    try {
+      observation = current.resolve(report.source.entryId);
+    } catch {
+      return false;
+    }
+    if (!observation) return false;
+    const batches = subtaskReportBatches({
+      parent,
+      group,
+      report: observation,
+      resolve: current.resolve,
+    });
+    const batch = batches[0];
+    return (
+      !!batch &&
+      batches.every(
+        (candidate) => candidate.jobIdentity === batch.jobIdentity,
+      ) &&
+      report.identity === batch.jobIdentity &&
+      report.parentSourceDigest === batch.parentSourceDigest &&
+      report.model === batch.request.model &&
+      sameSource(report.source, batch.source) &&
+      report.childIds.length === group.children.length &&
+      report.childIds.every(
+        (childId, index) => childId === group.children[index]?.id,
+      )
+    );
   }
 
   private acceptedSuppressed(
@@ -1065,6 +1649,220 @@ export class SubtaskRuntime {
     };
   }
 
+  private reportDispatched(
+    owner: SubtaskReportJob,
+    batch: SubtaskReportBatch,
+    ticket: Ticket,
+  ): SubtaskReportJob {
+    const { parkedUntil: _parkedUntil, ...bare } = detached(owner);
+    return {
+      ...bare,
+      source: detached(batch.source),
+      state: "dispatched",
+      attempts: [
+        ...copyReportAttempts(owner.attempts),
+        {
+          identity: batch.identity,
+          requestHash: batch.requestHash,
+          childIds: [...batch.childIds],
+          dispatch: ticket.dispatch,
+          at: ticket.at,
+          outcome: "dispatched",
+          usage: { inputTokens: 0, outputTokens: 0 },
+        },
+      ],
+    };
+  }
+
+  private reportParked(
+    owner: SubtaskReportJob,
+    parkedUntil: number,
+  ): SubtaskReportJob {
+    return {
+      ...detached(owner),
+      state: "parked",
+      parkedUntil,
+      attempts: copyReportAttempts(owner.attempts),
+    };
+  }
+
+  private reportRetry(
+    identity: string,
+    ticket: Ticket,
+    parkedUntil: number,
+  ): SubtaskReportJob | undefined {
+    const current = this.journal.reports.find(
+      (report) => report.identity === identity,
+    );
+    const latest = current?.attempts.at(-1);
+    if (
+      current?.state !== "dispatched" ||
+      latest?.dispatch !== ticket.dispatch ||
+      latest.at !== ticket.at ||
+      latest.outcome !== "dispatched"
+    )
+      return;
+    const attempts = copyReportAttempts(current.attempts);
+    const last = attempts.at(-1);
+    if (!last) return;
+    last.outcome = "retryable";
+    return { ...detached(current), state: "parked", parkedUntil, attempts };
+  }
+
+  private reportDecided(
+    identity: string,
+    ticket: Ticket,
+    decisions: ReportDecisionsWithReceipt,
+  ): SubtaskReportJob | undefined {
+    const current = this.journal.reports.find(
+      (report) => report.identity === identity,
+    );
+    const latest = current?.attempts.at(-1);
+    if (
+      current?.state !== "dispatched" ||
+      latest?.dispatch !== ticket.dispatch ||
+      latest.at !== ticket.at ||
+      latest.outcome !== "dispatched"
+    )
+      return;
+    const attempts = copyReportAttempts(current.attempts);
+    const last = attempts.at(-1);
+    if (!last) return;
+    last.outcome = "decided";
+    last.usage = { ...decisions.receipt.usage };
+    last.assessments = structuredClone(decisions.receipt.assessments);
+    const assessed = new Set<string>();
+    for (const attempt of attempts)
+      if (attempt.outcome === "decided")
+        for (const assessment of attempt.assessments ?? [])
+          assessed.add(assessment.childId);
+    return {
+      ...detached(current),
+      state: current.childIds.every((childId) => assessed.has(childId))
+        ? "complete"
+        : "ready",
+      attempts,
+    };
+  }
+
+  private reportFailure(
+    identity: string,
+    ticket: Ticket,
+    usage: Usage | undefined,
+  ): SubtaskReportJob | undefined {
+    const current = this.journal.reports.find(
+      (report) => report.identity === identity,
+    );
+    const latest = current?.attempts.at(-1);
+    if (
+      !current ||
+      latest?.dispatch !== ticket.dispatch ||
+      latest.at !== ticket.at ||
+      latest.outcome !== "dispatched"
+    )
+      return;
+    const attempts = copyReportAttempts(current.attempts);
+    const last = attempts.at(-1);
+    if (!last) return;
+    last.outcome = "failed";
+    last.usage = usage ? { ...usage } : { inputTokens: 0, outputTokens: 0 };
+    return { ...detached(current), state: "permanent", attempts };
+  }
+
+  private chargedReportJournal(
+    report: SubtaskReportJob,
+  ): SubtaskJournalCheckpoint | undefined {
+    if (this.journal.dispatches >= 1024) return;
+    const journal = this.replaceReport(report);
+    if (
+      !this.retireRecords(
+        journal,
+        (record) =>
+          record.parentTaskId === report.parentTaskId &&
+          record.state !== "complete" &&
+          record.state !== "superseded",
+      ) ||
+      !this.retireReports(
+        journal,
+        (current) =>
+          current.identity !== report.identity &&
+          current.parentTaskId === report.parentTaskId &&
+          current.state !== "complete" &&
+          current.state !== "superseded",
+      )
+    )
+      return;
+    journal.dispatches += 1;
+    journal.usage.jev.calls += 1;
+    return subtaskJournalIsValid(journal) ? journal : undefined;
+  }
+
+  private parkedReportJournal(
+    report: SubtaskReportJob,
+  ): SubtaskJournalCheckpoint | undefined {
+    const journal = this.replaceReport(report);
+    if (
+      !this.retireRecords(
+        journal,
+        (record) =>
+          record.parentTaskId === report.parentTaskId &&
+          record.state !== "complete" &&
+          record.state !== "superseded",
+      ) ||
+      !this.retireReports(
+        journal,
+        (current) =>
+          current.identity !== report.identity &&
+          current.parentTaskId === report.parentTaskId &&
+          current.state !== "complete" &&
+          current.state !== "superseded",
+      )
+    )
+      return;
+    return subtaskJournalIsValid(journal) ? journal : undefined;
+  }
+
+  private finalReportJournal(
+    report: SubtaskReportJob,
+    usage: Usage,
+  ): SubtaskJournalCheckpoint | undefined {
+    const journal = this.replaceReport(report);
+    journal.usage.jev.inputTokens += usage.inputTokens;
+    journal.usage.jev.outputTokens += usage.outputTokens;
+    if (
+      !Number.isSafeInteger(journal.usage.jev.inputTokens) ||
+      !Number.isSafeInteger(journal.usage.jev.outputTokens)
+    )
+      return;
+    return subtaskJournalIsValid(journal) ? journal : undefined;
+  }
+
+  private saveReportFailure(
+    identity: string,
+    ticket: Ticket,
+    flight: Flight,
+    sourceId: string,
+    usage?: Usage,
+  ): void {
+    if (!this.maySaveLateUsage(flight, sourceId)) return;
+    const report = this.reportFailure(identity, ticket, usage);
+    const journal =
+      report &&
+      this.finalReportJournal(
+        report,
+        usage ?? {
+          inputTokens: 0,
+          outputTokens: 0,
+        },
+      );
+    if (
+      journal &&
+      this.commitCandidate(this.store, journal) &&
+      this.maySaveLateUsage(flight, sourceId)
+    )
+      this.journal = journal;
+  }
+
   private chargedJournal(
     bucket: UsageBucket,
     record: SubtaskPhaseRecord,
@@ -1074,14 +1872,21 @@ export class SubtaskRuntime {
     const journal = this.replaceRecord(record);
     if (
       retireParentTaskId &&
-      !this.retireRecords(
+      (!this.retireRecords(
         journal,
         (current) =>
           current.identity !== record.identity &&
           current.parentTaskId === retireParentTaskId &&
           current.state !== "complete" &&
           current.state !== "superseded",
-      )
+      ) ||
+        !this.retireReports(
+          journal,
+          (current) =>
+            current.parentTaskId === retireParentTaskId &&
+            current.state !== "complete" &&
+            current.state !== "superseded",
+        ))
     )
       return;
     journal.dispatches += 1;
@@ -1125,6 +1930,23 @@ export class SubtaskRuntime {
     return journal;
   }
 
+  private replaceReport(report: SubtaskReportJob): SubtaskJournalCheckpoint {
+    const journal = detached(this.journal);
+    journal.records = journal.records.map((record) => detached(record));
+    journal.reports = journal.reports.map((current) => ({
+      ...current,
+      source: { ...current.source },
+      childIds: [...current.childIds],
+      attempts: copyReportAttempts(current.attempts),
+    }));
+    const index = journal.reports.findIndex(
+      (current) => current.identity === report.identity,
+    );
+    if (index < 0) journal.reports.push(detached(report));
+    else journal.reports[index] = detached(report);
+    return journal;
+  }
+
   /** Stage all history retirement before replacing a commit candidate journal. */
   private retireRecords(
     journal: SubtaskJournalCheckpoint,
@@ -1144,6 +1966,24 @@ export class SubtaskRuntime {
     return true;
   }
 
+  private retireReports(
+    journal: SubtaskJournalCheckpoint,
+    shouldRetire: (report: SubtaskReportJob) => boolean,
+  ): boolean {
+    const reports: SubtaskReportJob[] = [];
+    for (const current of journal.reports) {
+      if (!shouldRetire(current)) {
+        reports.push(current);
+        continue;
+      }
+      const superseded = supersedeSubtaskReportJob(current);
+      if (!superseded) return false;
+      reports.push(superseded);
+    }
+    journal.reports = reports;
+    return true;
+  }
+
   /** Observed drains carry no provider data and never reject into scheduling. */
   private retainPhysicalDrain(drains: Promise<void>[], drain: Promise<void>) {
     try {
@@ -1157,10 +1997,10 @@ export class SubtaskRuntime {
     await Promise.all(drains);
   }
 
-  private commitCandidate(
+  private candidateCheckpoint(
     store: SubtaskStore,
     journal: SubtaskJournalCheckpoint,
-  ): boolean {
+  ): Readonly<SubtaskRuntimeCheckpoint> | undefined {
     let state: SubtaskCheckpoint;
     try {
       state = store.checkpoint();
@@ -1173,12 +2013,20 @@ export class SubtaskRuntime {
             !acceptedSubtaskRecordMatchesGroup(record, state.groups),
         )
       )
-        return false;
+        return;
     } catch {
-      return false;
+      return;
     }
-    if (!subtaskJournalIsValid(journal)) return false;
-    const candidate = deepFreeze({ state, journal: detached(journal) });
+    if (!subtaskJournalIsValid(journal)) return;
+    return deepFreeze({ state, journal: detached(journal) });
+  }
+
+  private commitCandidate(
+    store: SubtaskStore,
+    journal: SubtaskJournalCheckpoint,
+  ): boolean {
+    const candidate = this.candidateCheckpoint(store, journal);
+    if (!candidate) return false;
     try {
       return this.options.commit(candidate) === true;
     } catch {

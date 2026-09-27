@@ -43,6 +43,19 @@ export interface ValidatedResult {
   usage: { input_tokens: number; output_tokens: number };
 }
 
+/** Per-call report transport truth, independent of mutable gateway status. */
+export type GatewayEvaluationOutcome =
+  | { kind: "result"; result: ValidatedResult }
+  | { kind: "retryable"; retryAfterMs: number }
+  | { kind: "deferred"; retryAfterMs: number }
+  | { kind: "unavailable" }
+  | { kind: "failed" };
+
+interface GatewayEvaluationInvocation {
+  result?: ValidatedResult;
+  outcome: GatewayEvaluationOutcome;
+}
+
 /** Last evaluation classification. Callers may safely park optional work. */
 export type GatewayOutcome =
   | "idle"
@@ -265,18 +278,56 @@ export class JevGateway {
     this.status = "Ready";
     this.outcome = "idle";
   }
+
+  private safeRetryDelay(deadline: number): number | undefined {
+    try {
+      const now = this.now();
+      if (!Number.isSafeInteger(now) || now < 0 || !Number.isFinite(deadline))
+        return;
+      const delay = Math.ceil(deadline - now);
+      if (
+        !Number.isSafeInteger(delay) ||
+        delay <= 0 ||
+        now > Number.MAX_SAFE_INTEGER - delay
+      )
+        return;
+      return delay;
+    } catch {
+      return;
+    }
+  }
+
   async evaluate(
     request: EvaluationRequest,
     identity: string,
     allowDuplicate = false,
   ): Promise<ValidatedResult | undefined> {
+    return (await this.evaluateInvocation(request, identity, allowDuplicate))
+      .result;
+  }
+
+  async evaluateWithOutcome(
+    request: EvaluationRequest,
+    identity: string,
+    allowDuplicate = false,
+  ): Promise<GatewayEvaluationOutcome> {
+    return (await this.evaluateInvocation(request, identity, allowDuplicate))
+      .outcome;
+  }
+
+  /** Shared transport pipeline; wrappers expose only their own settled result. */
+  private async evaluateInvocation(
+    request: EvaluationRequest,
+    identity: string,
+    allowDuplicate: boolean,
+  ): Promise<GatewayEvaluationInvocation> {
     if (this.paused || identity !== this.identity) {
       this.outcome = "paused";
-      return;
+      return { outcome: { kind: "failed" } };
     }
     if (this.flight) {
       this.outcome = "busy";
-      return;
+      return { outcome: { kind: "failed" } };
     }
     let body: string;
     let requestForValidation: EvaluationRequest;
@@ -312,7 +363,7 @@ export class JevGateway {
     } catch {
       this.status = "Unknown: invalid or oversized evidence/questions";
       this.outcome = "invalid";
-      return;
+      return { outcome: { kind: "failed" } };
     }
     const hash = createHash("sha256")
       .update(identity)
@@ -320,7 +371,7 @@ export class JevGateway {
       .digest("hex");
     if (!allowDuplicate && this.seen.has(hash)) {
       this.outcome = "suppressed";
-      return;
+      return { outcome: { kind: "failed" } };
     }
     let key: string | undefined;
     try {
@@ -328,17 +379,24 @@ export class JevGateway {
     } catch {
       this.status = "Offline: API key unavailable";
       this.outcome = "unavailable";
-      return;
+      return { outcome: { kind: "unavailable" } };
     }
     if (!key) {
       this.status = "Offline: missing TYPESAFE_API_KEY";
       this.outcome = "unavailable";
-      return;
+      return { outcome: { kind: "unavailable" } };
     }
-    if (this.now() < Math.max(this.nextAttempt, this.retryAfter)) {
+    const retryDeadline = Math.max(this.nextAttempt, this.retryAfter);
+    if (this.now() < retryDeadline) {
       this.status = "Pending: retry backoff / cooldown / Retry-After";
       this.outcome = "backoff";
-      return;
+      const retryAfterMs = this.safeRetryDelay(retryDeadline);
+      return {
+        outcome:
+          retryAfterMs === undefined
+            ? { kind: "failed" }
+            : { kind: "deferred", retryAfterMs },
+      };
     }
     const generation = this.generation;
     const controller = new AbortController();
@@ -357,6 +415,7 @@ export class JevGateway {
         reject(new Error("Timeout"));
       }, DEADLINE_MS);
     });
+    let observedRetryableHttp = false;
     try {
       const work = async () => {
         // This is transport truth: update immediately before fetch, so failed
@@ -392,6 +451,10 @@ export class JevGateway {
           return;
         }
         if (!response.ok) {
+          observedRetryableHttp =
+            response.status === 408 ||
+            response.status === 429 ||
+            (response.status >= 500 && response.status <= 599);
           if (
             response.status >= 400 &&
             response.status < 500 &&
@@ -439,7 +502,8 @@ export class JevGateway {
         // Observation is never transport admission authority.
       }
       const result = await Promise.race([physical, timeout, cancelled]);
-      if (generation !== this.generation) return;
+      if (generation !== this.generation)
+        return { outcome: { kind: "failed" } };
       if (result) {
         this.seen.set(hash, true);
         if (this.seen.size > 200) {
@@ -451,8 +515,9 @@ export class JevGateway {
         this.retryAfter = -Infinity;
         this.status = "Current";
         this.outcome = "success";
+        return { result, outcome: { kind: "result", result } };
       }
-      return result;
+      return { outcome: { kind: "failed" } };
     } catch (error) {
       if (generation === this.generation) {
         this.outcome =
@@ -473,8 +538,15 @@ export class JevGateway {
           this.status =
             "Offline / invalid response / timeout; retry backed off";
         }
+        if (observedRetryableHttp) {
+          const retryAfterMs = this.safeRetryDelay(
+            Math.max(this.nextAttempt, this.retryAfter),
+          );
+          if (retryAfterMs !== undefined)
+            return { outcome: { kind: "retryable", retryAfterMs } };
+        }
       }
-      return;
+      return { outcome: { kind: "failed" } };
     } finally {
       if (timer) clearTimeout(timer);
       if (this.flight === flight) this.flight = undefined;

@@ -167,6 +167,16 @@ const gateUsageOf = (value: unknown): Usage | undefined => {
     : undefined;
 };
 
+const validRuntimeCheckpoint = (
+  value: unknown,
+): value is SubtaskRuntimeCheckpoint =>
+  plainRecord(value) &&
+  Reflect.ownKeys(value).length === 2 &&
+  Object.hasOwn(value, "state") &&
+  Object.hasOwn(value, "journal") &&
+  subtaskCheckpointIsValid(fieldValue(value, "state")) &&
+  subtaskJournalIsValid(fieldValue(value, "journal"));
+
 /**
  * Disconnected C05 coordinator. It owns only generic sidecar store/journal
  * state; Monitor remains owner of mandatory state and full-envelope storage.
@@ -183,10 +193,15 @@ export class SubtaskRuntime {
   private flight?: Flight;
 
   constructor(private readonly options: SubtaskRuntimeOptions) {
-    // Isolate restored caller data now, but defer source-current restoration
-    // until a run supplies the authoritative parent set.
+    // Isolate and structurally validate restored caller data now, but defer
+    // source-current restoration until a run supplies authoritative parents.
     try {
-      this.initial = detached(options.initial);
+      const initial = detached<unknown>(options.initial);
+      if (!validRuntimeCheckpoint(initial)) {
+        this.initializationBlocked = true;
+        return;
+      }
+      this.initial = initial;
     } catch {
       this.initializationBlocked = true;
     }
@@ -219,6 +234,13 @@ export class SubtaskRuntime {
 
   /** Detached read-only durable component for later full-v11 integration. */
   checkpoint(): Readonly<SubtaskRuntimeCheckpoint> {
+    // Before first current-authority restoration, expose only a structurally
+    // validated detached component, never empty replacement state or raw input.
+    if (!this.initialized && this.initial)
+      return deepFreeze({
+        state: detached(this.initial.state),
+        journal: detached(this.initial.journal),
+      });
     return deepFreeze({
       state: this.store.checkpoint(),
       journal: detached(this.journal),
@@ -312,7 +334,18 @@ export class SubtaskRuntime {
           if (!journal || !this.commitCandidate(this.store, journal))
             return false;
 
+          // This proof is durable even when the synchronous save callback
+          // fences transport. Keep it locally to prevent a hidden retry.
           this.journal = journal;
+          if (
+            !this.exactBatch(
+              batch,
+              prepared.parent.id,
+              flight,
+              prepared.current.sourceId,
+            )
+          )
+            return false;
           ticket = nextTicket;
           dispatched = true;
           return true;
@@ -363,6 +396,15 @@ export class SubtaskRuntime {
 
     const journal = this.finalJournal("jev", decision, usage);
     if (!journal || !this.commitCandidate(this.store, journal)) return;
+    if (
+      !this.exactBatch(
+        batch,
+        prepared.parent.id,
+        flight,
+        prepared.current.sourceId,
+      )
+    )
+      return;
     this.journal = journal;
 
     if (decision.state === "ready") {
@@ -425,7 +467,18 @@ export class SubtaskRuntime {
           if (!journal || !this.commitCandidate(this.store, journal))
             return false;
 
+          // Charged proof survives a post-save fence; only transport admission
+          // is revoked by the renewed identity check.
           this.journal = journal;
+          if (
+            !this.exactBatch(
+              batch,
+              prepared.parent.id,
+              flight,
+              prepared.current.sourceId,
+            )
+          )
+            return false;
           ticket = nextTicket;
           dispatched = true;
           return true;
@@ -480,6 +533,15 @@ export class SubtaskRuntime {
       const record = this.proposalFinal(gateRecord, request, ticket, "noop");
       const journal = this.finalJournal("extraction", record, usage);
       if (!journal || !this.commitCandidate(this.store, journal)) return;
+      if (
+        !this.exactBatch(
+          batch,
+          prepared.parent.id,
+          flight,
+          prepared.current.sourceId,
+        )
+      )
+        return;
       this.journal = journal;
       return;
     }
@@ -518,6 +580,15 @@ export class SubtaskRuntime {
     );
     const journal = this.finalJournal("extraction", record, usage);
     if (!journal || !this.commitCandidate(candidate, journal)) return;
+    if (
+      !this.exactBatch(
+        batch,
+        prepared.parent.id,
+        flight,
+        prepared.current.sourceId,
+      )
+    )
+      return;
 
     // Save succeeded before either mutable owner changes or publication.
     this.store = candidate;
@@ -989,7 +1060,11 @@ export class SubtaskRuntime {
       this.gateFailure(batch, ticket),
       usage,
     );
-    if (journal && this.commitCandidate(this.store, journal))
+    if (
+      journal &&
+      this.commitCandidate(this.store, journal) &&
+      this.maySaveLateUsage(flight, sourceId)
+    )
       this.journal = journal;
   }
 
@@ -1007,7 +1082,11 @@ export class SubtaskRuntime {
       this.proposalFailure(gateRecord, request, ticket),
       usage,
     );
-    if (journal && this.commitCandidate(this.store, journal))
+    if (
+      journal &&
+      this.commitCandidate(this.store, journal) &&
+      this.maySaveLateUsage(flight, sourceId)
+    )
       this.journal = journal;
   }
 

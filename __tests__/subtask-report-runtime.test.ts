@@ -449,6 +449,27 @@ it("adaptively fits one child using real candidates and conservative final growt
     statuses(runtime)?.filter((status) => status === "reported-completed"),
   ).toHaveLength(1);
 });
+it("computes report growth without inherited serialization hooks", async () => {
+  const h = fixture();
+  const runtime = h.create();
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, "toJSON");
+  let hooks = 0;
+  Object.defineProperty(Object.prototype, "toJSON", {
+    configurable: true,
+    value(this: unknown) {
+      hooks++;
+      return this;
+    },
+  });
+  try {
+    await runtime.runReport(h.options.parent.id, h.source());
+  } finally {
+    if (previous) Object.defineProperty(Object.prototype, "toJSON", previous);
+    else Reflect.deleteProperty(Object.prototype, "toJSON");
+  }
+  expect(h.network).toHaveBeenCalledTimes(1);
+  expect(hooks).toBe(0);
+});
 it.each(["capacity", "invalidation"])(
   "does not dispatch after %s veto in pure preflight",
   async (mode) => {

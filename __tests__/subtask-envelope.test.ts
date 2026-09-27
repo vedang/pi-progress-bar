@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  canCommitSubtaskCheckpoint,
   checkpointStorageStatus,
   commitSubtaskCheckpoint,
   encodeCheckpoint,
@@ -268,6 +269,148 @@ describe("disconnected strict v11 generic subtask envelope", () => {
       }
     },
   );
+  it.each(["store", "journal", "split"])(
+    "pure preflight counts exact combined64KiB wrappers for %s growth",
+    async (bucket) => {
+      const { state, monitor } = await fixture();
+      const before = structuredClone({ state, monitor });
+      const room = 65536 - bytes(monitor.subtasks);
+      const reserve = {
+        storeBytes:
+          bucket === "journal"
+            ? 0
+            : bucket === "split"
+              ? Math.floor(room / 2)
+              : room,
+        journalBytes: 0,
+      };
+      reserve.journalBytes = room - reserve.storeBytes;
+      expect(canCommitSubtaskCheckpoint(state, monitor)).toBe(true);
+      expect(canCommitSubtaskCheckpoint(state, monitor, reserve)).toBe(true);
+      expect(
+        canCommitSubtaskCheckpoint(state, monitor, {
+          ...reserve,
+          journalBytes: reserve.journalBytes + 1,
+        }),
+      ).toBe(false);
+      expect({ state, monitor }).toEqual(before);
+    },
+  );
+  it.each([true, false])(
+    "preflights BOTH full512KiB projections with real Unicode bytes (enabled=%s)",
+    async (enabled) => {
+      const { state, monitor } = await fixture();
+      monitor.enabled = enabled;
+      state.sourceId = "🧭";
+      const reserve = { storeBytes: 13, journalBytes: 17 };
+      const off = bytes(
+        encodeSubtaskCheckpoint(state, { ...monitor, enabled: false }),
+      );
+      state.sourceId += "s".repeat(524288 - off - 30);
+      expect(
+        bytes(encodeSubtaskCheckpoint(state, { ...monitor, enabled: false })) +
+          30,
+      ).toBe(524288);
+      expect(canCommitSubtaskCheckpoint(state, monitor, reserve)).toBe(true);
+      state.sourceId += "s";
+      expect(
+        bytes(encodeSubtaskCheckpoint(state, { ...monitor, enabled: true })) +
+          30,
+      ).toBe(524288);
+      expect(canCommitSubtaskCheckpoint(state, monitor, reserve)).toBe(false);
+    },
+  );
+  it.each([-1, 0.1, NaN, Infinity, Number.MAX_SAFE_INTEGER])(
+    "rejects invalid/overflowing reserve %s without changing candidate",
+    async (value) => {
+      const { state, monitor } = await fixture();
+      const before = structuredClone({ state, monitor });
+      expect(
+        canCommitSubtaskCheckpoint(state, monitor, {
+          storeBytes: value,
+          journalBytes: 0,
+        }),
+      ).toBe(false);
+      expect(
+        canCommitSubtaskCheckpoint(state, monitor, {
+          storeBytes: 0,
+          journalBytes: value,
+        }),
+      ).toBe(false);
+      expect({ state, monitor }).toEqual(before);
+    },
+  );
+  it("rejects reserve accessors and inherited values without running hooks", async () => {
+    const { state, monitor } = await fixture();
+    let reads = 0;
+    const accessor = {
+      get storeBytes() {
+        reads++;
+        return 0;
+      },
+      journalBytes: 0,
+    };
+    expect(canCommitSubtaskCheckpoint(state, monitor, accessor)).toBe(false);
+    expect(reads).toBe(0);
+    expect(
+      canCommitSubtaskCheckpoint(
+        state,
+        monitor,
+        Object.create({ storeBytes: 0, journalBytes: 0 }),
+      ),
+    ).toBe(false);
+  });
+  it("measures real envelope/component bytes without inherited serialization hooks", async () => {
+    const { state, monitor } = await fixture();
+    const previous = Object.getOwnPropertyDescriptor(
+      Object.prototype,
+      "toJSON",
+    );
+    let hooks = 0;
+    Object.defineProperty(Object.prototype, "toJSON", {
+      configurable: true,
+      value(this: unknown) {
+        hooks++;
+        return this;
+      },
+    });
+    try {
+      expect(
+        canCommitSubtaskCheckpoint(state, monitor, {
+          storeBytes: 1,
+          journalBytes: 1,
+        }),
+      ).toBe(true);
+    } finally {
+      if (previous) Object.defineProperty(Object.prototype, "toJSON", previous);
+      else Reflect.deleteProperty(Object.prototype, "toJSON");
+    }
+    expect(hooks).toBe(0);
+  });
+  it("validates real data even with zero reserve; never repairs malformed candidates", async () => {
+    const { state, monitor } = await fixture();
+    monitor.subtasks.journal.dispatches = 1;
+    expect(canCommitSubtaskCheckpoint(state, monitor)).toBe(false);
+    expect(monitor.subtasks.journal.dispatches).toBe(1);
+  });
+  it("grants no positive growth budget without a real optional component", () => {
+    const state = emptyState("source");
+    const monitor = { enabled: true, usage: usage() };
+    expect(canCommitSubtaskCheckpoint(state, monitor)).toBe(true);
+    expect(
+      canCommitSubtaskCheckpoint(state, monitor, {
+        storeBytes: 1,
+        journalBytes: 0,
+      }),
+    ).toBe(false);
+    expect(
+      canCommitSubtaskCheckpoint(state, monitor, {
+        storeBytes: 0,
+        journalBytes: 1,
+      }),
+    ).toBe(false);
+    expect(canCommitSubtaskCheckpoint(state)).toBe(true);
+  });
   it("does not commit an exact ON boundary that cannot persist OFF", () => {
     const state = emptyState("s");
     const monitor = { enabled: true, usage: usage() };

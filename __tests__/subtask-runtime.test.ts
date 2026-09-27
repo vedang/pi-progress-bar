@@ -149,6 +149,58 @@ function fixture() {
 }
 
 describe("durable generic subtask runtime", () => {
+  it("preserves the restored durable component before any run or provider opportunity", async () => {
+    const h = fixture();
+    const runtime = h.create();
+    await runtime.run(h.parent.id);
+    const saved = runtime.checkpoint();
+    const calls = h.commit.mock.calls.length;
+    const restored = h.create(saved);
+    expect(restored.checkpoint()).toEqual(saved);
+    expect(h.commit).toHaveBeenCalledTimes(calls);
+  });
+  it.each([1, 2])(
+    "rechecks model authority after dispatch %i save without refunding the reservation",
+    async (ordinal) => {
+      const h = fixture();
+      h.commit.mockImplementation((candidate) => {
+        h.saved.push(structuredClone(candidate));
+        if (
+          candidate.journal.dispatches === ordinal &&
+          candidate.journal.records.some(
+            (record) => record.state === "dispatched",
+          )
+        )
+          h.options.selectedModel = "fixture/changed-after-save";
+        return true;
+      });
+      const runtime = h.create();
+      await runtime.run(h.parent.id);
+      expect(h.network.mock.calls.map(([kind]) => kind)).toEqual(
+        ordinal === 1 ? [] : ["gate"],
+      );
+      expect(runtime.checkpoint().journal.dispatches).toBe(ordinal);
+      expect(runtime.snapshot().groups).toEqual([]);
+      expect(h.onPublish).not.toHaveBeenCalled();
+    },
+  );
+  it("does not publish an accepted list if admission save invalidates its flight", async () => {
+    const h = fixture();
+    const runtime = h.create();
+    h.commit.mockImplementation((candidate) => {
+      h.saved.push(structuredClone(candidate));
+      if (candidate.state.groups.length) runtime.invalidate();
+      return true;
+    });
+    await runtime.run(h.parent.id);
+    // The old-flight write succeeded externally; it is not rolled back or
+    // adopted as current semantic authority after synchronous invalidation.
+    expect(h.saved.at(-1)?.state.groups).toHaveLength(1);
+    expect(runtime.checkpoint().journal.dispatches).toBe(2);
+    expect(runtime.snapshot().groups).toEqual([]);
+    expect(h.onPublish).not.toHaveBeenCalled();
+  });
+
   it("constructs without effects, then admits conversation-only children without changing parents", async () => {
     const h = fixture();
     const before = structuredClone(h.parent);

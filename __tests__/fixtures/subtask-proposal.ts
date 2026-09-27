@@ -4,12 +4,17 @@ import {
   buildSubtaskGate,
   type SubtaskGateOptions,
 } from "../../src/analysis/subtask-gate";
+import { buildSubtaskProposal } from "../../src/analysis/subtask-proposal";
 import type { Observation } from "../../src/core/hybrid-state";
 import type { SubtaskJournalCheckpoint } from "../../src/core/subtask-journal";
 import { SubtaskStore } from "../../src/core/subtasks";
 import { subtaskAdmission, subtaskHash, subtaskParent } from "./subtasks";
 
-export function subtaskProposalFixture(existing = false, reported = false) {
+export function subtaskProposalFixture(
+  existing = false,
+  reported = false,
+  model = "fixture/selected",
+) {
   const parent = subtaskParent();
   const parentSource: Observation = {
     id: "request",
@@ -49,7 +54,7 @@ export function subtaskProposalFixture(existing = false, reported = false) {
     latest,
     earlier: [],
     omissions: [],
-    selectedModel: "fixture/selected",
+    selectedModel: model,
     resolve: (id) => observations.find((item) => item.id === id),
   };
   const batch = buildSubtaskGate(options);
@@ -94,4 +99,31 @@ export function subtaskProposalFixture(existing = false, reported = false) {
     result,
     journal,
   };
+}
+
+export function subtaskSelectedFixture(model = "fixture/selected") {
+  const h = subtaskProposalFixture(false, false, model);
+  const request = buildSubtaskProposal(h.batch, h.journal, h.options);
+  if (!request) throw new Error("Expected authorized proposal");
+  const contextIndex = request.input.context.findIndex(
+    (item) => item.id === h.latest.id,
+  );
+  if (contextIndex < 0) throw new Error("Missing latest context");
+  const text = JSON.stringify({
+    proposals: [
+      {
+        parentIndex: 0,
+        children: [
+          {
+            kind: "add",
+            label: "Evaluate operating costs",
+            evidence: [{ contextIndex, start: 0, end: h.latest.text.length }],
+          },
+        ],
+        removals: [],
+        complete: false,
+      },
+    ],
+  });
+  return { ...h, request, text };
 }

@@ -59,6 +59,7 @@ import { type HealthSnapshot, healthSnapshot } from "../analysis/health";
 import { implementationFromResult } from "../analysis/implementation";
 import type { SubtaskGateBatch } from "../analysis/subtask-gate";
 import type { SubtaskProposalRequest } from "../analysis/subtask-proposal";
+import type { SubtaskReportBatch } from "../analysis/subtask-report";
 import {
   detailQuestionKeys,
   detailReceipt,
@@ -115,6 +116,7 @@ import {
   type CoverageQueueCheckpoint,
   type CoverageReportDispatchCheckpoint,
   type CoverageReportJobCheckpoint,
+  canCommitSubtaskCheckpoint,
   commitSubtaskCheckpoint,
   encodeCheckpoint,
   encodeSubtaskCheckpoint,
@@ -137,10 +139,11 @@ import {
   type HybridTask,
   type Observation,
   observationRef,
+  type SourceRef,
   tasksNewestFirst,
 } from "./hybrid-state";
 import type { SubtaskAccessSnapshot } from "./subtask-access";
-import type { SubtaskPhaseRecord } from "./subtask-journal";
+import type { SubtaskPhaseRecord, SubtaskReportJob } from "./subtask-journal";
 import {
   type SubtaskPhysicalFlightObserver,
   type SubtaskProposalTransportResult,
@@ -148,6 +151,7 @@ import {
   type SubtaskRuntimeCheckpoint,
   type SubtaskRuntimeCurrent,
   subtaskRuntimeRecordIsCurrent,
+  subtaskRuntimeReportIsCurrent,
 } from "./subtask-runtime";
 import { type SubtaskSnapshot, SubtaskStore } from "./subtasks";
 import type { Ledger } from "./types";
@@ -702,6 +706,18 @@ export class Monitor {
   private subtaskRuntime?: SubtaskRuntime;
   private subtaskFlight?: Promise<void>;
   private subtaskOwners: string[] = [];
+  private subtaskReportOwners: Array<{
+    parentTaskId: string;
+    source?: SourceRef;
+  }> = [];
+  private subtaskReportCandidates = new Map<string, SourceRef>();
+  private subtaskReportBlocked = new Map<string, SourceRef>();
+  private subtaskReportFrontiers = new Map<
+    string,
+    { decided: Set<string>; advances: number }
+  >();
+  private subtaskScheduleGeneration = 0;
+  private subtaskOptionalTurn: "subtask" | "detail" = "subtask";
   /** One adapter-issued capability stays stable until canonical metadata changes. */
   private subtaskEvidence?: SubtaskEvidence;
   private subtaskWakeKey?: string;
@@ -941,7 +957,18 @@ export class Monitor {
 
   /** Detached generic sidecar view. Reading it never schedules or mutates. */
   subtaskSnapshot(): SubtaskMonitorSnapshot {
-    return this.subtaskRuntime?.snapshot() ?? new SubtaskStore().snapshot();
+    const runtime = this.subtaskRuntime;
+    if (!runtime) return new SubtaskStore().snapshot();
+    const snapshot = runtime.snapshot();
+    if (snapshot.groups.length) return snapshot;
+    const current = this.subtaskCurrent(
+      this.state,
+      this.beginCanonicalPass(),
+      true,
+    );
+    return current
+      ? (this.restoredSubtaskStore(runtime, current)?.snapshot() ?? snapshot)
+      : snapshot;
   }
 
   /** Detached C04 access view. It cannot admit, report, or schedule subtasks. */
@@ -1549,6 +1576,8 @@ export class Monitor {
             : this.rehydratePreceding(pass, entryId),
         (record, candidate) =>
           this.subtaskRestoreCurrent(record, candidate, pass),
+        (report, candidate) =>
+          this.subtaskRestoreReportCurrent(report, candidate, pass),
       );
       if (restored) {
         this.state = copyState(restored.state);
@@ -2370,6 +2399,11 @@ export class Monitor {
             )
           : Promise.resolve(undefined);
       },
+      report: (batch, signal, onDispatch, onPhysicalFlight) =>
+        this.evaluateSubtaskReport(batch, signal, onDispatch, onPhysicalFlight),
+      canCommit: (candidate, reserve) =>
+        this.canCommitSubtaskReport(candidate, reserve),
+      now: () => Date.now(),
       commit: (candidate) => this.commitSubtaskCandidate(candidate),
       onPublish: () => this.publish(),
     });
@@ -2383,6 +2417,11 @@ export class Monitor {
     this.subtaskGateway.invalidate();
     this.subtaskGateDispatch = undefined;
     this.subtaskOwners = [];
+    this.subtaskReportOwners = [];
+    this.subtaskReportCandidates.clear();
+    this.subtaskReportBlocked.clear();
+    this.subtaskReportFrontiers.clear();
+    this.subtaskScheduleGeneration += 1;
     this.subtaskWakeKey = undefined;
     if (this.subtaskFlight) {
       this.pendingSubtaskCheckpoint = next;
@@ -2402,22 +2441,22 @@ export class Monitor {
     restoring = false,
   ): SubtaskRuntimeCurrent | undefined {
     if (
-      (!restoring &&
-        (!this.enabled ||
-          this.processing ||
-          this.queued.length > 0 ||
-          !!this.state.pending ||
-          this.state.scopeUnresolved)) ||
-      !this.options.proposeSubtasks
+      !restoring &&
+      (!this.enabled ||
+        this.processing ||
+        this.queued.length > 0 ||
+        !!this.state.pending ||
+        this.state.scopeUnresolved)
     )
       return;
     let selectedModel: string | undefined;
     try {
       selectedModel = this.options.selectedModel?.();
     } catch {
-      return;
+      // Reports use canonical Jev authority only; proposal capability is optional.
     }
-    if (typeof selectedModel !== "string" || !selectedModel) return;
+    if (typeof selectedModel !== "string" || !selectedModel)
+      selectedModel = undefined;
     const cursor = state.cursor;
     if (!cursor) return;
     const latest = pass.observation(cursor.id);
@@ -2501,6 +2540,41 @@ export class Monitor {
     );
   }
 
+  /** Report restore uses detached envelope authority, never prior live state. */
+  private subtaskRestoreReportCurrent(
+    report: SubtaskReportJob,
+    candidate: SubtaskRestoreContext,
+    pass: CanonicalPass,
+  ) {
+    const current = this.subtaskCurrent(candidate.state, pass, true);
+    return (
+      !!current && subtaskRuntimeReportIsCurrent(report, current, candidate)
+    );
+  }
+
+  /** Report preflight shares real v11 component and ON/OFF envelope limits. */
+  private canCommitSubtaskReport(
+    candidate: SubtaskRuntimeCheckpoint,
+    reserve: { storeBytes: number; journalBytes: number },
+  ) {
+    try {
+      return canCommitSubtaskCheckpoint(
+        this.state,
+        this.subtaskMetadata(
+          this.enabled,
+          this.healthCards,
+          this.state,
+          undefined,
+          this.taskDetails,
+          candidate,
+        ),
+        reserve,
+      );
+    } catch {
+      return false;
+    }
+  }
+
   /** Runtime candidate overlays strict-v11 metadata without swapping live state. */
   private commitSubtaskCandidate(candidate: SubtaskRuntimeCheckpoint): boolean {
     const saved = commitSubtaskCheckpoint(
@@ -2548,13 +2622,235 @@ export class Monitor {
     }
   }
 
+  private async evaluateSubtaskReport(
+    batch: SubtaskReportBatch,
+    signal: AbortSignal,
+    onDispatch: (at: number) => boolean,
+    onPhysicalFlight: SubtaskPhysicalFlightObserver,
+  ) {
+    if (!this.enabled || signal.aborted || this.subtaskGateway.isPaused)
+      return { kind: "unavailable" } as const;
+    const dispatch = onDispatch;
+    this.subtaskGateDispatch = dispatch;
+    this.subtaskPhysicalFlight = onPhysicalFlight;
+    const abort = () => this.subtaskGateway.invalidate();
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      return await this.subtaskGateway.evaluateWithOutcome(
+        batch.request,
+        this.subtaskIdentity(),
+        true,
+      );
+    } catch {
+      return { kind: "failed" } as const;
+    } finally {
+      signal.removeEventListener("abort", abort);
+      if (this.subtaskGateDispatch === dispatch)
+        this.subtaskGateDispatch = undefined;
+      if (this.subtaskPhysicalFlight === onPhysicalFlight)
+        this.subtaskPhysicalFlight = undefined;
+    }
+  }
+
+  private reportSource(observation: Observation): SourceRef {
+    return {
+      entryId: observation.id,
+      messageHash: observation.hash,
+      role: observation.role,
+      start: 0,
+      end: observation.text.length,
+      quoteHash: sha256(observation.text),
+    };
+  }
+
+  private reportJobForParent(
+    runtime: SubtaskRuntime,
+    parentTaskId: string,
+  ): SubtaskReportJob | undefined {
+    return runtime
+      .checkpoint()
+      .journal.reports.find(
+        (report) =>
+          report.parentTaskId === parentTaskId &&
+          report.state !== "complete" &&
+          report.state !== "superseded",
+      );
+  }
+
+  private reportDecidedIds(job: SubtaskReportJob | undefined): Set<string> {
+    const decided = new Set<string>();
+    for (const attempt of job?.attempts ?? [])
+      if (attempt.outcome === "decided")
+        for (const assessment of attempt.assessments ?? [])
+          decided.add(assessment.childId);
+    return decided;
+  }
+
+  private enqueueSubtaskReport(parentTaskId: string, source?: SourceRef) {
+    const index = this.subtaskReportOwners.findIndex(
+      (owner) => owner.parentTaskId === parentTaskId,
+    );
+    if (index >= 0) {
+      const owner = this.subtaskReportOwners[index];
+      if (!owner) return;
+      // Saved authority always wins over an unassessed newer candidate.
+      if (!owner.source || !source) owner.source = undefined;
+      else owner.source = { ...source };
+      return;
+    }
+    if (this.subtaskReportOwners.length >= 20) return;
+    this.subtaskReportOwners.push({
+      parentTaskId,
+      ...(source === undefined ? {} : { source: { ...source } }),
+    });
+  }
+
+  private latestSubtaskReportCandidate(
+    group: SubtaskSnapshot["groups"][number],
+    pass: CanonicalPass,
+  ): SourceRef | undefined {
+    const admission = pass.indexOf(group.source.entryId);
+    const cursor = this.state.cursor ? pass.indexOf(this.state.cursor.id) : -1;
+    if (admission < 0 || cursor <= admission) return;
+    let source: SourceRef | undefined;
+    for (let index = admission + 1; index <= cursor; index += 1) {
+      const header = pass.headers[index];
+      if (!header) continue;
+      const observation = pass.observation(header.id);
+      if (
+        observation &&
+        Buffer.byteLength(observation.text, "utf8") <= 12 * 1024
+      )
+        source = this.reportSource(observation);
+    }
+    return source;
+  }
+
+  private restoredSubtaskStore(
+    runtime: SubtaskRuntime,
+    current: SubtaskRuntimeCurrent,
+  ) {
+    return SubtaskStore.restore(runtime.checkpoint().state, {
+      parents: current.parents,
+      sourceCurrent: (source) => {
+        const observation = current.resolve(source.entryId);
+        return !!(
+          observation &&
+          observation.id === source.entryId &&
+          observation.hash === source.messageHash &&
+          observation.role === source.role &&
+          source.start >= 0 &&
+          source.end > source.start &&
+          source.end <= observation.text.length &&
+          sha256(observation.text) === observation.hash &&
+          sha256(observation.text.slice(source.start, source.end)) ===
+            source.quoteHash
+        );
+      },
+    });
+  }
+
+  private wakeSubtaskReports(
+    pass: CanonicalPass,
+    current: SubtaskRuntimeCurrent,
+  ) {
+    const runtime = this.subtaskRuntime;
+    if (!runtime || !this.enabled || this.processing || this.queued.length)
+      return;
+    const checkpoint = runtime.checkpoint();
+    const store = this.restoredSubtaskStore(runtime, current);
+    if (!store) return;
+    const snapshot = store.snapshot();
+    const known = checkpoint.journal.reports;
+    const parents = new Map(
+      this.state.tasks
+        .filter((parent) => parent.included)
+        .map((parent) => [parent.id, parent]),
+    );
+    const groups = snapshot.groups
+      .filter((group) => {
+        const parent = parents.get(group.parentTaskId);
+        return !!parent && parent.revision === group.parentRevision;
+      })
+      .slice(0, 20);
+    const live = new Set(groups.map((group) => group.parentTaskId));
+    for (const parentTaskId of this.subtaskReportCandidates.keys())
+      if (!live.has(parentTaskId))
+        this.subtaskReportCandidates.delete(parentTaskId);
+
+    for (const group of groups) {
+      const parentTaskId = group.parentTaskId;
+      const candidate = this.latestSubtaskReportCandidate(group, pass);
+      const alreadyRecorded = candidate
+        ? known.some((report) => sameSource(report.source, candidate))
+        : false;
+      if (candidate && !alreadyRecorded) {
+        this.subtaskReportCandidates.set(parentTaskId, candidate);
+        const blocked = this.subtaskReportBlocked.get(parentTaskId);
+        if (blocked && !sameSource(blocked, candidate))
+          this.subtaskReportBlocked.delete(parentTaskId);
+      } else if (!candidate || alreadyRecorded)
+        this.subtaskReportCandidates.delete(parentTaskId);
+
+      const owner = this.reportJobForParent(runtime, parentTaskId);
+      if (!owner) {
+        const next = this.subtaskReportCandidates.get(parentTaskId);
+        const blocked = this.subtaskReportBlocked.get(parentTaskId);
+        if (next && (!blocked || !sameSource(blocked, next)))
+          this.enqueueSubtaskReport(parentTaskId, next);
+        continue;
+      }
+      if (owner.state === "ready") {
+        const blocked = this.subtaskReportBlocked.get(parentTaskId);
+        if (!blocked || !sameSource(blocked, owner.source))
+          this.enqueueSubtaskReport(parentTaskId);
+        continue;
+      }
+      if (owner.state === "parked") {
+        const blocked = this.subtaskReportBlocked.get(parentTaskId);
+        if (
+          (!blocked || !sameSource(blocked, owner.source)) &&
+          owner.parkedUntil !== undefined &&
+          Date.now() >= owner.parkedUntil
+        )
+          this.enqueueSubtaskReport(parentTaskId);
+        continue;
+      }
+      if (owner.state === "permanent" || owner.state === "dispatched") {
+        const next = this.subtaskReportCandidates.get(parentTaskId);
+        if (next) this.enqueueSubtaskReport(parentTaskId, next);
+      }
+    }
+  }
+
+  /**
+   * Physical drains may finish after host session replacement. Consume only
+   * candidates captured by a prior named canonical wake; never reread host.
+   */
+  private wakeCapturedSubtaskReportCandidates(runtime: SubtaskRuntime) {
+    const known = runtime.checkpoint().journal.reports;
+    for (const [parentTaskId, candidate] of this.subtaskReportCandidates) {
+      if (known.some((report) => sameSource(report.source, candidate))) {
+        this.subtaskReportCandidates.delete(parentTaskId);
+        continue;
+      }
+      const blocked = this.subtaskReportBlocked.get(parentTaskId);
+      if (blocked && sameSource(blocked, candidate)) continue;
+      const owner = this.reportJobForParent(runtime, parentTaskId);
+      if (!owner || owner.state === "permanent" || owner.state === "dispatched")
+        this.enqueueSubtaskReport(parentTaskId, candidate);
+    }
+  }
+
   /** Named cursor/model/restore wakes only. No timer or self-requeue exists. */
   private wakeSubtasks(pass: CanonicalPass, force = false) {
     const current = this.subtaskCurrent(this.state, pass);
     if (!current) {
       this.subtaskOwners = [];
+      this.subtaskReportOwners = [];
       return;
     }
+    this.wakeSubtaskReports(pass, current);
     const key = JSON.stringify({
       sourceId: current.sourceId,
       latest: current.latest,
@@ -2566,10 +2862,13 @@ export class Monitor {
     });
     if (!force && key === this.subtaskWakeKey) return;
     this.subtaskWakeKey = key;
-    this.subtaskOwners = current.parents
-      .filter((parent) => parent.included)
-      .slice(0, 20)
-      .map((parent) => parent.id);
+    this.subtaskOwners =
+      current.selectedModel && this.options.proposeSubtasks
+        ? current.parents
+            .filter((parent) => parent.included)
+            .slice(0, 20)
+            .map((parent) => parent.id)
+        : [];
   }
 
   /** Cancel stale generic work without clearing durable access associations. */
@@ -2578,7 +2877,53 @@ export class Monitor {
     this.subtaskGateway.invalidate();
     this.subtaskGateDispatch = undefined;
     this.subtaskOwners = [];
+    this.subtaskReportOwners = [];
+    this.subtaskScheduleGeneration += 1;
     this.subtaskWakeKey = undefined;
+  }
+
+  private hasSubtaskWork() {
+    return this.subtaskReportOwners.length > 0 || this.subtaskOwners.length > 0;
+  }
+
+  private advanceSubtaskReport(
+    runtime: SubtaskRuntime,
+    parentTaskId: string,
+    before: SubtaskReportJob | undefined,
+    scheduleGeneration: number,
+  ) {
+    if (
+      this.subtaskRuntime !== runtime ||
+      this.subtaskScheduleGeneration !== scheduleGeneration
+    )
+      return;
+    const after = this.reportJobForParent(runtime, parentTaskId);
+    if (after?.state !== "ready") return;
+    const previous =
+      before?.identity === after.identity
+        ? this.reportDecidedIds(before)
+        : new Set<string>();
+    const decided = this.reportDecidedIds(after);
+    if (
+      !decided.size ||
+      decided.size >= after.childIds.length ||
+      previous.size >= decided.size ||
+      [...previous].some((childId) => !decided.has(childId))
+    )
+      return;
+    const frontier = this.subtaskReportFrontiers.get(after.identity);
+    if (
+      frontier &&
+      (frontier.advances >= 64 ||
+        frontier.decided.size >= decided.size ||
+        [...frontier.decided].some((childId) => !decided.has(childId)))
+    )
+      return;
+    this.subtaskReportFrontiers.set(after.identity, {
+      decided,
+      advances: (frontier?.advances ?? 0) + 1,
+    });
+    this.enqueueSubtaskReport(parentTaskId);
   }
 
   private drainSubtasks() {
@@ -2591,20 +2936,44 @@ export class Monitor {
       !this.subtaskRuntime
     )
       return false;
-    const parentTaskId = this.subtaskOwners.shift();
+    const report = this.subtaskReportOwners.shift();
+    const parentTaskId = report?.parentTaskId ?? this.subtaskOwners.shift();
     if (!parentTaskId) return false;
     const runtime = this.subtaskRuntime;
-    const flight = runtime.run(parentTaskId);
+    const before = report
+      ? structuredClone(this.reportJobForParent(runtime, parentTaskId))
+      : undefined;
+    const beforeJournal = report
+      ? JSON.stringify(runtime.checkpoint().journal)
+      : undefined;
+    const scheduleGeneration = this.subtaskScheduleGeneration;
+    const flight = report
+      ? runtime.runReport(parentTaskId, report.source)
+      : runtime.run(parentTaskId);
     this.subtaskFlight = flight;
     void flight.finally(() => {
       if (this.subtaskFlight !== flight) return;
       this.subtaskFlight = undefined;
+      if (report) {
+        if (beforeJournal === JSON.stringify(runtime.checkpoint().journal)) {
+          const source = report.source ?? before?.source;
+          if (source) this.subtaskReportBlocked.set(parentTaskId, source);
+        } else this.subtaskReportBlocked.delete(parentTaskId);
+        this.advanceSubtaskReport(
+          runtime,
+          parentTaskId,
+          before,
+          scheduleGeneration,
+        );
+      }
       if (this.pendingSubtaskCheckpoint) {
         const next = this.pendingSubtaskCheckpoint;
         this.pendingSubtaskCheckpoint = undefined;
         this.installSubtaskRuntime(next);
         if (this.enabled) this.subtaskGateway.enable(this.subtaskIdentity());
       }
+      if (this.enabled && this.subtaskRuntime)
+        this.wakeCapturedSubtaskReportCandidates(this.subtaskRuntime);
       this.publish();
       this.drain();
     });
@@ -5779,9 +6148,21 @@ export class Monitor {
       return;
     }
     if (this.healthFlight) return;
-    if (this.drainSubtasks()) return;
-    const coverage = this.nextCoverageWork();
     const detail = this.nextDetailWork();
+    if (
+      detail &&
+      this.hasSubtaskWork() &&
+      this.subtaskOptionalTurn === "detail" &&
+      this.startDetails(detail)
+    ) {
+      this.subtaskOptionalTurn = "subtask";
+      return;
+    }
+    if (this.drainSubtasks()) {
+      this.subtaskOptionalTurn = "detail";
+      return;
+    }
+    const coverage = this.nextCoverageWork();
     if (coverage && (!detail || this.optionalTurn === "coverage")) {
       this.optionalTurn = "detail";
       if (coverage.kind === "intent") {
@@ -5814,16 +6195,19 @@ export class Monitor {
       }
       return;
     }
-    if (detail && !this.detailFlight) {
-      this.optionalTurn = "coverage";
-      const flight = {
-        epoch: this.epoch,
-        token: ++this.nextDetailToken,
-        taskId: detail.taskId,
-      };
-      this.detailFlight = flight;
-      void this.processDetails(detail, flight);
-    }
+    if (detail && this.startDetails(detail)) this.optionalTurn = "coverage";
+  }
+
+  private startDetails(detail: TaskDetailRecord) {
+    if (this.detailFlight) return false;
+    const flight = {
+      epoch: this.epoch,
+      token: ++this.nextDetailToken,
+      taskId: detail.taskId,
+    };
+    this.detailFlight = flight;
+    void this.processDetails(detail, flight);
+    return true;
   }
 
   private rememberPreceding(

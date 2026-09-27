@@ -35,8 +35,20 @@ Oracle `83da0447` confirmed the sequencing constraint: progress may record expec
 ## Additional acceptance blockers
 
 - Legacy `CoverageStore`, `coverageSnapshot`, intent/report scheduler methods and v10 codec paths remain in source. Their removal was requested and remains incomplete; this is not an approved fallback.
-- Runtime/Monitor association binding implemented in `325157dc`; Main passed 24 tests. Production `index.ts` still omits passive tool ingress. Main's port of the original 22-child actual-host test reproduces four tool starts expected/zero observed; this remains a C05 blocker. The port uses generic accepted-yes proposals and post-settlement reads, retaining one parent, 22 pending children, exact item/batch access and private-body exclusion.
+- Runtime/Monitor association binding implemented in `325157dc`. Host port `b10b490e` exposed missing production ingress; `e0270832` additionally proved ordinary conversation advances dropped access links. Repair `c80f22f0` adds ingress and separates logical invalidation from lifecycle reset. Main passed 47 focused tests and all 5 installed-host admission/drain/access tests. Pinned host passed 4/5, failing the 22-child case before admission. Adapter diagnostics showed 22 mappings and active counts 1/2 when admission succeeded; no adapter change is justified.
 - Full unit/integration/installed-host verification and independent whole-C05 review remain required.
+
+## Evidenced sequencing blocker: stale gate owns the parent
+
+After `c80f22f0`, Main reproduced the pinned-host pre-admission failure: one gate charged, no proposal, gate-ready/permanent/failed. An installed-host pass does not clear this failure. Worker removal of the new branch-confirmation hook also reproduced it; that experiment alone does not establish every timing cause.
+
+Main froze a deterministic runtime RED, `admits a fresh metadata trigger after a stale gate drains without refunding or replaying its charge` in `subtask-runtime.test.ts`: hold the first dispatched gate, introduce original attested metadata, release the stale result, verify retained charge/permanent failure, then explicitly wake the now-current context. Expected a fresh second gate; observed only one. No host timing or retry is involved. Existing proposal-dispatch fixture assertion remains exactly 2 for historical cases; the new two-gate case requires 3.
+
+`SubtaskRuntime.runFlight` intentionally blocks a new identity while any same-parent record is not complete, with a comment reserving resolution for later policy. C07 owns changed-context reevaluation/supersession/recovery; silently removing that guard would bypass the staged contract. C05 cannot pass this ordinary discovery overlap with its current policy. This makes the sequencing conflict concrete before remaining legacy cleanup is complete.
+
+Latest configured checks: format/check pass (three existing Biome warnings); `make test` stops at unit failure, **1679 pass/51 fail**, comprising the prior 50 coverage regressions plus this new RED. Separate actual-host admission/drain/access checks: pinned **4 pass/1 fail**, installed **5 pass**. No skips, expected-failure annotations or retries used to claim acceptance.
+
+Requested owner exception: permit narrowly identified C06/C07 implementation against unaccepted C05 and explicitly adjust implementation dependencies for that overlap. C05 stays open; all regression gates, independent review, manual acceptance, cleanup and no-legacy-fallback requirements remain. This is not grouped acceptance, a test waiver, or permission for broader reordering. Pending owner decision; no C06/C07 source work started.
 - Mock/host mechanics do not replace fresh C10 semantic evaluation. No paid calls or release readiness claimed.
 
 Detailed retained logs are in the task folder: `c05-main-full-before-ports.log`, `c05-mandatory-port-final.log`, `c05-mixed-version-red.log`, `c05-drain-main-{unit,host,installed}.log`.

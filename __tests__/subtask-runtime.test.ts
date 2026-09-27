@@ -25,7 +25,7 @@ const empty = (): Component => ({
     },
   },
 });
-function fixture() {
+function fixture(expectedProposalDispatch = 2) {
   const h = subtaskProposalFixture();
   const saved: Component[] = [];
   let enabled = true;
@@ -95,7 +95,7 @@ function fixture() {
     ) => {
       if (!onDispatch(101) || signal.aborted) throw new Error("vetoed");
       network("proposal");
-      expect(saved.at(-1)?.journal.dispatches).toBe(2);
+      expect(saved.at(-1)?.journal.dispatches).toBe(expectedProposalDispatch);
       expect(
         saved
           .at(-1)
@@ -171,6 +171,55 @@ function associatedFixture() {
 }
 
 describe("durable generic subtask runtime", () => {
+  it("admits a fresh metadata trigger after a stale gate drains without refunding or replaying its charge", async () => {
+    const h = fixture(3);
+    const gate = h.gate.getMockImplementation();
+    if (!gate) throw new Error("Missing gate transport");
+    let release = () => {};
+    let started = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const dispatched = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    h.gate.mockImplementationOnce(async (...args) => {
+      const result = await gate(...args);
+      started();
+      await held;
+      return result;
+    });
+    h.choose("no");
+    const runtime = h.create();
+    const first = runtime.run(h.parent.id);
+    await dispatched;
+    h.options.evidence = subtaskAccessFixture([
+      ["One", "Two"],
+    ]).adapter.metadata();
+    release();
+    await first;
+    expect(runtime.checkpoint().journal).toMatchObject({
+      dispatches: 1,
+      usage: { jev: { calls: 1 } },
+      records: [
+        { state: "permanent", gate: { outcome: "failed", dispatch: 1 } },
+      ],
+    });
+    expect(h.propose).not.toHaveBeenCalled();
+    h.choose("yes");
+    // An explicit current-context wake is new work, not a retry of old proof.
+    await runtime.run(h.parent.id);
+    expect(h.gate).toHaveBeenCalledTimes(2);
+    expect(h.propose).toHaveBeenCalledTimes(1);
+    expect(runtime.snapshot().groups).toHaveLength(1);
+    expect(runtime.checkpoint().journal).toMatchObject({
+      dispatches: 3,
+      usage: { jev: { calls: 2 }, extraction: { calls: 1 } },
+    });
+    await runtime.run(h.parent.id);
+    expect(h.gate).toHaveBeenCalledTimes(2);
+    expect(h.propose).toHaveBeenCalledTimes(1);
+  });
   it("binds explicit access only after committed generic admission, never as completion", async () => {
     const h = associatedFixture();
     const runtime = h.create();

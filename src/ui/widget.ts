@@ -314,14 +314,28 @@ export function renderWidget(
     subtaskTask,
   );
   const subtaskDiagnostics = snapshot.subtaskDiagnostics;
-  const subtaskWarning = subtaskDiagnostics?.exhausted
-    ? `Subtasks${subtasksUnconfirmed ? " incomplete/unconfirmed ·" : ""} exhausted · optional review unavailable`
-    : subtaskDiagnostics?.adapter.omissions &&
-        subtaskDiagnostics.adapter.omissions > 0
-      ? `Subtasks${subtasksUnconfirmed ? " incomplete/unconfirmed ·" : " incomplete ·"} ${compact(subtaskDiagnostics.adapter.omissions)} optional candidates omitted`
-      : subtasksUnconfirmed
-        ? "Subtasks incomplete/unconfirmed · optional review remains"
-        : undefined;
+  const subtaskOmissions = subtaskDiagnostics?.adapter.omissions ?? 0;
+  const subtaskWarning =
+    subtasksUnconfirmed || subtaskDiagnostics?.exhausted || subtaskOmissions > 0
+      ? [
+          subtasksUnconfirmed
+            ? "Subtasks incomplete/unconfirmed"
+            : subtaskDiagnostics?.exhausted
+              ? "Subtasks exhausted"
+              : "Subtasks incomplete",
+          ...(subtasksUnconfirmed && subtaskDiagnostics?.exhausted
+            ? ["exhausted · optional review unavailable"]
+            : subtaskDiagnostics?.exhausted
+              ? ["optional review unavailable"]
+              : []),
+          ...(subtaskOmissions > 0
+            ? [`${compact(subtaskOmissions)} optional candidates omitted`]
+            : []),
+          ...(!subtaskDiagnostics?.exhausted && subtaskOmissions === 0
+            ? ["optional review remains"]
+            : []),
+        ].join(" · ")
+      : undefined;
   const lines: WidgetLine[] = [
     header,
     ...(current ? [{ text: current, wrap: true }] : []),

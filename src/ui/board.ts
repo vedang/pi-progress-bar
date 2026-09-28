@@ -570,7 +570,11 @@ class TaskBoard implements BoardComponent {
     return lines;
   }
 
-  private subtaskSummaryLines(task: BoardTask, width: number) {
+  private subtaskSummaryLines(
+    task: BoardTask,
+    width: number,
+    includeActivity = true,
+  ) {
     const groups = this.subtaskGroups(task);
     const lines: string[] = [];
     if (this.subtaskIncomplete(task))
@@ -589,27 +593,32 @@ class TaskBoard implements BoardComponent {
             (child) => access.get(child.id)?.status === "observed",
           ).length
         : undefined;
+      const unavailable = access
+        ? group.children.some(
+            (child) => access.get(child.id)?.status === "unavailable",
+          )
+        : true;
       const active = access
         ? group.children.filter(
             (child) => (access.get(child.id)?.activeCallHashes.length ?? 0) > 0,
           )
         : [];
+      const accessLabel =
+        observed && observed > 0
+          ? `• ${observed} observed access`
+          : unavailable
+            ? "• Access unavailable · no current observation binding"
+            : "• 0 observed access";
       lines.push(
         ...this.wrapLines(
           `• Reported completed ${stats.completed} / ${stats.tracked} · ${stats.pending} pending · ${stats.blocked} blocked`,
           width,
         ),
         ...this.wrapLines(`• Scope: ${this.subtaskScope(group)}`, width, "dim"),
-        ...this.wrapLines(
-          access
-            ? `• ${observed} observed access`
-            : "• Access unavailable · no current observation binding",
-          width,
-          "dim",
-        ),
+        ...this.wrapLines(accessLabel, width, "dim"),
         ...this.wrapLines(`• Source: ${group.source.role}`, width, "dim"),
       );
-      if (active.length)
+      if (includeActivity && active.length)
         lines.push(
           ...this.wrapLines(
             `• Active access: ${active.map((child) => child.label).join(" · ")}`,
@@ -617,8 +626,9 @@ class TaskBoard implements BoardComponent {
             "accent",
           ),
         );
-      for (const omission of group.omissions)
-        lines.push(...this.wrapLines(`• ${omission}`, width, "warning"));
+      if (includeActivity)
+        for (const omission of group.omissions)
+          lines.push(...this.wrapLines(`• ${omission}`, width, "warning"));
     }
     return lines;
   }
@@ -679,7 +689,7 @@ class TaskBoard implements BoardComponent {
     const header = [
       ...this.wrapLines("Subtasks:", width, "accent"),
       ...this.subtaskWarningLines(width, ""),
-      ...this.subtaskSummaryLines(task, width),
+      ...this.subtaskSummaryLines(task, width, false),
     ];
     const body: SubtaskPaneBodyLine[] = [];
     for (const group of groups) {

@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { subtaskReportOmissionIdentity } from "../src/analysis/subtask-report";
+import {
+  subtaskReportBatches,
+  subtaskReportOmissionIdentity,
+} from "../src/analysis/subtask-report";
 import * as codec from "../src/core/hybrid-checkpoint";
 import type { SubtaskPhaseRecord } from "../src/core/subtask-journal";
+import { CanonicalPass } from "../src/sources/messages";
+import { observation } from "./fixtures/hybrid";
 import { subtaskMetadataMonitor } from "./fixtures/subtask-metadata-monitor";
 import { subtaskSource } from "./fixtures/subtasks";
 
@@ -27,7 +32,7 @@ async function mapped() {
   return h;
 }
 
-it.each(["wallet", "bytes"])(
+it.each(["wallet", "bytes", "adaptive-bytes"])(
   "persists an explicit %s capacity refusal once without charging or retrying, including OFF/reload",
   async (limit) => {
     const h = await mapped();
@@ -68,7 +73,22 @@ it.each(["wallet", "bytes"])(
     const before = h.checkpoint().monitor?.subtasks?.journal;
     const callsBefore = h.counts();
     const capacity = vi.spyOn(codec, "canCommitSubtaskCheckpoint"); // observe real predicate
-    const text = "The workbook review has more unconfirmed work.";
+    const text = "The workbook review has more unconfirmed work.".repeat(
+      limit === "adaptive-bytes" ? 140 : 1,
+    );
+    if (limit === "adaptive-bytes") {
+      const report = observation("capacity-report", text, "assistant");
+      const pass = new CanonicalPass(h.reader());
+      const batches = subtaskReportBatches({
+        parent: h.monitor.state.tasks[0],
+        group: h.monitor.subtaskSnapshot().groups[0],
+        report,
+        resolve: (id) => (id === report.id ? report : pass.observation(id)),
+      });
+      expect(batches.length).toBeGreaterThan(1);
+      expect(batches[0]?.childIds.length).toBeLessThan(20);
+      expect(batches.flatMap((batch) => batch.childIds)).toHaveLength(22);
+    }
     const identity = subtaskReportOmissionIdentity({
       sourceId: h.monitor.state.sourceId,
       parent: h.monitor.state.tasks[0],
@@ -95,7 +115,7 @@ it.each(["wallet", "bytes"])(
     expect(h.checkpoint().monitor?.subtasks?.journal.usage.extraction).toEqual(
       before?.usage.extraction,
     );
-    if (limit === "bytes") {
+    if (limit !== "wallet") {
       expect(
         capacity.mock.calls.some(
           ([, , reserve], i) =>

@@ -6,6 +6,7 @@ import { subtaskJournalIsValid } from "../src/core/subtask-journal";
 import {
   SubtaskRuntime,
   type SubtaskRuntimeCheckpoint,
+  type SubtaskRuntimeOptions,
 } from "../src/core/subtask-runtime";
 import { reportChoices, subtaskReportFixture } from "./fixtures/subtask-report";
 import {
@@ -54,9 +55,10 @@ function fixture() {
     saved.push(structuredClone(candidate));
     return true;
   });
-  const canCommit = vi.fn(
+  const canCommit = vi.fn<NonNullable<SubtaskRuntimeOptions["canCommit"]>>(
     (_candidate: SubtaskRuntimeCheckpoint, _reserve: Reserve) => true,
   );
+  const onReportCapacityRefusal = vi.fn();
   const report = vi.fn(
     async (
       batch: SubtaskReportBatch,
@@ -125,6 +127,7 @@ function fixture() {
       propose,
       commit,
       onPublish,
+      onReportCapacityRefusal,
       ...(capability === "no-report" ? {} : { report }),
       ...(capability === "no-capacity" ? {} : { canCommit }),
       now: () => time,
@@ -154,6 +157,7 @@ function fixture() {
     onPublish,
     commit,
     canCommit,
+    onReportCapacityRefusal,
     report,
     gate,
     propose,
@@ -181,6 +185,40 @@ it.each(["no-report", "no-capacity"] as const)(
     await runtime.runReport(h.options.parent.id, h.source());
     expect(h.report).not.toHaveBeenCalled();
     expect(runtime.checkpoint().journal.dispatches).toBe(0);
+  },
+);
+it.each(["capacity", "unavailable", "throw", "stale-capacity"])(
+  "rechecks %s admission immediately before report dispatch after successful selection",
+  async (kind) => {
+    const h = fixture();
+    const transport = h.report.getMockImplementation();
+    if (!transport) throw new Error("Missing report transport");
+    h.report.mockImplementation(async (...args) => {
+      h.canCommit.mockImplementation(() => {
+        if (kind === "throw")
+          throw new Error("Transient admission reader failure");
+        if (kind === "stale-capacity") {
+          h.options.parent.label = "Changed authority during capacity preflight";
+          return "capacity";
+        }
+        return kind === "capacity" ? "capacity" : false;
+      });
+      return transport(...args);
+    });
+    const runtime = h.create();
+    await runtime.runReport(h.options.parent.id, h.source());
+    expect(h.report).toHaveBeenCalledTimes(1); // The earlier selection genuinely succeeded.
+    expect.soft(h.network).not.toHaveBeenCalled();
+    expect.soft(runtime.checkpoint().journal.dispatches).toBe(0);
+    expect.soft(statuses(runtime)).toEqual(Array(22).fill("pending"));
+    if (kind === "capacity")
+      expect(h.onReportCapacityRefusal).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: h.source(),
+          parent: h.options.parent,
+        }),
+      );
+    else expect(h.onReportCapacityRefusal).not.toHaveBeenCalled();
   },
 );
 it("durably completes 22 children in exactly 20+2 explicit opportunities without proposal credentials", async () => {

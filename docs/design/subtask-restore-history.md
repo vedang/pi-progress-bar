@@ -39,3 +39,9 @@ A committed target waiting for old physical drain is the authoritative accountin
 Public ingress creates22children and real wallet3. Later report costs one new negative gate plus two report chunks =>6. OFF old-checkpoint navigation must retain6; enabled navigation may charge one new goal/current-group/no-metadata gate =>7. Trigger hashes exclude group, so that new gate may share the initial no-metadata trigger; its full identity/context must be new and its trigger must differ from metadata-backed admission. No policy to suppress this legitimate named wake is introduced.
 
 First layer: pure helper tests, then source-only helper implementation; Monitor integration follows additional actual restore/save/drain/reset REDs. Existing public OFF/ON tests remain RED until integration. No stage acceptance or paid proof is implied.
+
+## Implementation evidence (in progress)
+
+Pure helper `84c63854` passes Main145 configured helper/journal/envelope checks; it is not yet wired into Monitor. Main's public restore suite now covers OFF/ON crossed with both preserveControls values, thrown persistence refusal, valid-but-incomparable supplied accounting, different-source isolation, same-source canonical reset, and two restores during abort-ignoring physical transport. These reach actual22-child public ingress and real provider dispatch accounting, not seeded groups. The supplied-accounting conflict is explicitly adversarial data, not a claim of actual fixture calls.
+
+Current focused result:8 integration REDs/29 controls PASS (16 pure helper,12 existing public metadata Monitor,1 new source-isolation control); TypeScript passes. Held transport preserves the visible floor until drain, then incorrectly falls7→3—so preserving only the draining runtime is insufficient. Source-only Monitor integration may now proceed within this contract; omission scheduling/UI and feature acceptance remain separate.

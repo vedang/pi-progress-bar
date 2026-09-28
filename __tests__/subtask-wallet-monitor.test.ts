@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { subtaskCheckpointStorageStatus } from "../src/core/hybrid-checkpoint";
 import { subtaskMetadataMonitor } from "./fixtures/subtask-metadata-monitor";
 
 const running: ReturnType<typeof subtaskMetadataMonitor>[] = [];
@@ -13,43 +14,55 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-it.each([false, true])(
-  "preserves real charges on older same-source restore (enabled=%s)",
-  async (enabled) => {
-    const h = subtaskMetadataMonitor();
-    running.push(h);
-    h.start();
-    await h.settle("goal");
-    await h.map();
-    expect(h.monitor.subtaskSnapshot().groups[0]?.children).toHaveLength(22);
-    const older = h.checkpoint();
-    const beforeReport = h.counts();
-    const olderBranch = structuredClone(h.reader());
-    h.append(
-      "wallet-report",
-      "I reviewed the workbook; the remaining checks are still pending.",
-    );
-    await h.settle("wallet-report");
-    expect(h.counts()).toMatchObject({
-      report: 2,
-      gate: beforeReport.gate + 1,
-      proposal: beforeReport.proposal,
-    });
-    const charged = h.checkpoint().monitor?.subtasks?.journal;
-    if (!charged || !older.monitor?.subtasks)
-      throw new Error("Missing public-ingress journal");
-    expect(charged.dispatches).toBe(
-      older.monitor.subtasks.journal.dispatches + 3,
-    );
-    expect(charged.usage.jev.calls + charged.usage.extraction.calls).toBe(
-      charged.dispatches,
-    );
-    const calls = h.counts();
-    older.monitor.enabled = enabled;
+async function chargedFixture(sourceId = () => "session:test") {
+  const h = subtaskMetadataMonitor(sourceId);
+  running.push(h);
+  h.start();
+  await h.settle("goal");
+  await h.map();
+  expect(h.monitor.subtaskSnapshot().groups[0]?.children).toHaveLength(22);
+  const older = h.checkpoint();
+  const beforeReport = h.counts();
+  const olderBranch = structuredClone(h.reader());
+  h.append(
+    "wallet-report",
+    "I reviewed the workbook; the remaining checks are still pending.",
+  );
+  await h.settle("wallet-report");
+  expect(h.counts()).toMatchObject({
+    report: 2,
+    gate: beforeReport.gate + 1,
+    proposal: beforeReport.proposal,
+  });
+  const charged = h.checkpoint().monitor?.subtasks?.journal;
+  if (!charged || !older.monitor?.subtasks)
+    throw new Error("Missing public-ingress journal");
+  expect(charged.dispatches).toBe(
+    older.monitor.subtasks.journal.dispatches + 3,
+  );
+  expect(charged.usage.jev.calls + charged.usage.extraction.calls).toBe(
+    charged.dispatches,
+  );
+  return { h, older, olderBranch, charged, calls: h.counts() };
+}
+
+it.each([
+  { enabled: false, preserveControls: false },
+  { enabled: true, preserveControls: false },
+  { enabled: false, preserveControls: true },
+  { enabled: true, preserveControls: true },
+])(
+  "preserves real charges on older same-source restore (enabled=$enabled preserveControls=$preserveControls)",
+  async ({ enabled, preserveControls }) => {
+    const { h, older, olderBranch, charged, calls } = await chargedFixture();
+    if (!older.monitor?.subtasks)
+      throw new Error("Missing checkpoint metadata");
+    if (!enabled && preserveControls) h.monitor.turnOff();
+    older.monitor.enabled = preserveControls ? !enabled : enabled;
     await h.monitor.restore(
       "/nonexistent-hybrid-test",
       older,
-      false,
+      preserveControls,
       () => olderBranch,
     );
     const restored = h.checkpoint().monitor?.subtasks?.journal;
@@ -106,3 +119,172 @@ it.each([false, true])(
     );
   },
 );
+
+it("refuses a thrown restore save without adopting target history or dispatching", async () => {
+  const { h, older, olderBranch, charged, calls } = await chargedFixture();
+  if (!older.monitor) throw new Error("Missing metadata");
+  older.monitor.enabled = false;
+  const state = structuredClone(h.monitor.state);
+  h.save.mockClear();
+  h.save.mockImplementation(() => {
+    throw new Error("PRIVATE_RESTORE_WRITE_FAILURE");
+  });
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    older,
+    false,
+    () => olderBranch,
+  );
+  expect(h.save).toHaveBeenCalled();
+  expect(h.monitor.enabled).toBe(false);
+  expect(h.checkpoint().monitor?.subtasks?.journal).toEqual(charged);
+  expect(h.monitor.state).toEqual(state);
+  expect(h.counts()).toEqual(calls);
+  expect(JSON.stringify(h.monitor.debugSnapshot())).not.toContain(
+    "PRIVATE_RESTORE_WRITE_FAILURE",
+  );
+});
+
+it("refuses individually valid but incomparable supplied accounting without overwriting live history", async () => {
+  const { h, older, olderBranch, charged, calls } = await chargedFixture();
+  if (!older.monitor?.subtasks) throw new Error("Missing metadata");
+  older.monitor.enabled = false;
+  // Adversarial supplied checkpoint, not a claim these calls occurred in this fixture.
+  older.monitor.subtasks.journal.dispatches++;
+  older.monitor.subtasks.journal.usage.extraction.calls++;
+  expect(subtaskCheckpointStorageStatus(older)).toBe("supported");
+  h.save.mockClear();
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    older,
+    false,
+    () => olderBranch,
+  );
+  expect(h.monitor.enabled).toBe(false);
+  expect(h.checkpoint().monitor?.subtasks?.journal).toEqual(charged);
+  expect(h.save).not.toHaveBeenCalled();
+  expect(h.counts()).toEqual(calls);
+  expect(h.monitor.subtaskDiagnosticsSnapshot().exhausted).toBe(false);
+});
+
+it("does not carry another source's wallet, identities, or allocator floors", async () => {
+  let sourceId = "session:test";
+  const { h, older, calls } = await chargedFixture(() => sourceId);
+  if (!older.monitor) throw new Error("Missing metadata");
+  older.monitor.enabled = false;
+  sourceId = "session:another";
+  await h.monitor.restore("/nonexistent-hybrid-test", older, false, () => []);
+  expect(h.monitor.state.sourceId).toBe(sourceId);
+  const component = h.checkpoint().monitor?.subtasks;
+  expect(component?.journal.dispatches ?? 0).toBe(0);
+  expect(component?.journal.records ?? []).toEqual([]);
+  expect(component?.journal.reports ?? []).toEqual([]);
+  expect(h.monitor.subtaskSnapshot().groups).toEqual([]);
+  expect(component?.state.nextGroupId ?? 1).toBe(1);
+  expect(component?.state.nextChildId ?? 1).toBe(1);
+  expect(h.counts()).toEqual(calls);
+});
+
+it("preserves charges and allocator floors when canonical reset removes stale semantic groups", async () => {
+  const { h, older, olderBranch, charged, calls } = await chargedFixture();
+  if (!older.monitor?.subtasks) throw new Error("Missing metadata");
+  older.monitor.enabled = false;
+  const allocator = older.monitor.subtasks.state;
+  const amended = olderBranch.map((entry) =>
+    (entry as { id?: string }).id === "goal"
+      ? {
+          type: "message",
+          id: "goal",
+          message: {
+            role: "user",
+            content:
+              "Different request invalidates the earlier canonical source.",
+          },
+        }
+      : entry,
+  );
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    older,
+    false,
+    () => amended,
+  );
+  const component = h.checkpoint().monitor?.subtasks;
+  expect(component?.journal.dispatches).toBe(charged.dispatches);
+  expect(component?.journal.usage).toEqual(charged.usage);
+  expect(component?.journal.records.map((record) => record.identity)).toEqual(
+    expect.arrayContaining(charged.records.map((record) => record.identity)),
+  );
+  expect(component?.state.nextGroupId).toBe(allocator.nextGroupId);
+  expect(component?.state.nextChildId).toBe(allocator.nextChildId);
+  expect(h.monitor.subtaskSnapshot().groups).toEqual([]);
+  expect(h.counts()).toEqual(calls);
+});
+
+it("uses committed history as the floor through repeated restores while old transport ignores abort", async () => {
+  const { h, older, olderBranch, charged } = await chargedFixture();
+  if (!older.monitor) throw new Error("Missing metadata");
+  const transport = h.fetch.getMockImplementation();
+  if (!transport) throw new Error("Missing fixture transport");
+  let release: (() => void) | undefined;
+  let held = false;
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body)) as {
+      questions: Record<string, unknown>;
+    };
+    const response = await transport(url, init);
+    if (
+      !held &&
+      Object.keys(request.questions).some((key) =>
+        key.startsWith("subtask:subtask-child:"),
+      )
+    ) {
+      held = true;
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    }
+    return response;
+  });
+  let floor = charged.dispatches;
+  let calls = h.counts();
+  try {
+    h.append(
+      "held-report",
+      "Additional workbook checks remain pending; no new completion is claimed.",
+    );
+    await h.settle("held-report");
+    expect(held).toBe(true);
+    const inFlight = h.checkpoint().monitor?.subtasks?.journal;
+    if (!inFlight) throw new Error("Missing dispatched journal");
+    floor = inFlight.dispatches;
+    expect(floor).toBeGreaterThan(charged.dispatches);
+    expect(
+      inFlight.reports.some((job) =>
+        job.attempts.some((attempt) => attempt.outcome === "dispatched"),
+      ),
+    ).toBe(true);
+    calls = h.counts();
+    older.monitor.enabled = false;
+    for (let i = 0; i < 2; i++) {
+      await h.monitor.restore(
+        "/nonexistent-hybrid-test",
+        older,
+        false,
+        () => olderBranch,
+      );
+      expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(floor);
+      expect(h.counts()).toEqual(calls);
+    }
+  } finally {
+    release?.();
+    await vi.advanceTimersByTimeAsync(100);
+  }
+  expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(floor);
+  expect(h.counts()).toEqual(calls);
+  expect(
+    h.monitor
+      .subtaskSnapshot()
+      .groups[0]?.children.every((child) => child.status === "pending"),
+  ).toBe(true);
+});

@@ -15,7 +15,7 @@ export const metadataXml = `<workbook><sheets>${coverageNames.map((name) => `<sh
 export type MetadataEnvelope = ReturnType<typeof encodeSubtaskCheckpoint>;
 
 /** Live public Monitor ingress. No seeded generic store or direct child admission. */
-export function subtaskMetadataMonitor() {
+export function subtaskMetadataMonitor(sourceId = () => "session:test") {
   const requests: EvaluationRequest[] = [];
   const admissions: boolean[] = [];
   const proposalNetwork = vi.fn();
@@ -90,6 +90,7 @@ export function subtaskMetadataMonitor() {
         unresolved: false,
       }),
     monitorOptions: {
+      sourceId,
       selectedModel: () => "fixture/selected",
       proposeSubtasks,
     },

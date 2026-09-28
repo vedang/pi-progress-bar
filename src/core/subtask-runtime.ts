@@ -92,6 +92,15 @@ interface SubtaskReportCommitReserve {
   journalBytes: number;
 }
 
+interface SubtaskReportCapacityRefusal {
+  sourceId: string;
+  parent: HybridTask;
+  group: SubtaskSnapshot["groups"][number];
+  source: SourceRef;
+}
+
+type SubtaskReportCommitAdmission = boolean | "capacity";
+
 export interface SubtaskRuntimeOptions {
   initial: SubtaskRuntimeCheckpoint;
   current: () => SubtaskRuntimeCurrent | undefined;
@@ -114,7 +123,9 @@ export interface SubtaskRuntimeOptions {
   canCommit?: (
     candidate: SubtaskRuntimeCheckpoint,
     reserve: SubtaskReportCommitReserve,
-  ) => boolean;
+  ) => SubtaskReportCommitAdmission;
+  /** Measured report refusal only; it never reports stale or transport failures. */
+  onReportCapacityRefusal?: (refusal: SubtaskReportCapacityRefusal) => void;
   now?: () => number;
   commit: (candidate: SubtaskRuntimeCheckpoint) => boolean;
   onPublish: (snapshot: Readonly<SubtaskSnapshot>) => void;
@@ -138,6 +149,13 @@ interface CurrentParent {
   group?: SubtaskSnapshot["groups"][number];
   options: SubtaskGateOptions;
 }
+
+type ReportBatchSelection =
+  | { kind: "batch"; batch: SubtaskReportBatch }
+  | { kind: "capacity" }
+  | { kind: "unavailable" };
+
+type ReportCommitAdmission = "accepted" | "capacity" | "unavailable";
 
 interface Flight {
   controller: AbortController;
@@ -901,8 +919,28 @@ export class SubtaskRuntime {
 
     const remaining = this.reportRemaining(prepared, sameIdentity);
     if (!remaining.length) return;
-    const batch = this.selectReportBatch(prepared, remaining, identity);
-    if (!batch) return;
+    if (this.journal.dispatches >= 1024) {
+      if (!sameIdentity)
+        this.reportCapacityRefused(
+          parentTaskId,
+          full[0].source,
+          flight,
+          prepared.current.sourceId,
+        );
+      return;
+    }
+    const selection = this.selectReportBatch(prepared, remaining, identity);
+    if (selection.kind !== "batch") {
+      if (selection.kind === "capacity" && !sameIdentity)
+        this.reportCapacityRefused(
+          parentTaskId,
+          full[0].source,
+          flight,
+          prepared.current.sourceId,
+        );
+      return;
+    }
+    const batch = selection.batch;
     const owner = sameIdentity ?? this.reportJob(batch, prepared);
     if (!owner) return;
     if (
@@ -1178,20 +1216,28 @@ export class SubtaskRuntime {
     prepared: CurrentReport,
     remaining: readonly string[],
     identity: string,
-  ): SubtaskReportBatch | undefined {
+  ): ReportBatchSelection {
     const limit = Math.min(20, remaining.length);
+    let measuredCapacity = false;
+    let unavailable = false;
     for (let size = limit; size >= 1; size -= 1) {
       const batches = subtaskReportBatches(prepared.options, {
         childIds: remaining.slice(0, size),
         maxQuestions: size,
       });
       const batch = batches.length === 1 ? batches[0] : undefined;
-      if (!batch || batch.jobIdentity !== identity) continue;
+      if (!batch || batch.jobIdentity !== identity) {
+        unavailable = true;
+        continue;
+      }
       const owner = this.journal.reports.find(
         (report) => report.identity === identity,
       );
       const report = owner ?? this.reportJob(batch, prepared);
-      if (!report) return;
+      if (!report) {
+        unavailable = true;
+        continue;
+      }
       const ticket = {
         dispatch: this.journal.dispatches + 1,
         at: this.reportNow(),
@@ -1199,8 +1245,38 @@ export class SubtaskRuntime {
       const journal = this.chargedReportJournal(
         this.reportDispatched(report, batch, ticket),
       );
-      if (!journal || !this.reportCanCommit(journal, batch)) continue;
-      return batch;
+      if (!journal) {
+        unavailable = true;
+        continue;
+      }
+      const admission = this.reportCanCommit(journal, batch);
+      if (admission === "accepted") return { kind: "batch", batch };
+      if (admission === "capacity") measuredCapacity = true;
+      else unavailable = true;
+    }
+    return measuredCapacity && !unavailable
+      ? { kind: "capacity" }
+      : { kind: "unavailable" };
+  }
+
+  /** Revalidate exact report authority before passing measured capacity to Monitor. */
+  private reportCapacityRefused(
+    parentTaskId: string,
+    source: SourceRef,
+    flight: Flight,
+    sourceId: string,
+  ) {
+    const current = this.currentReport(parentTaskId, source, flight, sourceId);
+    if (!current) return;
+    try {
+      this.options.onReportCapacityRefusal?.({
+        sourceId: current.current.sourceId,
+        parent: detached(current.parent),
+        group: detached(current.group),
+        source: detached(source),
+      });
+    } catch {
+      // Capacity reporting cannot alter dispatch, journal, or runtime authority.
     }
   }
 
@@ -1282,12 +1358,12 @@ export class SubtaskRuntime {
   private reportCanCommit(
     journal: SubtaskJournalCheckpoint,
     batch?: SubtaskReportBatch,
-  ): boolean {
-    if (!this.options.canCommit) return false;
+  ): ReportCommitAdmission {
+    if (!this.options.canCommit) return "unavailable";
     const candidate = this.candidateCheckpoint(this.store, journal);
-    if (!candidate) return false;
+    if (!candidate) return "unavailable";
     const serializedSource = batch && ownDataJson(batch.source);
-    if (batch && !serializedSource) return false;
+    if (batch && !serializedSource) return "unavailable";
     // Preserve prior 3-byte-per-code-unit worst-case reserve without invoking
     // ambient `toJSON`; source refs are part of every final store receipt.
     const sourceBytes = serializedSource
@@ -1299,9 +1375,14 @@ export class SubtaskRuntime {
       journalBytes: (sourceBytes + 256) * children + 2048,
     };
     try {
-      return this.options.canCommit(candidate, reserve) === true;
+      const admitted = this.options.canCommit(candidate, reserve);
+      return admitted === true
+        ? "accepted"
+        : admitted === "capacity"
+          ? "capacity"
+          : "unavailable";
     } catch {
-      return false;
+      return "unavailable";
     }
   }
 

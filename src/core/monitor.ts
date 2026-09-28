@@ -2741,6 +2741,15 @@ export class Monitor {
         this.evaluateSubtaskReport(batch, signal, onDispatch, onPhysicalFlight),
       canCommit: (candidate, reserve) =>
         this.canCommitSubtaskReport(candidate, reserve),
+      onReportCapacityRefusal: ({ group, parent, source, sourceId }) => {
+        this.recordSubtaskReportOmission(
+          group,
+          parent,
+          source,
+          sourceId,
+          "capacity",
+        );
+      },
       now: () => Date.now(),
       commit: (candidate) => this.commitSubtaskCandidate(candidate),
       onPublish: (snapshot) => {
@@ -3163,7 +3172,7 @@ export class Monitor {
   private canCommitSubtaskReport(
     candidate: SubtaskRuntimeCheckpoint,
     reserve: { storeBytes: number; journalBytes: number },
-  ) {
+  ): true | "capacity" | false {
     try {
       return canCommitSubtaskCheckpoint(
         this.state,
@@ -3176,7 +3185,9 @@ export class Monitor {
           candidate,
         ),
         reserve,
-      );
+      )
+        ? true
+        : "capacity";
     } catch {
       return false;
     }
@@ -3411,8 +3422,13 @@ export class Monitor {
     parent: HybridTask,
     source: SourceRef,
     sourceId: string,
-    reason: "report-oversized" | "coalesced",
+    reason: "report-oversized" | "coalesced" | "capacity",
   ): SubtaskReportOmissionReceipt {
+    if (
+      sourceId !== this.state.sourceId ||
+      sourceId !== this.options.sourceId()
+    )
+      return "stale";
     const identity = subtaskReportOmissionIdentity({
       sourceId,
       parent,

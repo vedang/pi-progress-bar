@@ -1,5 +1,5 @@
 type WorkKind = "action" | "response";
-export type ReportState =
+type ReportState =
   | "done"
   | "reopened"
   | "not-started"
@@ -32,14 +32,14 @@ interface SourceTask {
   revision?: string;
   ref: SourceRef;
 }
-export interface SourceSnapshot {
+interface SourceSnapshot {
   sourceId: string;
   kind: "checklist" | "conversation";
   revision: string;
   complete: boolean;
   tasks: SourceTask[];
 }
-export interface Task extends SourceTask {
+interface Task extends SourceTask {
   id: string;
   included: boolean;
   beads?: {
@@ -63,7 +63,7 @@ export interface Ledger {
   nextTaskId: number;
   explicitSelection: boolean;
 }
-export interface ReportBatch {
+interface ReportBatch {
   sourceId: string;
   scopeRevision: string;
   order: number;

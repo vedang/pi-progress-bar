@@ -36,7 +36,7 @@ Main owns all test edits, validation and acceptance. Children initially read onl
 
 Repository-native equivalents replace unavailable OpenClaw-specific campaign tooling: configured Vitest/offline guard, Make format/check/test, separate integration when unit fails, Biome/TypeScript/Knip, JJ diffs, independent native read-only preservation reviewers. Paid semantic proof occurs later under existing finite-manifest/ledger authorization; audit does not confer new semantic acceptance.
 
-## Discovery consumed; layer assessment in progress
+## Discovery and second-layer assessment consumed
 
 Main has read all eight discovery ledgers. They cover the140 assigned test files,1240 AST declaration candidates and27 primary support fixtures, with parameter factories manually reviewed by each lane. Discovery was read-only; no test run, paid call or source/test deletion occurred. This is inventory evidence, not automatic acceptance of every retention/deletion recommendation.
 
@@ -44,10 +44,10 @@ Proposed whole-layer retirement targets are orphan `AnalysisScheduler`, the pre-
 
 Main identified two discovery-quality caveats:
 
-- The runtime report's claim that175 AST candidates include two `describe` wrappers is inconsistent with the AST script, which only recognizes imported `it`/`test` aliases. A narrow correction has been requested; its283 executed case total agrees with the baseline.
-- Imports, construction and dormant scheduler call sites do not establish live legacy semantic authority under strict v11. A second reader is tracing actual entrypoint, restore and queue-population paths. Conversely, the44 failing legacy-fixture tests cannot be deleted without preserving their unique current product contracts, including durable omissions. N00-N04 continuation is intentionally awaiting N05 wiring, not orphan code.
+- The runtime report incorrectly counted two `describe` wrappers. Its correction confirms175 actual declarations,283 parameter-expanded cases and no omitted declaration; wrapper rows were surplus metadata.
+- The second reader traced strict-v11 entrypoints, restore validation and queue population: legacy semantic coverage cannot be populated through the shipping lifecycle. The34 scheduler failures stop at removed workbook admission; the10 storage failures inject forbidden v10 coverage metadata into v11. These are obsolete-fixture failures, not44 demonstrated live defects. Their unique current contracts still need generic keepers, including durable omissions, no-refund/deep-source/span restore and selected recovery/owner-order ports. Keep them visible until coherent feature-phase retirement. The adapter and `HealthCoverage` remain live; N00-N04 continuation is deliberately awaiting N05 wiring, not orphan code.
 
-Second read-only assessment has three independent scopes: core/UI obsolete layers and real-host keepers; auxiliary fixture/access redundancy; generic/legacy/health reachability and contract preservation. Main will synthesize exact keeper-first edits and mutation controls after these reports. Source/test baseline remains frozen. In particular, the Beads reader must retain all valid records (not filter backlog), and an empty valid export is not a missing-file failure; proposed fixture repairs must respect the actual reader contract.
+All three second-layer reports are consumed: core/UI obsolete layers and real-host keepers; auxiliary fixture/access redundancy; generic/legacy/health reachability and contract preservation. Main is executing their evidence-backed keeper-first cleanup serially. Their static reachability findings supersede discovery's blanket legacy-liveness claims. In particular, the Beads reader must retain all valid records (not filter backlog), and an empty valid export is not a missing-file failure; proposed fixture repairs must respect the actual reader contract.
 
 ## Executed cleanup batches
 
@@ -58,6 +58,14 @@ The independent second layer confirmed `enrichBeadsTasks` has no shipping caller
 Before deletion, focused keepers passed12/12. Three temporary production-owner controls were caught: removing duplicate rejection failed the duplicate case; bypassing all symlink defenses failed both real-filesystem symlink cases; injecting closed-record completion into `Monitor.refreshBeads` failed the retained Monitor task-status assertion. Both source files were restored byte-identically after each control (Beads SHA256 `31bfd49213f806146a92eb70e7f52a666fce7de6d80532c949875587c7edd460`, Monitor `cf486fc51b525caaed21a9cba3e349eb0847ab02eb3b3cff508e23b28e6901a5`). These are bounded controls, not an exhaustive filesystem race/security proof.
 
 Then Main removed the51-line orphan mutator/import and its redundant test/fixture. Post-removal keepers11/11 pass; format/check pass with the same three historical warnings. Reader and presentation implementation remain unchanged. Full gates and independent cumulative preservation review still follow the cleanup batch; this is not audit completion.
+
+### S1/L1/U1 — unreachable source/test layers
+
+Removed `AnalysisScheduler` plus its two suites, the old `core/ledger.ts` reducer plus its suite, and unused `clarityLabel` plus its suite. Source caller searches show no remaining reference to these removed functions. Current Monitor/hybrid/lifecycle/checkpoint/health/widget keepers pass165/165. No old scheduler policy was transplanted and no live health type was removed.
+
+The first check correctly found four newly unused type exports in `src/core/types.ts`. Removed only their `export` modifiers; all definitions and exported live `Ledger` remain unchanged. This is justified declaration cleanup, not a type redesign or Knip exemption. Format/check then passed (three historical warnings).
+
+Cumulative B1+S1/L1/U1 full unit result:1918 pass/44 unchanged legacy-fixture failures; separate integration86/86 pass. The pass-count delta is +4 repaired filesystem rows minus21 parameter-expanded orphan cases. `make test` still fails at the retained44 failures; integration was run separately, not silently skipped. Independent cumulative preservation review remains required. No paid calls, live corpus changes, feature acceptance, release or push.
 
 ## Completion remains pending
 

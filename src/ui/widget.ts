@@ -23,21 +23,6 @@ export interface WidgetSnapshot {
   subtaskDiagnostics?: SubtaskDiagnosticsSnapshot;
 }
 
-/** Existing safe health-label utility; board owns where it is displayed. */
-export function clarityLabel(score: unknown): string {
-  if (
-    typeof score !== "number" ||
-    !Number.isFinite(score) ||
-    score < 0 ||
-    score > 3
-  )
-    return "unknown";
-  if (score < 1) return "unclear";
-  if (score < 2) return "partly clear";
-  if (score < 3) return "mostly clear";
-  return "clear";
-}
-
 const esc = String.fromCharCode(27);
 // Unterminated OSC tails have no visible label content. Drop before the proven
 // VT sanitizer, which handles complete OSC/CSI/C1 sequences and partial CSI.

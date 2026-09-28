@@ -58,3 +58,16 @@ Same-source lifetime accounting is independent of `preserveControls`. A restore 
 ### Restore-history prerequisite accepted
 
 The historical wallet rollback above is repaired through `dd93c0a6` and accepted as a prerequisite batch after independent reviewer `922dee76` returned OK with notes. Main145 focused tests/checks pass; worker fullunit1968 PASS/46 known FAIL and86 integration PASS. Same-source restore/reset/drain now retains coherent wallet/history atomically. This supersedes the earlier pending-advisor/repair status only: omission detection, summary merge/ownership, capacity classification and passive UI remain unfinished, with two genuine Monitor REDs. ru7 and C05–C09 remain unaccepted.
+
+## Pure summary layer API
+
+Before identity/detection integration, `src/core/subtask-omissions.ts` provides pure candidate construction for **already codec-validated, canonical typed** summaries and internally constructed valid identity/reason entries. This layer is not an untrusted-input decoder and grants no report authority. Preserve typed inputs; do not widen public metadata to unknown or duplicate a schema/migration layer.
+
+- `appendSubtaskOmission(live, entry)` returns `{summary, changed}`. Identity-only dedupe; first reason wins. At64 entries, a distinct65th sets saturation without eviction. Once saturated (including byte saturation below64), new unknown detail is frozen: no refill or repeated writes.
+- `saturateSubtaskOmissions(live)` returns a smaller saturation-only candidate, including `{entries:[], saturated:true}` from absence. Existing saturation is a no-op.
+- `mergeSubtaskOmissions(live, incoming)` returns `{summary: SubtaskOmissionSummary | undefined, changed}`. Live-first union; first reason wins;64-entry truncation saturates; OR saturation. Already durable incoming entries may extend a saturated live summary, unlike newly observed unknown detail. Incoming absence never drops live history.
+- `projectSubtaskOmissions(summary)` returns detached `{total, byReason:{"report-oversized",coalesced,capacity}, saturated}` with explicit zero reason counts, no identities. Empty saturated remains incomplete, not exact zero.
+
+Inputs are `Readonly<SubtaskOmissionSummary> | undefined`; append entry is a readonly summary-entry type. Append/saturate always return a present summary. `changed` compares the candidate to live state, never to incoming. Every result is detached even on no-op; no mutation, storage, byte-admission callback, reader, clock, provider, retry or scheduling effect. Monitor later applies full-envelope byte preflight and atomic commit before publishing any candidate. Session matching is a caller precondition for merge.
+
+Main added12 declarations/14 expanded pure cases. Initial configured run is collection-RED because the module is absent;61 existing envelope cases pass. This is not14 executed failures. Identity hashing and Monitor/UI integration remain separate unfinished layers.

@@ -194,7 +194,7 @@ it.each(["stop", "restore"])(
   },
 );
 
-it.each(["stop", "nested-save-failure"])(
+it.each(["stop", "nested-save-failure", "stop-on-inside-save"])(
   "adopts saved wallet before plain ON after reentrant %s and preserves new charges through OFF/reload",
   async (mode) => {
     const donor = await chargedFixture();
@@ -209,8 +209,11 @@ it.each(["stop", "nested-save-failure"])(
     await h.monitor.restore("/nonexistent-hybrid-test", older, false, h.reader);
     let nested: Promise<void> | undefined;
     h.save.mockImplementationOnce(() => {
-      if (mode === "stop") h.monitor.stop();
-      else {
+      if (mode === "stop" || mode === "stop-on-inside-save") {
+        h.monitor.stop();
+        if (mode === "stop-on-inside-save")
+          h.monitor.turnOn("/nonexistent-hybrid-test");
+      } else {
         h.save.mockImplementationOnce(() => {
           throw new Error("Nested restore save refused");
         });
@@ -229,7 +232,7 @@ it.each(["stop", "nested-save-failure"])(
       h.reader,
     );
     await nested;
-    expect(h.monitor.enabled).toBe(false);
+    expect(h.monitor.enabled).toBe(mode === "stop-on-inside-save");
     expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(
       donor.charged.dispatches,
     );

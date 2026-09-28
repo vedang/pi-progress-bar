@@ -3,7 +3,7 @@ import type { TaskDetailRecord as DetailRecord } from "../../src/analysis/task-d
 
 export type { TaskDetailRecord as DetailRecord } from "../../src/analysis/task-details";
 
-import type { MonitorCheckpointMetadata } from "../../src/core/hybrid-checkpoint";
+import type { SubtaskMonitorCheckpointMetadata } from "../../src/core/hybrid-checkpoint";
 import type { HybridTask, Observation } from "../../src/core/hybrid-state";
 export const required = <T>(value: T | undefined): T => {
   if (value === undefined) throw new Error("Missing required fixture");
@@ -58,7 +58,7 @@ export function detailRecord(
 }
 export function detailMetadata(
   records: DetailRecord[],
-): MonitorCheckpointMetadata & { taskDetails: DetailRecord[] } {
+): SubtaskMonitorCheckpointMetadata & { taskDetails: DetailRecord[] } {
   return {
     enabled: false,
     usage: {

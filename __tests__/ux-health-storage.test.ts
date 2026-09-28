@@ -4,7 +4,7 @@ import {
   checkpointBytes,
   type HealthCard,
   MAX_CHECKPOINT_BYTES,
-  type MonitorCheckpointMetadata,
+  type SubtaskMonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
 import { initialMessage, observation } from "./fixtures/hybrid";
 import { monitorHarness } from "./fixtures/hybrid-monitor";
@@ -298,7 +298,7 @@ it("evicts optional health when mandatory core work fits only without the map", 
     Reflect.get(h.monitor, "capacityMetadata"),
     h.monitor,
     [undefined, new Map(), candidate],
-  ) as MonitorCheckpointMetadata;
+  ) as SubtaskMonitorCheckpointMetadata;
   candidate.scopeError = "x".repeat(
     MAX_CHECKPOINT_BYTES - checkpointBytes(candidate, coreMetadata) - 128,
   );
@@ -392,7 +392,7 @@ it("preflights prospective idle-DONE selector after restored-open work completes
     Reflect.get(h.monitor, "capacityMetadata"),
     h.monitor,
     [undefined, map, h.monitor.state],
-  ) as MonitorCheckpointMetadata;
+  ) as SubtaskMonitorCheckpointMetadata;
   delete withoutSelector.idleDoneTaskId;
   h.monitor.state.scopeError = "";
   h.monitor.state.scopeError = "x".repeat(

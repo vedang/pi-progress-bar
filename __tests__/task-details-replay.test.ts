@@ -5,7 +5,7 @@ import {
   checkpointBytes,
   encodeSubtaskCheckpoint,
   MAX_CHECKPOINT_BYTES,
-  type MonitorCheckpointMetadata,
+  type SubtaskMonitorCheckpointMetadata,
   subtaskCheckpointStorageStatus,
   subtaskMonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
@@ -429,7 +429,7 @@ it("mandatory admission evicts optional detail facts when only the core fits", a
     Reflect.get(h.monitor, "capacityMetadata"),
     h.monitor,
     [undefined, new Map(), candidate],
-  ) as MonitorCheckpointMetadata;
+  ) as SubtaskMonitorCheckpointMetadata;
   Reflect.deleteProperty(metadata, "taskDetails");
   candidate.scopeError = "x".repeat(
     MAX_CHECKPOINT_BYTES - checkpointBytes(candidate, metadata) - 128,

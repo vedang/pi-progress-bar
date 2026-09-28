@@ -4,7 +4,7 @@ import { extractionInput } from "../src/analysis/extractor";
 import {
   checkpointBytes,
   encodeSubtaskCheckpoint,
-  type MonitorCheckpointMetadata,
+  type SubtaskMonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
 import { selectedModelExtractor } from "../src/core/selected-model";
 import { fixtureHealthCard } from "./fixtures/health-card";
@@ -31,7 +31,7 @@ it.each(["jev", "extraction"] as const)(
   "saturates cumulative %s usage and keeps accepted checkpoints encodable",
   async (phase) => {
     const state = await initial();
-    const metadata: MonitorCheckpointMetadata = {
+    const metadata: SubtaskMonitorCheckpointMetadata = {
       enabled: false,
       usage: { jev: usage(), extraction: usage() },
     };
@@ -95,7 +95,7 @@ it("health envelope covers retained old card with prospective dispatch and usage
   first.label = "\ud800".repeat(240);
   state.focusTaskId = second.id;
   const oldCard = fixtureHealthCard(first, initialMessage);
-  const metadata: MonitorCheckpointMetadata = {
+  const metadata: SubtaskMonitorCheckpointMetadata = {
     enabled: false,
     usage: { jev: usage(), extraction: usage() },
     healthCards: [oldCard],

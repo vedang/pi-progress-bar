@@ -3,7 +3,7 @@ import { processObservation } from "../src/core/hybrid";
 import {
   checkpointBytes,
   encodeSubtaskCheckpoint,
-  type MonitorCheckpointMetadata,
+  type SubtaskMonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
 import { type HybridState, observationRef } from "../src/core/hybrid-state";
 import { fixtureHealthCard } from "./fixtures/health-card";
@@ -17,7 +17,7 @@ import {
 import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
 
 const running: ReturnType<typeof monitorHarness>[] = [];
-const metadata: MonitorCheckpointMetadata = {
+const metadata: SubtaskMonitorCheckpointMetadata = {
   enabled: false,
   usage: {
     jev: { calls: 0, inputTokens: 0, outputTokens: 0 },

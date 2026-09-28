@@ -189,6 +189,109 @@ async function fixture(
         .groups[0]?.children.map((child) => child.status),
   };
 }
+it("projects detached no-file reconciliation gaps and reported counts without parent or correction authority", async () => {
+  const h = await fixture();
+  const parents = structuredClone(h.monitor.state.tasks);
+  const correction = h.monitor.correctionSnapshot();
+  const calls = [
+    h.fetch.mock.calls.length,
+    h.extract.mock.calls.length,
+    h.reader.mock.calls.length,
+  ];
+  const snapshot = h.monitor.advisorySettlementSnapshot();
+  expect(snapshot).toMatchObject({
+    reason: "ready",
+    tasks: [{ id: "task:1" }],
+    subtasks: [
+      {
+        parentTaskId: "task:1",
+        parentRevision: 1,
+        groupId: "subtask-group:1",
+        listRevision: 1,
+        complete: true,
+        knownTotal: 22,
+        reportedCompleted: 0,
+        reportedBlocked: 0,
+        pending: 22,
+        gaps: labels.slice(0, 3),
+        omittedChildren: 19,
+      },
+    ],
+  });
+  expect(snapshot).not.toHaveProperty("coverage");
+  const rows = Reflect.get(snapshot, "subtasks") as {
+    gaps: string[];
+    observedAccess?: number;
+  }[];
+  expect(rows[0]).not.toHaveProperty("observedAccess");
+  rows[0].gaps[0] = "MUTATED";
+  expect(JSON.stringify(h.monitor.advisorySettlementSnapshot())).not.toContain(
+    "MUTATED",
+  );
+  expect(h.monitor.correctionSnapshot()).toEqual(correction);
+  expect(h.monitor.state.tasks).toEqual(parents);
+  expect([
+    h.fetch.mock.calls.length,
+    h.extract.mock.calls.length,
+    h.reader.mock.calls.length,
+  ]).toEqual(calls);
+  h.append("report", reportText);
+  await h.settle("report");
+  expect(
+    h.calls.map((request) => Object.keys(request.questions).length),
+  ).toEqual([20, 2]);
+  expect(h.monitor.advisorySettlementSnapshot()).toMatchObject({
+    tasks: [{ id: "task:1", status: "not-started" }],
+    subtasks: [
+      {
+        reportedCompleted: 22,
+        reportedBlocked: 0,
+        pending: 0,
+        gaps: [],
+        omittedChildren: 0,
+      },
+    ],
+  });
+  expect(h.monitor.state.tasks).toEqual(parents);
+});
+it.each(["group", "parent", "revision", "list", "child", "unavailable"])(
+  "does not infer reconciliation access from mismatched %s evidence",
+  async (kind) => {
+    const h = await fixture();
+    const group = h.monitor.subtaskSnapshot().groups[0];
+    const access = vi
+      .spyOn(h.monitor, "subtaskAccessSnapshot")
+      .mockReturnValue({
+        omissions: 0,
+        groups: [
+          {
+            groupId: kind === "group" ? "subtask-group:999" : group.id,
+            parentTaskId: kind === "parent" ? "task:999" : group.parentTaskId,
+            parentRevision: group.parentRevision + Number(kind === "revision"),
+            listRevision: group.listRevision + Number(kind === "list"),
+            children: [
+              {
+                childId:
+                  kind === "child" ? "subtask-child:999" : group.children[0].id,
+                status: kind === "unavailable" ? "unavailable" : "observed",
+                activeCallHashes: [],
+              },
+            ],
+          },
+        ],
+      });
+    try {
+      const snapshot = h.monitor.advisorySettlementSnapshot();
+      expect(snapshot).toMatchObject({ subtasks: [{ pending: 22 }] });
+      const rows = Reflect.get(snapshot, "subtasks") as object[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).not.toHaveProperty("observedAccess");
+      expect(h.calls).toHaveLength(0);
+    } finally {
+      access.mockRestore();
+    }
+  },
+);
 it("restores a mid-wave checkpoint without one parent's report suppressing another parent's same-source work", async () => {
   const h = await fixture(false, false, 2);
   const [first, second] = h.monitor.state.tasks;

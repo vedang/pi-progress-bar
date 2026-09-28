@@ -224,6 +224,23 @@ it.each([false, true])(
     expect(JSON.stringify(h.monitor.checkpoint())).not.toContain(
       "PRIVATE_ACCESS_BODY",
     );
+    const reconciliation = h.monitor.advisorySettlementSnapshot();
+    expect(reconciliation).toMatchObject({
+      subtasks: [
+        {
+          parentTaskId: parents[0].id,
+          parentRevision: parents[0].revision,
+          reportedCompleted: 0,
+          reportedBlocked: 0,
+          pending: 2,
+          observedAccess: 1,
+          gaps: ["Compare operating costs", "Assess deployment risks"],
+          omittedChildren: 0,
+        },
+      ],
+    });
+    expect(reconciliation).not.toHaveProperty("coverage");
+    expect(h.fetch).toHaveBeenCalledTimes(calls);
     h.monitor.turnOff();
     expect(
       h.monitor

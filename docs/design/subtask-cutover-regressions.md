@@ -2,6 +2,14 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## C09 generic reconciliation RED freeze
+
+Under approved C08/C09 implementation overlap, Main ported all seven historical `coverage-reconciliation.test.ts` cases to the new `subtasks` summary schema, retaining20 parent rows,8 MAYBE receipts, malicious-label escaping, both byte limits/whole-block fallback, stale/foreign/DONE filtering and no all-DONE wake. Added excluded-parent, count-only knownTotal1000,240-scalar astral gap, duplicate parent/group, total200/per-group64 limits and malformed-scope/access/omission controls. Overflow fixtures have unique groups and exactly200 tracked children, so fallback tests real byte overflow rather than accidental identity/count invalidity.
+
+Main added real Monitor no-file pending→reported-complete projection, detached-mutation/no-reader/no-provider/unchanged-parent/correction controls, exact access-binding negatives and observed-access assertions in the existing mapped-access cases. No legacy snapshot facade or fabricated semantic completion.
+
+Configured freeze: **27 failed/29 passed (56 cases)**. Format/check pass, with only three historical warnings. Source not yet changed for C09. Logs `c09-projection-{red,format,check}.log`. C09 formatter/Monitor implementation must precede acceptance; C08 diagnostics/UI, remaining scheduler/storage ports, legacy removal, host diagnosis and whole-stage reviews remain open.
+
 ## Verified parked-owner repair and remaining sequencing gate
 
 Source `b961ab21` validates report-owner authority at named canonical wakes and consumes captured ownership during physical settlement. Main independently passed **45/45** report/Monitor/bounds tests (`c07-invalid-owner-main-green.log`). Worker reported680 broad passes,1883 unit passes/50 original coverage failures, and83 integration passes; these do not constitute whole-stage acceptance or resolve the historically intermittent correction failure.

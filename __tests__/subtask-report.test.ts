@@ -5,6 +5,7 @@ import {
   type SubtaskReportReceipt,
   subtaskReportBatches,
   subtaskReportDecisions,
+  subtaskReportRequestSize,
 } from "../src/analysis/subtask-report";
 import { reportChoices, subtaskReportFixture } from "./fixtures/subtask-report";
 import { subtaskHash, subtaskSource } from "./fixtures/subtasks";
@@ -576,6 +577,33 @@ it("does not truncate or partially build oversized canonical report evidence", (
   const tool = subtaskReportFixture();
   Object.assign(tool.options.report, { role: "toolResult" });
   expect(subtaskReportBatches(tool.options)).toEqual([]);
+});
+it("classifies whole-request overflow in a later child's canonical source without treating invalid evidence as oversized", () => {
+  const f = subtaskReportFixture();
+  const text = "A separate canonical child obligation. ".repeat(600);
+  const source = subtaskSource("later-child-source", text);
+  f.observations.set(source.entryId, {
+    id: source.entryId,
+    role: "user",
+    text,
+    hash: source.messageHash,
+  });
+  f.options.group.children[21].source = source;
+  expect(
+    subtaskReportBatches(f.options, {
+      childIds: [f.options.group.children[0].id],
+      maxQuestions: 1,
+    }),
+  ).toHaveLength(1);
+  expect(
+    subtaskReportBatches(f.options, {
+      childIds: [f.options.group.children[21].id],
+      maxQuestions: 1,
+    }),
+  ).toEqual([]);
+  expect(subtaskReportRequestSize(f.options)).toBe("oversized");
+  f.options.group.children[21].source.quoteHash = "0".repeat(64);
+  expect(subtaskReportRequestSize(f.options)).toBe("invalid");
 });
 it("keeps all children within fixed request bounds with long canonical context", () => {
   const f = subtaskReportFixture(

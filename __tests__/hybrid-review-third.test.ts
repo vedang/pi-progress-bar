@@ -4,8 +4,8 @@ import { extractionInput } from "../src/analysis/extractor";
 import { gateRequest } from "../src/analysis/gate";
 import { processObservation } from "../src/core/hybrid";
 import {
-  encodeCheckpoint,
-  restoreCheckpoint,
+  encodeSubtaskCheckpoint,
+  restoreSubtaskCheckpoint,
 } from "../src/core/hybrid-checkpoint";
 import {
   emptyState,
@@ -29,9 +29,9 @@ function restore(
 ) {
   // Fourth argument is canonical-order authority, deliberately independent of
   // the stored proof. Current implementation ignores it; the repair must not.
-  return Reflect.apply(restoreCheckpoint, undefined, [
+  return Reflect.apply(restoreSubtaskCheckpoint, undefined, [
     {
-      ...encodeCheckpoint(emptyState("session:test")),
+      ...encodeSubtaskCheckpoint(emptyState("session:test")),
       state: structuredClone(state),
     },
     "session:test",

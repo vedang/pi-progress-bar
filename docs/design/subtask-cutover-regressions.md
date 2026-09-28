@@ -2,6 +2,12 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## Mandatory codec retirement prerequisite (2026-09-28)
+
+Main moved remaining mandatory checkpoint consumers to the actual strict-v11 encoder/restorer: advisory-origin, hybrid-checkpoint, hybrid-focus, hybrid-fourth-review, hybrid-journal-replay, hybrid-review-core and hybrid-review-third. All assertions for canonical context, accepted-phase replay, exact undo/events/focus, corruption rejection, capacity and no rebilling remain; restored mandatory state now comes from the v11 result's `.state`. Version rejection explicitly includes obsolete10 and future12. No compatibility wrapper or alias was added.
+
+The subtask envelope keeper now asserts current v11 acceptance and supplied v10 rejection without retaining a working v10 writer/reader; exact512KiB ON/OFF boundaries remain. Main **171/171 PASS across eight files**, make check PASS with three historical warnings. Legacy source is not yet removed.
+
 ## Final report scheduling keeper ports (2026-09-28)
 
 Main strengthened `subtask-report-monitor.test.ts` with exact1023→1024 final-call behavior,20 completed plus2 pending through reload, held-call OFF fencing with no completion, and admitted-owner precedence when a newer corrective candidate arrives at exhaustion. The existing physical-drain keeper now explicitly proves advisory readiness and has an OFF late-response branch. A delayed-response case checks actual persisted dispatch timestamps rather than response time. Combined report/recovery/storage keepers **67/67 PASS**, make check PASS (three historical warnings).

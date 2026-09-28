@@ -7,8 +7,8 @@ import {
 import { type AdmissionPlan, processObservation } from "../src/core/hybrid";
 import {
   checkpointBytes,
-  encodeCheckpoint,
-  restoreCheckpoint,
+  encodeSubtaskCheckpoint,
+  restoreSubtaskCheckpoint,
 } from "../src/core/hybrid-checkpoint";
 import type { HybridState } from "../src/core/hybrid-state";
 import {
@@ -67,7 +67,7 @@ function padEvents(state: HybridState, target: number) {
   expect(checkpointBytes(state)).toBe(target);
 }
 function restore(checkpoint: unknown) {
-  return restoreCheckpoint(
+  return restoreSubtaskCheckpoint(
     checkpoint,
     "session:test",
     (id) => [initialMessage, latest].find((o) => o.id === id),
@@ -87,14 +87,14 @@ async function journal() {
   );
   const state = saved.find((s) => s.pending?.journal.completions.length);
   if (!state) throw new Error("Missing accepted completion");
-  expect(restore(encodeCheckpoint(state))).toBeDefined();
+  expect(restore(encodeSubtaskCheckpoint(state))).toBeDefined();
   return state;
 }
 
 it.each(["confidence", "probability"] as const)(
   "rejects impossible accepted focus with low %s",
   async (field) => {
-    const checkpoint = encodeCheckpoint(await journal());
+    const checkpoint = encodeSubtaskCheckpoint(await journal());
     const assessment =
       checkpoint.state.pending?.journal.completions[0]?.focus?.assessment;
     if (!assessment) throw new Error("Missing focus");
@@ -103,7 +103,7 @@ it.each(["confidence", "probability"] as const)(
   },
 );
 it("rejects a phase-invalid completion choice even with matching task copy", async () => {
-  const checkpoint = encodeCheckpoint(await journal());
+  const checkpoint = encodeSubtaskCheckpoint(await journal());
   const record = checkpoint.state.pending?.journal.completions[0];
   const assessment = record?.assessments[0];
   const task = checkpoint.state.tasks.find((t) => t.id === record?.chunkIds[0]);
@@ -128,7 +128,7 @@ it.each(["hash", "range"])(
     );
     const state = saved.find((s) => s.pending?.journal.patch);
     if (!state) throw new Error("Missing accepted patch");
-    const checkpoint = encodeCheckpoint(state);
+    const checkpoint = encodeSubtaskCheckpoint(state);
     expect(restore(checkpoint)).toBeDefined();
     const source =
       checkpoint.state.pending?.journal.patch?.outcome.archive[0]?.source;

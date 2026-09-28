@@ -3,8 +3,8 @@ import { extractionInput } from "../src/analysis/extractor";
 import { gateRequest } from "../src/analysis/gate";
 import { processObservation } from "../src/core/hybrid";
 import {
-  encodeCheckpoint,
-  restoreCheckpoint,
+  encodeSubtaskCheckpoint,
+  restoreSubtaskCheckpoint,
 } from "../src/core/hybrid-checkpoint";
 import { emptyState, type HybridState } from "../src/core/hybrid-state";
 import {
@@ -36,8 +36,8 @@ async function ledger(total: number, active: number, long = false) {
   state.focusTaskId = undefined;
   // This is a legal bounded checkpoint, not a malformed oversized input.
   expect(
-    restoreCheckpoint(
-      encodeCheckpoint(state),
+    restoreSubtaskCheckpoint(
+      encodeSubtaskCheckpoint(state),
       "session:test",
       () => initialMessage,
       () => [],
@@ -185,7 +185,7 @@ it.each([
           : item.pending?.phase === "extract",
     );
     if (!state) throw new Error("Missing accepted journal fixture");
-    const checkpoint = encodeCheckpoint(state);
+    const checkpoint = encodeSubtaskCheckpoint(state);
     const pending = checkpoint.state.pending;
     if (!pending) throw new Error("Missing pending phase");
     if (variant === "missing-gate")
@@ -203,7 +203,7 @@ it.each([
       completion.requestHash = "c".repeat(64);
     }
     expect(
-      restoreCheckpoint(
+      restoreSubtaskCheckpoint(
         checkpoint,
         "session:test",
         () => initialMessage,
@@ -273,7 +273,7 @@ it.each(["label", "kind", "completed-label", "completion-event"])(
             ).length),
     );
     if (!partial) throw new Error("Missing accepted unchanged journal");
-    const checkpoint = encodeCheckpoint(partial);
+    const checkpoint = encodeSubtaskCheckpoint(partial);
     const task = checkpoint.state.tasks[0];
     if (!task) throw new Error("Missing task");
     if (variant === "label" || variant === "completed-label")
@@ -287,7 +287,7 @@ it.each(["label", "kind", "completed-label", "completion-event"])(
       event.kind = "withdraw";
     }
     expect(
-      restoreCheckpoint(
+      restoreSubtaskCheckpoint(
         checkpoint,
         "session:test",
         (id) => [initialMessage, latest].find((message) => message.id === id),
@@ -313,14 +313,14 @@ it("binds an accepted gate to the canonical earlier context used by its request"
   );
   const gated = saved.find((state) => state.pending?.phase === "extract");
   if (!gated) throw new Error("Missing gate snapshot");
-  const checkpoint = encodeCheckpoint(gated);
+  const checkpoint = encodeSubtaskCheckpoint(gated);
   const amended = observation(
     context.id,
     "The parser means the batch parser.",
     "assistant",
   );
   expect(
-    restoreCheckpoint(
+    restoreSubtaskCheckpoint(
       checkpoint,
       "session:test",
       (id) =>

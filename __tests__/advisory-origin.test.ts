@@ -7,8 +7,8 @@ import { extractionInput, groundPatch } from "../src/analysis/extractor";
 import { gateRequest } from "../src/analysis/gate";
 import { processObservation } from "../src/core/hybrid";
 import {
-  encodeCheckpoint,
-  restoreCheckpoint,
+  encodeSubtaskCheckpoint,
+  restoreSubtaskCheckpoint,
 } from "../src/core/hybrid-checkpoint";
 import type { HybridState } from "../src/core/hybrid-state";
 import { canonicalMessages } from "../src/sources/messages";
@@ -176,8 +176,8 @@ it("H1 real status answers can update the existing board and resume accepted pen
   if (!pending)
     throw new Error("Missing accepted pending-completion checkpoint");
   const sources = [initialMessage, latest];
-  const restored = restoreCheckpoint(
-    encodeCheckpoint(pending),
+  const restored = restoreSubtaskCheckpoint(
+    encodeSubtaskCheckpoint(pending),
     "session:test",
     (id) => sources.find((s) => s.id === id),
     () => [],
@@ -185,7 +185,11 @@ it("H1 real status answers can update the existing board and resume accepted pen
   expect(restored).toBeDefined();
   if (!restored) throw new Error("Could not restore current proof");
   const resumedTransport = backend();
-  const resumed = await processObservation(restored, latest, resumedTransport);
+  const resumed = await processObservation(
+    restored.state,
+    latest,
+    resumedTransport,
+  );
   expect(resumed.tasks.map((t) => t.status)).toEqual(
     completed.tasks.map((t) => t.status),
   );

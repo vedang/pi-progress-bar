@@ -1,9 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   canCommitSubtaskCheckpoint,
-  checkpointStorageStatus,
   commitSubtaskCheckpoint,
-  encodeCheckpoint,
   encodeSubtaskCheckpoint,
   restoreSubtaskCheckpoint,
   subtaskCheckpointStorageStatus,
@@ -532,11 +530,12 @@ describe("disconnected strict v11 generic subtask envelope", () => {
     expect(() => encodeSubtaskCheckpoint(state, monitor)).toThrow();
     expect(calls).toBe(0);
   });
-  it("keeps active v10 unchanged and never treats it as v11 or migrates it", async () => {
+  it("rejects v10 without migration while admitting the current v11 envelope", async () => {
     const { state, monitor } = await fixture();
-    const old = encodeCheckpoint(state, { enabled: true, usage: usage() });
-    expect(old.version).toBe(10);
-    expect(checkpointStorageStatus(old)).toBe("supported");
+    const old = {
+      ...encodeSubtaskCheckpoint(state, { enabled: true, usage: usage() }),
+      version: 10,
+    };
     expect(subtaskCheckpointStorageStatus(old)).toBe("unsupported");
     expect(
       restoreSubtaskCheckpoint(
@@ -548,17 +547,16 @@ describe("disconnected strict v11 generic subtask envelope", () => {
       ),
     ).toBeUndefined();
     expect(
-      checkpointStorageStatus(encodeSubtaskCheckpoint(state, monitor)),
-    ).toBe("unsupported");
+      subtaskCheckpointStorageStatus(encodeSubtaskCheckpoint(state, monitor)),
+    ).toBe("supported");
   });
   it.each([true, false])(
     "enforces the exact whole512KiB bound for enabled=%s without shrinking valid parent capacity",
     (enabled) => {
       const state = emptyState("s");
       const monitor = { enabled, usage: usage() };
-      const base = bytes(encodeCheckpoint(state, monitor));
+      const base = bytes(encodeSubtaskCheckpoint(state, monitor));
       state.sourceId = "s".repeat(1 + 524288 - base);
-      expect(bytes(encodeCheckpoint(state, monitor))).toBe(524288);
       expect(bytes(encodeSubtaskCheckpoint(state, monitor))).toBe(524288);
       state.sourceId += "s";
       expect(() => encodeSubtaskCheckpoint(state, monitor)).toThrow();

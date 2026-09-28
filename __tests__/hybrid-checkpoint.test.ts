@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { processObservation } from "../src/core/hybrid";
 import {
-  encodeCheckpoint,
-  restoreCheckpoint,
+  encodeSubtaskCheckpoint,
+  restoreSubtaskCheckpoint,
 } from "../src/core/hybrid-checkpoint";
 import {
   emptyState,
@@ -26,22 +26,22 @@ function required<T>(value: T | undefined): T {
 const resolver = (messages: Observation[]) => (id: string) =>
   messages.find((message) => message.id === id);
 function restore(state: HybridState, messages = [initialMessage]) {
-  const restored = restoreCheckpoint(
-    encodeCheckpoint(state),
+  const restored = restoreSubtaskCheckpoint(
+    encodeSubtaskCheckpoint(state),
     "session:test",
     resolver(messages),
     () => [],
   );
   expect(restored).toBeDefined();
   if (!restored) throw new Error("Expected checkpoint restoration");
-  return restored;
+  return restored.state;
 }
 
-describe("strict hybrid v10 checkpoint", () => {
+describe("strict hybrid v11 checkpoint", () => {
   it("round-trips generated labels and evidence, without full source context", async () => {
     const state = await initial(true);
-    const checkpoint = encodeCheckpoint(state);
-    expect(checkpoint).toMatchObject({ version: 10 });
+    const checkpoint = encodeSubtaskCheckpoint(state);
+    expect(checkpoint).toMatchObject({ version: 11 });
     expect(JSON.stringify(checkpoint)).toContain("Implement parser");
     expect(JSON.stringify(checkpoint)).not.toContain(
       "PRIVATE_CONTEXT_SENTINEL",
@@ -52,12 +52,15 @@ describe("strict hybrid v10 checkpoint", () => {
     expect(state.tasks[0]?.label).toBe("Implement parser");
     expect(JSON.stringify(checkpoint)).not.toContain("consumer mutation");
   });
-  it.each([1, 2, 3, 4, 5, 6, 7, 8, 9, 11])(
+  it.each([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12])(
     "rejects obsolete or unknown checkpoint version %i",
     async (version) => {
-      const checkpoint = { ...encodeCheckpoint(await initial()), version };
+      const checkpoint = {
+        ...encodeSubtaskCheckpoint(await initial()),
+        version,
+      };
       expect(
-        restoreCheckpoint(
+        restoreSubtaskCheckpoint(
           checkpoint,
           "session:test",
           resolver([initialMessage]),
@@ -67,9 +70,9 @@ describe("strict hybrid v10 checkpoint", () => {
     },
   );
   it("rejects malformed schema, wrong session and unavailable or modified canonical source", async () => {
-    const checkpoint = encodeCheckpoint(await initial());
+    const checkpoint = encodeSubtaskCheckpoint(await initial());
     expect(
-      restoreCheckpoint(
+      restoreSubtaskCheckpoint(
         { ...checkpoint, interval: 15 },
         "session:test",
         resolver([initialMessage]),
@@ -77,7 +80,7 @@ describe("strict hybrid v10 checkpoint", () => {
       ),
     ).toBeUndefined();
     expect(
-      restoreCheckpoint(
+      restoreSubtaskCheckpoint(
         checkpoint,
         "another-session",
         resolver([initialMessage]),
@@ -85,7 +88,7 @@ describe("strict hybrid v10 checkpoint", () => {
       ),
     ).toBeUndefined();
     expect(
-      restoreCheckpoint(
+      restoreSubtaskCheckpoint(
         checkpoint,
         "session:test",
         () => undefined,
@@ -93,7 +96,7 @@ describe("strict hybrid v10 checkpoint", () => {
       ),
     ).toBeUndefined();
     expect(
-      restoreCheckpoint(
+      restoreSubtaskCheckpoint(
         checkpoint,
         "session:test",
         resolver([observation(initialMessage.id, "different source")]),
@@ -127,7 +130,7 @@ describe("strict hybrid v10 checkpoint", () => {
       if (variant === "duplicate-id") required(state.tasks[1]).id = "task:1";
       if (variant === "quote-hash")
         required(state.tasks[0]).source.quoteHash = "invalid";
-      expect(() => encodeCheckpoint(state)).toThrow();
+      expect(() => encodeSubtaskCheckpoint(state)).toThrow();
     },
   );
 });

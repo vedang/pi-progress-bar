@@ -1,8 +1,8 @@
 import { expect, it } from "vitest";
 import { processObservation } from "../src/core/hybrid";
 import {
-  encodeCheckpoint,
-  restoreCheckpoint,
+  encodeSubtaskCheckpoint,
+  restoreSubtaskCheckpoint,
 } from "../src/core/hybrid-checkpoint";
 import type { HybridState, Observation } from "../src/core/hybrid-state";
 import {
@@ -28,7 +28,7 @@ function record(state: HybridState) {
   return object(object(state.pending).journal);
 }
 function restore(checkpoint: unknown, messages: Observation[]) {
-  return Reflect.apply(restoreCheckpoint, undefined, [
+  return Reflect.apply(restoreSubtaskCheckpoint, undefined, [
     checkpoint,
     "session:test",
     (id: string) => messages.find((message) => message.id === id),
@@ -103,7 +103,7 @@ it.each([
   "cursor-role",
 ])("anchors gate origin and transition: %s", async (variant) => {
   const c = await capture();
-  const checkpoint = encodeCheckpoint(c.gate);
+  const checkpoint = encodeSubtaskCheckpoint(c.gate);
   const gate = object(record(checkpoint.state).gate);
   expect(restore(checkpoint, c.messages)).toBeDefined();
   if (variant === "prior-assessment") {
@@ -133,7 +133,7 @@ it.each([
   "event-length",
 ])("rejects corrupt patch undo: %s", async (variant) => {
   const c = await capture(true);
-  const checkpoint = encodeCheckpoint(c.patched);
+  const checkpoint = encodeSubtaskCheckpoint(c.patched);
   const undo = object(object(record(checkpoint.state).patch).undo);
   expect(restore(checkpoint, c.messages)).toBeDefined();
   if (variant === "revise-label")
@@ -160,7 +160,7 @@ it.each([
   "event-suffix",
 ])("replays completion against the exact prior state: %s", async (variant) => {
   const c = await capture();
-  const checkpoint = encodeCheckpoint(c.completed);
+  const checkpoint = encodeSubtaskCheckpoint(c.completed);
   const completion = first(record(checkpoint.state).completions);
   const undo = object(completion.undo);
   expect(restore(checkpoint, c.messages)).toBeDefined();
@@ -206,14 +206,16 @@ it("stores normalized outcomes and undo, not redundant projection/hash/event ali
     ])
       expect(item).not.toHaveProperty(field);
   }
-  expect(JSON.stringify(encodeCheckpoint(c.completed))).not.toContain(
+  expect(JSON.stringify(encodeSubtaskCheckpoint(c.completed))).not.toContain(
     initialMessage.text,
   );
-  expect(JSON.stringify(encodeCheckpoint(c.completed))).not.toContain(
+  expect(JSON.stringify(encodeSubtaskCheckpoint(c.completed))).not.toContain(
     c.messages[1]?.text,
   );
   expect(JSON.stringify(journal)).not.toContain('"quote":');
-  expect(restore(encodeCheckpoint(c.completed), c.messages)).toBeDefined();
+  expect(
+    restore(encodeSubtaskCheckpoint(c.completed), c.messages),
+  ).toBeDefined();
 });
 
 it.each(["gate", "patch", "completion"])(
@@ -222,7 +224,7 @@ it.each(["gate", "patch", "completion"])(
     const c = await capture(true);
     const state =
       phase === "gate" ? c.gate : phase === "patch" ? c.patched : c.completed;
-    const checkpoint = encodeCheckpoint(state);
+    const checkpoint = encodeSubtaskCheckpoint(state);
     const journal = record(checkpoint.state);
     expect(restore(checkpoint, c.messages)).toBeDefined();
     const request =
@@ -266,7 +268,7 @@ it.each([false, true])(
     });
     expect(blocked.scopeUnresolved).toBe(unresolved);
     expect(
-      restore(encodeCheckpoint(blocked), [initialMessage, latest]),
+      restore(encodeSubtaskCheckpoint(blocked), [initialMessage, latest]),
     ).toBeDefined();
   },
 );
@@ -297,7 +299,7 @@ it("restores an accepted completion phase blocked at the event limit", async () 
     value: "event-capacity",
   });
   expect(
-    restore(encodeCheckpoint(blocked), [initialMessage, latest]),
+    restore(encodeSubtaskCheckpoint(blocked), [initialMessage, latest]),
   ).toBeDefined();
 });
 
@@ -324,9 +326,9 @@ it("replays identical canonical context with a different object construction ord
     hash: context.hash,
   };
   expect(canonical).toEqual(context);
-  const checkpoint = encodeCheckpoint(gate);
+  const checkpoint = encodeSubtaskCheckpoint(gate);
   expect(
-    restoreCheckpoint(
+    restoreSubtaskCheckpoint(
       checkpoint,
       "session:test",
       (id) =>

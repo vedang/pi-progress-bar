@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { completionRequest } from "../src/analysis/completion";
 import { processObservation } from "../src/core/hybrid";
 import {
-  checkpointBytes,
-  encodeCheckpoint,
-  restoreCheckpoint,
+  encodeSubtaskCheckpoint,
+  restoreSubtaskCheckpoint,
+  subtaskCheckpointBytes,
 } from "../src/core/hybrid-checkpoint";
 import { emptyState, type HybridState } from "../src/core/hybrid-state";
 import {
@@ -22,12 +22,12 @@ const latest = observation(
   "assistant",
 );
 const restore = (checkpoint: unknown) =>
-  restoreCheckpoint(
+  restoreSubtaskCheckpoint(
     checkpoint,
     "session:test",
     (id) => [initialMessage, latest].find((o) => o.id === id),
     () => [],
-  );
+  )?.state;
 async function switched(options: Parameters<typeof backend>[1] = {}) {
   const state = await initial();
   const p = backend(noPatch(), {
@@ -72,7 +72,7 @@ describe("Jev-selected current task focus", () => {
       const plan = object(args[0]);
       if (plan.phase === "completion")
         admittedBytes =
-          checkpointBytes(plan.candidate as HybridState) +
+          subtaskCheckpointBytes(plan.candidate as HybridState) +
           Number(plan.schemaBytes);
       return true;
     });
@@ -95,7 +95,7 @@ describe("Jev-selected current task focus", () => {
     const accepted = saved.find((s) => s.pending?.journal.completions.length);
     expect(accepted).toBeDefined();
     if (!accepted) throw new Error("No accepted result");
-    expect(checkpointBytes(accepted)).toBeLessThanOrEqual(admittedBytes);
+    expect(subtaskCheckpointBytes(accepted)).toBeLessThanOrEqual(admittedBytes);
   });
   it.each([false, true])(
     "fits all twenty full-label focus candidates without needless duplication (unicode=%s)",
@@ -189,8 +189,8 @@ describe("Jev-selected current task focus", () => {
   });
   it("uses a strict new checkpoint schema without legacy focus protocol branches", async () => {
     const state = await captured();
-    const checkpoint = encodeCheckpoint(state);
-    expect(checkpoint.version).toBe(10);
+    const checkpoint = encodeSubtaskCheckpoint(state);
+    expect(checkpoint.version).toBe(11);
     expect(restore({ ...checkpoint, version: 5 })).toBeUndefined();
     expect(JSON.stringify(checkpoint)).not.toContain("focusProtocol");
   });
@@ -205,7 +205,7 @@ describe("Jev-selected current task focus", () => {
       },
       priorFocusTaskId: { present: true, value: "task:1" },
     });
-    const restored = restore(encodeCheckpoint(state));
+    const restored = restore(encodeSubtaskCheckpoint(state));
     expect(restored?.focusTaskId).toBe("task:2");
     if (!restored) throw new Error("Cannot restore accepted focus");
     const p = backend();
@@ -217,7 +217,7 @@ describe("Jev-selected current task focus", () => {
   it.each(["missing", "hash", "choice", "source", "undo"])(
     "rejects corrupt %s focus proof",
     async (kind) => {
-      const checkpoint = encodeCheckpoint(await captured());
+      const checkpoint = encodeSubtaskCheckpoint(await captured());
       const state = object(checkpoint.state);
       const journal = object(object(state.pending).journal);
       const record = object((journal.completions as unknown[])[0]);
@@ -287,8 +287,8 @@ describe("Jev-selected current task focus", () => {
       throw new Error("No first focus request");
     expect(first.questions.focus.criteria).toHaveProperty("task:20");
     expect(Object.keys(first.questions).length).toBeLessThanOrEqual(20);
-    const restored = restoreCheckpoint(
-      encodeCheckpoint(pending),
+    const restored = restoreSubtaskCheckpoint(
+      encodeSubtaskCheckpoint(pending),
       "session:test",
       (id) => sources.find((o) => o.id === id),
       () => [],
@@ -296,7 +296,7 @@ describe("Jev-selected current task focus", () => {
     expect(restored).toBeDefined();
     if (!restored) throw new Error("No partial resume");
     const resume = backend(noPatch(), { focus: "task:20" });
-    const next = await processObservation(restored, update, resume);
+    const next = await processObservation(restored.state, update, resume);
     expect(
       resume.evaluate.mock.calls.some(
         ([r]) => "focus" in r.questions || "gate" in r.questions,

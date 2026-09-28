@@ -551,6 +551,20 @@ export class ReconciliationDelivery {
       }
       if (!question || questionIndex < 0) return;
 
+      // A reply is correlated only when the matching canonical question starts
+      // the assistant suffix. An earlier assistant entry belongs to another
+      // turn, even if a later terminal reply would otherwise look valid.
+      for (let index = 0; index < questionIndex; index++) {
+        const entry = suffix[index];
+        if (
+          plainObject(entry) &&
+          entry.type === "message" &&
+          plainObject(entry.message) &&
+          entry.message.role === "assistant"
+        )
+          return;
+      }
+
       const questionId = question.id;
       const details = question.details;
       if (

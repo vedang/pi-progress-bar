@@ -586,9 +586,10 @@ export default function progressBar(pi: ExtensionAPI): void {
     delivery?.onCorrectionRunInvalidated();
     const ownAdvisoryStart = delivery?.onAgentStart() ?? false;
     // Pi retries/compaction begin another low-level run without another
-    // before_agent_start. Retain only its already-validated proof and make the
-    // next provider-context check decide whether it still matches.
+    // before_agent_start. Only an already-active source run can retain its
+    // proof; an idle custom turn has no fresh capture and must be unknown.
     const priorContinuationPolicy = continuationPolicy?.policy;
+    const continuingSourceRun = activeCorrectionRun !== undefined;
     if (!ownAdvisoryStart) {
       invalidateContinuation(false);
       clearOpportunity();
@@ -607,7 +608,7 @@ export default function progressBar(pi: ExtensionAPI): void {
         runId: run,
         policy:
           pendingContinuationPolicy ??
-          priorContinuationPolicy ??
+          (continuingSourceRun ? priorContinuationPolicy : undefined) ??
           captureContinuationPolicy(undefined),
       };
     }

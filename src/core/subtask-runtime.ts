@@ -923,7 +923,7 @@ export class SubtaskRuntime {
       if (!sameIdentity)
         this.reportCapacityRefused(
           parentTaskId,
-          full[0].source,
+          full[0],
           flight,
           prepared.current.sourceId,
         );
@@ -934,7 +934,7 @@ export class SubtaskRuntime {
       if (selection.kind === "capacity" && !sameIdentity)
         this.reportCapacityRefused(
           parentTaskId,
-          full[0].source,
+          full[0],
           flight,
           prepared.current.sourceId,
         );
@@ -984,7 +984,23 @@ export class SubtaskRuntime {
           const nextTicket = { dispatch: this.journal.dispatches + 1, at };
           const report = this.reportDispatched(owner, batch, nextTicket);
           const journal = this.chargedReportJournal(report);
-          if (!journal || !this.reportCanCommit(journal, batch)) return false;
+          if (!journal) return false;
+          const admission = this.reportCanCommit(journal, batch);
+          if (admission !== "accepted") {
+            if (
+              admission === "capacity" &&
+              !this.journal.reports.some(
+                (job) => job.identity === owner.identity,
+              )
+            )
+              this.reportCapacityRefused(
+                prepared.parent.id,
+                batch,
+                flight,
+                prepared.current.sourceId,
+              );
+            return false;
+          }
           if (
             !this.exactReport(
               batch,
@@ -1225,6 +1241,8 @@ export class SubtaskRuntime {
         childIds: remaining.slice(0, size),
         maxQuestions: size,
       });
+      // Wire-size splitting is normal prefix selection, not unavailable authority.
+      if (batches.length > 1) continue;
       const batch = batches.length === 1 ? batches[0] : undefined;
       if (!batch || batch.jobIdentity !== identity) {
         unavailable = true;
@@ -1262,18 +1280,18 @@ export class SubtaskRuntime {
   /** Revalidate exact report authority before passing measured capacity to Monitor. */
   private reportCapacityRefused(
     parentTaskId: string,
-    source: SourceRef,
+    batch: SubtaskReportBatch,
     flight: Flight,
     sourceId: string,
   ) {
-    const current = this.currentReport(parentTaskId, source, flight, sourceId);
+    const current = this.exactReport(batch, parentTaskId, flight, sourceId);
     if (!current) return;
     try {
       this.options.onReportCapacityRefusal?.({
         sourceId: current.current.sourceId,
         parent: detached(current.parent),
         group: detached(current.group),
-        source: detached(source),
+        source: detached(batch.source),
       });
     } catch {
       // Capacity reporting cannot alter dispatch, journal, or runtime authority.

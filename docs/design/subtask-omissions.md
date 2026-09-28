@@ -136,3 +136,7 @@ The previous pending keeper persisted C during a live wake before restore. Main 
 ### Launch repair verification
 
 Source `038d3154` changes only Monitor: it reserves the flight slot and report kind before invoking runtime code, then attaches the returned flight without resetting callback-established flags. Main inspected the complete diff and reran12 configured suites:346 PASS; `make check` PASS. Worker reports formatting PASS with no changes,2031 unit PASS/44 retained legacy failures, and86 integration PASS. The synchronous dispatch-save model-selection regression and corrected pending-target first-save keeper both pass. Retained review remains the acceptance gate; no product/stage acceptance or deferred feature completion is claimed.
+
+### Accepted ownership/oversized prerequisite
+
+Independent retained reviewer `31d732f6` returned **OK** for the cumulative omission implementation through `038d3154`: launch reservation and pending-target first-save proof closed; prior OFF and wake-key repairs remain intact. Main accepts the pure helper/identity, Monitor ownership and oversized-transaction layer with346 focused/check PASS and worker2031 unit PASS/44 retained legacy failures/86 integration PASS. This is not ru7, C05–C09 or product acceptance. Coalescing transactions, explicit capacity-refusal classification, passive UI, subsequent cumulative gates and remaining legacy keeper ports are still required.

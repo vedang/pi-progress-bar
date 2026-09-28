@@ -456,21 +456,31 @@ it("restores a mid-wave checkpoint without one parent's report suppressing anoth
     ...savedJob.childIds.filter((id) => !alreadyDecided.has(id)),
     ...secondGroup.children.map((child) => child.id),
   ].map((id) => `subtask:${id}`);
-  h.save.mockReset();
-  h.calls.splice(0);
-  await h.monitor.restore("/nonexistent-hybrid-test", midway, false, h.reader);
+  // This is crash recovery, not navigation in a Monitor that already knows the
+  // later terminal receipts. A live rewind must not replay that charged work.
+  h.monitor.stop();
+  const restored = await fixture(false, false, 2);
+  expect(restored.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(0);
+  await restored.monitor.restore(
+    "/nonexistent-hybrid-test",
+    midway,
+    false,
+    h.reader,
+  );
   await vi.advanceTimersByTimeAsync(200);
-  const covered = h.calls.flatMap((request) => Object.keys(request.questions));
+  const covered = restored.calls.flatMap((request) =>
+    Object.keys(request.questions),
+  );
   expect(covered).toEqual(expectedKeys);
   expect(new Set(covered).size).toBe(expectedKeys.length);
   expect(
-    h.calls.every(
+    restored.calls.every(
       (request) =>
         sourceId(request) === "report" &&
         Object.keys(request.questions).length <= 20,
     ),
   ).toBe(true);
-  const journal = h.checkpoint().monitor?.subtasks?.journal;
+  const journal = restored.checkpoint().monitor?.subtasks?.journal;
   expect(
     journal?.reports
       .filter((job) => job.state === "complete")
@@ -478,7 +488,7 @@ it("restores a mid-wave checkpoint without one parent's report suppressing anoth
       .sort(),
   ).toEqual([first.id, second.id].sort());
   expect(journal?.dispatches).toBe(
-    (midway.monitor?.subtasks?.journal.dispatches ?? 0) + h.calls.length,
+    (midway.monitor?.subtasks?.journal.dispatches ?? 0) + restored.calls.length,
   );
 });
 it("projects restored groups without rereading the host from passive getters", async () => {

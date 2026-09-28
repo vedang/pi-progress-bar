@@ -297,6 +297,7 @@ describe("one-shot continuation controller", () => {
         phase: "consumed",
         gateDispatches: mode === "unadmitted" ? 0 : 1,
         draftDispatches: 0,
+        unavailable: mode === "failure",
       });
       expect(JSON.stringify(h.controller.snapshot())).not.toContain(
         "private provider failure",
@@ -368,7 +369,13 @@ describe("one-shot continuation controller", () => {
       await h.controller.wake();
       expect(h.emit).not.toHaveBeenCalled();
       expect(h.draft).toHaveBeenCalledTimes(1);
-      expect(h.controller.snapshot().phase).toBe("consumed");
+      expect(h.controller.snapshot()).toMatchObject({
+        phase: "consumed",
+        unavailable: ["error", "invalid", "foreign-model"].includes(mode),
+      });
+      expect(JSON.stringify(h.controller.snapshot())).not.toContain(
+        "private draft failure",
+      );
     },
   );
   it("enforces32gate32draft64total across invalidations and fresh roots", async () => {

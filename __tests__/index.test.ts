@@ -266,6 +266,10 @@ it("keeps commands passive and OFF idempotent without enabling debugger commands
   await h.emit("session_start");
   await h.command("");
   expect(h.notify).toHaveBeenCalled();
+  expect(h.notify.mock.calls.at(-1)?.[0]).toContain("Continuation: available");
+  expect(h.notify.mock.calls.at(-1)?.[0]).toContain(
+    "Continuation dispatches: 0/64 (Jev 0/32, draft 0/32)",
+  );
   expect(fetch).not.toHaveBeenCalled();
   await h.command("off");
   await h.command("off");

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
+  ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import { expect, it, vi } from "vitest";
 import type { ContinuationDraftRequest } from "../src/advisory/continuation-draft";
@@ -82,6 +83,7 @@ async function host(
   continuationProof = false,
   latePolicyOverride?: string,
   dropFirstContinuation = false,
+  diagnosticUI = false,
 ) {
   const cwd = await mkdtemp(join(tmpdir(), "progress-advisory-host-"));
   const settingsManager = pi.SettingsManager.inMemory({
@@ -273,11 +275,25 @@ async function host(
     tools: correctionProof ? ["write"] : [],
     thinkingLevel: "off",
   });
-  await session.bindExtensions({ mode, onError: (e) => errors.push(e) });
+  const notifications: string[] = [];
+  await session.bindExtensions({
+    mode,
+    onError: (e) => errors.push(e),
+    ...(diagnosticUI
+      ? {
+          uiContext: {
+            notify: (text: string) => notifications.push(text),
+            setWidget: () => {},
+            setStatus: () => {},
+          } as unknown as ExtensionUIContext,
+        }
+      : {}),
+  });
   if (!api || !context) throw new Error("Host did not bind extension");
   return {
     api,
     context,
+    notifications,
     manager,
     session,
     faux,
@@ -766,6 +782,8 @@ it.each([
   { mode: "rpc", choice: "yes", scenario: "retry-assistant" },
   { mode: "rpc", choice: "yes", scenario: "retry-policy" },
   { mode: "rpc", choice: "yes", scenario: "retry-model" },
+  { mode: "tui", choice: "yes", scenario: "diagnostic-success" },
+  { mode: "tui", choice: "yes", scenario: "diagnostic-failure" },
 ] as const)(
   "actual Pi $mode production continuation consumes one status-reply root ($choice, $scenario)",
   async ({ mode, choice, scenario }) => {
@@ -829,6 +847,7 @@ it.each([
         ? "Pause all implementation until new user approval."
         : undefined,
       scenario.startsWith("retry-"),
+      scenario.startsWith("diagnostic-"),
     );
     const nativeTimeout = globalThis.setTimeout;
     const deadlines: Array<{
@@ -890,13 +909,15 @@ it.each([
                   .join("\n");
           const input = JSON.parse(text) as ContinuationDraftRequest["input"];
           drafts.push(input);
+          if (scenario === "diagnostic-failure")
+            throw new Error("PRIVATE_CONTINUATION_PROVIDER_ERROR");
           const contextIndex = input.authority.context.findIndex(
             (item) =>
               item.role === "user" && item.text.includes("Implement parser"),
           );
           if (contextIndex < 0)
             throw new Error("Missing actual canonical authorization");
-          return fauxAssistantMessage(
+          const response = fauxAssistantMessage(
             JSON.stringify({
               targetIndex: input.acceptedIndices[0],
               action: "Implement the authorized parser change.",
@@ -909,6 +930,9 @@ it.each([
               ],
             }),
           );
+          response.usage.input = 7;
+          response.usage.output = 9;
+          return response;
         },
         fauxAssistantMessage("I will continue the authorized parser work."),
       ];
@@ -1093,6 +1117,41 @@ it.each([
         expect(authority.receipt.replies.at(-1)?.entryId).toBe(
           authority.context.at(-1)?.id,
         );
+        if (scenario.startsWith("diagnostic-")) {
+          const failed = scenario === "diagnostic-failure";
+          await vi.waitFor(() => expect(drafts).toHaveLength(1));
+          if (!failed)
+            await vi.waitFor(() =>
+              expect(
+                h.trace.filter((entry) => entry.hook === "agent_settled"),
+              ).toHaveLength(3),
+            );
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          for (const enabled of [true, false, true]) {
+            await bounded(
+              h.session.prompt(enabled ? "/progress on" : "/progress off"),
+            );
+            await bounded(h.session.prompt("/progress"));
+            const text = h.notifications.at(-1);
+            expect(text).toContain(
+              `Continuation: ${failed ? "unavailable" : "available"}`,
+            );
+            expect(text).toContain(
+              "Continuation dispatches: 2/64 (Jev 1/32, draft 1/32)",
+            );
+            expect(text).toContain(
+              `Continuation tokens: ${failed ? 2 : 9} input • ${failed ? 1 : 10} output`,
+            );
+            expect(text).not.toMatch(
+              /PRIVATE_CONTINUATION|Implement parser|standing authorization|untrusted suggested next step/,
+            );
+          }
+          expect(gates).toHaveLength(1);
+          expect(drafts).toHaveLength(1);
+          expect(h.sent).toHaveLength(failed ? 1 : 2);
+          expect(h.errors).toEqual([]);
+          return;
+        }
         if (choice === "yes") {
           await vi.waitFor(() => expect(h.sent).toHaveLength(2));
           if (scenario.startsWith("retry-")) {

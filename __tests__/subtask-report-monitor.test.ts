@@ -1961,3 +1961,302 @@ it("revokes an invalid pending wake and recovers identical generic work on the n
     await vi.advanceTimersByTimeAsync(100);
   }
 });
+
+it("keeps a charged report across proposal-model selection without stranding its remaining children", async () => {
+  const h = await fixture();
+  let release: (() => void) | undefined;
+  h.setTransport(async (request) => {
+    if (h.calls.length === 1)
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    return answer(request);
+  });
+  try {
+    h.append("report-model-selection", reportText);
+    await h.settle("report-model-selection");
+    expect(h.calls).toHaveLength(1);
+    const before = h.checkpoint().monitor?.subtasks?.journal.dispatches;
+    h.monitor.modelSelected();
+    expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(before);
+    release?.();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.calls.map(sourceId)).toEqual([
+      "report-model-selection",
+      "report-model-selection",
+    ]);
+    expect(h.statuses()).toEqual(Array(22).fill("reported-completed"));
+    expect(h.checkpoint().monitor?.subtasks?.journal.reports[0]).toMatchObject({
+      state: "complete",
+    });
+    expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(
+      (before ?? 0) + 1,
+    );
+  } finally {
+    h.monitor.stop();
+    release?.();
+    await vi.advanceTimersByTimeAsync(100);
+  }
+});
+
+it.each(["constant", "oversized", "throw"])(
+  "builds bounded hook-free wake identities under inherited toJSON (%s)",
+  async (kind) => {
+    const h = await fixture();
+    const pass = new CanonicalPass(h.reader());
+    const current = Reflect.apply(
+      Reflect.get(h.monitor, "subtaskCurrent"),
+      h.monitor,
+      [h.monitor.state, pass],
+    ) as SubtaskRuntimeCurrent;
+    expect(current).toBeDefined();
+    const second = {
+      ...current,
+      latest: { ...current.latest, id: "different-canonical-id" },
+    };
+    const build = Reflect.get(h.monitor, "subtaskWakeKeyFor");
+    const baseline = Reflect.apply(build, h.monitor, [current]) as string;
+    const descriptor = Object.getOwnPropertyDescriptor(
+      Object.prototype,
+      "toJSON",
+    );
+    const hook = vi.fn(() => {
+      if (kind === "throw") throw new Error("Inherited serialization hook");
+      return kind === "oversized"
+        ? "PRIVATE_WAKE_BODY".repeat(8192)
+        : "same-key";
+    });
+    let keys: string[] = [];
+    let error: unknown;
+    try {
+      Object.defineProperty(Object.prototype, "toJSON", {
+        configurable: true,
+        value: hook,
+      });
+      keys = [current, second].map(
+        (value) => Reflect.apply(build, h.monitor, [value]) as string,
+      );
+    } catch (caught) {
+      error = caught;
+    } finally {
+      if (descriptor)
+        Object.defineProperty(Object.prototype, "toJSON", descriptor);
+      else Reflect.deleteProperty(Object.prototype, "toJSON");
+    }
+    expect.soft(hook).not.toHaveBeenCalled();
+    expect.soft(error).toBeUndefined();
+    expect.soft(keys[0]).toBe(baseline);
+    expect.soft(keys[0]).not.toBe(keys[1]);
+    for (const key of keys) expect(key).toMatch(/^[a-f0-9]{64}$/);
+  },
+);
+
+it("persists oversized C during pending proposal drain without captured body or disposed reads", async () => {
+  let selected = false;
+  let disposed = false;
+  const selectedModel = vi.fn(() => {
+    if (disposed) throw new Error("Disposed pending model reader");
+    return selected ? "fixture/selected" : undefined;
+  });
+  let proposalAttempts = 0;
+  let release: (() => void) | undefined;
+  const proposeSubtasks: NonNullable<
+    MonitorOptions["proposeSubtasks"]
+  > = async (_request, _signal, onDispatch, onPhysicalFlight) => {
+    proposalAttempts++;
+    if (proposalAttempts === 1) throw new Error("Unavailable before dispatch");
+    expect(onDispatch?.(Date.now())).toBe(true);
+    const drain = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    onPhysicalFlight?.(drain);
+    await drain;
+    throw new Error("Late aborted proposal must not publish");
+  };
+  const h = await fixture(
+    false,
+    false,
+    2,
+    {
+      selectedModel,
+      proposeSubtasks,
+    },
+    0,
+  );
+  const [a, p] = h.monitor.state.tasks;
+  const gates: EvaluationRequest[] = [];
+  const transport = h.fetch.getMockImplementation();
+  if (!transport) throw new Error("Missing fixture transport");
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+    if (request.questions["subtask:0"]) {
+      gates.push(request);
+      const state = request.state as {
+        parent: { id: string };
+        latest: { id: string };
+      };
+      return answer(
+        request,
+        state.parent.id === p.id && state.latest.id === "report-a"
+          ? "yes"
+          : "no",
+      );
+    }
+    return transport(url, init);
+  });
+  try {
+    selected = true;
+    h.append("report-a", reportText);
+    await h.settle("report-a");
+    await vi.advanceTimersByTimeAsync(200);
+    expect(proposalAttempts).toBe(1);
+    const target = h.checkpoint();
+    if (!target.monitor?.subtasks) throw new Error("Missing real yes gate");
+    expect(
+      target.monitor.subtasks.journal.records.find(
+        (record) => record.parentTaskId === p.id,
+      ),
+    ).toMatchObject({ state: "ready" });
+    expect(target.monitor.subtasks.journal.usage.extraction.calls).toBe(0);
+    // Existing report-fixture admission boundary only; all gate/proposal/report
+    // dispatches and the parked certificate below use real runtime hooks.
+    const store = new SubtaskStore();
+    expect(
+      store.admit({
+        ...subtaskAdmission(labels),
+        parent: a,
+        source: a.source,
+        complete: true,
+        knownTotal: 22,
+        children: labels.map((label) => ({
+          kind: "add",
+          label,
+          source: a.source,
+        })),
+      }),
+    ).toEqual({ accepted: true });
+    target.monitor.subtasks.state = store.checkpoint();
+    h.setTransport(async (request) =>
+      h.calls.length === 1
+        ? new Response(null, { status: 503, headers: { "Retry-After": "10" } })
+        : answer(request),
+    );
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      target,
+      false,
+      h.reader,
+    );
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.calls).toHaveLength(1);
+    expect(proposalAttempts).toBe(2);
+    expect(release).toBeTypeOf("function");
+    const parked = h
+      .checkpoint()
+      .monitor?.subtasks?.journal.reports.find(
+        (job) => job.parentTaskId === a.id,
+      );
+    expect(parked).toMatchObject({ state: "parked" });
+    if (!parked?.parkedUntil)
+      throw new Error("Missing admitted retry deadline");
+    expect(parked.parkedUntil).toBeGreaterThan(Date.now());
+    h.append(
+      "oversized-c",
+      `PRIVATE_PENDING_OVERSIZED ${"oversized report evidence ".repeat(700)}`,
+    );
+    await h.settle("oversized-c");
+    const sameLineage = h.checkpoint();
+    expect(
+      sameLineage.monitor?.subtasks?.journal.reports.find(
+        (job) => job.identity === parked.identity,
+      ),
+    ).toEqual(parked);
+    gates.splice(0);
+    const branch = h.reader();
+    const reader = vi.fn(() => {
+      if (disposed) throw new Error("Disposed pending canonical reader");
+      return branch;
+    });
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      sameLineage,
+      false,
+      reader,
+    );
+    // Let the named restore finish its ordinary mandatory scheduling before
+    // disposing readers; only the held physical proposal remains outstanding.
+    await vi.advanceTimersByTimeAsync(200);
+    const installed = h.checkpoint();
+    expect(installed.monitor?.subtaskOmissions).toMatchObject({
+      entries: [{ reason: "report-oversized" }],
+      saturated: false,
+    });
+    expect(Reflect.get(h.monitor, "pendingSubtaskCurrent")).toBeNull();
+    expect(JSON.stringify(installed)).not.toContain(
+      "PRIVATE_PENDING_OVERSIZED",
+    );
+    expect(
+      h.save.mock.calls.some(([raw]) =>
+        (raw as Envelope).monitor?.subtaskOmissions?.entries.some(
+          (entry) => entry.reason === "report-oversized",
+        ),
+      ),
+    ).toBe(true);
+    const reads = [reader.mock.calls.length, selectedModel.mock.calls.length];
+    disposed = true;
+    release?.();
+    await vi.advanceTimersByTimeAsync(200);
+    expect([reader.mock.calls.length, selectedModel.mock.calls.length]).toEqual(
+      reads,
+    );
+    expect(Reflect.get(h.monitor, "capturedSubtaskCurrent")).toBeNull();
+    expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(
+      installed.monitor?.subtasks?.journal.dispatches,
+    );
+    expect(h.checkpoint().monitor?.subtasks?.state.groups).toEqual(
+      installed.monitor?.subtasks?.state.groups,
+    );
+    expect(h.checkpoint().monitor?.subtaskOmissions).toEqual(
+      installed.monitor?.subtaskOmissions,
+    );
+    expect(
+      gates.filter(
+        (request) =>
+          (request.state as { parent: { id: string } }).parent.id === a.id,
+      ),
+    ).toEqual([]);
+    expect(
+      h
+        .checkpoint()
+        .monitor?.subtasks?.journal.reports.find(
+          (job) => job.identity === parked.identity,
+        ),
+    ).toEqual(parked);
+    expect(h.calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(
+      Math.max(0, parked.parkedUntil - Date.now()) + 1,
+    );
+    expect(h.calls).toHaveLength(1);
+    expect([reader.mock.calls.length, selectedModel.mock.calls.length]).toEqual(
+      reads,
+    );
+    disposed = false;
+    h.append("bounded-after-c", "The agreed work has a new bounded report.");
+    await h.settle("bounded-after-c");
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.calls.length).toBeGreaterThan(1);
+    expect(sourceId(h.calls[1])).toBe("report-a");
+    expect(h.calls.map(sourceId)).not.toContain("oversized-c");
+    expect(
+      h
+        .checkpoint()
+        .monitor?.subtasks?.journal.reports.find(
+          (job) => job.identity === parked.identity,
+        ),
+    ).toMatchObject({ state: "complete" });
+  } finally {
+    h.monitor.stop();
+    release?.();
+    await vi.advanceTimersByTimeAsync(100);
+  }
+});

@@ -560,3 +560,38 @@ it("saturates retained omissions once without disabling later valid report admis
   });
   expect(h.monitor.subtaskDiagnosticsSnapshot().exhausted).toBe(false);
 });
+
+it("persists reentrant OFF during an enabled omission-history restore", async () => {
+  const h = await mapped();
+  const target = h.checkpoint();
+  if (!target.monitor) throw new Error("Missing metadata");
+  target.monitor.subtaskOmissions = {
+    entries: [omitted(77)],
+    saturated: false,
+  };
+  let interrupted = false;
+  h.save.mockImplementation((raw: unknown) => {
+    const saved = raw as ReturnType<typeof h.checkpoint>;
+    if (
+      !interrupted &&
+      saved.monitor?.enabled &&
+      saved.monitor.subtaskOmissions
+    ) {
+      interrupted = true;
+      h.monitor.turnOff();
+    }
+  });
+  await h.monitor.restore("/nonexistent-hybrid-test", target, false, h.reader);
+  expect(interrupted).toBe(true);
+  expect(h.monitor.enabled).toBe(false);
+  const durable = h.save.mock.calls.at(-1)?.[0] as ReturnType<
+    typeof h.checkpoint
+  >;
+  expect.soft(durable.monitor?.enabled).toBe(false);
+  expect(durable.monitor?.subtaskOmissions).toEqual(
+    target.monitor.subtaskOmissions,
+  );
+  h.save.mockReset();
+  await h.monitor.restore("/nonexistent-hybrid-test", durable, false, h.reader);
+  expect(h.monitor.enabled).toBe(false);
+});

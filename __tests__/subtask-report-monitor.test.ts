@@ -943,6 +943,10 @@ it.each(["unrelated", "corrective"])(
       ]);
       expect(journal?.dispatches).toBe(h.calls.length);
       expect(journal?.usage.jev.calls).toBe(h.calls.length);
+      expect(
+        h.monitor.subtaskDiagnosticsSnapshot().semanticOmissions.byReason
+          .capacity,
+      ).toBe(0);
     } finally {
       capacity.mockRestore();
     }

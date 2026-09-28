@@ -2,6 +2,10 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## C08 UI repairs independently verified
+
+Main inspected `b62fda7d` and independently verified **30/30 focused UI**, **1929 unit passes/50 known legacy failures**, **84/84 integration**, format/check pass with three historical warnings. Logs `c08-ui-fixed-main-{focused,test,integration,format,check}.log`. Worker separately reported876 broad passes and83/84 integration. Unavailable access no longer implies zero, positive partial observations remain visible, widget warnings coexist, and pane rows are not duplicated. C05–C09 remain unaccepted: remaining Monitor/scheduler/storage assertion ports, legacy semantic/v10 removal, host-race diagnosis and independent whole-stage reviews are still required.
+
 ## C08 UI source review and repair REDs
 
 Main inspected `7bd4f943` and independently passed all25 frozen UI units (including the minimal generic control). Review found matched full-roster unavailable access rendered as observed0, widget exhaustion hiding omission warnings, and duplicate active-access/group-omission rows within the same subtask pane. Main froze **4 RED/26 passing controls**: all-unavailable and mixed unavailable/no-observation must not infer zero; actual all-no-observation zero and partial positive observed1 remain passing controls; widget must retain both warnings; pane rows appear once. Logs `c08-ui-review-red.log`, format/check pass in `c08-ui-repair-*`.

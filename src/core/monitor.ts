@@ -36,6 +36,7 @@ import {
   readLabelSelections,
   type VisibilityTask,
 } from "../analysis/activity-label";
+import type { ContinuationGateBatch } from "../analysis/continuation-gate";
 import type { ExtractionInput } from "../analysis/extractor";
 import {
   type EvaluationRequest,
@@ -176,6 +177,8 @@ export interface MonitorOptions {
   ) => Promise<SubtaskProposalTransportResult>;
   /** Runtime-only grounded-detail gate; production enables it and tests may disable it. */
   richDetailsEnabled?: boolean;
+  /** Named semantic/health publication wake for disconnected continuation transport. */
+  onContinuationWake?: () => void;
   /** Accepted correction advice is runtime-only and delivered by the host seam. */
   onCorrection?: (emission: CorrectionEmission) => void;
 }
@@ -635,6 +638,9 @@ export class Monitor {
   private subtaskPhysicalFlight?: SubtaskPhysicalFlightObserver;
   /** Optional corrective binding has its own one-flight transport authority. */
   private readonly correctionGateway: JevGateway;
+  /** Continuation has its own Jev transport; it never borrows semantic capacity. */
+  private readonly continuationGateway: JevGateway;
+  private continuationGateDispatch?: (at: number) => boolean;
   /** Visibility transport and spend are isolated from semantic/advisory telemetry. */
   private readonly visibilityGateway: JevGateway;
   private readonly visibility = new ExecutionVisibilityStore();
@@ -835,6 +841,13 @@ export class Monitor {
       onDispatch: (at) => this.recordJevDispatch(at),
       // Corrections are optional and never disable semantic progress tracking.
       onPermanentError: () => this.note("model-unavailable"),
+    });
+    this.continuationGateway = new JevGateway({
+      fetch: (url, init) => globalThis.fetch(url, init),
+      getApiKey: () => process.env.TYPESAFE_API_KEY,
+      beforeDispatch: (at) => this.continuationGateDispatch?.(at) === true,
+      // Continuation is optional; availability is surfaced by its controller.
+      onPermanentError: () => this.note("jev-unavailable"),
     });
     this.visibilityGateway = new JevGateway({
       fetch: (url, init) => globalThis.fetch(url, init),
@@ -1238,6 +1251,8 @@ export class Monitor {
       this.subtaskWakeKey = undefined;
       this.resetCoverageAdapter();
       this.correctionGateway.pause();
+      this.continuationGateway.pause();
+      this.continuationGateDispatch = undefined;
       this.dropVisibilityFlight();
       this.visibilityGateway.pause();
       this.clearActivity(false);
@@ -1249,6 +1264,7 @@ export class Monitor {
       if (!retainReportAuthority)
         this.subtaskGateway.enable(this.subtaskIdentity());
       this.correctionGateway.enable(this.identity());
+      this.continuationGateway.enable(this.identity());
       this.visibilityGateway.enable(this.visibilityIdentity());
       this.waitingForWake = false;
       this.requeue(pass);
@@ -1421,6 +1437,8 @@ export class Monitor {
     this.subtaskOwners = [];
     this.subtaskWakeKey = undefined;
     this.correctionGateway.pause();
+    this.continuationGateway.pause();
+    this.continuationGateDispatch = undefined;
     this.resetVisibility();
     this.resetCoverageAdapter();
     this.clearActivity(false);
@@ -1706,6 +1724,7 @@ export class Monitor {
     this.detailGateway.enable(this.identity());
     this.subtaskGateway.enable(this.subtaskIdentity());
     this.correctionGateway.enable(this.identity());
+    this.continuationGateway.enable(this.identity());
     this.visibilityGateway.enable(this.visibilityIdentity());
     this.rememberVisibilityFrontier(pass);
     this.requeue(pass, true);
@@ -1899,6 +1918,47 @@ export class Monitor {
       ready: this.advisorySettlementReason() === "ready",
       ...(this.state.cursor ? { cursor: { ...this.state.cursor } } : {}),
     });
+  }
+
+  /** Mandatory canonical work and ready health always yield before continuation. */
+  continuationCanStart(): boolean {
+    return (
+      this.enabled &&
+      this.advisorySettlementReason() === "ready" &&
+      !this.healthFlight &&
+      !this.nextReadyHealthJob()
+    );
+  }
+
+  /** One optional Jev admission, fenced by the controller at fetch boundary. */
+  async evaluateContinuationGate(
+    batch: ContinuationGateBatch,
+    signal: AbortSignal,
+    admit: () => boolean,
+  ): Promise<ValidatedResult | undefined> {
+    if (!this.continuationCanStart() || signal.aborted) return;
+    const dispatch = (_at: number) => !signal.aborted && admit();
+    this.continuationGateDispatch = dispatch;
+    const abort = () => this.continuationGateway.invalidate();
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      const result = await this.continuationGateway.evaluate(
+        batch.request,
+        this.identity(),
+        true,
+      );
+      return signal.aborted ? undefined : result;
+    } finally {
+      signal.removeEventListener("abort", abort);
+      if (this.continuationGateDispatch === dispatch)
+        this.continuationGateDispatch = undefined;
+    }
+  }
+
+  /** Input/lifecycle invalidation aborts only continuation's own Jev flight. */
+  invalidateContinuation(): void {
+    this.continuationGateway.invalidate();
+    this.continuationGateDispatch = undefined;
   }
 
   /**
@@ -6018,6 +6078,9 @@ export class Monitor {
         this.publish();
       }
       this.drain();
+      // Processing completion is the named frontier publication after cursor
+      // and health scheduling settle; it is not a redraw or polling wake.
+      this.options.onContinuationWake?.();
     }
   }
 
@@ -6693,6 +6756,9 @@ export class Monitor {
         this.syncPresentationCard();
         this.activity = "Idle";
         this.publish();
+        // Health settlement is a named scheduler event; optional continuation
+        // may proceed only once no ready health work remains.
+        this.options.onContinuationWake?.();
       }
       this.drain();
     }
@@ -7157,6 +7223,8 @@ export class Monitor {
     }
     this.refreshBeads();
     this.publish();
+    // Commit advances canonical cursor/frontier; do not rely on UI rendering.
+    this.options.onContinuationWake?.();
   }
 
   /** Count every transport dispatch, including failed/retried same-ms attempts. */

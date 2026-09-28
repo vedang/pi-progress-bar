@@ -3,6 +3,13 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import type { ContinuationAuthorityBinding } from "./advisory/continuation-authority";
+import { ContinuationController } from "./advisory/continuation-controller";
+import {
+  captureContinuationPolicy,
+  validateContinuationPolicy,
+} from "./advisory/continuation-policy";
+import { selectedModelContinuation } from "./advisory/continuation-selected-model";
 import {
   CorrectionAdapter,
   projectCorrectionAction,
@@ -44,6 +51,21 @@ export default function progressBar(pi: ExtensionAPI): void {
   let activeCorrectionSource:
     | { sourceRun: number; policy: CorrectionPolicyProjection }
     | undefined;
+  /** Full rendered policy proof for one independent run and its status reply. */
+  let pendingContinuationPolicy:
+    | ReturnType<typeof captureContinuationPolicy>
+    | undefined;
+  let continuationPolicy:
+    | {
+        runId: number;
+        policy: ReturnType<typeof captureContinuationPolicy>;
+      }
+    | undefined;
+  let continuationBinding: ContinuationAuthorityBinding | undefined;
+  let continuationFingerprint: string | undefined;
+  let continuationDeliveryActive = false;
+  let continuationControlEpoch = 0;
+  let continuationController: ContinuationController | undefined;
   let currentOpportunity:
     | {
         id: string;
@@ -67,7 +89,11 @@ export default function progressBar(pi: ExtensionAPI): void {
     currentOpportunity = undefined;
   };
   const clearCorrectionOpportunity = () => {
-    if (currentOpportunity?.kind !== "reconciliation") clearOpportunity();
+    if (
+      currentOpportunity?.kind === "test-correction" ||
+      currentOpportunity?.kind === "review-correction"
+    )
+      clearOpportunity();
   };
   const disposeController = () => {
     controller?.dispose();
@@ -86,6 +112,7 @@ export default function progressBar(pi: ExtensionAPI): void {
       activeCorrectionRun = undefined;
       activeCorrectionSource = undefined;
       pendingCorrectionPolicy = undefined;
+      invalidateContinuation();
       clearOpportunity();
     }
     if (ctx.mode === "tui" && presentation.enabled) {
@@ -133,6 +160,7 @@ export default function progressBar(pi: ExtensionAPI): void {
         return context;
       }),
       richDetailsEnabled: true,
+      onContinuationWake: () => wakeContinuation(),
       onCorrection: ({ kind, content, binding }) => {
         const target = delivery;
         // A classifier result is useful only in its originating active turn.
@@ -161,6 +189,99 @@ export default function progressBar(pi: ExtensionAPI): void {
       },
     },
   );
+
+  function releaseContinuationRoot(): void {
+    continuationBinding = undefined;
+    continuationFingerprint = undefined;
+    continuationPolicy = undefined;
+    continuationDeliveryActive = false;
+    if (currentOpportunity?.kind === "continuation") clearOpportunity();
+  }
+
+  function invalidateContinuation(clearPendingPolicy = true): void {
+    continuationControlEpoch++;
+    continuationController?.invalidate();
+    monitor.invalidateContinuation();
+    releaseContinuationRoot();
+    if (clearPendingPolicy) pendingContinuationPolicy = undefined;
+  }
+
+  function wakeContinuation(): void {
+    const controller = continuationController;
+    const binding = continuationBinding;
+    if (!controller || !binding) return;
+    const phase = controller.snapshot().phase;
+    if (phase === "idle" || phase === "consumed") return;
+    const authority = monitor.continuationAuthority(binding);
+    if (!authority.available) {
+      if (authority.reason !== "frontier") invalidateContinuation();
+      else
+        void controller.wake().finally(() => {
+          if (
+            continuationBinding === binding &&
+            controller.snapshot().phase === "consumed" &&
+            !continuationDeliveryActive
+          )
+            releaseContinuationRoot();
+        });
+      return;
+    }
+    if (
+      continuationFingerprint !== undefined &&
+      continuationFingerprint !== authority.fingerprint
+    ) {
+      invalidateContinuation();
+      return;
+    }
+    continuationFingerprint ??= authority.fingerprint;
+    void controller.wake().finally(() => {
+      if (
+        continuationBinding === binding &&
+        controller.snapshot().phase === "consumed" &&
+        !continuationDeliveryActive
+      )
+        releaseContinuationRoot();
+    });
+  }
+
+  continuationController = new ContinuationController({
+    authority: () =>
+      continuationBinding
+        ? monitor.continuationAuthority(continuationBinding)
+        : { available: false, reason: "stale" },
+    canStart: () =>
+      monitor.continuationCanStart() &&
+      (context?.isIdle() ?? false) &&
+      !(context?.hasPendingMessages() ?? true),
+    gate: (batch, signal, admit) =>
+      monitor.evaluateContinuationGate(batch, signal, admit),
+    draft: selectedModelContinuation(() => {
+      if (!context) throw new Error("No active Pi context");
+      return context;
+    }),
+    emit: (draft) => {
+      const binding = continuationBinding;
+      const target = delivery;
+      if (
+        !binding ||
+        !target ||
+        currentOpportunity?.kind !== "continuation" ||
+        currentOpportunity.id !== binding.receipt.opportunityId ||
+        currentOpportunity.runId !== binding.originalRunId
+      )
+        return false;
+      const result = target.request({
+        kind: "continuation",
+        opportunityId: binding.receipt.opportunityId,
+        content: draft.message,
+        sessionEpoch: binding.sessionEpoch,
+        branchEpoch: binding.branchEpoch,
+      });
+      continuationDeliveryActive = result === "started";
+      return continuationDeliveryActive;
+    },
+  });
+
   delivery = new ReconciliationDelivery({
     state: () => {
       const snapshot = monitor.advisorySettlementSnapshot();
@@ -179,16 +300,67 @@ export default function progressBar(pi: ExtensionAPI): void {
         branchEpoch,
         opportunityId: currentOpportunity?.id,
         relevant:
-          snapshot.reason === "ready" &&
-          (currentOpportunity?.kind === "reconciliation"
+          currentOpportunity?.kind === "reconciliation"
             ? snapshot.tasks.some((task) => task.status !== "done")
-            : correctionRelevant),
+            : snapshot.reason === "ready" &&
+              (currentOpportunity?.kind === "continuation"
+                ? !!continuationBinding &&
+                  continuationBinding.receipt.opportunityId ===
+                    currentOpportunity.id &&
+                  continuationBinding.originalRunId === currentOpportunity.runId
+                : correctionRelevant),
         idle: context?.isIdle() ?? false,
         pendingMessages: context?.hasPendingMessages() ?? true,
       };
     },
     branch: () => context?.sessionManager.getBranch() ?? [],
     sendMessage: (message, options) => pi.sendMessage(message, options),
+    onReconciliationSettled: (receipt) => {
+      const original = currentOpportunity;
+      const policy = continuationPolicy;
+      const controller = continuationController;
+      const model = context?.model;
+      if (
+        !controller ||
+        original?.kind !== "reconciliation" ||
+        original.id !== receipt.opportunityId ||
+        original.runId === undefined ||
+        original.runId !== policy?.runId ||
+        receipt.sessionEpoch !== sessionEpoch ||
+        receipt.branchEpoch !== branchEpoch ||
+        !model?.provider ||
+        !model.id
+      )
+        return;
+      const binding: ContinuationAuthorityBinding = {
+        receipt,
+        policy: policy.policy,
+        originalRunId: original.runId,
+        sessionEpoch,
+        branchEpoch,
+        controlEpoch: continuationControlEpoch,
+        model: `${model.provider}/${model.id}`,
+      };
+      if (
+        !controller.arm({
+          opportunityId: original.id,
+          sessionEpoch,
+          branchEpoch,
+          originalRunId: original.runId,
+        }) ||
+        !controller.settle(receipt)
+      )
+        return;
+      continuationBinding = binding;
+      continuationFingerprint = undefined;
+      // Root ownership moves only after original chain releases and receipt binds.
+      currentOpportunity = {
+        id: original.id,
+        kind: "continuation",
+        runId: original.runId,
+      };
+      wakeContinuation();
+    },
   });
   reconciliation = new ReconciliationController({
     snapshot: () => monitor.advisorySettlementSnapshot(),
@@ -243,10 +415,27 @@ export default function progressBar(pi: ExtensionAPI): void {
     // host canonical branch after Monitor observes its mandatory state.
     monitor.confirmCoverageBranch(ctx.sessionManager.getBranch());
     reconciliation?.refresh();
+    wakeContinuation();
   };
-  const settle = (origin: SettlementOrigin | undefined) => {
+  const settle = (
+    origin: SettlementOrigin | undefined,
+    settlingKind: AdvisoryDeliveryKind | undefined,
+  ) => {
     if (origin === undefined) return;
-    if (origin !== "uncertain-advisory") clearOpportunity();
+    if (origin !== "uncertain-advisory") {
+      // Receipt callback may synchronously move reconciliation ownership into
+      // its continuation root. Never clear that newly acquired opportunity.
+      if (
+        settlingKind === "reconciliation" &&
+        currentOpportunity?.kind === "reconciliation"
+      )
+        clearOpportunity();
+      else if (
+        settlingKind === "continuation" &&
+        currentOpportunity?.kind === "continuation"
+      )
+        releaseContinuationRoot();
+    }
     reconciliation?.settled(runEpoch, origin);
   };
 
@@ -285,6 +474,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     activeCorrectionRun = undefined;
     activeCorrectionSource = undefined;
     pendingCorrectionPolicy = undefined;
+    invalidateContinuation();
     clearOpportunity();
     await restore(ctx, false);
   });
@@ -297,6 +487,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     activeCorrectionRun = undefined;
     activeCorrectionSource = undefined;
     pendingCorrectionPolicy = undefined;
+    invalidateContinuation();
     clearOpportunity();
   });
   pi.on("session_tree", async (_event, ctx) => {
@@ -311,6 +502,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     activeCorrectionRun = undefined;
     activeCorrectionSource = undefined;
     pendingCorrectionPolicy = undefined;
+    invalidateContinuation();
     clearOpportunity();
     await restore(ctx, true);
   });
@@ -322,6 +514,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     activeCorrectionRun = undefined;
     activeCorrectionSource = undefined;
     pendingCorrectionPolicy = undefined;
+    invalidateContinuation();
     clearOpportunity();
     monitor.stop();
     context = undefined;
@@ -334,6 +527,7 @@ export default function progressBar(pi: ExtensionAPI): void {
     activeCorrectionRun = undefined;
     activeCorrectionSource = undefined;
     pendingCorrectionPolicy = undefined;
+    invalidateContinuation();
     clearOpportunity();
   });
   // Canonical active branch is authoritative for semantic tracking. Tool activity
@@ -348,6 +542,24 @@ export default function progressBar(pi: ExtensionAPI): void {
     );
   });
   pi.on("context", (_event, ctx) => {
+    context = ctx;
+    const rootRun =
+      currentOpportunity?.kind === "reconciliation"
+        ? currentOpportunity.runId
+        : runEpoch;
+    const policy = continuationPolicy;
+    if (policy && policy.runId === rootRun) {
+      let effectivePrompt: unknown;
+      try {
+        effectivePrompt = ctx.getSystemPrompt();
+      } catch {
+        // Missing host observation is unknown, never empty standing authority.
+      }
+      continuationPolicy = {
+        runId: policy.runId,
+        policy: validateContinuationPolicy(policy.policy, effectivePrompt),
+      };
+    }
     delivery?.onContext(ctx.sessionManager.getBranch());
     observe(ctx);
     monitor.confirmVisibilityBranch(ctx.sessionManager.getBranch());
@@ -363,12 +575,24 @@ export default function progressBar(pi: ExtensionAPI): void {
     pendingCorrectionPolicy = projectCorrectionPolicy(
       event.systemPromptOptions,
     );
+    // Structured options omit assembled base/skill/tool guidance. Preserve the
+    // full rendered prompt now, then validate it at provider-context time.
+    pendingContinuationPolicy = captureContinuationPolicy(event.systemPrompt);
   });
   pi.on("agent_start", (_event, ctx) => {
     context = ctx;
-    // A subsequent logical run cannot receive stale classifier work from its
-    // predecessor. Reconciliation retains its separate retry/compaction rules.
+    // Delivery alone distinguishes its own retry/compaction starts from a new
+    // independent run. A new run immediately revokes an old continuation root.
     delivery?.onCorrectionRunInvalidated();
+    const ownAdvisoryStart = delivery?.onAgentStart() ?? false;
+    // Pi retries/compaction begin another low-level run without another
+    // before_agent_start. Retain only its already-validated proof and make the
+    // next provider-context check decide whether it still matches.
+    const priorContinuationPolicy = continuationPolicy?.policy;
+    if (!ownAdvisoryStart) {
+      invalidateContinuation(false);
+      clearOpportunity();
+    }
     clearCorrectionOpportunity();
     const run = ++runEpoch;
     activeCorrectionRun = run;
@@ -378,7 +602,16 @@ export default function progressBar(pi: ExtensionAPI): void {
       policy: pendingCorrectionPolicy ?? { coverage: "unknown", entries: [] },
     };
     pendingCorrectionPolicy = undefined;
-    delivery?.onAgentStart();
+    if (!ownAdvisoryStart) {
+      continuationPolicy = {
+        runId: run,
+        policy:
+          pendingContinuationPolicy ??
+          priorContinuationPolicy ??
+          captureContinuationPolicy(undefined),
+      };
+    }
+    pendingContinuationPolicy = undefined;
     reconciliation?.runStarted(run);
     monitor.visibilityRunStarted();
     monitor.setActivity("Agent active");
@@ -391,16 +624,19 @@ export default function progressBar(pi: ExtensionAPI): void {
     activeCorrectionSource = undefined;
     clearCorrectionOpportunity();
     // Final canonical observation precedes delivery-origin classification and
-    // controller readiness/deadline handling.
+    // controller readiness/frontier handling.
     observe(ctx);
     monitor.confirmVisibilityBranch(ctx.sessionManager.getBranch());
     monitor.visibilityRunSettled();
+    const settlingKind = currentOpportunity?.kind;
     const origin = delivery?.onAgentSettled(ctx.sessionManager.getBranch());
     delivery?.onCorrectionRunInvalidated();
-    settle(origin);
+    settle(origin, settlingKind);
   });
   pi.on("model_select", (_event, ctx) => {
     context = ctx;
+    invalidateContinuation();
+    clearOpportunity();
     monitor.modelSelected();
   });
   const observeCorrectionAttempt = (

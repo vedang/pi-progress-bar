@@ -225,11 +225,12 @@ export class ReconciliationDelivery {
     this.cancel("external-input");
   }
 
-  onAgentStart(): void {
-    if (this.disposed) return;
+  /** Returns true only for this chain's own advisory run/retry/compaction start. */
+  onAgentStart(): boolean {
+    if (this.disposed) return false;
     const run = ++this.latestRun;
     const chain = this.chain;
-    if (!chain) return;
+    if (!chain) return false;
     if (
       chain.independentRun !== undefined &&
       chain.independentRun > this.lastSettledRun
@@ -237,7 +238,7 @@ export class ReconciliationDelivery {
       // A correction remains attached to externally-started work even if Pi
       // reports an additional start before that work settles.
       chain.independentRun = run;
-      return;
+      return false;
     }
     if (
       chain.candidateOwnRun ||
@@ -247,11 +248,12 @@ export class ReconciliationDelivery {
       // intervening settlement. Keep this chain correlated to final run.
       chain.candidateOwnRun = false;
       chain.ownRun = run;
-      return;
+      return true;
     }
     // A noncandidate start after prior settlement is independent work, not a
     // continuation of an old terminal or uncertain advisory chain.
     this.clearChain(chain);
+    return false;
   }
 
   onMessageEnd(message: unknown, branch: readonly unknown[]): void {

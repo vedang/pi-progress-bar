@@ -2,6 +2,12 @@
 
 Owner approved bounded persisted omission summaries after the test audit; this narrowly supersedes earlier no-new-schema wording. No raw content, automatic retry, legacy facade, or additional report-disable threshold. C05/C07 acceptance remains gated on implementation and real Monitor proof.
 
+## Restore reentrancy repair candidate (2026-09-28)
+
+Cumulative reviewer `01f8aebb` validated prior size/coalescing/capacity/UI fixes but blocked restore-history publication: a successful synchronous save followed by reentrant stop or another same-source restore could erase the newly saved component and summary. Main `fc9f5338` reproduced five cases, including real public-ingress wallet6 rolling back to3. `aab633b3` stages the complete normalized source-scoped restore history and retains successful stale history without granting queue ownership.
+
+Main then reproduced older outer staging masking newer nested history: actual wallets3→6→9, followed by another older restore inside the outer save callback, rolled9 back to6 (`4cb3f018`). `77ebe784` fences older stages against the latest successfully saved serial. Main independently inspected both repairs and passed **105 focused tests and make check** (three historical lint warnings). Worker reports222 focused,2072 full unit passes/44 retained legacy failures,86 integration passes. Retained reviewer `c1040d0f` is reviewing the cumulative candidate; **ru7 and C05–C09 remain unaccepted**. No legacy deletion or semantic-quality acceptance is implied.
+
 ## Schema and storage contract
 
 [tag:subtask_omission_summary] Strict v11 Monitor metadata gains optional `subtaskOmissions: { entries: Array<{identity, reason}>, saturated: boolean }`. Identity is lowercase SHA256 hex; reason is exactly `report-oversized`, `coalesced`, or `capacity`. Maximum64 entries, unique by identity alone; first durable reason wins. Exact own-data keys/dense arrays only; reject getters/prototypes and duplicate identities, including conflicting reasons. No text, labels, paths, raw source references, timestamps, provider output, retry state or persisted counters.

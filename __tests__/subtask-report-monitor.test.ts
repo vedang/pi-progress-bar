@@ -68,6 +68,7 @@ async function fixture(
   throwingModel = false,
   parentCount = 1,
   monitorOptions: Partial<MonitorOptions> = {},
+  admittedParentCount = parentCount,
 ) {
   const h = monitorHarness([branchEntry("goal", goal)], {
     richDetailsEnabled: details,
@@ -134,7 +135,7 @@ async function fixture(
   await vi.advanceTimersByTimeAsync(100);
   expect(h.monitor.state.tasks).toHaveLength(parentCount);
   const store = new SubtaskStore();
-  for (const parent of h.monitor.state.tasks)
+  for (const parent of h.monitor.state.tasks.slice(0, admittedParentCount))
     expect(
       store.admit({
         ...subtaskAdmission(labels),
@@ -1222,4 +1223,134 @@ it("accepts later canonical user reports without a role shortcut", async () => {
     h.calls.map((request) => Object.keys(request.questions).length),
   ).toEqual([20, 2]);
   expect(h.statuses()).toEqual(Array(22).fill("reported-completed"));
+});
+
+it("resolves enabled restore independently of its newly started physical report drain", async () => {
+  const original = await fixture();
+  let ready: Envelope | undefined;
+  original.save.mockImplementation((raw: unknown) => {
+    const candidate = raw as Envelope;
+    if (
+      candidate.monitor?.subtasks?.journal.reports.some(
+        (job) =>
+          job.state === "ready" &&
+          job.attempts.some((attempt) => attempt.outcome === "decided"),
+      )
+    )
+      ready ??= structuredClone(candidate);
+  });
+  original.append("report", reportText);
+  await original.settle("report");
+  expect(ready).toBeDefined();
+  if (!ready) throw new Error("Missing real ready checkpoint");
+  original.monitor.stop();
+  const h = await fixture();
+  let release: (() => void) | undefined;
+  let returned = false;
+  h.setTransport(async (request) => {
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return answer(request);
+  });
+  const restoring = h.monitor
+    .restore("/nonexistent-hybrid-test", ready, false, original.reader)
+    .then(() => {
+      returned = true;
+    });
+  try {
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.calls).toHaveLength(1);
+    expect(release).toBeTypeOf("function");
+    expect(h.monitor.enabled).toBe(true);
+    expect(returned).toBe(true);
+    await vi.advanceTimersByTimeAsync(61000);
+    expect(h.calls).toHaveLength(1);
+    expect(returned).toBe(true);
+  } finally {
+    h.monitor.stop();
+    release?.();
+    await vi.advanceTimersByTimeAsync(100);
+    await restoring;
+  }
+});
+
+it("dispatches target-only report work after old drain without another wake or disposed-reader access", async () => {
+  let disposed = false;
+  const selectedModel = vi.fn(() => {
+    if (disposed) throw new Error("Disposed model reader");
+    return undefined;
+  });
+  const h = await fixture(false, false, 2, { selectedModel }, 1);
+  let release: (() => void) | undefined;
+  h.setTransport(async (request) => {
+    if (h.calls.length === 1)
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    return answer(request);
+  });
+  h.append("report", reportText);
+  await h.settle("report");
+  expect(h.calls).toHaveLength(1);
+  expect(release).toBeTypeOf("function");
+  const target = h.checkpoint();
+  if (!target.monitor?.subtasks) throw new Error("Missing dispatched history");
+  const store = new SubtaskStore();
+  for (const [index, parent] of h.monitor.state.tasks.entries()) {
+    const items = index === 0 ? labels : labels.slice(0, 1);
+    expect(
+      store.admit({
+        ...subtaskAdmission(items),
+        parent,
+        source: parent.source,
+        complete: true,
+        knownTotal: items.length,
+        children: items.map((label) => ({
+          kind: "add",
+          label,
+          source: parent.source,
+        })),
+      }),
+    ).toEqual({ accepted: true });
+  }
+  // Equal original wallet/proofs; only target semantics gains a group. This is
+  // new report work for the named restore wake, not resurrection of the old job.
+  target.monitor.subtasks.state = store.checkpoint();
+  expect(subtaskCheckpointStorageStatus(target)).toBe("supported");
+  const second = target.monitor.subtasks.state.groups[1];
+  const branch = structuredClone(h.reader());
+  const reader = vi.fn(() => {
+    if (disposed) throw new Error("Disposed canonical reader");
+    return branch;
+  });
+  try {
+    await h.monitor.restore("/nonexistent-hybrid-test", target, false, reader);
+    expect(h.calls).toHaveLength(1);
+    expect(h.monitor.enabled).toBe(true);
+    expect(h.checkpoint().monitor?.subtasks?.state.groups).toHaveLength(2);
+    expect.soft(h.monitor.subtaskSnapshot().groups).toHaveLength(2);
+    const reads = [reader.mock.calls.length, selectedModel.mock.calls.length];
+    disposed = true;
+    release?.();
+    await vi.advanceTimersByTimeAsync(200);
+    expect([reader.mock.calls.length, selectedModel.mock.calls.length]).toEqual(
+      reads,
+    );
+    expect(h.calls).toHaveLength(2);
+    expect(Object.keys(h.calls[1].questions)).toEqual(
+      second.children.map((child) => `subtask:${child.id}`),
+    );
+    expect(
+      h
+        .checkpoint()
+        .monitor?.subtasks?.journal.reports.find(
+          (job) => job.parentTaskId === second.parentTaskId,
+        ),
+    ).toMatchObject({ state: "complete" });
+  } finally {
+    h.monitor.stop();
+    release?.();
+    await vi.advanceTimersByTimeAsync(100);
+  }
 });

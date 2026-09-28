@@ -65,6 +65,8 @@ it.each([
       preserveControls,
       () => olderBranch,
     );
+    // Lifecycle completion does not await optional transport settlement.
+    if (enabled) await vi.advanceTimersByTimeAsync(100);
     const restored = h.checkpoint().monitor?.subtasks?.journal;
     expect(restored?.dispatches).toBe(charged.dispatches + Number(enabled));
     if (!restored) throw new Error("Missing restored journal");
@@ -125,6 +127,7 @@ it("refuses a thrown restore save without adopting target history or dispatching
   if (!older.monitor) throw new Error("Missing metadata");
   older.monitor.enabled = false;
   const state = structuredClone(h.monitor.state);
+  const telemetry = h.checkpoint().monitor;
   h.save.mockClear();
   h.save.mockImplementation(() => {
     throw new Error("PRIVATE_RESTORE_WRITE_FAILURE");
@@ -139,6 +142,12 @@ it("refuses a thrown restore save without adopting target history or dispatching
   expect(h.monitor.enabled).toBe(false);
   expect(h.checkpoint().monitor?.subtasks?.journal).toEqual(charged);
   expect(h.monitor.state).toEqual(state);
+  const retained = h.checkpoint().monitor;
+  expect(retained?.usage).toEqual(telemetry?.usage);
+  expect(retained?.lastJevCallAt).toEqual(telemetry?.lastJevCallAt);
+  expect(retained?.lastExtractionCallAt).toEqual(
+    telemetry?.lastExtractionCallAt,
+  );
   expect(h.counts()).toEqual(calls);
   expect(JSON.stringify(h.monitor.debugSnapshot())).not.toContain(
     "PRIVATE_RESTORE_WRITE_FAILURE",
@@ -287,4 +296,37 @@ it("uses committed history as the floor through repeated restores while old tran
       .subtaskSnapshot()
       .groups[0]?.children.every((child) => child.status === "pending"),
   ).toBe(true);
+});
+
+it("persists the same preserved mandatory telemetry that OFF restore adopts", async () => {
+  const { h, older, olderBranch } = await chargedFixture();
+  if (!older.monitor) throw new Error("Missing older metadata");
+  h.monitor.turnOff();
+  const before = h.checkpoint().monitor;
+  if (!before) throw new Error("Missing live metadata");
+  expect(
+    before.usage.jev.calls + before.usage.extraction.calls,
+  ).toBeGreaterThan(
+    older.monitor.usage.jev.calls + older.monitor.usage.extraction.calls,
+  );
+  older.monitor.enabled = true; // preserveControls must keep live OFF.
+  h.save.mockClear();
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    older,
+    true,
+    () => olderBranch,
+  );
+  expect(h.monitor.enabled).toBe(false);
+  expect(h.save).toHaveBeenCalled();
+  const saved = h.save.mock.calls.at(-1)?.[0] as ReturnType<
+    typeof h.checkpoint
+  >;
+  const adopted = h.checkpoint().monitor;
+  expect(adopted?.usage).toEqual(before.usage);
+  expect(saved.monitor?.usage).toEqual(adopted?.usage);
+  expect(saved.monitor?.lastJevCallAt).toEqual(adopted?.lastJevCallAt);
+  expect(saved.monitor?.lastExtractionCallAt).toEqual(
+    adopted?.lastExtractionCallAt,
+  );
 });

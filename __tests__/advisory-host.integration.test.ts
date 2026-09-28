@@ -81,6 +81,7 @@ async function host(
   waitForCorrection = true,
   continuationProof = false,
   latePolicyOverride?: string,
+  dropFirstContinuation = false,
 ) {
   const cwd = await mkdtemp(join(tmpdir(), "progress-advisory-host-"));
   const settingsManager = pi.SettingsManager.inMemory({
@@ -165,6 +166,17 @@ async function host(
                 ...extension,
                 sendMessage: (message, options) => {
                   sent.push(message);
+                  if (
+                    dropFirstContinuation &&
+                    (message.details as { kind?: string } | undefined)?.kind ===
+                      "continuation" &&
+                    sent.filter(
+                      (item) =>
+                        (item.details as { kind?: string } | undefined)
+                          ?.kind === "continuation",
+                    ).length === 1
+                  )
+                    return;
                   extension.sendMessage(message, options);
                 },
               }),
@@ -750,6 +762,10 @@ it.each([
   { mode: "rpc", choice: "yes", scenario: "unrelated-custom" },
   { mode: "rpc", choice: "yes", scenario: "drain-gate" },
   { mode: "rpc", choice: "yes", scenario: "drain-draft" },
+  { mode: "rpc", choice: "yes", scenario: "retry-current" },
+  { mode: "rpc", choice: "yes", scenario: "retry-assistant" },
+  { mode: "rpc", choice: "yes", scenario: "retry-policy" },
+  { mode: "rpc", choice: "yes", scenario: "retry-model" },
 ] as const)(
   "actual Pi $mode production continuation consumes one status-reply root ($choice, $scenario)",
   async ({ mode, choice, scenario }) => {
@@ -812,12 +828,14 @@ it.each([
       scenario === "policy-override"
         ? "Pause all implementation until new user approval."
         : undefined,
+      scenario.startsWith("retry-"),
     );
     const nativeTimeout = globalThis.setTimeout;
     const deadlines: Array<{
       callback: () => void;
       timer: ReturnType<typeof setTimeout>;
     }> = [];
+    const retries: typeof deadlines = [];
     const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
       callback: (...args: unknown[]) => void,
       delay?: number,
@@ -826,13 +844,15 @@ it.each([
       const timer = nativeTimeout(callback, delay, ...args);
       if (delay === 60_000)
         deadlines.push({ callback: () => callback(...args), timer });
+      if (delay === 2_000 || delay === 8_000)
+        retries.push({ callback: () => callback(...args), timer });
       return timer;
     }) as typeof setTimeout);
     const frozen = Date.now();
     const dateSpy = vi.spyOn(Date, "now").mockReturnValue(frozen);
     const drafts: ContinuationDraftRequest["input"][] = [];
     try {
-      h.faux.setResponses([
+      const responses: Parameters<typeof h.faux.setResponses>[0] = [
         fauxAssistantMessage(
           "The parser is pending. No implementation has started.",
         ),
@@ -891,7 +911,8 @@ it.each([
           );
         },
         fauxAssistantMessage("I will continue the authorized parser work."),
-      ]);
+      ];
+      h.faux.setResponses(responses);
       await bounded(
         h.session.prompt(
           "Continue the assigned parser work and regression tests until complete.",
@@ -1020,6 +1041,31 @@ it.each([
             await new Promise<void>((resolve) => setImmediate(resolve));
             expect(gates).toHaveLength(1);
             expect(h.sent).toHaveLength(2);
+            // Drain releases capacity, not stale authority. Only a later fresh
+            // user root may classify, draft and send again.
+            h.faux.setResponses(responses);
+            dateSpy.mockReturnValue(frozen + 120_004);
+            const afterDrainDeadlines = deadlines.length;
+            await bounded(
+              h.session.prompt("Resume the authorized parser work."),
+            );
+            await vi.waitFor(() =>
+              expect(deadlines.length).toBe(afterDrainDeadlines + 1),
+            );
+            const afterDrainDeadline = deadlines[afterDrainDeadlines];
+            clearTimeout(afterDrainDeadline.timer);
+            dateSpy.mockReturnValue(frozen + 180_005);
+            afterDrainDeadline.callback();
+            await vi.waitFor(() => expect(h.sent).toHaveLength(4));
+            await vi.waitFor(() =>
+              expect(
+                h.trace.filter((entry) => entry.hook === "agent_settled"),
+              ).toHaveLength(7),
+            );
+            expect(gates).toHaveLength(2);
+            expect(h.sent[3]).toMatchObject({
+              details: { kind: "continuation" },
+            });
             expect(h.errors).toEqual([]);
             return;
           }
@@ -1049,6 +1095,48 @@ it.each([
         );
         if (choice === "yes") {
           await vi.waitFor(() => expect(h.sent).toHaveLength(2));
+          if (scenario.startsWith("retry-")) {
+            await vi.waitFor(() => expect(retries.length).toBeGreaterThan(0));
+            if (scenario === "retry-assistant")
+              h.manager.appendMessage(
+                fauxAssistantMessage("New independent execution has resumed."),
+              );
+            if (scenario === "retry-policy")
+              h.session.agent.state.systemPrompt =
+                "Pause implementation pending user approval.";
+            if (scenario === "retry-model") {
+              const model = h.session.model;
+              if (!model) throw new Error("Missing actual host model");
+              h.session.agent.state.model = { ...model, id: "changed-model" };
+            }
+            const retry = retries.at(-1);
+            if (!retry) throw new Error("Missing actual continuation retry");
+            clearTimeout(retry.timer);
+            dateSpy.mockReturnValue(frozen + 62_002);
+            retry.callback();
+            if (scenario === "retry-current") {
+              await vi.waitFor(() => expect(h.sent).toHaveLength(3));
+              await vi.waitFor(() =>
+                expect(
+                  h.trace.filter((entry) => entry.hook === "agent_settled"),
+                ).toHaveLength(3),
+              );
+              expect(h.sent[2]).toMatchObject({
+                ...h.sent[1],
+                details: {
+                  ...(h.sent[1].details as object),
+                  sendId: expect.any(String),
+                },
+              });
+            } else {
+              await new Promise<void>((resolve) => setImmediate(resolve));
+              expect(h.sent).toHaveLength(2);
+            }
+            expect(gates).toHaveLength(1);
+            expect(drafts).toHaveLength(1);
+            expect(h.errors).toEqual([]);
+            return;
+          }
           await vi.waitFor(() =>
             expect(
               h.trace.filter((entry) => entry.hook === "agent_settled"),
@@ -1084,6 +1172,7 @@ it.each([
       dateSpy.mockRestore();
       timerSpy.mockRestore();
       for (const deadline of deadlines) clearTimeout(deadline.timer);
+      for (const retry of retries) clearTimeout(retry.timer);
       released.release();
       projections.mockRestore();
       await h.dispose();

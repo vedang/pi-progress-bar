@@ -4178,13 +4178,18 @@ export class Monitor {
       ? JSON.stringify(runtime.checkpoint().journal)
       : undefined;
     const scheduleGeneration = this.subtaskScheduleGeneration;
+    // Runtime dispatch persistence may synchronously reenter Monitor before
+    // runReport()/run() returns its promise. Reserve ownership first so model
+    // selection, replacement, and nested drains see the real flight kind.
+    const reservation = Promise.resolve();
+    this.subtaskFlight = reservation;
+    this.subtaskFlightIsReport = !!report;
+    this.subtaskFlightReportParentId = report?.parentTaskId;
+    this.subtaskFlightReportMayBeSuperseded = false;
     const flight = report
       ? runtime.runReport(parentTaskId, report.source)
       : runtime.run(parentTaskId);
     this.subtaskFlight = flight;
-    this.subtaskFlightIsReport = !!report;
-    this.subtaskFlightReportParentId = report?.parentTaskId;
-    this.subtaskFlightReportMayBeSuperseded = false;
     void flight.finally(() => {
       if (this.subtaskFlight !== flight) return;
       const supersedeReport =

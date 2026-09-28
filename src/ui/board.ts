@@ -563,7 +563,7 @@ class TaskBoard implements BoardComponent {
     if (diagnostics?.exhausted)
       lines.push(
         ...this.wrapLines(
-          `${marker}Subtasks exhausted · optional review unavailable`,
+          `${marker}Subtasks exhausted · optional analysis unavailable`,
           width,
           "warning",
         ),
@@ -589,7 +589,7 @@ class TaskBoard implements BoardComponent {
     if (this.subtaskIncomplete(task))
       lines.push(
         ...this.wrapLines(
-          "• Subtasks incomplete/unconfirmed · optional review remains",
+          "• Subtasks incomplete/unconfirmed · optional analysis remains",
           width,
           "warning",
         ),
@@ -620,7 +620,7 @@ class TaskBoard implements BoardComponent {
             : "• 0 observed access";
       lines.push(
         ...this.wrapLines(
-          `• Reported completed ${stats.completed} / ${stats.tracked} · ${stats.pending} pending · ${stats.blocked} blocked`,
+          `• Reported complete ${stats.completed} / ${stats.tracked} · ${stats.pending} pending · ${stats.blocked} blocked`,
           width,
         ),
         ...this.wrapLines(`• Scope: ${this.subtaskScope(group)}`, width, "dim"),

@@ -328,15 +328,15 @@ export function renderWidget(
               ? "Subtasks exhausted"
               : "Subtasks incomplete",
           ...(subtasksUnconfirmed && subtaskDiagnostics?.exhausted
-            ? ["exhausted · optional review unavailable"]
+            ? ["exhausted · optional analysis unavailable"]
             : subtaskDiagnostics?.exhausted
-              ? ["optional review unavailable"]
+              ? ["optional analysis unavailable"]
               : []),
           ...(subtaskOmissions > 0
             ? [`${compact(subtaskOmissions)} optional candidates omitted`]
             : []),
           ...(!subtaskDiagnostics?.exhausted && subtaskOmissions === 0
-            ? ["optional review remains"]
+            ? ["optional analysis remains"]
             : []),
         ].join(" · ")
       : undefined;

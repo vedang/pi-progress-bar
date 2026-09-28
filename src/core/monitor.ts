@@ -181,7 +181,7 @@ export interface MonitorOptions {
     signal: AbortSignal,
     onDispatch?: (at: number) => boolean,
     onPhysicalFlight?: SubtaskPhysicalFlightObserver,
-  ) => Promise<SubtaskProposalTransportResult>;
+  ) => Promise<unknown>;
   /** Runtime-only grounded-detail gate; production enables it and tests may disable it. */
   richDetailsEnabled?: boolean;
   /** Accepted correction advice is runtime-only and delivered by the host seam. */
@@ -388,6 +388,25 @@ export interface CoverageMonitorSnapshot extends CoverageSnapshot {
 
 /** Detached generic sidecar projection. It cannot change parent task state. */
 export type SubtaskMonitorSnapshot = Readonly<SubtaskSnapshot>;
+
+/** Detached durable generic wallet and adapter allocation facts. */
+export interface SubtaskDiagnosticsSnapshot {
+  dispatches: number;
+  exhausted: boolean;
+  parkedOwners?: number;
+  permanentOwners?: number;
+  adapter: {
+    pendingCount: number;
+    pendingBytes: number;
+    retainedBytes: number;
+    omissions: number;
+  };
+}
+
+interface SubtaskDiagnosticAuthority {
+  parked: Set<string>;
+  permanent: Set<string>;
+}
 
 export type AdvisorySettlementReason =
   | "disabled"
@@ -728,6 +747,8 @@ export class Monitor {
   >();
   /** Named-wake validated report owners; drains never reopen host authority. */
   private subtaskActiveReportParents = new Set<string>();
+  /** Bounded validated parked/permanent parents; no reader survives capture. */
+  private subtaskDiagnosticAuthority?: SubtaskDiagnosticAuthority;
   private subtaskScheduleGeneration = 0;
   private subtaskOptionalTurn: "subtask" | "detail" = "subtask";
   /** One adapter-issued capability stays stable until canonical metadata changes. */
@@ -984,6 +1005,30 @@ export class Monitor {
         this.coverageAdapter.accessEvidence(),
       ) ?? { groups: [], omissions: 0 }
     );
+  }
+
+  /** Passive durable generic wallet and captured-owner projection. */
+  subtaskDiagnosticsSnapshot(): SubtaskDiagnosticsSnapshot {
+    const journal = this.subtaskRuntime?.checkpoint().journal;
+    const dispatches = journal?.dispatches ?? 0;
+    const adapter = this.coverageAdapter.snapshot();
+    const authority = this.subtaskDiagnosticAuthority;
+    return {
+      dispatches,
+      exhausted: dispatches === 1024,
+      ...(authority === undefined
+        ? {}
+        : {
+            parkedOwners: authority.parked.size,
+            permanentOwners: authority.permanent.size,
+          }),
+      adapter: {
+        pendingCount: adapter.pendingCount,
+        pendingBytes: adapter.pendingBytes,
+        retainedBytes: adapter.retainedBytes,
+        omissions: adapter.omissions,
+      },
+    };
   }
 
   /** Provisional declared calls dispatch immediately; final reconciliation is turn-bound. */
@@ -1269,6 +1314,7 @@ export class Monitor {
       this.subtaskRuntime?.invalidate();
       this.subtaskGateway.pause();
       this.subtaskGateDispatch = undefined;
+      this.subtaskDiagnosticAuthority = undefined;
       this.subtaskOwners = [];
       this.subtaskWakeKey = undefined;
       this.resetCoverageRuntime();
@@ -1448,6 +1494,7 @@ export class Monitor {
     this.subtaskRuntime?.invalidate();
     this.subtaskGateway.pause();
     this.subtaskGateDispatch = undefined;
+    this.subtaskDiagnosticAuthority = undefined;
     this.subtaskOwners = [];
     this.subtaskWakeKey = undefined;
     this.correctionGateway.pause();
@@ -1590,6 +1637,13 @@ export class Monitor {
         this.replaceSubtaskRuntime(restored.monitor?.subtasks);
         this.hydrateSubtaskProjection(pass);
         this.mergeTelemetry(restored.monitor, work, pass);
+        const current = this.subtaskCurrent(this.state, pass, true);
+        if (current)
+          this.captureSubtaskDiagnosticAuthority(
+            current,
+            restored.monitor?.subtasks ?? this.emptySubtaskCheckpoint(),
+          );
+        else this.subtaskDiagnosticAuthority = undefined;
         this.latchHistoricalCatchup = true;
         if (this.directCanonicalAmendment(pass) || this.pendingContextAmended())
           this.resetState(work.sourceId, false);
@@ -2404,7 +2458,7 @@ export class Monitor {
               signal,
               (at) => onDispatch(at) === true,
               onPhysicalFlight,
-            )
+            ).then((result) => result as SubtaskProposalTransportResult)
           : Promise.resolve(undefined);
       },
       report: (batch, signal, onDispatch, onPhysicalFlight) =>
@@ -2434,6 +2488,7 @@ export class Monitor {
     this.subtaskReportBlocked.clear();
     this.subtaskReportFrontiers.clear();
     this.subtaskActiveReportParents.clear();
+    this.subtaskDiagnosticAuthority = undefined;
     this.subtaskScheduleGeneration += 1;
     this.subtaskWakeKey = undefined;
     if (this.subtaskFlight) {
@@ -2613,6 +2668,12 @@ export class Monitor {
         return true;
       },
     );
+    if (saved !== undefined) {
+      const pass = this.beginCanonicalPass();
+      const current = this.subtaskCurrent(this.state, pass);
+      if (current) this.captureSubtaskDiagnosticAuthority(current, candidate);
+      else this.subtaskDiagnosticAuthority = undefined;
+    }
     return saved !== undefined;
   }
 
@@ -2763,7 +2824,15 @@ export class Monitor {
     runtime: SubtaskRuntime,
     current: SubtaskRuntimeCurrent,
   ) {
-    return SubtaskStore.restore(runtime.checkpoint().state, {
+    return this.restoreSubtaskStore(runtime.checkpoint(), current);
+  }
+
+  /** Rebuild detached group authority from a checkpoint at a named boundary. */
+  private restoreSubtaskStore(
+    checkpoint: Readonly<SubtaskRuntimeCheckpoint>,
+    current: SubtaskRuntimeCurrent,
+  ) {
+    return SubtaskStore.restore(checkpoint.state, {
       parents: current.parents,
       sourceCurrent: (source) => {
         const observation = current.resolve(source.entryId);
@@ -2781,6 +2850,69 @@ export class Monitor {
         );
       },
     });
+  }
+
+  /** Capture only current durable owner IDs; never retain canonical readers. */
+  private captureSubtaskDiagnosticAuthority(
+    current: SubtaskRuntimeCurrent,
+    checkpoint:
+      | Readonly<SubtaskRuntimeCheckpoint>
+      | undefined = this.subtaskRuntime?.checkpoint(),
+  ) {
+    if (!checkpoint) {
+      this.subtaskDiagnosticAuthority = undefined;
+      return;
+    }
+    const store = this.restoreSubtaskStore(checkpoint, current);
+    if (!store) {
+      this.subtaskDiagnosticAuthority = undefined;
+      return;
+    }
+    const groups = store.snapshot().groups;
+    const parked = new Set<string>();
+    const permanent = new Set<string>();
+    const state = { tasks: [...current.parents] };
+    let established = true;
+    const add = (parentTaskId: string, ownerState: "parked" | "permanent") =>
+      (ownerState === "parked" ? parked : permanent).add(parentTaskId);
+
+    for (const record of checkpoint.journal.records) {
+      if (record.state !== "parked" && record.state !== "permanent") continue;
+      if (typeof current.selectedModel !== "string") {
+        established = false;
+        break;
+      }
+      const group = groups.find(
+        (candidate) =>
+          candidate.parentTaskId === record.parentTaskId &&
+          candidate.parentRevision === record.parentRevision &&
+          candidate.listRevision === record.listRevision,
+      );
+      if (
+        subtaskRuntimeRecordIsCurrent(record, current, {
+          state,
+          ...(group === undefined ? {} : { group }),
+        })
+      )
+        add(record.parentTaskId, record.state);
+    }
+    if (established)
+      for (const report of checkpoint.journal.reports) {
+        if (report.state !== "parked" && report.state !== "permanent") continue;
+        const group = groups.find(
+          (candidate) => candidate.id === report.groupId,
+        );
+        if (
+          subtaskRuntimeReportIsCurrent(report, current, {
+            state,
+            ...(group === undefined ? {} : { group }),
+          })
+        )
+          add(report.parentTaskId, report.state);
+      }
+    const owners = new Set([...parked, ...permanent]);
+    this.subtaskDiagnosticAuthority =
+      established && owners.size <= 20 ? { parked, permanent } : undefined;
   }
 
   private hydrateSubtaskProjection(pass: CanonicalPass) {
@@ -2965,16 +3097,19 @@ export class Monitor {
     if (!hasReports && !this.options.proposeSubtasks) {
       this.subtaskOwners = [];
       this.subtaskReportOwners = [];
+      this.subtaskDiagnosticAuthority = undefined;
       return;
     }
     const current = this.subtaskCurrent(this.state, pass, false, !hasReports);
     if (!current) {
       this.subtaskOwners = [];
       this.subtaskReportOwners = [];
+      this.subtaskDiagnosticAuthority = undefined;
       return;
     }
     if (hasReports) this.wakeSubtaskReports(pass, current);
     this.refreshActiveSubtaskReportParents(current);
+    this.captureSubtaskDiagnosticAuthority(current);
     const key = JSON.stringify({
       sourceId: current.sourceId,
       latest: current.latest,
@@ -3004,6 +3139,7 @@ export class Monitor {
     this.subtaskRuntime?.invalidate();
     this.subtaskGateway.invalidate();
     this.subtaskGateDispatch = undefined;
+    this.subtaskDiagnosticAuthority = undefined;
     this.subtaskOwners = [];
     this.subtaskReportOwners = [];
     this.subtaskScheduleGeneration += 1;

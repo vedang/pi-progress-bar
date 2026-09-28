@@ -47,6 +47,8 @@ export interface CoverageAdapterResult {
 
 export interface CoverageAdapterSnapshot {
   pendingCount: number;
+  pendingBytes: number;
+  retainedBytes: number;
   omissions: number;
 }
 
@@ -835,7 +837,13 @@ export class CoverageAdapter {
   }
 
   snapshot(): CoverageAdapterSnapshot {
-    return { pendingCount: this.pending.size, omissions: this.omissions };
+    const budget = this.budgetState();
+    return {
+      pendingCount: budget.pending.length,
+      pendingBytes: budget.pending.length ? ownDataBytes(budget.pending) : 0,
+      retainedBytes: ownDataBytes(budget),
+      omissions: this.omissions,
+    };
   }
 
   /**

@@ -8,10 +8,21 @@ import {
 } from "../src/core/hybrid-checkpoint";
 import type { SourceRef } from "../src/core/hybrid-state";
 import type { MonitorOptions } from "../src/core/monitor";
+import type { SubtaskRuntimeCurrent } from "../src/core/subtask-runtime";
 import { SubtaskStore } from "../src/core/subtasks";
+import { isCurrentSubtaskEvidence } from "../src/sources/coverage";
+import { CanonicalPass } from "../src/sources/messages";
 import { backend, noPatch, observation } from "./fixtures/hybrid";
 import { branchEntry, monitorHarness } from "./fixtures/hybrid-monitor";
-import { subtaskAdmission } from "./fixtures/subtasks";
+import {
+  metadataCommand,
+  metadataXml,
+} from "./fixtures/subtask-metadata-monitor";
+import {
+  subtaskAdmission,
+  subtaskHash,
+  subtaskSource,
+} from "./fixtures/subtasks";
 
 type Envelope = ReturnType<typeof encodeSubtaskCheckpoint>;
 const labels = Array.from(
@@ -168,9 +179,11 @@ async function fixture(
   expect(subtaskCheckpointStorageStatus(saved)).toBe("supported");
   await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
   await vi.advanceTimersByTimeAsync(100);
-  expect(checkpoint().monitor?.subtasks?.state.groups[0].children).toHaveLength(
-    22,
-  );
+  if (admittedParentCount > 0)
+    expect(
+      checkpoint().monitor?.subtasks?.state.groups[0].children,
+    ).toHaveLength(22);
+  else expect(checkpoint().monitor?.subtasks?.state.groups ?? []).toEqual([]);
   expect(calls).toEqual([]); // Admission source equality is NOT a report token.
   all.splice(0);
   return {
@@ -1348,6 +1361,440 @@ it("dispatches target-only report work after old drain without another wake or d
           (job) => job.parentTaskId === second.parentTaskId,
         ),
     ).toMatchObject({ state: "complete" });
+  } finally {
+    h.monitor.stop();
+    release?.();
+    await vi.advanceTimersByTimeAsync(100);
+  }
+});
+
+it.each([false, true])(
+  "preserves real pending evidence capability and revokes it on stop=%s",
+  async (stop) => {
+    let selected = false;
+    let disposed = false;
+    const selectedModel = vi.fn(() => {
+      if (disposed) throw new Error("Disposed selected-model reader");
+      return selected ? "fixture/selected" : undefined;
+    });
+    const proposeSubtasks = vi.fn(async () => {
+      throw new Error("Unexpected proposal after a negative gate");
+    });
+    const h = await fixture(
+      false,
+      false,
+      2,
+      { selectedModel, proposeSubtasks },
+      1,
+    );
+    let release: (() => void) | undefined;
+    h.setTransport(async (request) => {
+      if (h.calls.length === 1)
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      return answer(request);
+    });
+    h.append("report", reportText);
+    await h.settle("report");
+    expect(release).toBeTypeOf("function");
+    const target = h.checkpoint();
+    const gates: EvaluationRequest[] = [];
+    const transport = h.fetch.getMockImplementation();
+    if (!transport) throw new Error("Missing fixture transport");
+    h.fetch.mockImplementation(async (url, init) => {
+      const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+      if (request.questions["subtask:0"]) {
+        gates.push(request);
+        return answer(request, "no");
+      }
+      return transport(url, init);
+    });
+    const reader = vi.fn(() => {
+      if (disposed) throw new Error("Disposed canonical reader");
+      return h.reader();
+    });
+    try {
+      await h.monitor.restore(
+        "/nonexistent-hybrid-test",
+        target,
+        false,
+        reader,
+      );
+      h.monitor.observeCoverageToolStart("pending-manifest", "bash", {
+        command: metadataCommand,
+      });
+      h.monitor.observeCoverageToolEnd("pending-manifest", "bash");
+      h.replace([
+        ...h.reader(),
+        {
+          type: "message",
+          id: "result-pending-manifest",
+          message: {
+            role: "toolResult",
+            toolCallId: "pending-manifest",
+            toolName: "bash",
+            content: [{ type: "text", text: metadataXml }],
+            isError: false,
+          },
+        },
+      ]);
+      selected = true;
+      h.monitor.confirmCoverageBranch(h.reader());
+      const captured = Reflect.get(h.monitor, "pendingSubtaskCurrent") as
+        | SubtaskRuntimeCurrent
+        | null
+        | undefined;
+      expect(captured?.evidence?.resources).toHaveLength(1);
+      // Narrow white-box check is necessary: JSON equality cannot prove the
+      // private adapter-issued capability or release of its resolver closure.
+      if (!stop)
+        expect.soft(isCurrentSubtaskEvidence(captured?.evidence)).toBe(true);
+      if (stop) {
+        h.monitor.stop();
+        expect.soft(Reflect.get(h.monitor, "pendingSubtaskCurrent")).toBeNull();
+        expect
+          .soft(Reflect.get(h.monitor, "capturedSubtaskCurrent"))
+          .toBeNull();
+        expect.soft(captured?.resolve("goal")).toBeUndefined();
+        expect.soft(isCurrentSubtaskEvidence(captured?.evidence)).toBe(false);
+      }
+      const reads = [reader.mock.calls.length, selectedModel.mock.calls.length];
+      disposed = true;
+      release?.();
+      await vi.advanceTimersByTimeAsync(200);
+      expect([
+        reader.mock.calls.length,
+        selectedModel.mock.calls.length,
+      ]).toEqual(reads);
+      expect(proposeSubtasks).not.toHaveBeenCalled();
+      if (stop) {
+        expect(gates).toEqual([]);
+        expect(Reflect.get(h.monitor, "capturedSubtaskCurrent")).toBeNull();
+      } else {
+        const secondId = h.monitor.state.tasks[1].id;
+        const ownerGates = gates.filter(
+          (request) =>
+            (request.state as { parent: { id: string } }).parent.id ===
+            secondId,
+        );
+        expect(ownerGates).toHaveLength(1);
+        expect(ownerGates[0].state).toMatchObject({
+          evidence: {
+            resources: [{ source: { entryId: "result-pending-manifest" } }],
+          },
+        });
+      }
+    } finally {
+      h.monitor.stop();
+      release?.();
+      await vi.advanceTimersByTimeAsync(100);
+    }
+  },
+);
+
+it.each([
+  { bytes: 65536, sources: 1 },
+  { bytes: 65537, sources: 1 },
+  { bytes: 65537, sources: 2 },
+])(
+  "bounds pending canonical transfer at $bytes UTF-8 bytes across $sources sources without pruning history",
+  async ({ bytes, sources }) => {
+    let selected = false;
+    let disposed = false;
+    const selectedModel = vi.fn(() => {
+      if (disposed) throw new Error("Disposed model reader");
+      return selected ? "fixture/selected" : undefined;
+    });
+    const proposeSubtasks = vi.fn(async () => {
+      throw new Error("Unexpected proposal");
+    });
+    const h = await fixture(
+      false,
+      false,
+      2,
+      { selectedModel, proposeSubtasks },
+      1,
+    );
+    let release: (() => void) | undefined;
+    h.setTransport(async (request) => {
+      if (h.calls.length === 1)
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      return answer(request);
+    });
+    h.append("report", reportText);
+    await h.settle("report");
+    expect(release).toBeTypeOf("function");
+    const target = h.checkpoint();
+    if (!target.monitor?.subtasks) throw new Error("Missing history");
+    const initialBranch = h.reader();
+    const ids = Array.from(
+      { length: sources },
+      (_, index) => `historical:${index}`,
+    );
+    const makeBranch = (texts: string[]) => [
+      ...texts.map((text, index) => branchEntry(ids[index], text, "user")),
+      ...initialBranch,
+    ];
+    const captureBytes = (texts: string[]) => {
+      const pass = new CanonicalPass(makeBranch(texts));
+      return Buffer.byteLength(
+        JSON.stringify(
+          ["report", "goal", ...ids].map((id) => pass.observation(id)),
+        ),
+        "utf8",
+      );
+    };
+    const bodies = labels.slice(0, sources);
+    let remaining = bytes - captureBytes(bodies);
+    for (let index = 0; index < sources; index++) {
+      const added = Math.floor(remaining / (sources - index));
+      bodies[index] +=
+        "é".repeat(Math.floor(added / 2)) + "x".repeat(added % 2);
+      remaining -= added;
+    }
+    expect(captureBytes(bodies)).toBe(bytes);
+    if (sources > 1)
+      expect(
+        bodies.every((body) => Buffer.byteLength(body, "utf8") < 65536),
+      ).toBe(true);
+    const references = bodies.map((body, index) => ({
+      ...subtaskSource(ids[index], body),
+      end: labels[index].length,
+      quoteHash: subtaskHash(labels[index]),
+    }));
+    const source = references[0];
+    const store = new SubtaskStore();
+    const parent = target.state.tasks[0];
+    expect(
+      store.admit({
+        ...subtaskAdmission(labels),
+        parent,
+        source: parent.source,
+        complete: true,
+        knownTotal: 22,
+        children: labels.map((label, index) => ({
+          kind: "add",
+          label,
+          source: references[index] ?? parent.source,
+        })),
+      }),
+    ).toEqual({ accepted: true });
+    target.monitor.subtasks.state = store.checkpoint();
+    expect(subtaskCheckpointStorageStatus(target)).toBe("supported");
+    const branch = makeBranch(bodies);
+    const reader = vi.fn(() => {
+      if (disposed) throw new Error("Disposed canonical reader");
+      return branch;
+    });
+    const gates: EvaluationRequest[] = [];
+    const transport = h.fetch.getMockImplementation();
+    if (!transport) throw new Error("Missing transport");
+    h.fetch.mockImplementation(async (url, init) => {
+      const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+      if (request.questions["subtask:0"]) {
+        gates.push(request);
+        return answer(request, "no");
+      }
+      return transport(url, init);
+    });
+    try {
+      selected = true;
+      await h.monitor.restore(
+        "/nonexistent-hybrid-test",
+        target,
+        false,
+        reader,
+      );
+      // Settle canonical bookkeeping for the historical entry while old
+      // optional transport is still held; only later drain must be passive.
+      await vi.advanceTimersByTimeAsync(200);
+      expect(h.monitor.enabled).toBe(true);
+      const before = h.checkpoint().monitor?.subtasks;
+      expect(before?.state.groups[0].children[0].source).toEqual(source);
+      expect(before?.state.groups[0].children).toHaveLength(22);
+      if (bytes > 65536)
+        expect.soft(Reflect.get(h.monitor, "pendingSubtaskCurrent")).toBeNull();
+      const reads = [reader.mock.calls.length, selectedModel.mock.calls.length];
+      disposed = true;
+      release?.();
+      await vi.advanceTimersByTimeAsync(200);
+      expect([
+        reader.mock.calls.length,
+        selectedModel.mock.calls.length,
+      ]).toEqual(reads);
+      const after = h.checkpoint().monitor?.subtasks;
+      expect(after?.state).toEqual(before?.state);
+      if (bytes > 65536) {
+        expect(gates).toEqual([]);
+        expect(after?.journal).toEqual(before?.journal);
+        expect(Reflect.get(h.monitor, "capturedSubtaskCurrent")).toBeNull();
+      } else {
+        const secondId = target.state.tasks[1].id;
+        expect(
+          gates.filter(
+            (request) =>
+              (request.state as { parent: { id: string } }).parent.id ===
+              secondId,
+          ),
+        ).toHaveLength(1);
+      }
+    } finally {
+      h.monitor.stop();
+      release?.();
+      await vi.advanceTimersByTimeAsync(100);
+    }
+  },
+);
+
+it("keeps a real parked report owner ahead of decomposition during a different parent's proposal drain", async () => {
+  let selected = false;
+  let proposalAttempts = 0;
+  let release: (() => void) | undefined;
+  const proposeSubtasks: NonNullable<
+    MonitorOptions["proposeSubtasks"]
+  > = async (_request, _signal, onDispatch, onPhysicalFlight) => {
+    proposalAttempts++;
+    if (proposalAttempts === 1) throw new Error("Unavailable before dispatch");
+    expect(onDispatch?.(Date.now())).toBe(true);
+    const drain = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    onPhysicalFlight?.(drain);
+    await drain;
+    throw new Error("Late aborted proposal must not publish");
+  };
+  const h = await fixture(
+    false,
+    false,
+    2,
+    {
+      selectedModel: () => (selected ? "fixture/selected" : undefined),
+      proposeSubtasks,
+    },
+    0,
+  );
+  const [a, p] = h.monitor.state.tasks;
+  const gates: EvaluationRequest[] = [];
+  const transport = h.fetch.getMockImplementation();
+  if (!transport) throw new Error("Missing fixture transport");
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+    if (request.questions["subtask:0"]) {
+      gates.push(request);
+      const state = request.state as {
+        parent: { id: string };
+        latest: { id: string };
+      };
+      return answer(
+        request,
+        state.parent.id === p.id && state.latest.id === "report-a"
+          ? "yes"
+          : "no",
+      );
+    }
+    return transport(url, init);
+  });
+  try {
+    selected = true;
+    h.append("report-a", reportText);
+    await h.settle("report-a");
+    await vi.advanceTimersByTimeAsync(200);
+    expect(proposalAttempts).toBe(1);
+    const target = h.checkpoint();
+    if (!target.monitor?.subtasks) throw new Error("Missing real yes gate");
+    expect(
+      target.monitor.subtasks.journal.records.find(
+        (record) => record.parentTaskId === p.id,
+      ),
+    ).toMatchObject({ state: "ready" });
+    expect(target.monitor.subtasks.journal.usage.extraction.calls).toBe(0);
+    // Existing report-fixture admission boundary only; all gate/proposal/report
+    // dispatches and the parked certificate below use real runtime hooks.
+    const store = new SubtaskStore();
+    expect(
+      store.admit({
+        ...subtaskAdmission(labels),
+        parent: a,
+        source: a.source,
+        complete: true,
+        knownTotal: 22,
+        children: labels.map((label) => ({
+          kind: "add",
+          label,
+          source: a.source,
+        })),
+      }),
+    ).toEqual({ accepted: true });
+    target.monitor.subtasks.state = store.checkpoint();
+    h.setTransport(async (request) =>
+      h.calls.length === 1
+        ? new Response(null, { status: 503, headers: { "Retry-After": "10" } })
+        : answer(request),
+    );
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      target,
+      false,
+      h.reader,
+    );
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.calls).toHaveLength(1);
+    expect(proposalAttempts).toBe(2);
+    expect(release).toBeTypeOf("function");
+    const parked = h
+      .checkpoint()
+      .monitor?.subtasks?.journal.reports.find(
+        (job) => job.parentTaskId === a.id,
+      );
+    expect(parked).toMatchObject({ state: "parked" });
+    if (!parked?.parkedUntil)
+      throw new Error("Missing admitted retry deadline");
+    expect(parked.parkedUntil).toBeGreaterThan(Date.now());
+    h.append(
+      "report-b",
+      "A newer report is waiting behind the parked assessment.",
+    );
+    await h.settle("report-b");
+    const sameLineage = h.checkpoint();
+    expect(
+      sameLineage.monitor?.subtasks?.journal.reports.find(
+        (job) => job.identity === parked.identity,
+      ),
+    ).toEqual(parked);
+    gates.splice(0);
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      sameLineage,
+      false,
+      h.reader,
+    );
+    release?.();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(
+      gates.filter(
+        (request) =>
+          (request.state as { parent: { id: string } }).parent.id === a.id,
+      ),
+    ).toEqual([]);
+    expect(
+      h
+        .checkpoint()
+        .monitor?.subtasks?.journal.reports.find(
+          (job) => job.identity === parked.identity,
+        ),
+    ).toEqual(parked);
+    expect(h.calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(
+      Math.max(0, parked.parkedUntil - Date.now()) + 1,
+    );
+    expect(h.calls).toHaveLength(1);
+    h.observe();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.calls.length).toBeGreaterThan(1);
+    expect(sourceId(h.calls[1])).toBe("report-a");
   } finally {
     h.monitor.stop();
     release?.();

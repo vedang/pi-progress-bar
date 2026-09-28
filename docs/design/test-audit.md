@@ -49,6 +49,16 @@ Main identified two discovery-quality caveats:
 
 Second read-only assessment has three independent scopes: core/UI obsolete layers and real-host keepers; auxiliary fixture/access redundancy; generic/legacy/health reachability and contract preservation. Main will synthesize exact keeper-first edits and mutation controls after these reports. Source/test baseline remains frozen. In particular, the Beads reader must retain all valid records (not filter backlog), and an empty valid export is not a missing-file failure; proposed fixture repairs must respect the actual reader contract.
 
+## Executed cleanup batches
+
+### B1 — Beads reader keeper, obsolete mutator retirement
+
+The independent second layer confirmed `enrichBeadsTasks` has no shipping caller. Main repaired the direct filesystem keeper first: exact successful record parsing (including unrelated records), valid empty export, actual missing export, malformed JSON/record, duplicate IDs, directory symlink and file symlink. Invalid reads must return no partial records. The unchanged actual Monitor keeper remains the authority proof: closed Beads metadata cannot complete a task or import backlog.
+
+Before deletion, focused keepers passed12/12. Three temporary production-owner controls were caught: removing duplicate rejection failed the duplicate case; bypassing all symlink defenses failed both real-filesystem symlink cases; injecting closed-record completion into `Monitor.refreshBeads` failed the retained Monitor task-status assertion. Both source files were restored byte-identically after each control (Beads SHA256 `31bfd49213f806146a92eb70e7f52a666fce7de6d80532c949875587c7edd460`, Monitor `cf486fc51b525caaed21a9cba3e349eb0847ab02eb3b3cff508e23b28e6901a5`). These are bounded controls, not an exhaustive filesystem race/security proof.
+
+Then Main removed the51-line orphan mutator/import and its redundant test/fixture. Post-removal keepers11/11 pass; format/check pass with the same three historical warnings. Reader and presentation implementation remain unchanged. Full gates and independent cumulative preservation review still follow the cleanup batch; this is not audit completion.
+
 ## Completion remains pending
 
 No audit lane or C05-C09 stage is accepted by discovery consumption. Audit results, deletions/keepers, caught mutations, product-defect controls and final LOC/gates will be recorded here as executed. Feature work follows the audit, with final green gates and independent stage acceptance before manual handoff.

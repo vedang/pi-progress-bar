@@ -2,24 +2,9 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Task } from "../src/core/types";
-import { enrichBeadsTasks, readBeadsExport } from "../src/sources/beads";
+import { readBeadsExport } from "../src/sources/beads";
 
 const roots: string[] = [];
-const task = (text: string): Task => ({
-  id: "task-1",
-  text,
-  status: "not-started",
-  criteria: [],
-  included: true,
-  ref: {
-    sourceId: "conversation:goal",
-    entryId: "goal",
-    start: 0,
-    end: text.length,
-    provenance: "user",
-  },
-});
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((path) => rm(path, { recursive: true, force: true })),
@@ -36,8 +21,8 @@ async function workspace(lines: object[]) {
   return root;
 }
 
-describe("read-only Beads enrichment", () => {
-  it("grounds only exact IDs already present in admitted tasks", async () => {
+describe("read-only Beads export", () => {
+  it("reads every valid record without assigning task authority", async () => {
     const cwd = await workspace([
       {
         id: "proj-123",
@@ -59,53 +44,77 @@ describe("read-only Beads enrichment", () => {
       },
     ]);
     const exportData = await readBeadsExport(cwd);
-    const enriched = enrichBeadsTasks([task("Implement proj-123")], exportData);
-    expect(enriched[0]?.beads).toMatchObject({
-      id: "proj-123",
-      title: "Build parser",
-      exportStatus: "open",
-    });
-    expect(enriched).toHaveLength(1);
-    expect(JSON.stringify(enriched)).not.toContain("proj-124");
-  });
-
-  it("leaves missing, malformed, duplicate, and symlink exports incomplete without status authority", async () => {
-    const missing = await readBeadsExport(await workspace([]));
-    expect(
-      enrichBeadsTasks([task("Implement proj-123")], missing)[0]?.status,
-    ).toBe("not-started");
-    const duplicateRoot = await workspace([
-      { id: "proj-123", title: "A", status: "closed" },
-      { id: "proj-123", title: "B", status: "open" },
-    ]);
-    expect((await readBeadsExport(duplicateRoot)).complete).toBe(false);
-    const outside = await workspace([
-      { id: "proj-123", title: "A", status: "closed" },
-    ]);
-    const linked = await mkdtemp(join(tmpdir(), "progress-beads-link-"));
-    roots.push(linked);
-    await mkdir(join(linked, ".beads"));
-    await symlink(
-      join(outside, ".beads", "issues.jsonl"),
-      join(linked, ".beads", "issues.jsonl"),
-    );
-    expect((await readBeadsExport(linked)).complete).toBe(false);
-  });
-
-  it("never lets closed export status complete conversation-reported work", async () => {
-    const cwd = await workspace([
+    expect(exportData.complete).toBe(true);
+    expect([...exportData.records.values()]).toEqual([
       {
         id: "proj-123",
         title: "Build parser",
+        status: "open",
+        issueType: "task",
+        parentIds: [],
+      },
+      {
+        id: "proj-epic",
+        title: "Container",
+        status: "open",
+        issueType: "epic",
+        parentIds: [],
+      },
+      {
+        id: "proj-124",
+        title: "Other backlog",
         status: "closed",
-        issue_type: "task",
+        issueType: "task",
+        parentIds: [],
       },
     ]);
-    const enriched = enrichBeadsTasks(
-      [task("Implement proj-123")],
-      await readBeadsExport(cwd),
-    );
-    expect(enriched[0]?.status).toBe("not-started");
-    expect(enriched[0]?.beads?.conflict).toBe(true);
+    const empty = await readBeadsExport(await workspace([]));
+    expect(empty.complete).toBe(true);
+    expect(empty.records.size).toBe(0);
   });
+
+  it.each([
+    "missing",
+    "malformed-json",
+    "malformed-record",
+    "duplicate",
+    "directory-symlink",
+    "file-symlink",
+  ] as const)(
+    "rejects %s exports without retaining partial records",
+    async (kind) => {
+      const cwd = await mkdtemp(join(tmpdir(), "progress-beads-invalid-"));
+      roots.push(cwd);
+      const records = [{ id: "proj-123", title: "A", status: "closed" }];
+      if (kind === "directory-symlink" || kind === "file-symlink") {
+        const outside = await workspace(records);
+        if (kind === "directory-symlink") {
+          await symlink(join(outside, ".beads"), join(cwd, ".beads"));
+        } else {
+          await mkdir(join(cwd, ".beads"));
+          await symlink(
+            join(outside, ".beads", "issues.jsonl"),
+            join(cwd, ".beads", "issues.jsonl"),
+          );
+        }
+      } else if (kind !== "missing") {
+        await mkdir(join(cwd, ".beads"));
+        const invalid =
+          kind === "malformed-json"
+            ? "{"
+            : JSON.stringify(
+                kind === "duplicate"
+                  ? records[0]
+                  : { id: "proj-124", title: "B", status: "invalid" },
+              );
+        await writeFile(
+          join(cwd, ".beads", "issues.jsonl"),
+          `${JSON.stringify(records[0])}\n${invalid}\n`,
+        );
+      }
+      const result = await readBeadsExport(cwd);
+      expect(result.complete).toBe(false);
+      expect(result.records.size).toBe(0);
+    },
+  );
 });

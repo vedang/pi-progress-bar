@@ -1,7 +1,6 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import type { Task } from "../core/types";
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_RECORDS = 10_000;
@@ -166,54 +165,4 @@ export function beadsPresentation(
         ? false
         : (issue.status === "closed") !== completed,
   };
-}
-
-export function enrichBeadsTasks(tasks: Task[], source: BeadsExport): Task[] {
-  const grounded = tasks.map((task) => {
-    const { beads: _stale, ...plain } = task;
-    const ids = task.text.match(/[A-Za-z0-9][A-Za-z0-9._-]{2,127}/g) ?? [];
-    const matches = [...new Set(ids)].flatMap((id) => {
-      const item = source.records.get(id);
-      return item ? [item] : [];
-    });
-    const issue = matches.length === 1 ? matches[0] : undefined;
-    if (!issue) return plain as Task;
-    return {
-      ...plain,
-      beads: {
-        id: issue.id,
-        title: issue.title,
-        ...(issue.status ? { exportStatus: issue.status } : {}),
-        ...(issue.issueType ? { issueType: issue.issueType } : {}),
-        conflict:
-          issue.status === undefined
-            ? false
-            : (issue.status === "closed") !== (task.status === "done"),
-      },
-    } as Task;
-  });
-  const activeIds = new Set(
-    grounded
-      .filter((task) => task.included)
-      .flatMap((task) => task.beads?.id ?? []),
-  );
-  const seen = new Set<string>();
-  return grounded.map((task) => {
-    const id = task.beads?.id;
-    if (!id) return task;
-    const issue = source.records.get(id);
-    const childActive = [...source.records.values()].some(
-      (candidate) =>
-        activeIds.has(candidate.id) && candidate.parentIds.includes(id),
-    );
-    const duplicate = seen.has(id);
-    seen.add(id);
-    return {
-      ...task,
-      included:
-        task.included &&
-        !duplicate &&
-        !(issue?.issueType === "epic" && childActive),
-    };
-  });
 }

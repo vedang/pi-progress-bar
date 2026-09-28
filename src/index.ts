@@ -94,6 +94,8 @@ export default function progressBar(pi: ExtensionAPI): void {
         board: monitor.boardSnapshot(),
         visibility: monitor.visibilitySnapshot(),
         subtasks: monitor.subtaskSnapshot(),
+        subtaskAccess: monitor.subtaskAccessSnapshot(),
+        subtaskDiagnostics: monitor.subtaskDiagnosticsSnapshot(),
       };
       if (!controller) {
         // Host contexts may be freshly wrapped for every event. Only explicit

@@ -4,20 +4,23 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { BoardSnapshot } from "../core/board-projection";
 import type { ExecutionVisibilitySnapshot } from "../core/execution-visibility";
 import type {
-  CoverageMonitorSnapshot,
   PresentationSnapshot,
+  SubtaskDiagnosticsSnapshot,
   SubtaskMonitorSnapshot,
 } from "../core/monitor";
+import type { SubtaskAccessSnapshot } from "../core/subtask-access";
 
 export interface WidgetSnapshot {
   presentation: PresentationSnapshot;
   board: BoardSnapshot;
   /** Optional while old host/test projections have no runtime visibility data. */
   visibility?: ExecutionVisibilitySnapshot;
-  /** Optional read-only coverage sidecar; never task-board authority. */
-  coverage?: CoverageMonitorSnapshot;
   /** Optional generic child sidecar; never parent completion authority. */
   subtasks?: SubtaskMonitorSnapshot;
+  /** Optional runtime access facts; never child report status authority. */
+  subtaskAccess?: SubtaskAccessSnapshot;
+  /** Optional durable wallet and adapter allocation facts. */
+  subtaskDiagnostics?: SubtaskDiagnosticsSnapshot;
 }
 
 /** Existing safe health-label utility; board owns where it is displayed. */
@@ -142,36 +145,24 @@ const warning = (snapshot: WidgetSnapshot, width: number) => {
 };
 
 /**
- * Advisory qualifier only: exact current parent/revision coverage has open or
- * unconfirmed review facts. It never changes task lifecycle or progress.
+ * Advisory qualifier only: exact current parent/revision subtasks have open
+ * report facts. It never changes task lifecycle or parent progress.
  */
-export const coverageUnconfirmedForTask = (
-  coverage: WidgetSnapshot["coverage"],
+const subtasksUnconfirmedForTask = (
+  subtasks: WidgetSnapshot["subtasks"],
   task: WidgetSnapshot["board"]["tasks"][number] | undefined,
 ) => {
-  if (!coverage || !task) return false;
-  return coverage.groups.some((group) => {
-    if (
-      group.parentTaskId !== task.taskId ||
-      group.parentRevision !== task.revision
-    )
-      return false;
-    const knownTotal = group.complete
-      ? (group.knownTotal ?? group.children.length)
-      : group.knownTotal;
-    const reviewed = group.children.filter(
-      (child) => child.status === "reported-reviewed",
-    ).length;
-    return (
-      !group.complete ||
-      knownTotal === undefined ||
-      group.children.some(
-        (child) =>
-          child.status === "reported-blocked" || child.status === "pending",
-      ) ||
-      reviewed < knownTotal
-    );
-  });
+  if (!subtasks || !task) return false;
+  return subtasks.groups.some(
+    (group) =>
+      group.parentTaskId === task.taskId &&
+      group.parentRevision === task.revision &&
+      (!group.complete ||
+        group.children.some(
+          (child) =>
+            child.status === "reported-blocked" || child.status === "pending",
+        )),
+  );
 };
 
 const currentTask = (board: BoardSnapshot) => {
@@ -313,21 +304,23 @@ export function renderWidget(
     snapshot.visibility?.budgetRemaining === 0
       ? "Visibility budget reached · history incomplete"
       : undefined;
-  const coverageTask = snapshot.board.currentTask
+  const subtaskTask = snapshot.board.currentTask
     ? snapshot.board.tasks.find(
         (candidate) => candidate.taskId === snapshot.board.currentTask?.taskId,
       )
     : undefined;
-  const coverageUnconfirmed = coverageUnconfirmedForTask(
-    snapshot.coverage,
-    coverageTask,
+  const subtasksUnconfirmed = subtasksUnconfirmedForTask(
+    snapshot.subtasks,
+    subtaskTask,
   );
-  const coverageWarning = snapshot.coverage?.exhausted
-    ? `Coverage${coverageUnconfirmed ? " incomplete/unconfirmed ·" : ""} exhausted · optional review unavailable`
-    : snapshot.coverage?.omissions && snapshot.coverage.omissions > 0
-      ? `Coverage${coverageUnconfirmed ? " incomplete/unconfirmed ·" : " incomplete ·"} ${compact(snapshot.coverage.omissions)} optional candidates omitted`
-      : coverageUnconfirmed
-        ? "Coverage incomplete/unconfirmed · optional review remains"
+  const subtaskDiagnostics = snapshot.subtaskDiagnostics;
+  const subtaskWarning = subtaskDiagnostics?.exhausted
+    ? `Subtasks${subtasksUnconfirmed ? " incomplete/unconfirmed ·" : ""} exhausted · optional review unavailable`
+    : subtaskDiagnostics?.adapter.omissions &&
+        subtaskDiagnostics.adapter.omissions > 0
+      ? `Subtasks${subtasksUnconfirmed ? " incomplete/unconfirmed ·" : " incomplete ·"} ${compact(subtaskDiagnostics.adapter.omissions)} optional candidates omitted`
+      : subtasksUnconfirmed
+        ? "Subtasks incomplete/unconfirmed · optional review remains"
         : undefined;
   const lines: WidgetLine[] = [
     header,
@@ -335,8 +328,8 @@ export function renderWidget(
     ...(visibilityWarning
       ? [{ text: visibilityWarning, tone: "warning" as const }]
       : []),
-    ...(coverageWarning
-      ? [{ text: coverageWarning, tone: "warning" as const, wrap: true }]
+    ...(subtaskWarning
+      ? [{ text: subtaskWarning, tone: "warning" as const, wrap: true }]
       : []),
     task,
     ...(selected

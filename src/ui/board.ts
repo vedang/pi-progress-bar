@@ -8,18 +8,16 @@ import {
 } from "@earendil-works/pi-tui";
 import { type BoardLayout, layoutBoard } from "./layout";
 import {
-  coverageUnconfirmedForTask,
   lifecycleTone,
   sanitizeTerminalText,
   type WidgetSnapshot,
 } from "./widget";
 
 type BoardTask = WidgetSnapshot["board"]["tasks"][number];
-type CoverageSnapshot = NonNullable<WidgetSnapshot["coverage"]>;
-type CoverageGroup = CoverageSnapshot["groups"][number];
+type SubtaskGroup = NonNullable<WidgetSnapshot["subtasks"]>["groups"][number];
 type VisibilitySnapshot = NonNullable<WidgetSnapshot["visibility"]>;
 type VisibilityAction = VisibilitySnapshot["actions"][number];
-type BoardPane = "list" | "detail" | "coverage";
+type BoardPane = "list" | "detail" | "subtasks";
 
 type DetailValue = {
   text: string;
@@ -35,7 +33,7 @@ interface BoardViewState {
   selectedId?: string;
   listOffset: number;
   detailOffset: number;
-  coverageOffset: number;
+  subtaskOffset: number;
   debugger: boolean;
   pane: BoardPane;
 }
@@ -46,13 +44,13 @@ interface ActionAnchor {
   lineOffset: number;
 }
 
-/** Exact child and wrapped line stay in view through transient current rows. */
-interface CoverageAnchor {
+/** Exact child and wrapped line stay in view through transient access rows. */
+interface SubtaskAnchor {
   childId: string;
   lineOffset: number;
 }
 
-interface CoveragePaneBodyLine {
+interface SubtaskPaneBodyLine {
   text: string;
   childId?: string;
   childLineOffset?: number;
@@ -91,8 +89,8 @@ class TaskBoard implements BoardComponent {
   private selectedIndex = 0;
   private listOffset = 0;
   private detailOffset = 0;
-  /** Coverage inventory offset is detached from task detail/action history. */
-  private coverageOffset = 0;
+  /** Subtask inventory offset is detached from task detail/action history. */
+  private subtaskOffset = 0;
   /** Stable action + wrapped-line position while the user scrolls history. */
   private actionAnchor: ActionAnchor | undefined;
   private actionAnchorGap = false;
@@ -115,14 +113,14 @@ class TaskBoard implements BoardComponent {
     const previousIndex = this.selectedIndex;
     const previousId = this.selectedId;
     const anchor = this.captureActionAnchor() ?? this.actionAnchor;
-    const coverageParent = this.coverageParentIdentity(this.selected());
-    const coverageAtEnd =
-      this.pane === "coverage" &&
-      this.coverageOffset >=
-        this.coverageMaximum(this.selected(), this.lastLayout);
-    const coverageAnchor = coverageAtEnd
+    const subtaskParent = this.subtaskParentIdentity(this.selected());
+    const subtaskAtEnd =
+      this.pane === "subtasks" &&
+      this.subtaskOffset >=
+        this.subtaskMaximum(this.selected(), this.lastLayout);
+    const subtaskAnchor = subtaskAtEnd
       ? undefined
-      : this.captureCoverageAnchor();
+      : this.captureSubtaskAnchor();
     this.snapshot = clone(next);
     const tasks = this.tasks();
     const currentIndex = previousId
@@ -143,21 +141,21 @@ class TaskBoard implements BoardComponent {
       this.listOffset = 0;
       this.resetActionAnchor();
     }
-    const sameCoverageParent =
-      coverageParent === this.coverageParentIdentity(this.selected());
-    if (previousId !== this.selectedId || !sameCoverageParent) {
+    const sameSubtaskParent =
+      subtaskParent === this.subtaskParentIdentity(this.selected());
+    if (previousId !== this.selectedId || !sameSubtaskParent) {
       this.resetActionAnchor();
-      this.coverageOffset = 0;
+      this.subtaskOffset = 0;
     } else {
       if (anchor) this.restoreActionAnchor(anchor);
-      if (coverageAnchor) this.restoreCoverageAnchor(coverageAnchor);
+      if (subtaskAnchor) this.restoreSubtaskAnchor(subtaskAnchor);
     }
-    if (this.pane === "coverage" && !this.hasCoverage(this.selected()))
+    if (this.pane === "subtasks" && !this.hasSubtasks(this.selected()))
       this.pane = "detail";
     this.clampOffsets(this.lastLayout);
-    // Current runtime activity is pinned metadata, never a scroll command.
-    if (coverageAtEnd && sameCoverageParent && this.pane === "coverage")
-      this.coverageOffset = this.coverageMaximum(
+    // Runtime access rows are pinned metadata, never a scroll command.
+    if (subtaskAtEnd && sameSubtaskParent && this.pane === "subtasks")
+      this.subtaskOffset = this.subtaskMaximum(
         this.selected(),
         this.lastLayout,
       );
@@ -175,7 +173,7 @@ class TaskBoard implements BoardComponent {
       ...(this.selectedId ? { selectedId: this.selectedId } : {}),
       listOffset: this.listOffset,
       detailOffset: this.detailOffset,
-      coverageOffset: this.coverageOffset,
+      subtaskOffset: this.subtaskOffset,
       debugger: this.debugger,
       pane: this.pane,
     };
@@ -194,8 +192,8 @@ class TaskBoard implements BoardComponent {
       return;
     }
     if (matchesKey(data, "tab")) {
-      const panes: BoardPane[] = this.hasCoverage(this.selected())
-        ? ["list", "detail", "coverage"]
+      const panes: BoardPane[] = this.hasSubtasks(this.selected())
+        ? ["list", "detail", "subtasks"]
         : ["list", "detail"];
       const index = panes.indexOf(this.pane);
       this.pane = panes[(index + 1) % panes.length] ?? "list";
@@ -203,7 +201,7 @@ class TaskBoard implements BoardComponent {
       return;
     }
     if (matchesKey(data, "left")) {
-      const next = this.pane === "coverage" ? "detail" : "list";
+      const next = this.pane === "subtasks" ? "detail" : "list";
       if (this.pane !== next) {
         this.pane = next;
         this.requestRender();
@@ -211,7 +209,7 @@ class TaskBoard implements BoardComponent {
       return;
     }
     if (matchesKey(data, "right")) {
-      // Keep existing right/enter ownership; Tab alone adds optional coverage.
+      // Keep existing right/enter ownership; Tab alone adds optional subtasks.
       if (this.pane === "list") {
         this.pane = "detail";
         this.requestRender();
@@ -229,8 +227,8 @@ class TaskBoard implements BoardComponent {
       this.handleDetailInput(data);
       return;
     }
-    if (this.pane === "coverage") {
-      this.handleCoverageInput(data);
+    if (this.pane === "subtasks") {
+      this.handleSubtaskInput(data);
       return;
     }
     this.handleListInput(data);
@@ -304,18 +302,18 @@ class TaskBoard implements BoardComponent {
     this.selectedIndex = next;
     this.selectedId = tasks[next]?.taskId;
     this.resetActionAnchor();
-    this.coverageOffset = 0;
+    this.subtaskOffset = 0;
     this.clampOffsets(this.lastLayout);
     this.requestRender();
   }
 
-  private handleCoverageInput(data: string): void {
-    const maximum = this.coverageMaximum(this.selected(), this.lastLayout);
+  private handleSubtaskInput(data: string): void {
+    const maximum = this.subtaskMaximum(this.selected(), this.lastLayout);
     const page = Math.max(
       1,
-      this.coverageCapacity(this.selected(), this.lastLayout),
+      this.subtaskCapacity(this.selected(), this.lastLayout),
     );
-    let next = this.coverageOffset;
+    let next = this.subtaskOffset;
     if (matchesKey(data, "up")) next--;
     else if (matchesKey(data, "down")) next++;
     else if (matchesKey(data, "pageUp")) next -= page;
@@ -324,8 +322,8 @@ class TaskBoard implements BoardComponent {
     else if (matchesKey(data, "end")) next = maximum;
     else return;
     next = Math.max(0, Math.min(next, maximum));
-    if (next === this.coverageOffset) return;
-    this.coverageOffset = next;
+    if (next === this.subtaskOffset) return;
+    this.subtaskOffset = next;
     this.requestRender();
   }
 
@@ -372,8 +370,8 @@ class TaskBoard implements BoardComponent {
         ),
     ];
     const detail =
-      this.pane === "coverage"
-        ? this.coveragePaneLines(task, layout)
+      this.pane === "subtasks"
+        ? this.subtaskPaneLines(task, layout)
         : this.detailLines(task, layout);
     return this.compose(left, detail, layout);
   }
@@ -436,8 +434,7 @@ class TaskBoard implements BoardComponent {
           ]),
       ...this.wrapLines(`Task: ${task.label}`, width),
       ...this.wrapLines(`Assessment: ${this.provenance(task)}`, width),
-      ...this.subtaskLines(task, width),
-      ...this.coverageLines(task, width),
+      ...this.subtaskDetailLines(task, width),
       ...this.detailValueLines("Task Title", task.details?.title, width),
       ...this.detailValueLines("Description", task.details?.description, width),
       ...(task.details?.acceptanceCriteria?.length
@@ -476,182 +473,149 @@ class TaskBoard implements BoardComponent {
     return { pinned, body, actions: visibility.actions };
   }
 
-  /** Generic subtasks remain a passive sidecar of one exact parent revision. */
-  private subtaskLines(task: BoardTask, width: number) {
-    const groups = (this.snapshot.subtasks?.groups ?? []).filter(
-      (group) =>
-        group.parentTaskId === task.taskId &&
-        group.parentRevision === task.revision,
-    );
-    if (!groups.length) return [];
-    const lines = [...this.wrapLines("Subtasks:", width)];
-    for (const group of groups) {
-      const completed = group.children.filter(
-        (child) => child.status === "reported-completed",
-      ).length;
-      const blocked = group.children.filter(
-        (child) => child.status === "reported-blocked",
-      ).length;
-      const pending = group.children.filter(
-        (child) => child.status === "pending",
-      ).length;
-      const total = group.complete
-        ? (group.knownTotal ?? group.children.length)
-        : "unknown total";
-      lines.push(
-        ...this.wrapLines(
-          `• Reported complete ${completed} / ${total} · ${pending} pending · ${blocked} blocked`,
-          width,
-        ),
-      );
-      for (const child of group.children) {
-        const status =
-          child.status === "reported-completed"
-            ? "reported complete"
-            : child.status === "reported-blocked"
-              ? "reported blocked"
-              : "pending";
-        lines.push(...this.wrapLines(`• ${child.label} · ${status}`, width));
-      }
-      for (const omission of group.omissions)
-        lines.push(...this.wrapLines(`• ${omission}`, width, "warning"));
-    }
-    return lines;
+  /** Generic subtasks stay attached to one exact parent revision. */
+  private subtaskParentIdentity(task: BoardTask | undefined) {
+    return task ? `${task.taskId}:${task.revision}` : undefined;
   }
 
-  private coverageParentIdentity(task: BoardTask | undefined) {
-    return task
-      ? `${task.taskId}:${task.revision}:${task.sourceDigest ?? ""}`
-      : undefined;
-  }
-
-  /** Coverage stays attached to its exact parent revision, never task rows. */
-  private coverageGroups(task: BoardTask): readonly CoverageGroup[] {
-    return (this.snapshot.coverage?.groups ?? []).filter(
+  private subtaskGroups(task: BoardTask): readonly SubtaskGroup[] {
+    return (this.snapshot.subtasks?.groups ?? []).filter(
       (group) =>
         group.parentTaskId === task.taskId &&
         group.parentRevision === task.revision,
     );
   }
 
-  private hasCoverage(task = this.selected()) {
+  private hasSubtasks(task = this.selected()) {
     return (
-      !!task && this.coverageGroups(task).some((group) => group.children.length)
+      !!task && this.subtaskGroups(task).some((group) => group.children.length)
     );
   }
 
-  private coverageRole(group: CoverageGroup) {
-    return ["user", "assistant", "intercom"].includes(group.intent.role)
-      ? group.intent.role
-      : "unknown";
-  }
-
-  private coverageStats(group: CoverageGroup) {
-    const reviewed = group.children.filter(
-      (child) => child.status === "reported-reviewed",
+  private subtaskStats(group: SubtaskGroup) {
+    const completed = group.children.filter(
+      (child) => child.status === "reported-completed",
     ).length;
     const blocked = group.children.filter(
       (child) => child.status === "reported-blocked",
     ).length;
-    const pending = group.children.filter(
-      (child) => child.status === "pending",
-    ).length;
-    const accessed = group.children.filter((child) => child.accessed).length;
-    const denominator = group.complete
-      ? (group.knownTotal ?? group.children.length)
-      : group.knownTotal;
-    return { reviewed, blocked, pending, accessed, denominator };
+    return {
+      completed,
+      blocked,
+      pending: group.children.length - completed - blocked,
+      tracked: group.children.length,
+    };
   }
 
-  private coverageUnconfirmed(task: BoardTask) {
-    return coverageUnconfirmedForTask(this.snapshot.coverage, task);
-  }
-
-  private coverageQualifier(width: number) {
-    return this.wrapLines(
-      "• Coverage incomplete/unconfirmed · optional review remains",
-      width,
-      "warning",
+  /** Access is usable only when every declared child binds this exact group. */
+  private subtaskAccess(group: SubtaskGroup) {
+    const matches = (this.snapshot.subtaskAccess?.groups ?? []).filter(
+      (access) =>
+        access.groupId === group.id &&
+        access.parentTaskId === group.parentTaskId &&
+        access.parentRevision === group.parentRevision &&
+        access.listRevision === group.listRevision,
     );
-  }
-
-  /** Current runtime IDs are untrusted until they resolve in this exact group. */
-  private coverageCurrentChildren(group: CoverageGroup) {
-    const ids = new Set(
-      (this.snapshot.coverage?.current ?? [])
-        .filter((current) => current.groupId === group.id)
-        .flatMap((current) => current.childIds),
+    if (
+      matches.length !== 1 ||
+      matches[0]?.children.length !== group.children.length
+    )
+      return;
+    const entries = new Map(
+      matches[0].children.map((child) => [child.childId, child] as const),
     );
-    return group.children.filter((child) => ids.has(child.id));
+    if (
+      entries.size !== group.children.length ||
+      group.children.some((child) => !entries.has(child.id))
+    )
+      return;
+    return entries;
   }
 
-  private coverageCurrentLabel(
-    children: readonly CoverageGroup["children"][number][],
-  ) {
-    const marker = children.length === 1 ? "item" : "batch";
-    return `Current ${marker}: ${children.length} ${
-      children.length === 1 ? "item" : "items"
-    } · ${children.map((child) => child.label).join(" · ")}`;
+  private subtaskScope(group: SubtaskGroup) {
+    const scope = group.complete
+      ? `complete · known ${(group.knownTotal ?? group.children.length).toLocaleString("en-US")}`
+      : group.knownTotal === undefined
+        ? "scope unknown"
+        : `known ${group.knownTotal.toLocaleString("en-US")}`;
+    return `${scope} · ${group.children.length} tracked`;
   }
 
-  /** Detail pane summarizes coverage; inventory itself has its own scroll pane. */
-  private coverageLines(task: BoardTask, width: number) {
-    const groups = this.coverageGroups(task);
-    const coverage = this.snapshot.coverage;
-    if (!groups.length && !coverage?.exhausted && !(coverage?.omissions ?? 0))
-      return [];
-    const lines = [...this.wrapLines("Coverage:", width)];
-    if (this.coverageUnconfirmed(task))
-      lines.push(...this.coverageQualifier(width));
-    if (coverage?.exhausted)
+  private subtaskIncomplete(task: BoardTask) {
+    return this.subtaskGroups(task).some((group) => {
+      const stats = this.subtaskStats(group);
+      return !group.complete || stats.pending > 0 || stats.blocked > 0;
+    });
+  }
+
+  private subtaskWarningLines(width: number, marker = "• ") {
+    const diagnostics = this.snapshot.subtaskDiagnostics;
+    const lines: string[] = [];
+    if (diagnostics?.exhausted)
       lines.push(
         ...this.wrapLines(
-          "• Coverage exhausted · optional review unavailable",
+          `${marker}Subtasks exhausted · optional review unavailable`,
           width,
           "warning",
         ),
       );
-    if ((coverage?.omissions ?? 0) > 0)
+    if ((diagnostics?.adapter.omissions ?? 0) > 0)
       lines.push(
         ...this.wrapLines(
-          `• Incomplete · ${coverage?.omissions} optional candidates omitted`,
+          `${marker}Subtasks incomplete · ${diagnostics?.adapter.omissions} optional candidates omitted`,
+          width,
+          "warning",
+        ),
+      );
+    return lines;
+  }
+
+  private subtaskSummaryLines(task: BoardTask, width: number) {
+    const groups = this.subtaskGroups(task);
+    const lines: string[] = [];
+    if (this.subtaskIncomplete(task))
+      lines.push(
+        ...this.wrapLines(
+          "• Subtasks incomplete/unconfirmed · optional review remains",
           width,
           "warning",
         ),
       );
     for (const group of groups) {
-      const stats = this.coverageStats(group);
-      const denominator =
-        stats.denominator === undefined ? "unknown total" : stats.denominator;
+      const stats = this.subtaskStats(group);
+      const access = this.subtaskAccess(group);
+      const observed = access
+        ? group.children.filter(
+            (child) => access.get(child.id)?.status === "observed",
+          ).length
+        : undefined;
+      const active = access
+        ? group.children.filter(
+            (child) => (access.get(child.id)?.activeCallHashes.length ?? 0) > 0,
+          )
+        : [];
       lines.push(
         ...this.wrapLines(
-          `• Reported reviewed ${stats.reviewed} / ${denominator}`,
+          `• Reported completed ${stats.completed} / ${stats.tracked} · ${stats.pending} pending · ${stats.blocked} blocked`,
           width,
         ),
+        ...this.wrapLines(`• Scope: ${this.subtaskScope(group)}`, width, "dim"),
         ...this.wrapLines(
-          `• ${stats.accessed} accessed · ${stats.blocked} blocked · ${stats.pending} pending`,
+          access
+            ? `• ${observed} observed access`
+            : "• Access unavailable · no current observation binding",
           width,
           "dim",
         ),
-        ...this.wrapLines(
-          `• Intent: ${this.coverageRole(group)}`,
-          width,
-          "dim",
-        ),
+        ...this.wrapLines(`• Source: ${group.source.role}`, width, "dim"),
       );
-      const current = this.coverageCurrentChildren(group);
-      if (current.length)
+      if (active.length)
         lines.push(
           ...this.wrapLines(
-            `• ${this.coverageCurrentLabel(current)}`,
+            `• Active access: ${active.map((child) => child.label).join(" · ")}`,
             width,
             "accent",
           ),
-        );
-      const first = group.children[0];
-      if (first)
-        lines.push(
-          ...this.wrapLines(`• First tab: ${first.label}`, width, "dim"),
         );
       for (const omission of group.omissions)
         lines.push(...this.wrapLines(`• ${omission}`, width, "warning"));
@@ -659,8 +623,41 @@ class TaskBoard implements BoardComponent {
     return lines;
   }
 
-  /** Detail owns full health values; coverage keeps a bounded header viewport. */
-  private coverageSummaryHeadings(width: number) {
+  private subtaskChildStatus(group: SubtaskGroup, childId: string) {
+    const child = group.children.find((candidate) => candidate.id === childId);
+    if (child?.status === "reported-completed") return "reported completed";
+    if (child?.status === "reported-blocked") return "reported blocked";
+    return "pending";
+  }
+
+  /** Detail keeps generic children visible; pane owns independent long-list scroll. */
+  private subtaskDetailLines(task: BoardTask, width: number) {
+    const groups = this.subtaskGroups(task);
+    const diagnostics = this.snapshot.subtaskDiagnostics;
+    if (
+      !groups.length &&
+      !diagnostics?.exhausted &&
+      !diagnostics?.adapter.omissions
+    )
+      return [];
+    const lines = [
+      ...this.wrapLines("Subtasks:", width),
+      ...this.subtaskWarningLines(width),
+      ...this.subtaskSummaryLines(task, width),
+    ];
+    for (const group of groups)
+      for (const child of group.children)
+        lines.push(
+          ...this.wrapLines(
+            `• ${child.label} · ${this.subtaskChildStatus(group, child.id)}`,
+            width,
+          ),
+        );
+    return lines;
+  }
+
+  /** Detail owns full health values; subtasks keeps only bounded headings pinned. */
+  private subtaskSummaryHeadings(width: number) {
     return [
       this.formatLine("Summary:", width),
       ...[
@@ -673,54 +670,29 @@ class TaskBoard implements BoardComponent {
     ];
   }
 
-  private coveragePaneContent(
+  private subtaskPaneContent(
     task: BoardTask,
     layout: BoardLayout,
-  ): { pinned: string[]; body: CoveragePaneBodyLine[] } {
+  ): { pinned: string[]; body: SubtaskPaneBodyLine[] } {
     const width = layout.rightWidth;
-    const groups = this.coverageGroups(task);
-    const coverage = this.snapshot.coverage;
-    const header = [...this.wrapLines("Coverage:", width, "accent")];
-    if (this.coverageUnconfirmed(task))
-      header.push(...this.coverageQualifier(width));
-    if (coverage?.exhausted)
-      header.push(
-        ...this.wrapLines(
-          "Coverage exhausted · optional review unavailable",
-          width,
-          "warning",
-        ),
-      );
-    if ((coverage?.omissions ?? 0) > 0)
-      header.push(
-        ...this.wrapLines(
-          `${coverage?.omissions} optional candidates omitted`,
-          width,
-          "warning",
-        ),
-      );
-    const body: CoveragePaneBodyLine[] = [];
+    const groups = this.subtaskGroups(task);
+    const header = [
+      ...this.wrapLines("Subtasks:", width, "accent"),
+      ...this.subtaskWarningLines(width, ""),
+      ...this.subtaskSummaryLines(task, width),
+    ];
+    const body: SubtaskPaneBodyLine[] = [];
     for (const group of groups) {
-      const stats = this.coverageStats(group);
-      const denominator =
-        stats.denominator === undefined ? "unknown total" : stats.denominator;
-      header.push(
-        ...this.wrapLines(
-          `Reported reviewed ${stats.reviewed} / ${denominator}`,
-          width,
-        ),
-        ...this.wrapLines(
-          `${stats.accessed} accessed · ${stats.blocked} blocked · ${stats.pending} pending`,
-          width,
-          "dim",
-        ),
-        ...this.wrapLines(`Intent: ${this.coverageRole(group)}`, width, "dim"),
-      );
-      const current = this.coverageCurrentChildren(group);
-      if (current.length)
+      const access = this.subtaskAccess(group);
+      const active = access
+        ? group.children.filter(
+            (child) => (access.get(child.id)?.activeCallHashes.length ?? 0) > 0,
+          )
+        : [];
+      if (active.length)
         body.push(
           ...this.wrapLines(
-            `• ${this.coverageCurrentLabel(current)}`,
+            `• Active access: ${active.map((child) => child.label).join(" · ")}`,
             width,
             "accent",
           ).map((text) => ({ text })),
@@ -731,15 +703,20 @@ class TaskBoard implements BoardComponent {
             text,
           })),
         );
+      if (!group.children.length)
+        body.push(
+          ...this.wrapLines(
+            "• No named subtasks · 0 tracked",
+            width,
+            "dim",
+          ).map((text) => ({ text })),
+        );
       for (const child of group.children) {
+        const observation = access?.get(child.id)?.status;
         const childLines = this.wrapLines(
-          `• ${child.label} · ${
-            child.status === "reported-reviewed"
-              ? "reported reviewed"
-              : child.status === "reported-blocked"
-                ? "blocked"
-                : "pending"
-          }${child.accessed ? " · accessed" : ""}`,
+          `• ${child.label} · ${this.subtaskChildStatus(group, child.id)}${
+            observation === "observed" ? " · observed access" : ""
+          }`,
           width,
         );
         body.push(
@@ -758,7 +735,7 @@ class TaskBoard implements BoardComponent {
         );
     }
     const maximumPinned = Math.max(1, layout.contentRows - 2);
-    const summary = this.coverageSummaryHeadings(width);
+    const summary = this.subtaskSummaryHeadings(width);
     const pinned =
       header.length + summary.length <= maximumPinned
         ? [...summary, ...header]
@@ -766,51 +743,47 @@ class TaskBoard implements BoardComponent {
     return { pinned: pinned.slice(0, maximumPinned), body };
   }
 
-  private coveragePaneLines(task: BoardTask, layout: BoardLayout): string[] {
-    const { pinned, body } = this.coveragePaneContent(task, layout);
-    const capacity = this.coverageCapacity(task, layout, pinned.length);
+  private subtaskPaneLines(task: BoardTask, layout: BoardLayout): string[] {
+    const { pinned, body } = this.subtaskPaneContent(task, layout);
+    const capacity = this.subtaskCapacity(task, layout, pinned.length);
     const maximum = Math.max(0, body.length - capacity);
-    this.coverageOffset = Math.max(0, Math.min(this.coverageOffset, maximum));
+    this.subtaskOffset = Math.max(0, Math.min(this.subtaskOffset, maximum));
     return [
       ...pinned,
       ...body
-        .slice(this.coverageOffset, this.coverageOffset + capacity)
+        .slice(this.subtaskOffset, this.subtaskOffset + capacity)
         .map((line) => line.text),
     ];
   }
 
-  private coverageCapacity(
+  private subtaskCapacity(
     task: BoardTask | undefined,
     layout: BoardLayout,
     pinnedLength?: number,
   ) {
     if (!task) return 1;
     const pinned =
-      pinnedLength ?? this.coveragePaneContent(task, layout).pinned.length;
+      pinnedLength ?? this.subtaskPaneContent(task, layout).pinned.length;
     return Math.max(1, layout.contentRows - pinned);
   }
 
-  private coverageMaximum(task: BoardTask | undefined, layout: BoardLayout) {
+  private subtaskMaximum(task: BoardTask | undefined, layout: BoardLayout) {
     if (!task) return 0;
-    const { pinned, body } = this.coveragePaneContent(task, layout);
+    const { pinned, body } = this.subtaskPaneContent(task, layout);
     return Math.max(
       0,
-      body.length - this.coverageCapacity(task, layout, pinned.length),
+      body.length - this.subtaskCapacity(task, layout, pinned.length),
     );
   }
 
-  /** Preserve first visible child line, not stale numeric row after current rows. */
-  private captureCoverageAnchor(): CoverageAnchor | undefined {
+  /** Preserve first visible child line, not stale numeric rows after access changes. */
+  private captureSubtaskAnchor(): SubtaskAnchor | undefined {
     const task = this.selected();
-    if (!task || this.pane !== "coverage") return;
-    const { pinned, body } = this.coveragePaneContent(task, this.lastLayout);
-    const capacity = this.coverageCapacity(
-      task,
-      this.lastLayout,
-      pinned.length,
-    );
+    if (!task || this.pane !== "subtasks") return;
+    const { pinned, body } = this.subtaskPaneContent(task, this.lastLayout);
+    const capacity = this.subtaskCapacity(task, this.lastLayout, pinned.length);
     const maximum = Math.max(0, body.length - capacity);
-    const offset = Math.max(0, Math.min(this.coverageOffset, maximum));
+    const offset = Math.max(0, Math.min(this.subtaskOffset, maximum));
     if (offset >= maximum) return;
     const line = body
       .slice(offset, offset + capacity)
@@ -823,16 +796,16 @@ class TaskBoard implements BoardComponent {
     return { childId: line.childId, lineOffset: line.childLineOffset };
   }
 
-  private restoreCoverageAnchor(anchor: CoverageAnchor) {
+  private restoreSubtaskAnchor(anchor: SubtaskAnchor) {
     const task = this.selected();
-    if (!task || this.pane !== "coverage") return;
-    const { body } = this.coveragePaneContent(task, this.lastLayout);
+    if (!task || this.pane !== "subtasks") return;
+    const { body } = this.subtaskPaneContent(task, this.lastLayout);
     const offset = body.findIndex(
       (line) =>
         line.childId === anchor.childId &&
         line.childLineOffset === anchor.lineOffset,
     );
-    if (offset >= 0) this.coverageOffset = offset;
+    if (offset >= 0) this.subtaskOffset = offset;
   }
 
   private sameVisibilityTask(
@@ -1103,7 +1076,7 @@ class TaskBoard implements BoardComponent {
     if (!tasks.length) {
       this.listOffset = 0;
       this.detailOffset = 0;
-      this.coverageOffset = 0;
+      this.subtaskOffset = 0;
       return;
     }
     this.selectedIndex = Math.max(
@@ -1122,11 +1095,11 @@ class TaskBoard implements BoardComponent {
       0,
       Math.min(this.detailOffset, this.detailMaximum(layout)),
     );
-    this.coverageOffset = Math.max(
+    this.subtaskOffset = Math.max(
       0,
       Math.min(
-        this.coverageOffset,
-        this.coverageMaximum(this.selected(), layout),
+        this.subtaskOffset,
+        this.subtaskMaximum(this.selected(), layout),
       ),
     );
   }

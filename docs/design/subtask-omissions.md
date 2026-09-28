@@ -2,11 +2,19 @@
 
 Owner approved bounded persisted omission summaries after the test audit; this narrowly supersedes earlier no-new-schema wording. No raw content, automatic retry, legacy facade, or additional report-disable threshold. C05/C07 acceptance remains gated on implementation and real Monitor proof.
 
-## Restore reentrancy repair candidate (2026-09-28)
+## Scoped acceptance (2026-09-28)
+
+Main accepts `ru7` through `5d0e8cfa` after cumulative independent reviewer `428925fa` returned **OK with notes, no issues found**, with a clean exact source-tree attestation. Durable omission identity/storage, oversized/coalesced/capacity recording, passive UI, source isolation and restore-history/enable repairs are included.
+
+Final lifecycle repairs: Main `f875f7da` reproduced delayed stop/nested-save-failure→ON using an older runtime behind saved history; `13bd075a` adopts merged history before enable. Main `aa81aeb0` added stop→ON inside the active save callback; `5d0e8cfa` uses the common source/serial-fenced staged-history selector for active candidates and completed floors. Both paths preflight/persist/install before gateways wake and preserve old plus new paid receipts through OFF/reload.
+
+Main verification on final source: **108 focused PASS, format/check PASS** (three historical warnings), **2075 full unit PASS /44 retained legacy failures**, **86 integration PASS**. The documented pure-helper64KiB detached-capture limitation remains nonblocking; unreachable NUL-heavy runtime finding stays withdrawn. This closes only the omission requirement: **C05–C09 acceptance, legacy retirement, continuation production wiring and fresh semantic QA remain outstanding**. No release/install/push or final manual readiness is claimed.
+
+## Restore reentrancy repair history (2026-09-28)
 
 Cumulative reviewer `01f8aebb` validated prior size/coalescing/capacity/UI fixes but blocked restore-history publication: a successful synchronous save followed by reentrant stop or another same-source restore could erase the newly saved component and summary. Main `fc9f5338` reproduced five cases, including real public-ingress wallet6 rolling back to3. `aab633b3` stages the complete normalized source-scoped restore history and retains successful stale history without granting queue ownership.
 
-Main then reproduced older outer staging masking newer nested history: actual wallets3→6→9, followed by another older restore inside the outer save callback, rolled9 back to6 (`4cb3f018`). `77ebe784` fences older stages against the latest successfully saved serial. Main independently inspected both repairs and passed **105 focused tests and make check** (three historical lint warnings). Worker reports222 focused,2072 full unit passes/44 retained legacy failures,86 integration passes. Retained reviewer `c1040d0f` is reviewing the cumulative candidate; **ru7 and C05–C09 remain unaccepted**. No legacy deletion or semantic-quality acceptance is implied.
+Main then reproduced older outer staging masking newer nested history: actual wallets3→6→9, followed by another older restore inside the outer save callback, rolled9 back to6 (`4cb3f018`). `77ebe784` fences older stages against the latest successfully saved serial. Main independently inspected both repairs and passed **105 focused tests and make check** (three historical lint warnings). Worker reports222 focused,2072 full unit passes/44 retained legacy failures,86 integration passes. At that intermediate candidate, reviewer `c1040d0f` had not accepted the batch; subsequent lifecycle findings and their resolution are recorded above. No legacy deletion or semantic-quality acceptance is implied.
 
 ## Schema and storage contract
 

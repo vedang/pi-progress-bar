@@ -57,6 +57,7 @@ import {
 } from "../analysis/gateway";
 import { type HealthSnapshot, healthSnapshot } from "../analysis/health";
 import { implementationFromResult } from "../analysis/implementation";
+import { ownDataJson } from "../analysis/own-data-json";
 import type { SubtaskGateBatch } from "../analysis/subtask-gate";
 import type { SubtaskProposalRequest } from "../analysis/subtask-proposal";
 import {
@@ -769,6 +770,8 @@ export class Monitor {
   private subtaskFlight?: Promise<void>;
   /** Generic invalidation may wait for an oversized report receipt. */
   private subtaskFlightIsReport = false;
+  /** Proposal-model reset waits for a charged report's physical drain. */
+  private subtaskGatewayResetAfterReportDrain = false;
   private subtaskFlightReportParentId?: string;
   private subtaskFlightReportMayBeSuperseded = false;
   private subtaskOwners: string[] = [];
@@ -1366,8 +1369,13 @@ export class Monitor {
       this.activityGateway.pause();
       this.detailGateway.pause();
       this.coverageGateway.pause();
-      this.subtaskRuntime?.invalidate();
-      this.subtaskGateway.pause();
+      const retainReportAuthority = this.subtaskFlightIsReport;
+      if (retainReportAuthority)
+        this.subtaskGatewayResetAfterReportDrain = true;
+      else {
+        this.subtaskRuntime?.invalidate();
+        this.subtaskGateway.pause();
+      }
       this.subtaskGateDispatch = undefined;
       this.subtaskDiagnosticAuthority = undefined;
       this.subtaskOwners = [];
@@ -1383,7 +1391,8 @@ export class Monitor {
       this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
       this.coverageGateway.enable(this.identity());
-      this.subtaskGateway.enable(this.subtaskIdentity());
+      if (!retainReportAuthority)
+        this.subtaskGateway.enable(this.subtaskIdentity());
       this.correctionGateway.enable(this.identity());
       this.visibilityGateway.enable(this.visibilityIdentity());
       this.wakeCoverage(true);
@@ -1547,6 +1556,7 @@ export class Monitor {
     this.capturedSubtaskCurrentRevoke = undefined;
     this.capturedSubtaskCurrent = null;
     this.enabled = false;
+    this.subtaskGatewayResetAfterReportDrain = false;
     this.waitingForWake = false;
     this.clearRetry();
     this.settleActiveAuthority(this.activeObservation);
@@ -1762,7 +1772,8 @@ export class Monitor {
           );
           this.latchHistoricalCatchup = true;
         }
-        work.persisted = true;
+        // A reentrant OFF may have changed desired control after this save.
+        work.persisted = metadata.enabled === work.wantEnabled;
       } else if (restored) {
         this.subtaskOmissions = subtaskOmissions;
         this.state = copyState(restored.state);
@@ -1806,7 +1817,8 @@ export class Monitor {
         this.mergeTelemetry(metadata, work, pass);
         this.resetState(work.sourceId, false, component);
         this.latchHistoricalCatchup = true;
-        work.persisted = true;
+        // Only exact desired control may suppress final OFF persistence.
+        work.persisted = metadata.enabled === work.wantEnabled;
       } else if (this.restoreSourceMatches(work.data, work.sourceId)) {
         this.mergeTelemetry(work.metadata, work, pass);
         this.resetState(work.sourceId, false);
@@ -2719,6 +2731,7 @@ export class Monitor {
     const next = structuredClone(checkpoint ?? this.emptySubtaskCheckpoint());
     this.subtaskRuntime?.resetAccess();
     this.subtaskRuntime?.invalidate();
+    this.subtaskGatewayResetAfterReportDrain = false;
     this.subtaskGateway.invalidate();
     this.subtaskGateDispatch = undefined;
     this.subtaskOwners = [];
@@ -3383,9 +3396,9 @@ export class Monitor {
     return saturation === "stale" ? "stale" : "not-recorded";
   }
 
-  /** Wake dedupe retains canonical identity, never unbounded observation bodies. */
+  /** Fixed-size wake identity serializes inert own data, never host hooks or bodies. */
   private subtaskWakeKeyFor(current: SubtaskRuntimeCurrent) {
-    return JSON.stringify({
+    const value = ownDataJson({
       sourceId: current.sourceId,
       latest: {
         id: current.latest.id,
@@ -3402,6 +3415,7 @@ export class Monitor {
       selectedModel: current.selectedModel,
       ...(current.evidence === undefined ? {} : { evidence: current.evidence }),
     });
+    return sha256(value?.json ?? "subtask-wake:v1:invalid-own-data");
   }
 
   private restoredSubtaskStore(
@@ -4080,6 +4094,7 @@ export class Monitor {
     this.capturedSubtaskCurrentRevoke = undefined;
     this.capturedSubtaskCurrent = null;
     this.subtaskRuntime?.invalidate();
+    this.subtaskGatewayResetAfterReportDrain = false;
     this.subtaskGateway.invalidate();
     this.subtaskGateDispatch = undefined;
     this.subtaskDiagnosticAuthority = undefined;
@@ -4190,6 +4205,10 @@ export class Monitor {
           before,
           scheduleGeneration,
         );
+      }
+      if (this.subtaskGatewayResetAfterReportDrain) {
+        this.subtaskGatewayResetAfterReportDrain = false;
+        if (this.enabled) this.subtaskGateway.enable(this.subtaskIdentity());
       }
       if (this.pendingSubtaskCheckpoint) {
         const next = this.pendingSubtaskCheckpoint;

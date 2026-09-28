@@ -12,20 +12,6 @@ const fixture = JSON.parse(
   ),
 );
 
-it("preserves the manual final report and owner-approved abstention oracle", () => {
-  const final = fixture.messages.at(-1);
-  expect(final.id).toBe("3b6c3881");
-  expect(final.text).toContain("Read plan and supporting lifecycle");
-  expect(final.text).toContain("Waiting for your go-ahead.");
-  expect(fixture.recordedCursor.id).toBe(final.id);
-  expect(fixture.expectedFinalReported).toEqual({ done: 0, total: 2 });
-  expect(fixture.expectedCompletedTaskIds).toEqual([]);
-  expect(fixture.recordedTasks.map((task: HybridTask) => task.status)).toEqual([
-    "not-started",
-    "not-started",
-  ]);
-});
-
 it("reproduces recorded yes-answer abstentions without weakening global confidence guards", () => {
   const tasks = fixture.recordedTasks as HybridTask[];
   const final = fixture.messages.at(-1);

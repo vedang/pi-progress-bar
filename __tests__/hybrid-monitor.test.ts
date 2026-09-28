@@ -72,13 +72,12 @@ describe("integrated hybrid monitor", () => {
       ),
     ).toBe(true);
   });
-  it("is idle without eligible evidence and never gains interval controls", async () => {
+  it("does not dispatch semantic work while idle without eligible evidence", async () => {
     const h = fixture([]);
     h.start();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(h.fetch).not.toHaveBeenCalled();
     expect(h.extract).not.toHaveBeenCalled();
-    expect(h.monitor).not.toHaveProperty("interval");
     h.replace([
       { type: "custom", id: "custom", data: "SECRET" },
       {

@@ -117,6 +117,7 @@ describe("explicit resource associations and isolated child access", () => {
       { resourceIndex: 0, itemIndex: 0 },
       { resourceIndex: 0, itemIndex: 0 },
     ]);
+    expect(p.applied?.status).toBe("accepted");
     if (p.applied?.status !== "accepted")
       throw new Error("Duplicate links must not poison semantic admission");
     expect(f.store.admit(p.applied.admission)).toEqual({ accepted: true });
@@ -149,9 +150,10 @@ describe("explicit resource associations and isolated child access", () => {
   it("does not infer links from resource labels and rejects malformed metadata indices", () => {
     const f = subtaskAccessFixture();
     const p = f.propose([undefined]);
+    expect(p.applied?.status).toBe("accepted");
     if (p.applied?.status !== "accepted")
       throw new Error("Optional association required no model claim");
-    f.store.admit(p.applied.admission);
+    expect(f.store.admit(p.applied.admission)).toEqual({ accepted: true });
     const access = new SubtaskAccess(f.store);
     expect(access.bind(p.applied)).toBe(true);
     expect(

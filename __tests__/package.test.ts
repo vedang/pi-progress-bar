@@ -8,11 +8,6 @@ function manifest() {
 }
 
 describe("Pi package scaffold", () => {
-  it("loads the declared entry as an extension factory", async () => {
-    const entry = await import("../src/index");
-    expect(typeof entry.default).toBe("function");
-  });
-
   it("declares the TypeScript extension and ships only runtime source", () => {
     const pkg = manifest();
     expect(pkg.name).toBe("pi-progress-bar");

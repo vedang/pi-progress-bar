@@ -67,6 +67,34 @@ The first check correctly found four newly unused type exports in `src/core/type
 
 Cumulative B1+S1/L1/U1 full unit result:1918 pass/44 unchanged legacy-fixture failures; separate integration86/86 pass. The pass-count delta is +4 repaired filesystem rows minus21 parameter-expanded orphan cases. `make test` still fails at the retained44 failures; integration was run separately, not silently skipped. Independent cumulative preservation review remains required. No paid calls, live corpus changes, feature acceptance, release or push.
 
-## Completion remains pending
+### Auxiliary consolidation and private-shape checks
 
-No audit lane or C05-C09 stage is accepted by discovery consumption. Audit results, deletions/keepers, caught mutations, product-defect controls and final LOC/gates will be recorded here as executed. Feature work follows the audit, with final green gates and independent stage acceptance before manual handoff.
+Independent cumulative review `b43504f9-4088-4cea-9a1e-5cb6f9bfbf38` passed the entire B1/S1/L1/U1 batch. Main then applied the remaining evidenced candidates:
+
+- Strengthened duplicate/optional association keepers in `subtask-access.test.ts` with explicit parser acceptance and store admission before deleting the two parser-only positives.17/17 passed first. Real parser mutations rejecting duplicate claims and requiring optional links each failed the retained acceptance assertion; source restored byte-identically (SHA256 `37c3698dd3b9557264a6e5e89a60c2954459bba53465b2ba4ae082e475721c53`). Canonical provenance and malformed-index parser controls remain.
+- Removed only the historical prose/metadata equality declaration in `manual-advisory-reading.test.ts`; production `completionDecisions` replay and both JSON consumers remain. Removed `continuation-fixtures.test.ts`, which only checked diagnostic corpus inventory. Its original JSON/hash provenance remains unchanged; fresh independent N06 semantic acceptance remains required. Nine focused keeper files passed180/180.
+- Removed the redundant1201-observation private-index declaration, keeping the stronger retained-payload/bytes/checkpoint/read-budget tests. A real Monitor mutation caching every settled canonical observation failed the keeper at1201 retained payloads versus66 allowed, then was byte-restored. This does not claim an ID-only metadata-cache bound. Removed only the private `interval` assertion and renamed that idle test; both60-second no-dispatch controls remain. No production timer behavior changed.
+- Removed only direct-import factory checking from `package.test.ts`. Actual offline Pi CLI loading remains: non-callable default export and broken `pi.extensions` path mutations each failed the native keeper. Both files were byte-restored (index SHA256 `609851d989c8002da67f1940afe1edbba12596d665239b86d33c35d8d54ab747`, package `445175b86b783ad7db36659c20a0b63b16e116e76ee5937888e109c80204b50c`). Manifest/install safety and all real-host tests remain.
+
+Final candidate gates: format/check pass with three historical warnings; unit1912 pass/44 unchanged legacy-fixture failures; integration86/86 pass.135 test files remain (115 unit,17 integration,3 live unrun).18 declarations retired,1222 remain; the repaired Beads negative table adds five parameter rows, so1979→1956 unit cases is a net23-case reduction. Production code is reduced by500 lines; no support/corpus file removed. These numbers are accounting, not coverage or deletion targets.
+
+## Retained implementation handoff
+
+Audit does not revive obsolete workbook/v10 semantics. Keep the44 failing fixtures until the following required generic proofs/product changes support coherent removal:
+
+| Requirement | Existing partial/current keeper | Required feature-phase action |
+|---|---|---|
+| Coalesced/oversized skipped semantic work survives reload | Generic report size rejection/coalescing, not durable loss | Implement approved `ru7`: bounded content-free identity/count, once-only projection, no provider for oversize, no automatic retry; port scheduler317/476. |
+| End-to-end wallet exhaustion and stale result fence | Report journal1024 cap; Monitor diagnostics; runtime stale-result guard | Carry exact Monitor1023→1024 dispatch/pending-tail/reload and replacement-authority assertions, not diagnostics alone. |
+| Explicit selected-model recovery without parent re-extraction | Runtime stale-flight/charge controls | Resolve current generic phase recovery policy from contracts, then preserve charged failed phase → named model-selected wake → at most one current retry, no refund or parent extraction. |
+| Generic gate/proposal versus report ownership and overlap restore | Pure shared-owner journal, latest report coalescing | Port actual Monitor ordering/overlap normalization and bounded loss; do not resurrect resource-intent ownership. |
+| Restore isolation with health and no unnecessary billing | Envelope/runtime/report restore | Actual v11 Monitor with groups/journal/health cards; no gate/proposal/report/extraction/health rebill. |
+| Adapter loss versus canonical semantic-source loss | Generic metadata amendment/access tests; pure source pruning | Keep groups/IDs/wallet independent of ephemeral tool metadata; prune only stale canonical authority without refund. |
+| Deep source, no refund, exact quote span | Partial bounded restored-read and bridge-drift tests | Three v11 Monitor proofs: source beyond64-entry tail; older same-source checkpoint cannot lower wallet; structurally valid wrong quote/span/hash rejected while unrelated valid state remains. |
+| Legacy source/codecs after ports | Live generic wave/retry/drain/fairness/save-fence keepers | Remove unreachable semantic coverage source/tests together; retain adapter and HealthCoverage. Rehome mandatory codec contracts before removing old v10 codec; no migration/facade. |
+
+Existing generic Monitor/runtime tests already cover20+2 waves, saved-prefix recovery, deadline plus named wake, durable pre/post-dispatch save fences, detail fairness, all report roles and physical drain. Reuse those real keepers rather than adding disconnected duplicates. C05-C09 remain unaccepted; N05, C10/N06 semantic QA and owner manual review remain later gates.
+
+## Final audit acceptance pending
+
+All planned cleanup candidates are applied. Final independent cumulative preservation review must evaluate both batches and this retained-requirement handoff before closing `hmv`. Full product gates remain red until feature completion. No release, install, push, paid semantic proof or manual acceptance is claimed.

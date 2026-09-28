@@ -18,20 +18,6 @@ describe("explicit optional model resource associations", () => {
     expect(p.applied.admission.children[0]).not.toHaveProperty("association");
     expect(f.store.snapshot().groups).toEqual([]);
   });
-  it("leaves duplicate valid claims for optional-link ambiguity without poisoning child admission", () => {
-    const f = subtaskAccessFixture();
-    expect(
-      f.propose([
-        { resourceIndex: 0, itemIndex: 0 },
-        { resourceIndex: 0, itemIndex: 0 },
-      ]).applied?.status,
-    ).toBe("accepted");
-  });
-  it("keeps association optional", () => {
-    expect(subtaskAccessFixture().propose([undefined]).applied?.status).toBe(
-      "accepted",
-    );
-  });
   it.each([
     { resourceIndex: 99, itemIndex: 0 },
     { resourceIndex: 0, itemIndex: 99 },

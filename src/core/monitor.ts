@@ -2913,20 +2913,24 @@ export class Monitor {
         this.savingRestoredSubtaskHistory = prior;
     }
     if (!saved) return;
-    if (staged.serial > this.latestRestoredSubtaskHistorySerial) {
-      this.latestRestoredSubtaskHistorySerial = staged.serial;
-      if (
-        staged.sourceId === this.state.sourceId &&
-        staged.sourceId === this.options.sourceId()
-      ) {
-        this.restoredSubtaskHistoryFloor = staged;
-        this.subtaskOmissions = mergeSubtaskOmissions(
-          this.subtaskOmissions,
-          staged.subtaskOmissions,
-        ).summary;
-      }
-    }
+    this.rememberSavedSubtaskHistory(staged);
     return staged;
+  }
+
+  /** Retain only newer, same-source history after its synchronous save succeeds. */
+  private rememberSavedSubtaskHistory(staged: StagedRestoredSubtaskHistory) {
+    if (staged.serial <= this.latestRestoredSubtaskHistorySerial) return;
+    this.latestRestoredSubtaskHistorySerial = staged.serial;
+    if (
+      staged.sourceId === this.state.sourceId &&
+      staged.sourceId === this.options.sourceId()
+    ) {
+      this.restoredSubtaskHistoryFloor = staged;
+      this.subtaskOmissions = mergeSubtaskOmissions(
+        this.subtaskOmissions,
+        staged.subtaskOmissions,
+      ).summary;
+    }
   }
 
   /** A current control installs its staged history; stale work leaves no queue. */
@@ -3036,31 +3040,51 @@ export class Monitor {
 
   /** Runtime candidate overlays strict-v11 metadata without swapping live state. */
   private commitSubtaskCandidate(candidate: SubtaskRuntimeCheckpoint): boolean {
-    const saved = commitSubtaskCheckpoint(
+    const metadata = this.subtaskMetadata(
+      this.enabled,
+      this.healthCards,
       this.state,
-      this.subtaskMetadata(
-        this.enabled,
-        this.healthCards,
-        this.state,
-        undefined,
-        this.taskDetails,
-        candidate,
-      ),
-      (checkpoint) => {
+      undefined,
+      this.taskDetails,
+      candidate,
+      this.durableSubtaskOmissions(),
+    );
+    const staged: StagedRestoredSubtaskHistory = {
+      sourceId: this.state.sourceId,
+      serial: ++this.nextRestoredSubtaskHistorySerial,
+      component: structuredClone(candidate),
+      ...(metadata.subtaskOmissions === undefined
+        ? {}
+        : { subtaskOmissions: structuredClone(metadata.subtaskOmissions) }),
+    };
+    const prior = this.savingRestoredSubtaskHistory;
+    const runtime = this.subtaskRuntime;
+    this.savingRestoredSubtaskHistory = staged;
+    let saved: ReturnType<typeof commitSubtaskCheckpoint>;
+    try {
+      saved = commitSubtaskCheckpoint(this.state, metadata, (checkpoint) => {
         this.persist(checkpoint);
         return true;
-      },
-    );
-    if (saved !== undefined) {
-      const current = this.capturedSubtaskCurrent;
-      if (current === null) return true;
-      this.captureSubtaskDiagnosticAuthoritySafely(candidate, () =>
-        current === undefined
-          ? this.subtaskCurrent(this.state, this.beginCanonicalPass())
-          : current,
-      );
+      });
+    } finally {
+      if (this.savingRestoredSubtaskHistory === staged)
+        this.savingRestoredSubtaskHistory = prior;
     }
-    return saved !== undefined;
+    if (saved === undefined) return false;
+    if (
+      !this.enabled ||
+      this.controlWork !== undefined ||
+      this.subtaskRuntime !== runtime
+    )
+      this.rememberSavedSubtaskHistory(staged);
+    const current = this.capturedSubtaskCurrent;
+    if (current === null) return true;
+    this.captureSubtaskDiagnosticAuthoritySafely(candidate, () =>
+      current === undefined
+        ? this.subtaskCurrent(this.state, this.beginCanonicalPass())
+        : current,
+    );
+    return true;
   }
 
   private async evaluateSubtaskGate(

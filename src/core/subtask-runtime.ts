@@ -1122,7 +1122,7 @@ export class SubtaskRuntime {
       ticket,
       flight,
       prepared.current.sourceId,
-      outcome?.kind === "result" ? usageOf(outcome.result) : undefined,
+      outcome?.kind === "result" ? gateUsageOf(outcome.result) : undefined,
     );
   }
 

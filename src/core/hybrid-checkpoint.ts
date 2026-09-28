@@ -242,12 +242,6 @@ export interface SubtaskMonitorCheckpointMetadata {
   subtaskOmissions?: SubtaskOmissionSummary;
 }
 
-/** Untrusted v11 encoder input; strict validation narrows it to metadata above. */
-type SubtaskMonitorCheckpointInput = Omit<
-  SubtaskMonitorCheckpointMetadata,
-  "subtaskOmissions"
-> & { subtaskOmissions?: unknown };
-
 interface SubtaskCheckpointEnvelope {
   version: typeof SUBTASK_VERSION;
   state: HybridState;
@@ -2417,7 +2411,7 @@ export function subtaskCheckpointStorageStatus(
 
 function stagedSubtaskCheckpoint(
   state: HybridState,
-  monitor?: SubtaskMonitorCheckpointInput,
+  monitor?: SubtaskMonitorCheckpointMetadata,
 ): SubtaskCheckpointEnvelope {
   const detachedState = strictDetachedData(state);
   const detachedMonitor =
@@ -2446,7 +2440,7 @@ function stagedSubtaskCheckpoint(
 /** Exact v11 byte count before capacity denial; it never invokes v10 codecs. */
 export function subtaskCheckpointBytes(
   state: HybridState,
-  monitor?: SubtaskMonitorCheckpointInput,
+  monitor?: SubtaskMonitorCheckpointMetadata,
 ) {
   return subtaskByteLength(stagedSubtaskCheckpoint(state, monitor));
 }
@@ -2510,7 +2504,7 @@ const subtaskBytesFit = (bytes: number, reserve: number, limit: number) => {
  */
 export function canCommitSubtaskCheckpoint(
   state: HybridState,
-  monitor?: SubtaskMonitorCheckpointInput,
+  monitor?: SubtaskMonitorCheckpointMetadata,
   reserve: SubtaskCheckpointReserve = { storeBytes: 0, journalBytes: 0 },
 ): boolean {
   try {
@@ -2601,7 +2595,7 @@ export function canCommitSubtaskCheckpoint(
  */
 export function encodeSubtaskCheckpoint(
   state: HybridState,
-  monitor?: SubtaskMonitorCheckpointInput,
+  monitor?: SubtaskMonitorCheckpointMetadata,
 ): SubtaskCheckpointEnvelope {
   const checkpoint = stagedSubtaskCheckpoint(state, monitor);
   if (subtaskByteLength(checkpoint) > MAX_CHECKPOINT_BYTES)
@@ -2779,7 +2773,7 @@ export function restoreSubtaskCheckpoint(
  */
 export function commitSubtaskCheckpoint(
   state: HybridState,
-  monitor: SubtaskMonitorCheckpointInput | undefined,
+  monitor: SubtaskMonitorCheckpointMetadata | undefined,
   save: (candidate: SubtaskCheckpointEnvelope) => boolean,
 ): SubtaskCheckpointEnvelope | undefined {
   let candidate: SubtaskCheckpointEnvelope;

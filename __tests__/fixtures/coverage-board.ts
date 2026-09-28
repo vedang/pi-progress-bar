@@ -1,7 +1,11 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { CoverageStore } from "../../src/core/coverage";
+import type { SubtaskDiagnosticsSnapshot } from "../../src/core/monitor";
+import type { SubtaskAccessSnapshot } from "../../src/core/subtask-access";
+import { type SubtaskSnapshot, SubtaskStore } from "../../src/core/subtasks";
+import { CoverageAdapter } from "../../src/sources/coverage";
 import type { WidgetSnapshot } from "../../src/ui/widget";
-import { coverageInventory, coverageParent, coverageSource } from "./coverage";
+import { coverageNames } from "./coverage";
+import { subtaskAdmission, subtaskSource } from "./subtasks";
 import { uxView } from "./ux-view";
 
 export const coverageTheme = {
@@ -9,53 +13,69 @@ export const coverageTheme = {
   bg: (_: string, text: string) => text,
   bold: (text: string) => text,
 } as Theme;
-export function coverageBoardView(): WidgetSnapshot {
-  const view: WidgetSnapshot = uxView();
-  const parent = coverageParent();
-  const store = new CoverageStore();
-  store.admit({
-    parent,
-    intent: parent.source,
-    inventory: coverageInventory(),
-  });
-  const group = store.snapshot().groups[0];
-  store.report({
-    groupId: group.id,
-    inventoryRevision: 1,
-    childIds: [group.children[0].id],
-    source: coverageSource("review"),
-    status: "reported-reviewed",
-  });
-  store.report({
-    groupId: group.id,
-    inventoryRevision: 1,
-    childIds: [group.children[1].id],
-    source: coverageSource("blocker"),
-    status: "reported-blocked",
-  });
-  store.access({
-    groupId: group.id,
-    inventoryRevision: 1,
-    childIds: [group.children[0].id, group.children[1].id],
-    source: {
-      entryId: "access",
-      messageHash: "a".repeat(64),
-      callId: "read-1",
-    },
-  });
-  view.board.tasks[0].label = parent.label;
-  view.board.tasks[0].status = "OPEN";
-  view.board.currentTask = { taskId: parent.id, status: "OPEN" };
-  view.presentation.progress = { done: 0, total: 1, kind: "current" };
-  view.coverage = {
-    ...store.snapshot(),
-    current: [],
-    pendingCount: 0,
-    pendingBytes: 0,
-    omissions: 0,
-    exhausted: false,
+export type GenericBoardView = WidgetSnapshot & {
+  subtasks: SubtaskSnapshot;
+  subtaskAccess: SubtaskAccessSnapshot;
+  subtaskDiagnostics: SubtaskDiagnosticsSnapshot;
+};
+/** Synthetic presentation facts, not semantic-provider acceptance evidence. */
+export function coverageBoardView(): GenericBoardView {
+  const base = uxView();
+  const store = new SubtaskStore();
+  const admission = {
+    ...subtaskAdmission(coverageNames),
+    complete: true,
+    knownTotal: 22,
   };
-  return view;
+  if (!store.admit(admission).accepted)
+    throw new Error("Invalid generic UI fixture");
+  const group = store.snapshot().groups[0];
+  for (const [index, status] of [
+    [0, "reported-completed"],
+    [1, "reported-blocked"],
+  ] as const) {
+    if (
+      !store.report({
+        groupId: group.id,
+        listRevision: group.listRevision,
+        childIds: [group.children[index].id],
+        source: subtaskSource(`report-${index}`),
+        status,
+      }).accepted
+    )
+      throw new Error("Invalid generic report fixture");
+  }
+  base.board.tasks[0].label = admission.parent.label;
+  base.board.tasks[0].status = "OPEN";
+  base.board.currentTask = { taskId: admission.parent.id, status: "OPEN" };
+  base.presentation.progress = { done: 0, total: 1, kind: "current" };
+  return {
+    ...base,
+    subtasks: store.snapshot(),
+    subtaskAccess: {
+      groups: [
+        {
+          groupId: group.id,
+          parentTaskId: group.parentTaskId,
+          parentRevision: group.parentRevision,
+          listRevision: group.listRevision,
+          children: group.children.map((child, index) => ({
+            childId: child.id,
+            status: index < 2 ? "observed" : "no-observation",
+            activeCallHashes: [],
+          })),
+        },
+      ],
+      omissions: 0,
+    },
+    subtaskDiagnostics: {
+      dispatches: 0,
+      exhausted: false,
+      parkedOwners: 0,
+      permanentOwners: 0,
+      adapter: new CoverageAdapter().snapshot(),
+    },
+  };
 }
 export const coverageKeys = {
   tab: "\t",

@@ -2,6 +2,16 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## C08 generic UI/navigation RED freeze
+
+Main ported all13 historical board cases and both real-TUI cases onto generic groups, separate C04 access and diagnostics. The fixture uses `SubtaskStore`, not `CoverageStore`, and contains no legacy `coverage` facade. Existing parent OPEN/DONE/fraction, provenance, unknown scope, independent scrolling, mid-list anchoring, parent switching, health headings, Escape, widths56/80/160, sanitization, detached updates and every-child reachability assertions remain executable.
+
+Explicit projection change: old `coverage.current` report-batch rows are not in the approved generic DTO. Those dynamic-row tests now exercise declared active access from C04 `activeCallHashes`, separately from durable reported-completed status. Active access is **not** claimed to be an in-flight Jev report batch. The dynamic-row anchoring and non-completion assertions are preserved, not removed.
+
+Added11 board cases: prepend/list-revision child-ID anchoring, same-revision wording/source-digest continuity versus revision reset, knownTotal1000 and count-only scope, omissions without groups/exhaustion, five stale/foreign access bindings and unavailable-versus-zero access. Added production-index wiring test with mocked readonly projections (mechanics only), asserting real widget omission text and zero provider calls.
+
+Configured unit **24 RED/1 passing existing generic control**. Configured integration **3 RED/29 passing index controls**: two real TUI navigation failures plus missing production diagnostics wiring. Format/check pass (three historical warnings). Logs `c08-ui-{red,host-red,format,check}.log`. Index tests run in the integration config, not unit. No UI source implementation or stage acceptance yet.
+
 ## C08 diagnostic repair independently verified
 
 Main inspected `9863447a`: diagnostic failures invalidate only optional owner facts, successful persistence remains successful, and the original proposer return type is restored. Independent results: **48 focused passes**, **1913 unit passes/50 known coverage-port failures**, **83/83 integration**, format/check pass with three historical warnings. Logs `c08-fixed-main-{focused,test,integration,format,check}.log`. Worker separately reported893 broad passes and82/83 integration. The variable host correction failure remains undiagnosed and unwaived. C08 producer repair is verified, not stage acceptance; UI/navigation and remaining Monitor/legacy ports follow.

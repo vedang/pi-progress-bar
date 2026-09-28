@@ -16,7 +16,7 @@ it.each([
   [80, 24],
   [140, 40],
 ])(
-  "real TUI routes coverage navigation and clips overlay at%ix%i",
+  "real TUI routes generic subtask navigation and clips overlay at%ix%i",
   async (columns, rows) => {
     let input: ((data: string) => void) | undefined;
     let output = "";
@@ -63,7 +63,7 @@ it.each([
     close = () => overlay.hide();
     try {
       await vi.waitFor(() =>
-        expect(stripVTControlCharacters(output)).toContain("Coverage"),
+        expect(stripVTControlCharacters(output)).toContain("Subtasks"),
       );
       expect(tui.getFocusedComponent()).toBe(board);
       output = "";

@@ -4,7 +4,9 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { Monitor } from "../src/core/monitor";
 import extension from "../src/index";
+import { coverageBoardView, coverageTheme } from "./fixtures/coverage-board";
 import { addPatch, observation } from "./fixtures/hybrid";
 import { branchEntry, jevReply } from "./fixtures/hybrid-monitor";
 import {
@@ -382,6 +384,39 @@ it("explains widget inspection without exposing debugger aggregates in ordinary 
   expect(help).toMatch(/dispatch|requests/i);
 });
 
+it("wires generic diagnostic and access projections into the production widget", async () => {
+  const view = coverageBoardView();
+  view.subtaskDiagnostics.adapter.omissions = 7;
+  const diagnostic = vi
+    .spyOn(Monitor.prototype, "subtaskDiagnosticsSnapshot")
+    .mockReturnValue(view.subtaskDiagnostics);
+  const access = vi
+    .spyOn(Monitor.prototype, "subtaskAccessSnapshot")
+    .mockReturnValue(view.subtaskAccess);
+  try {
+    const h = fixture();
+    await h.emit("session_start");
+    expect(diagnostic).toHaveBeenCalled();
+    expect(access).toHaveBeenCalled();
+    const factory = h.setWidget.mock.calls.find(
+      ([, widget]) => typeof widget === "function",
+    )?.[1] as (
+      tui: unknown,
+      theme: unknown,
+    ) => { render(width: number): string[] };
+    expect(factory).toBeTypeOf("function");
+    const widget = factory(
+      { requestRender: vi.fn(), getFocusedComponent: () => null },
+      coverageTheme,
+    );
+    expect(widget.render(120).join("\n")).toMatch(/7[^\n]*omitted/i);
+    expect(h.complete).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  } finally {
+    diagnostic.mockRestore();
+    access.mockRestore();
+  }
+});
 it("keeps one widget generation across fresh per-event context wrappers", async () => {
   const h = fixture();
   await h.emit("session_start");

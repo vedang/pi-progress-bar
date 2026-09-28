@@ -620,6 +620,7 @@ const assistantVisibleText = (message: unknown) => {
 const MAX_COVERAGE_TOOL_RESULT_BYTES = 32 * 1024;
 const MAX_PENDING_COVERAGE_CANDIDATES = 16;
 const MAX_PENDING_COVERAGE_BYTES = 64 * 1024;
+const MAX_PENDING_SUBTASK_CAPTURE_BYTES = 64 * 1024;
 
 /** Matches the bounded text-block join used by passive tool adapters. */
 const coverageToolResultText = (message: Record<string, unknown>) => {
@@ -765,10 +766,12 @@ export class Monitor {
   /** One adapter-issued capability stays stable until canonical metadata changes. */
   private subtaskEvidence?: SubtaskEvidence;
   private subtaskWakeKey?: string;
-  /** Detached named restore authority used only after a pending drain installs. */
-  private pendingSubtaskCurrent?: SubtaskRuntimeCurrent;
-  /** Captured authority serves target work until a later named host wake. */
-  private capturedSubtaskCurrent?: SubtaskRuntimeCurrent;
+  /** Pending target authority: live unset, blocked null, or detached capture. */
+  private pendingSubtaskCurrent?: SubtaskRuntimeCurrent | null;
+  private pendingSubtaskCurrentRevoke?: () => void;
+  /** Installed target authority: live unset, blocked null, or detached capture. */
+  private capturedSubtaskCurrent?: SubtaskRuntimeCurrent | null;
+  private capturedSubtaskCurrentRevoke?: () => void;
   private pendingSubtaskCheckpoint?: SubtaskRuntimeCheckpoint;
 
   private reader?: () => readonly unknown[];
@@ -1500,6 +1503,12 @@ export class Monitor {
   }
 
   private disableRuntime() {
+    this.pendingSubtaskCurrentRevoke?.();
+    this.pendingSubtaskCurrentRevoke = undefined;
+    this.pendingSubtaskCurrent = null;
+    this.capturedSubtaskCurrentRevoke?.();
+    this.capturedSubtaskCurrentRevoke = undefined;
+    this.capturedSubtaskCurrent = null;
     this.enabled = false;
     this.waitingForWake = false;
     this.clearRetry();
@@ -1691,6 +1700,8 @@ export class Monitor {
           component ?? emptySubtasks,
           work.wantEnabled,
           work,
+          state,
+          pass,
         );
         if (!component || !this.commitRestoredSubtaskHistory(state, metadata)) {
           this.refuseRestoredSubtaskHistory(work);
@@ -1739,6 +1750,8 @@ export class Monitor {
           component ?? emptySubtasks,
           work.wantEnabled,
           work,
+          state,
+          pass,
         );
         if (!component || !this.commitRestoredSubtaskHistory(state, metadata)) {
           this.refuseRestoredSubtaskHistory(work);
@@ -2595,16 +2608,25 @@ export class Monitor {
   private installSubtaskRuntime(
     initial: SubtaskRuntimeCheckpoint,
     preserveProjection = false,
-    capturedCurrent?: SubtaskRuntimeCurrent,
+    capturedCurrent: SubtaskRuntimeCurrent | null | undefined = undefined,
+    capturedCurrentRevoke?: () => void,
   ) {
     this.pendingSubtaskCheckpoint = undefined;
     this.pendingSubtaskCurrent = undefined;
+    this.pendingSubtaskCurrentRevoke = undefined;
+    this.capturedSubtaskCurrentRevoke?.();
     this.capturedSubtaskCurrent = capturedCurrent;
+    this.capturedSubtaskCurrentRevoke = capturedCurrentRevoke;
     if (!preserveProjection) this.subtaskProjection = undefined;
     this.subtaskRuntime = new SubtaskRuntime({
       initial: structuredClone(initial),
-      current: () =>
-        this.capturedSubtaskCurrent ?? this.subtaskCurrent(this.state),
+      current: () => {
+        const captured = this.capturedSubtaskCurrent;
+        if (captured === null) return;
+        return captured === undefined
+          ? this.subtaskCurrent(this.state)
+          : captured;
+      },
       gate: (batch, signal, onDispatch, onPhysicalFlight) =>
         this.evaluateSubtaskGate(batch, signal, onDispatch, onPhysicalFlight),
       propose: (request, signal, onDispatch, onPhysicalFlight) => {
@@ -2649,8 +2671,12 @@ export class Monitor {
     this.subtaskDiagnosticAuthority = undefined;
     this.subtaskScheduleGeneration += 1;
     this.subtaskWakeKey = undefined;
-    this.capturedSubtaskCurrent = undefined;
-    this.pendingSubtaskCurrent = undefined;
+    this.capturedSubtaskCurrentRevoke?.();
+    this.capturedSubtaskCurrentRevoke = undefined;
+    this.capturedSubtaskCurrent = null;
+    this.pendingSubtaskCurrentRevoke?.();
+    this.pendingSubtaskCurrentRevoke = undefined;
+    this.pendingSubtaskCurrent = null;
     if (this.subtaskFlight) {
       this.pendingSubtaskCheckpoint = next;
       return;
@@ -2854,6 +2880,8 @@ export class Monitor {
     component: Readonly<SubtaskRuntimeCheckpoint>,
     enabled: boolean,
     work: ControlWork,
+    state: HybridState,
+    pass: CanonicalPass,
   ): SubtaskMonitorCheckpointMetadata {
     const base: SubtaskMonitorCheckpointMetadata = metadata
       ? structuredClone(metadata)
@@ -2908,12 +2936,36 @@ export class Monitor {
           work.telemetry.lastExtractionCallAt ?? 0,
         ) || undefined
       : base.lastExtractionCallAt;
+    const healthCards = (base.healthCards ?? [])
+      .filter((card) => this.healthCardMatchesCanonical(card, pass, state))
+      .map(copyHealthCard);
+    const taskDetails = this.options.richDetailsEnabled
+      ? ((base.taskDetails ?? []) as TaskDetailRecord[])
+          .filter((detail) =>
+            this.detailRecordMatchesCanonical(detail, pass, state),
+          )
+          .map(copyDetailRecord)
+      : [];
+    const idleDoneTaskId = base.idleDoneTaskId;
+    const retainsIdleDone = state.tasks.some(
+      (task) =>
+        task.id === idleDoneTaskId && task.included && task.status === "done",
+    );
+    const {
+      healthCards: _healthCards,
+      taskDetails: _taskDetails,
+      idleDoneTaskId: _idleDoneTaskId,
+      ...normalized
+    } = base;
     return {
-      ...base,
+      ...normalized,
       enabled,
       usage,
       ...(lastJevCallAt === undefined ? {} : { lastJevCallAt }),
       ...(lastExtractionCallAt === undefined ? {} : { lastExtractionCallAt }),
+      ...(healthCards.length ? { healthCards } : {}),
+      ...(taskDetails.length ? { taskDetails } : {}),
+      ...(retainsIdleDone && idleDoneTaskId ? { idleDoneTaskId } : {}),
       subtasks: structuredClone(component),
     };
   }
@@ -2996,10 +3048,11 @@ export class Monitor {
     );
     if (saved !== undefined) {
       const current = this.capturedSubtaskCurrent;
-      this.captureSubtaskDiagnosticAuthoritySafely(
-        candidate,
-        () =>
-          current ?? this.subtaskCurrent(this.state, this.beginCanonicalPass()),
+      if (current === null) return true;
+      this.captureSubtaskDiagnosticAuthoritySafely(candidate, () =>
+        current === undefined
+          ? this.subtaskCurrent(this.state, this.beginCanonicalPass())
+          : current,
       );
     }
     return saved !== undefined;
@@ -3429,12 +3482,13 @@ export class Monitor {
     }
   }
 
-  /** Detach bounded target references; no post-drain callback can reach host input. */
+  /** Detach bounded target dependencies; no post-drain callback reaches host input. */
   private capturedPendingSubtaskCurrent(
     current: SubtaskRuntimeCurrent,
     checkpoint: Readonly<SubtaskRuntimeCheckpoint>,
+    genericParentIds: ReadonlySet<string>,
     pass: CanonicalPass,
-  ): SubtaskRuntimeCurrent {
+  ): SubtaskRuntimeCurrent | undefined {
     const entryIds = new Set([
       current.latest.id,
       ...current.earlier.map((observation) => observation.id),
@@ -3449,14 +3503,49 @@ export class Monitor {
       if (typeof source.entryId === "string") entryIds.add(source.entryId);
       for (const item of Object.values(value)) collect(item);
     };
-    collect(checkpoint);
-    collect(current.parents);
-    const observations = new Map(
-      [...entryIds].flatMap((entryId) => {
-        const observation = pass.observation(entryId);
-        return observation ? [[entryId, structuredClone(observation)]] : [];
-      }),
+    collect(checkpoint.state);
+    collect(
+      checkpoint.journal.records.filter(
+        (record) => record.state !== "superseded",
+      ),
     );
+    collect(
+      checkpoint.journal.reports.filter(
+        (report) => report.state !== "superseded",
+      ),
+    );
+    for (const parent of current.parents)
+      if (genericParentIds.has(parent.id)) collect(parent.source);
+
+    const retained: Array<[string, Observation]> = [];
+    let bytes = 2; // JSON array brackets.
+    for (const entryId of entryIds) {
+      const observation = pass.observation(entryId);
+      if (!observation) return;
+      // Reject a raw oversized body before serializing or cloning it.
+      if (
+        Buffer.byteLength(observation.text, "utf8") >
+        MAX_PENDING_SUBTASK_CAPTURE_BYTES
+      )
+        return;
+      const encoded = Buffer.byteLength(JSON.stringify(observation), "utf8");
+      const next = bytes + encoded + (retained.length ? 1 : 0);
+      if (next > MAX_PENDING_SUBTASK_CAPTURE_BYTES) return;
+      bytes = next;
+      retained.push([entryId, observation]);
+    }
+
+    const observations = new Map(
+      retained.map(([entryId, observation]) => [
+        entryId,
+        structuredClone(observation),
+      ]),
+    );
+    let revoked = false;
+    this.pendingSubtaskCurrentRevoke = () => {
+      revoked = true;
+      observations.clear();
+    };
     return {
       sourceId: current.sourceId,
       enabled: current.enabled,
@@ -3467,11 +3556,10 @@ export class Monitor {
       ...(current.selectedModel === undefined
         ? {}
         : { selectedModel: current.selectedModel }),
-      ...(current.evidence === undefined
-        ? {}
-        : { evidence: structuredClone(current.evidence) }),
+      // Evidence capability is identity-attested; cloning destroys its proof.
+      ...(current.evidence === undefined ? {} : { evidence: current.evidence }),
       resolve: (entryId) => {
-        const observation = observations.get(entryId);
+        const observation = revoked ? undefined : observations.get(entryId);
         return observation ? structuredClone(observation) : undefined;
       },
     };
@@ -3504,11 +3592,6 @@ export class Monitor {
     }
     const store = this.restoreSubtaskStore(checkpoint, current);
     if (!store) return;
-    this.pendingSubtaskCurrent = this.capturedPendingSubtaskCurrent(
-      current,
-      checkpoint,
-      pass,
-    );
     const snapshot = store.snapshot();
     this.subtaskProjection = structuredClone(snapshot);
     const parents = new Map(
@@ -3558,6 +3641,14 @@ export class Monitor {
         if (candidate && !alreadyRecorded) active.add(parentTaskId);
         continue;
       }
+      // Ownership survives blocking and parked retry deadlines. Runnability only
+      // controls report queue admission below.
+      if (
+        owner.state === "ready" ||
+        owner.state === "parked" ||
+        owner.state === "dispatched"
+      )
+        active.add(parentTaskId);
       if (owner.state === "ready") {
         const blocked = this.subtaskReportBlocked.get(parentTaskId);
         if (!blocked || !sameSource(blocked, owner.source)) {
@@ -3578,6 +3669,35 @@ export class Monitor {
         if (candidate && !alreadyRecorded) active.add(parentTaskId);
       }
     }
+    const owners = new Set(active);
+    const genericParentIds = new Set(
+      current.selectedModel && this.options.proposeSubtasks
+        ? current.parents.flatMap((parent) => {
+            if (!parent.included) return [];
+            if (!owners.has(parent.id) && owners.size >= 20) return [];
+            owners.add(parent.id);
+            return [parent.id];
+          })
+        : [],
+    );
+    this.pendingSubtaskCurrentRevoke?.();
+    this.pendingSubtaskCurrentRevoke = undefined;
+    const captured = this.capturedPendingSubtaskCurrent(
+      current,
+      checkpoint,
+      genericParentIds,
+      pass,
+    );
+    if (!captured) {
+      this.pendingSubtaskCurrent = null;
+      this.subtaskOwners = [];
+      this.subtaskReportOwners = [];
+      this.subtaskReportCandidates.clear();
+      this.subtaskActiveReportParents.clear();
+      this.subtaskDiagnosticAuthority = undefined;
+      return;
+    }
+    this.pendingSubtaskCurrent = captured;
     this.subtaskActiveReportParents = active;
     this.captureSubtaskDiagnosticAuthoritySafely(checkpoint, () => current);
     const key = JSON.stringify({
@@ -3591,16 +3711,7 @@ export class Monitor {
     });
     if (!force && key === this.subtaskWakeKey) return;
     this.subtaskWakeKey = key;
-    const owners = new Set(active);
-    this.subtaskOwners =
-      current.selectedModel && this.options.proposeSubtasks
-        ? current.parents.flatMap((parent) => {
-            if (!parent.included) return [];
-            if (!owners.has(parent.id) && owners.size >= 20) return [];
-            owners.add(parent.id);
-            return [parent.id];
-          })
-        : [];
+    this.subtaskOwners = [...genericParentIds];
   }
 
   /** Named cursor/model/restore wakes only. No timer or self-requeue exists. */
@@ -3609,6 +3720,8 @@ export class Monitor {
       this.wakePendingSubtasks(pass, force);
       return;
     }
+    this.capturedSubtaskCurrentRevoke?.();
+    this.capturedSubtaskCurrentRevoke = undefined;
     this.capturedSubtaskCurrent = undefined;
     const reportParentIds = new Set(
       this.subtaskRuntime
@@ -3661,6 +3774,12 @@ export class Monitor {
 
   /** Cancel stale generic work without clearing durable access associations. */
   private invalidateSubtaskWork() {
+    this.pendingSubtaskCurrentRevoke?.();
+    this.pendingSubtaskCurrentRevoke = undefined;
+    this.pendingSubtaskCurrent = null;
+    this.capturedSubtaskCurrentRevoke?.();
+    this.capturedSubtaskCurrentRevoke = undefined;
+    this.capturedSubtaskCurrent = null;
     this.subtaskRuntime?.invalidate();
     this.subtaskGateway.invalidate();
     this.subtaskGateDispatch = undefined;
@@ -3766,9 +3885,11 @@ export class Monitor {
       if (this.pendingSubtaskCheckpoint) {
         const next = this.pendingSubtaskCheckpoint;
         const current = this.pendingSubtaskCurrent;
+        const revoke = this.pendingSubtaskCurrentRevoke;
         this.pendingSubtaskCheckpoint = undefined;
         this.pendingSubtaskCurrent = undefined;
-        this.installSubtaskRuntime(next, true, current);
+        this.pendingSubtaskCurrentRevoke = undefined;
+        this.installSubtaskRuntime(next, true, current, revoke);
         if (this.enabled) this.subtaskGateway.enable(this.subtaskIdentity());
       }
       if (this.enabled && this.subtaskRuntime) {
@@ -3777,6 +3898,15 @@ export class Monitor {
       }
       this.publish();
       this.drain();
+      if (
+        this.capturedSubtaskCurrent !== null &&
+        !this.subtaskFlight &&
+        !this.hasSubtaskWork()
+      ) {
+        this.capturedSubtaskCurrentRevoke?.();
+        this.capturedSubtaskCurrentRevoke = undefined;
+        this.capturedSubtaskCurrent = undefined;
+      }
     });
     return true;
   }
@@ -5539,8 +5669,12 @@ export class Monitor {
     this.coverageAdapterOmissions = 0;
   }
 
-  private healthCardMatchesCanonical(card: HealthCard, pass?: CanonicalPass) {
-    const task = this.state.tasks.find(
+  private healthCardMatchesCanonical(
+    card: HealthCard,
+    pass?: CanonicalPass,
+    state: HybridState = this.state,
+  ) {
+    const task = state.tasks.find(
       (item) =>
         item.id === card.taskId &&
         item.revision === card.revision &&
@@ -5568,8 +5702,9 @@ export class Monitor {
   private detailRecordMatchesCanonical(
     record: TaskDetailRecord,
     pass?: CanonicalPass,
+    state: HybridState = this.state,
   ) {
-    const task = this.state.tasks.find((item) => item.id === record.taskId);
+    const task = state.tasks.find((item) => item.id === record.taskId);
     if (!task || !detailRecordMatchesTask(record, task)) return false;
     const resolve = (entryId: string) =>
       pass

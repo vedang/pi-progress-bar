@@ -748,6 +748,8 @@ it.each([
   { mode: "rpc", choice: "yes", scenario: "tree-gate" },
   { mode: "rpc", choice: "yes", scenario: "policy-override" },
   { mode: "rpc", choice: "yes", scenario: "unrelated-custom" },
+  { mode: "rpc", choice: "yes", scenario: "drain-gate" },
+  { mode: "rpc", choice: "yes", scenario: "drain-draft" },
 ] as const)(
   "actual Pi $mode production continuation consumes one status-reply root ($choice, $scenario)",
   async ({ mode, choice, scenario }) => {
@@ -779,7 +781,7 @@ it.each([
           )
         ) {
           gates.push(request);
-          if (scenario.endsWith("-gate")) {
+          if (scenario.endsWith("-gate") && gates.length === 1) {
             held.release();
             await released.promise;
             drained.release();
@@ -845,7 +847,7 @@ it.each([
           "The parser and regression tests remain pending, authorized and unblocked. No peer owns them; I have not resumed implementation.",
         ),
         async (context) => {
-          if (scenario === "off-draft") {
+          if (scenario.endsWith("-draft")) {
             held.release();
             await released.promise;
             drained.release();
@@ -958,7 +960,7 @@ it.each([
           expect(h.sent).toHaveLength(1);
           released.release();
         }
-        if (scenario.endsWith("-gate") || scenario === "off-draft") {
+        if (scenario.endsWith("-gate") || scenario.endsWith("-draft")) {
           await bounded(held.promise);
           expect(gates).toHaveLength(1);
           expect(h.sent).toHaveLength(1);
@@ -974,6 +976,52 @@ it.each([
           } else {
             await bounded(h.session.prompt("/progress off"));
             await bounded(h.session.prompt("/progress on"));
+          }
+          if (scenario.startsWith("drain-")) {
+            // A real fresh independent root must not overlap the old raw provider,
+            // even though OFF/ON already revoked its logical result authority.
+            h.faux.setResponses([
+              fauxAssistantMessage(
+                "The parser remains pending; no implementation has started.",
+              ),
+              fauxAssistantMessage(
+                "The parser remains pending, authorized and unblocked. I have not resumed implementation.",
+              ),
+            ]);
+            dateSpy.mockReturnValue(frozen + 60_002);
+            const priorDeadlines = deadlines.length;
+            await bounded(
+              h.session.prompt("Continue the authorized parser work."),
+            );
+            await vi.waitFor(() =>
+              expect(deadlines.length).toBe(priorDeadlines + 1),
+            );
+            const freshDeadline = deadlines[priorDeadlines];
+            clearTimeout(freshDeadline.timer);
+            dateSpy.mockReturnValue(frozen + 120_003);
+            freshDeadline.callback();
+            await vi.waitFor(() =>
+              expect(
+                h.trace.filter((entry) => entry.hook === "agent_settled")
+                  .length,
+              ).toBeGreaterThanOrEqual(4),
+            );
+            const monitor = projections.mock.instances[0];
+            if (!(monitor instanceof Monitor))
+              throw new Error("Missing production Monitor");
+            await vi.waitFor(() =>
+              expect(monitor.advisorySettlementSnapshot().reason).toBe("ready"),
+            );
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            expect(gates).toHaveLength(1);
+            expect(h.sent).toHaveLength(2);
+            released.release();
+            await bounded(drained.promise);
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            expect(gates).toHaveLength(1);
+            expect(h.sent).toHaveLength(2);
+            expect(h.errors).toEqual([]);
+            return;
           }
           released.release();
           await bounded(drained.promise);

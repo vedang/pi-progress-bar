@@ -1,4 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ContinuationSnapshot } from "../advisory/continuation-controller";
 import type { Monitor } from "../core/monitor";
 
 const commands = `How to use:
@@ -11,8 +12,13 @@ Widget controls:
   Enter                             Request task board
   Left / Esc                        Return selection to editor`;
 
-const help = (monitor: Monitor) => {
+const help = (monitor: Monitor, continuation: ContinuationSnapshot) => {
   const view = monitor.presentationSnapshot();
+  const continuationStatus = continuation.exhausted
+    ? "exhausted"
+    : continuation.unavailable
+      ? "unavailable"
+      : "available";
   return `Automatic progress monitor
 
 State: ${view.enabled ? "ON" : "OFF"}
@@ -21,6 +27,10 @@ Service: ${view.service.label}
 Jev requests: ${view.usage.jev.calls} actual dispatched requests • ${view.usage.jev.inputTokens} input tokens • ${view.usage.jev.outputTokens} output tokens
 Extraction requests: ${view.usage.extraction.calls} actual dispatched requests • ${view.usage.extraction.inputTokens} input tokens • ${view.usage.extraction.outputTokens} output tokens
 Request counts are session-wide transport dispatches, not questions or tasks.
+Continuation: ${continuationStatus}
+Continuation dispatches: ${continuation.gateDispatches + continuation.draftDispatches}/64 (Jev ${continuation.gateDispatches}/32, draft ${continuation.draftDispatches}/32)
+Continuation tokens: ${continuation.usage.inputTokens} input • ${continuation.usage.outputTokens} output
+Continuation direct caps apply per extension instance and reset on reload; triggered turns use separate provider limits.
 
 ${commands}`;
 };
@@ -30,11 +40,12 @@ export async function command(
   args: string,
   ctx: ExtensionCommandContext,
   monitor: Monitor,
+  continuation: ContinuationSnapshot,
 ) {
   const action = args.trim();
   try {
     if (!action) {
-      if (ctx.hasUI) ctx.ui.notify(help(monitor), "info");
+      if (ctx.hasUI) ctx.ui.notify(help(monitor, continuation), "info");
       return;
     }
     if (action === "off") {

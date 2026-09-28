@@ -49,6 +49,8 @@ export type ContinuationSnapshot = {
   gateDispatches: number;
   draftDispatches: number;
   exhausted: boolean;
+  /** Last admitted, still-current provider or validation outcome was unavailable. */
+  unavailable: boolean;
   usage: ContinuationUsage;
 };
 
@@ -363,6 +365,8 @@ export class ContinuationController {
   private generation = 0;
   private gateDispatches = 0;
   private draftDispatches = 0;
+  /** Lifetime provider health only; authority/scheduling uncertainty never sets it. */
+  private unavailable = false;
   private usage: ContinuationUsage = { inputTokens: 0, outputTokens: 0 };
 
   constructor(private readonly options: ContinuationControllerOptions) {}
@@ -490,6 +494,7 @@ export class ContinuationController {
         this.gateDispatches >= MAX_GATE_DISPATCHES ||
         this.draftDispatches >= MAX_DRAFT_DISPATCHES ||
         this.gateDispatches + this.draftDispatches >= MAX_DISPATCHES,
+      unavailable: this.unavailable,
       usage: { ...this.usage },
     };
   }
@@ -526,6 +531,12 @@ export class ContinuationController {
         (drain) => this.retainPhysicalFlight(drain),
       );
     } catch {
+      this.markUnavailableIfCurrent(
+        admission.didAdmit(),
+        generation,
+        root,
+        receipt,
+      );
       this.consumeIfActive(generation, root);
       return;
     }
@@ -541,13 +552,16 @@ export class ContinuationController {
       return;
     }
     const gated = applyContinuationGate(batch, result, current);
-    if (
-      !gated ||
-      !this.addUsage(gated.usage.input_tokens, gated.usage.output_tokens)
-    ) {
+    if (!gated) {
+      this.unavailable = true;
       this.consumeIfActive(generation, root);
       return;
     }
+    if (!this.addUsage(gated.usage.input_tokens, gated.usage.output_tokens)) {
+      this.consumeIfActive(generation, root);
+      return;
+    }
+    this.unavailable = false;
 
     const request = buildContinuationDraft(batch, result, current);
     if (!request) {
@@ -607,6 +621,12 @@ export class ContinuationController {
         (drain) => this.retainPhysicalFlight(drain),
       );
     } catch {
+      this.markUnavailableIfCurrent(
+        admission.didAdmit(),
+        generation,
+        root,
+        receipt,
+      );
       this.consumeIfActive(generation, root);
       return;
     }
@@ -616,7 +636,12 @@ export class ContinuationController {
       return;
     }
     const current = this.current(generation, root, receipt);
-    if (!current || !validDraftResult(result, request)) {
+    if (!current) {
+      this.consumeIfActive(generation, root);
+      return;
+    }
+    if (!validDraftResult(result, request)) {
+      this.unavailable = true;
       this.consumeIfActive(generation, root);
       return;
     }
@@ -627,9 +652,11 @@ export class ContinuationController {
 
     const applied = applyContinuationDraft(request, result.text, current);
     if (!applied) {
+      this.unavailable = true;
       this.consumeIfActive(generation, root);
       return;
     }
+    this.unavailable = false;
 
     // Keep scheduler before final authority so its callback cannot stale emission.
     if (!this.canSchedule()) {
@@ -802,6 +829,16 @@ export class ContinuationController {
         ? this.gateDispatches < MAX_GATE_DISPATCHES
         : this.draftDispatches < MAX_DRAFT_DISPATCHES)
     );
+  }
+
+  private markUnavailableIfCurrent(
+    admitted: boolean,
+    generation: number,
+    root: ContinuationRoot,
+    receipt: ReconciliationSettlement,
+  ): void {
+    if (admitted && this.current(generation, root, receipt))
+      this.unavailable = true;
   }
 
   private addUsage(inputTokens: number, outputTokens: number): boolean {

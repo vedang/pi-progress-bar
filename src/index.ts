@@ -65,7 +65,7 @@ export default function progressBar(pi: ExtensionAPI): void {
   let continuationFingerprint: string | undefined;
   let continuationDeliveryActive = false;
   let continuationControlEpoch = 0;
-  let continuationController: ContinuationController | undefined;
+  let continuationController: ContinuationController;
   let currentOpportunity:
     | {
         id: string;
@@ -508,7 +508,8 @@ export default function progressBar(pi: ExtensionAPI): void {
 
   pi.registerCommand("progress", {
     description: "Show or turn automatic progress monitoring on/off",
-    handler: (args, ctx) => command(args, ctx, monitor),
+    handler: (args, ctx) =>
+      command(args, ctx, monitor, continuationController.snapshot()),
   });
   pi.on("session_start", async (_event, ctx) => {
     // Session replacement normally sends shutdown first. Repeat disposal here

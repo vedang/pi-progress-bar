@@ -2,6 +2,12 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## Selected-model recovery keeper ports (2026-09-28)
+
+`subtask-recovery-monitor.test.ts` exercises actual conversation-only Monitor gate→proposal for three charged failures: unknown transport failure, malformed result with known usage, and rejected admission persistence. Same-model named selection does not retry; a genuinely changed selected-model identity permits exactly one fresh gate+proposal, preserves old receipts as superseded history, retains all four charges, admits two grounded children and never re-extracts or re-assesses the parent. Repeating that selection does not rebill. This follows the explicit C07 supersession contract, not the obsolete unconditional same-context intent retry policy.
+
+Initial metadata-based fixture failed because model selection correctly resets ephemeral adapter evidence and the fixture then answered no; it did not establish a production defect. Replaced it with independent conversation-grounded proposals, rather than preserving stale evidence or changing production behavior. Main **61/61** combined recovery/runtime/storage/Monitor/wallet tests and TypeScript pass. Legacy scheduler tests remain present until complete keeper mapping and coherent source retirement.
+
 ## Generic storage keeper ports (2026-09-28, retirement pending)
 
 Main added three actual public-Monitor restore keepers in `subtask-storage-monitor.test.ts`: removal of all tool metadata preserves conversation-grounded children, allocator and exhausted wallet through repeated restore while access becomes unavailable; exact canonical child sources survive more than64 later branch entries; a structurally valid but wrong child quote span prunes the group without refunding the wallet or disturbing parent/health/allocator state. Fixture admissions run the real generic gate and selected proposal before restoration. The exhausted wallet is an explicitly supported historical wallet, not fabricated provider receipts.

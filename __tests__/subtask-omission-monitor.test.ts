@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
+import type { SubtaskDiagnosticsSnapshot } from "../src/core/monitor";
+import type { projectSubtaskOmissions } from "../src/core/subtask-omissions";
+
+expectTypeOf<SubtaskDiagnosticsSnapshot["semanticOmissions"]>().toEqualTypeOf<
+  ReturnType<typeof projectSubtaskOmissions>
+>();
+
 import {
   type SubtaskOmissionSummary,
   subtaskCheckpointStorageStatus,
@@ -326,4 +333,234 @@ it("does not publish an older source's summary after a reentrant source-switch r
   expect(h.monitor.enabled).toBe(false);
   expect(h.checkpoint().monitor?.subtaskOmissions).toBeUndefined();
   expect(h.monitor.subtaskSnapshot().groups).toEqual([]);
+});
+
+const largeReport = `PRIVATE_OVERSIZED_REPORT ${"measured evidence ".repeat(800)}`;
+const reportSources = (h: ReturnType<typeof subtaskMetadataMonitor>) =>
+  h.requests
+    .filter((request) =>
+      Object.keys(request.questions).some((key) =>
+        key.startsWith("subtask:subtask-child:"),
+      ),
+    )
+    .map(
+      (request) =>
+        (request.state as { report: { source: { entryId: string } } }).report
+          .source.entryId,
+    );
+
+it("does not count oversized prose when no valid subtask group was admitted", async () => {
+  const h = subtaskMetadataMonitor();
+  running.push(h);
+  h.start();
+  await h.settle("goal");
+  h.append("oversized-without-group", largeReport);
+  await h.settle("oversized-without-group");
+  expect(h.monitor.subtaskSnapshot().groups).toEqual([]);
+  expect(h.checkpoint().monitor?.subtaskOmissions).toBeUndefined();
+  expect(h.counts().report).toBe(0);
+});
+it("does not publish a vetoed oversize receipt or retry it without a named wake", async () => {
+  const h = await mapped();
+  let attempts = 0;
+  h.save.mockImplementation((raw: unknown) => {
+    const candidate = raw as ReturnType<typeof h.checkpoint>;
+    if (candidate.monitor?.subtaskOmissions) {
+      attempts++;
+      throw new Error("PRIVATE_OMISSION_SAVE_VETO");
+    }
+  });
+  h.append("oversized-veto", largeReport);
+  await h.settle("oversized-veto");
+  expect.soft(attempts).toBeGreaterThan(0);
+  expect(h.checkpoint().monitor?.subtaskOmissions).toBeUndefined();
+  expect(h.counts().report).toBe(0);
+  h.save.mockReset();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(h.checkpoint().monitor?.subtaskOmissions).toBeUndefined();
+  h.observe();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(h.checkpoint().monitor?.subtaskOmissions).toMatchObject({
+    entries: [{ reason: "report-oversized" }],
+    saturated: false,
+  });
+  expect(h.counts().report).toBe(0);
+  expect(JSON.stringify(h.monitor.debugSnapshot())).not.toContain(
+    "PRIVATE_OMISSION_SAVE_VETO",
+  );
+});
+it("preserves real parked report A across oversized C and restore, then retries only A after deadline and wake", async () => {
+  const h = await mapped();
+  const transport = h.fetch.getMockImplementation();
+  if (!transport) throw new Error("Missing transport");
+  let first = true;
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body)) as {
+      questions: Record<string, unknown>;
+    };
+    const response = await transport(url, init);
+    if (
+      first &&
+      Object.keys(request.questions).some((key) =>
+        key.startsWith("subtask:subtask-child:"),
+      )
+    ) {
+      first = false;
+      return new Response(null, {
+        status: 503,
+        headers: { "Retry-After": "10" },
+      });
+    }
+    return response;
+  });
+  h.append("saved-report-a", "The workbook checks remain pending.");
+  await h.settle("saved-report-a");
+  expect(reportSources(h)).toEqual(["saved-report-a"]);
+  const parked = h
+    .checkpoint()
+    .monitor?.subtasks?.journal.reports.find(
+      (job) => job.source.entryId === "saved-report-a",
+    );
+  expect(parked).toMatchObject({ state: "parked" });
+  if (!parked?.parkedUntil) throw new Error("Missing real retry deadline");
+  h.append("oversized-c", largeReport);
+  await h.settle("oversized-c");
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    h.checkpoint(),
+    false,
+    h.reader,
+  );
+  expect
+    .soft(
+      h
+        .checkpoint()
+        .monitor?.subtasks?.journal.reports.find(
+          (job) => job.identity === parked.identity,
+        ),
+    )
+    .toEqual(parked);
+  expect
+    .soft(h.checkpoint().monitor?.subtaskOmissions)
+    .toMatchObject({
+      entries: [{ reason: "report-oversized" }],
+      saturated: false,
+    });
+  await vi.advanceTimersByTimeAsync(
+    Math.max(0, parked.parkedUntil - Date.now()) + 1,
+  );
+  expect(reportSources(h)).toEqual(["saved-report-a"]);
+  h.observe();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(reportSources(h)).toEqual([
+    "saved-report-a",
+    "saved-report-a",
+    "saved-report-a",
+  ]);
+  expect(
+    h
+      .checkpoint()
+      .monitor?.subtasks?.journal.reports.find(
+        (job) => job.identity === parked.identity,
+      ),
+  ).toMatchObject({ state: "complete" });
+});
+it("keeps eligible B behind held A when newest C is oversized, and retains C's receipt after report commits", async () => {
+  const h = await mapped();
+  const transport = h.fetch.getMockImplementation();
+  if (!transport) throw new Error("Missing transport");
+  let release: (() => void) | undefined;
+  let held = false;
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body)) as {
+      questions: Record<string, unknown>;
+    };
+    const response = await transport(url, init);
+    if (
+      !held &&
+      Object.keys(request.questions).some((key) =>
+        key.startsWith("subtask:subtask-child:"),
+      )
+    ) {
+      held = true;
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    }
+    return response;
+  });
+  try {
+    h.append("held-a", "The initial workbook checks remain pending.");
+    await h.settle("held-a");
+    expect(held).toBe(true);
+    h.append(
+      "eligible-b",
+      "A later eligible workbook report still has pending work.",
+    );
+    await h.settle("eligible-b");
+    h.append("oversized-c", largeReport);
+    await h.settle("oversized-c");
+    expect(reportSources(h)).toEqual(["held-a"]);
+    const summary = h.checkpoint().monitor?.subtaskOmissions;
+    expect
+      .soft(summary)
+      .toMatchObject({
+        entries: [{ reason: "report-oversized" }],
+        saturated: false,
+      });
+    release?.();
+    await vi.advanceTimersByTimeAsync(300);
+    const reports = reportSources(h);
+    expect(reports).not.toContain("oversized-c");
+    expect(reports.filter((id) => id === "held-a")).toHaveLength(2);
+    expect(reports.filter((id) => id === "eligible-b")).toHaveLength(2);
+    expect(reports.indexOf("eligible-b")).toBeGreaterThan(
+      reports.lastIndexOf("held-a"),
+    );
+    expect(h.checkpoint().monitor?.subtaskOmissions).toEqual(summary);
+    expect(
+      h
+        .checkpoint()
+        .monitor?.subtasks?.journal.reports.find(
+          (job) => job.source.entryId === "eligible-b",
+        ),
+    ).toMatchObject({ state: "complete" });
+  } finally {
+    h.monitor.stop();
+    release?.();
+    await vi.advanceTimersByTimeAsync(100);
+  }
+});
+it("saturates retained omissions once without disabling later valid report admission", async () => {
+  const h = await mapped();
+  const target = h.checkpoint();
+  if (!target.monitor) throw new Error("Missing metadata");
+  const entries = Array.from({ length: 64 }, (_, index) => omitted(index));
+  target.monitor.subtaskOmissions = { entries, saturated: false };
+  await h.monitor.restore("/nonexistent-hybrid-test", target, false, h.reader);
+  await vi.advanceTimersByTimeAsync(200);
+  h.append("overflow-omission", largeReport);
+  await h.settle("overflow-omission");
+  await vi.advanceTimersByTimeAsync(200);
+  expect
+    .soft(h.checkpoint().monitor?.subtaskOmissions)
+    .toEqual({ entries, saturated: true });
+  h.save.mockClear();
+  for (let i = 0; i < 3; i++) {
+    h.observe();
+    await vi.advanceTimersByTimeAsync(100);
+  }
+  expect(h.save).not.toHaveBeenCalled();
+  const before = h.counts().report;
+  h.append(
+    "eligible-after-saturation",
+    "A short eligible report confirms more checks remain pending.",
+  );
+  await h.settle("eligible-after-saturation");
+  expect(h.counts().report).toBe(before + 2);
+  expect(h.checkpoint().monitor?.subtaskOmissions).toEqual({
+    entries,
+    saturated: true,
+  });
+  expect(h.monitor.subtaskDiagnosticsSnapshot().exhausted).toBe(false);
 });

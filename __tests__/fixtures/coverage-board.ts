@@ -69,6 +69,11 @@ export function coverageBoardView(): GenericBoardView {
       omissions: 0,
     },
     subtaskDiagnostics: {
+      semanticOmissions: {
+        total: 0,
+        byReason: { "report-oversized": 0, coalesced: 0, capacity: 0 },
+        saturated: false,
+      },
       dispatches: 0,
       exhausted: false,
       parkedOwners: 0,

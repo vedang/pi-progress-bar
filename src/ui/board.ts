@@ -644,7 +644,7 @@ class TaskBoard implements BoardComponent {
 
   private subtaskChildStatus(group: SubtaskGroup, childId: string) {
     const child = group.children.find((candidate) => candidate.id === childId);
-    if (child?.status === "reported-completed") return "reported completed";
+    if (child?.status === "reported-completed") return "reported complete";
     if (child?.status === "reported-blocked") return "reported blocked";
     return "pending";
   }

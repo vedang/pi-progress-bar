@@ -40,7 +40,9 @@ it.each(["OPEN", "DONE"] as const)(
     h.board.update(h.view);
     const output = h.text();
     expect(output).toMatch(/reported complete\b[^\n]*1\s*\/\s*22/i);
-    expect(output).not.toMatch(/optional review|reported reviewed/i);
+    expect(output).not.toMatch(
+      /optional review|reported reviewed|reported completed/i,
+    );
     expect(renderWidget(h.view, false, 200, theme).join("\n")).not.toMatch(
       /optional review|reported reviewed/i,
     );

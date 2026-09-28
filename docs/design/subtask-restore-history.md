@@ -89,3 +89,9 @@ The historical-source boundary fixture settles mandatory canonical bookkeeping w
 ### Four-finding repair candidate
 
 `3dfe026e` changes Monitor only: original evidence capability retention, pending parked ownership, prospective optional metadata normalization, and bounded/revocable captured authority. Main inspected the225-line diff and reran142 focused tests plus `make check`: PASS. Worker reports559 broader tests and86 integration tests passing; full configured unit result1965 PASS/46 known residual FAIL. The previously six failing review regressions pass. Retained independent re-review is running; candidate results do not accept the batch or overall feature.
+
+### Closure and invalid-wake follow-up
+
+Re-review of `3dfe026e` confirms the original three defects and the evidence/ownership/metadata fixes. Capture remains blocked on three additional seams. Main reproduces each: a report-only target with a distinct parent source beyond80 older entries stalls after drain; an invalid selected-model wake retains old capture and suppresses an identical recovered wake; inherited `Object.prototype.toJSON` executes four times and bypasses aggregate byte measurement. Combined report/wallet result:3 RED/55 PASS; TypeScript passes.
+
+Report-parent observations are initialization/report dependencies regardless of selected proposal-model availability; include them in the same aggregate cap. Every unavailable pending wake must revoke old capture and reset queues plus deduplication key, so a later identical named wake can rebuild work. Transfer byte measurement must use a hook-free own-data representation, not ordinary prototype-bearing JSON serialization. The hook regression isolates the narrow capture seam synchronously and restores the global descriptor before assertions, avoiding unrelated codec/transport behavior. No source repair or new acceptance is implied by these REDs.

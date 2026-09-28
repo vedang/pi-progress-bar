@@ -1288,85 +1288,116 @@ it("resolves enabled restore independently of its newly started physical report 
   }
 });
 
-it("dispatches target-only report work after old drain without another wake or disposed-reader access", async () => {
-  let disposed = false;
-  const selectedModel = vi.fn(() => {
-    if (disposed) throw new Error("Disposed model reader");
-    return undefined;
-  });
-  const h = await fixture(false, false, 2, { selectedModel }, 1);
-  let release: (() => void) | undefined;
-  h.setTransport(async (request) => {
-    if (h.calls.length === 1)
-      await new Promise<void>((resolve) => {
-        release = resolve;
-      });
-    return answer(request);
-  });
-  h.append("report", reportText);
-  await h.settle("report");
-  expect(h.calls).toHaveLength(1);
-  expect(release).toBeTypeOf("function");
-  const target = h.checkpoint();
-  if (!target.monitor?.subtasks) throw new Error("Missing dispatched history");
-  const store = new SubtaskStore();
-  for (const [index, parent] of h.monitor.state.tasks.entries()) {
-    const items = index === 0 ? labels : labels.slice(0, 1);
-    expect(
-      store.admit({
-        ...subtaskAdmission(items),
-        parent,
-        source: parent.source,
-        complete: true,
-        knownTotal: items.length,
-        children: items.map((label) => ({
-          kind: "add",
-          label,
-          source: parent.source,
-        })),
-      }),
-    ).toEqual({ accepted: true });
-  }
-  // Equal original wallet/proofs; only target semantics gains a group. This is
-  // new report work for the named restore wake, not resurrection of the old job.
-  target.monitor.subtasks.state = store.checkpoint();
-  expect(subtaskCheckpointStorageStatus(target)).toBe("supported");
-  const second = target.monitor.subtasks.state.groups[1];
-  const branch = structuredClone(h.reader());
-  const reader = vi.fn(() => {
-    if (disposed) throw new Error("Disposed canonical reader");
-    return branch;
-  });
-  try {
-    await h.monitor.restore("/nonexistent-hybrid-test", target, false, reader);
+it.each([false, true])(
+  "dispatches target-only report work after old drain without disposed reads (distinct deep parent=%s)",
+  async (deepParent) => {
+    let disposed = false;
+    const selectedModel = vi.fn(() => {
+      if (disposed) throw new Error("Disposed model reader");
+      return undefined;
+    });
+    const h = await fixture(false, false, 2, { selectedModel }, 1);
+    let release: (() => void) | undefined;
+    h.setTransport(async (request) => {
+      if (h.calls.length === 1)
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      return answer(request);
+    });
+    h.append("report", reportText);
+    await h.settle("report");
     expect(h.calls).toHaveLength(1);
-    expect(h.monitor.enabled).toBe(true);
-    expect(h.checkpoint().monitor?.subtasks?.state.groups).toHaveLength(2);
-    expect.soft(h.monitor.subtaskSnapshot().groups).toHaveLength(2);
-    const reads = [reader.mock.calls.length, selectedModel.mock.calls.length];
-    disposed = true;
-    release?.();
-    await vi.advanceTimersByTimeAsync(200);
-    expect([reader.mock.calls.length, selectedModel.mock.calls.length]).toEqual(
-      reads,
-    );
-    expect(h.calls).toHaveLength(2);
-    expect(Object.keys(h.calls[1].questions)).toEqual(
-      second.children.map((child) => `subtask:${child.id}`),
-    );
-    expect(
-      h
-        .checkpoint()
-        .monitor?.subtasks?.journal.reports.find(
-          (job) => job.parentTaskId === second.parentTaskId,
-        ),
-    ).toMatchObject({ state: "complete" });
-  } finally {
-    h.monitor.stop();
-    release?.();
-    await vi.advanceTimersByTimeAsync(100);
-  }
-});
+    expect(release).toBeTypeOf("function");
+    const target = h.checkpoint();
+    if (!target.monitor?.subtasks)
+      throw new Error("Missing dispatched history");
+    const deepText =
+      "Deliver agreed plan 2 and implement its agreed component.";
+    if (deepParent)
+      target.state.tasks[1].source = subtaskSource("deep-parent", deepText);
+    const store = new SubtaskStore();
+    for (const [index, parent] of target.state.tasks.entries()) {
+      const items = index === 0 ? labels : labels.slice(0, 1);
+      // Admission/child evidence is later than, and distinct from, parent source.
+      const admissionSource = h.monitor.state.tasks[index].source;
+      expect(
+        store.admit({
+          ...subtaskAdmission(items),
+          parent,
+          source: admissionSource,
+          complete: true,
+          knownTotal: items.length,
+          children: items.map((label) => ({
+            kind: "add",
+            label,
+            source: admissionSource,
+          })),
+        }),
+      ).toEqual({ accepted: true });
+    }
+    // Equal original wallet/proofs; only target semantics gains a group. This is
+    // new report work for the named restore wake, not resurrection of the old job.
+    target.monitor.subtasks.state = store.checkpoint();
+    expect(subtaskCheckpointStorageStatus(target)).toBe("supported");
+    const second = target.monitor.subtasks.state.groups[1];
+    const branch = [
+      ...(deepParent
+        ? [
+            branchEntry("deep-parent", deepText, "user"),
+            ...Array.from({ length: 80 }, (_, index) =>
+              branchEntry(
+                `old-context:${index}`,
+                "Older neutral context.",
+                "assistant",
+              ),
+            ),
+          ]
+        : []),
+      ...structuredClone(h.reader()),
+    ];
+    const reader = vi.fn(() => {
+      if (disposed) throw new Error("Disposed canonical reader");
+      return branch;
+    });
+    try {
+      await h.monitor.restore(
+        "/nonexistent-hybrid-test",
+        target,
+        false,
+        reader,
+      );
+      await vi.advanceTimersByTimeAsync(200);
+      expect(h.calls).toHaveLength(1);
+      expect(h.monitor.enabled).toBe(true);
+      expect(h.checkpoint().monitor?.subtasks?.state.groups).toHaveLength(2);
+      expect.soft(h.monitor.subtaskSnapshot().groups).toHaveLength(2);
+      const reads = [reader.mock.calls.length, selectedModel.mock.calls.length];
+      disposed = true;
+      release?.();
+      await vi.advanceTimersByTimeAsync(200);
+      expect([
+        reader.mock.calls.length,
+        selectedModel.mock.calls.length,
+      ]).toEqual(reads);
+      expect(h.calls).toHaveLength(2);
+      expect(Object.keys(h.calls[1].questions)).toEqual(
+        second.children.map((child) => `subtask:${child.id}`),
+      );
+      expect(
+        h
+          .checkpoint()
+          .monitor?.subtasks?.journal.reports.find(
+            (job) => job.parentTaskId === second.parentTaskId,
+          ),
+      ).toMatchObject({ state: "complete" });
+    } finally {
+      h.monitor.stop();
+      release?.();
+      await vi.advanceTimersByTimeAsync(100);
+    }
+  },
+);
 
 it.each([false, true])(
   "preserves real pending evidence capability and revokes it on stop=%s",
@@ -1497,9 +1528,10 @@ it.each([
   { bytes: 65536, sources: 1 },
   { bytes: 65537, sources: 1 },
   { bytes: 65537, sources: 2 },
+  { bytes: 65537, sources: 2, inheritedHook: true },
 ])(
-  "bounds pending canonical transfer at $bytes UTF-8 bytes across $sources sources without pruning history",
-  async ({ bytes, sources }) => {
+  "bounds pending canonical transfer at $bytes UTF-8 bytes across $sources sources (inheritedHook=$inheritedHook)",
+  async ({ bytes, sources, inheritedHook = false }) => {
     let selected = false;
     let disposed = false;
     const selectedModel = vi.fn(() => {
@@ -1602,6 +1634,47 @@ it.each([
     });
     try {
       selected = true;
+      if (inheritedHook) {
+        const pass = new CanonicalPass(branch);
+        for (const id of ["goal", "report", ...ids]) pass.observation(id);
+        const current = Reflect.apply(
+          Reflect.get(h.monitor, "subtaskCurrent"),
+          h.monitor,
+          [target.state, pass],
+        ) as SubtaskRuntimeCurrent | undefined;
+        expect(current).toBeDefined();
+        const hook = vi.fn(() => ({}));
+        const descriptor = Object.getOwnPropertyDescriptor(
+          Object.prototype,
+          "toJSON",
+        );
+        let captured: SubtaskRuntimeCurrent | undefined;
+        // Isolate the private byte boundary: a global hook during public
+        // restore would also alter unrelated fixture/codec serialization.
+        try {
+          Object.defineProperty(Object.prototype, "toJSON", {
+            configurable: true,
+            value: hook,
+          });
+          captured = Reflect.apply(
+            Reflect.get(h.monitor, "capturedPendingSubtaskCurrent"),
+            h.monitor,
+            [
+              current,
+              target.monitor.subtasks,
+              new Set(target.state.tasks.map((task) => task.id)),
+              pass,
+            ],
+          ) as SubtaskRuntimeCurrent | undefined;
+        } finally {
+          if (descriptor)
+            Object.defineProperty(Object.prototype, "toJSON", descriptor);
+          else Reflect.deleteProperty(Object.prototype, "toJSON");
+        }
+        expect.soft(hook).not.toHaveBeenCalled();
+        expect(captured).toBeUndefined();
+        return;
+      }
       await h.monitor.restore(
         "/nonexistent-hybrid-test",
         target,
@@ -1795,6 +1868,93 @@ it("keeps a real parked report owner ahead of decomposition during a different p
     await vi.advanceTimersByTimeAsync(200);
     expect(h.calls.length).toBeGreaterThan(1);
     expect(sourceId(h.calls[1])).toBe("report-a");
+  } finally {
+    h.monitor.stop();
+    release?.();
+    await vi.advanceTimersByTimeAsync(100);
+  }
+});
+
+it("revokes an invalid pending wake and recovers identical generic work on the next named wake", async () => {
+  let selected = false;
+  let unavailable = false;
+  let disposed = false;
+  const selectedModel = vi.fn(() => {
+    if (disposed) throw new Error("Disposed model reader");
+    if (unavailable) throw new Error("Transient selected model lookup failure");
+    return selected ? "fixture/selected" : undefined;
+  });
+  const proposeSubtasks = vi.fn(async () => {
+    throw new Error("Unexpected proposal");
+  });
+  const h = await fixture(
+    false,
+    false,
+    2,
+    { selectedModel, proposeSubtasks },
+    1,
+  );
+  let release: (() => void) | undefined;
+  h.setTransport(async (request) => {
+    if (h.calls.length === 1)
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    return answer(request);
+  });
+  h.append("report", reportText);
+  await h.settle("report");
+  expect(release).toBeTypeOf("function");
+  const target = h.checkpoint();
+  if (!target.monitor?.subtasks) throw new Error("Missing history");
+  target.monitor.subtasks.state = new SubtaskStore().checkpoint();
+  expect(subtaskCheckpointStorageStatus(target)).toBe("supported");
+  const gates: EvaluationRequest[] = [];
+  const transport = h.fetch.getMockImplementation();
+  if (!transport) throw new Error("Missing transport");
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+    if (request.questions["subtask:0"]) {
+      gates.push(request);
+      return answer(request, "no");
+    }
+    return transport(url, init);
+  });
+  const reader = vi.fn(() => {
+    if (disposed) throw new Error("Disposed canonical reader");
+    return h.reader();
+  });
+  try {
+    selected = true;
+    await h.monitor.restore("/nonexistent-hybrid-test", target, false, reader);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.monitor.subtaskSnapshot().groups).toEqual([]);
+    const original = Reflect.get(h.monitor, "pendingSubtaskCurrent") as
+      | SubtaskRuntimeCurrent
+      | null
+      | undefined;
+    expect(original?.resolve("goal")).toBeDefined();
+    unavailable = true;
+    h.monitor.observe(reader);
+    expect.soft(Reflect.get(h.monitor, "pendingSubtaskCurrent")).toBeNull();
+    expect.soft(original?.resolve("goal")).toBeUndefined();
+    unavailable = false;
+    h.monitor.observe(reader);
+    const reads = [reader.mock.calls.length, selectedModel.mock.calls.length];
+    disposed = true;
+    release?.();
+    await vi.advanceTimersByTimeAsync(200);
+    expect([reader.mock.calls.length, selectedModel.mock.calls.length]).toEqual(
+      reads,
+    );
+    const secondId = target.state.tasks[1].id;
+    expect(
+      gates.filter(
+        (request) =>
+          (request.state as { parent: { id: string } }).parent.id === secondId,
+      ),
+    ).toHaveLength(1);
+    expect(proposeSubtasks).not.toHaveBeenCalled();
   } finally {
     h.monitor.stop();
     release?.();

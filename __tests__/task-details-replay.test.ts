@@ -2,10 +2,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { taskDetailRequest } from "../src/analysis/task-details";
 import { processObservation } from "../src/core/hybrid";
 import {
-  checkpointBytes,
   encodeSubtaskCheckpoint,
   MAX_CHECKPOINT_BYTES,
   type SubtaskMonitorCheckpointMetadata,
+  subtaskCheckpointBytes,
   subtaskCheckpointStorageStatus,
   subtaskMonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
@@ -432,7 +432,7 @@ it("mandatory admission evicts optional detail facts when only the core fits", a
   ) as SubtaskMonitorCheckpointMetadata;
   Reflect.deleteProperty(metadata, "taskDetails");
   candidate.scopeError = "x".repeat(
-    MAX_CHECKPOINT_BYTES - checkpointBytes(candidate, metadata) - 128,
+    MAX_CHECKPOINT_BYTES - subtaskCheckpointBytes(candidate, metadata) - 128,
   );
   const calls = h.fetch.mock.calls.length;
   expect(

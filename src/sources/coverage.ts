@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { ownDataJson } from "../analysis/own-data-json";
 
 /** Passive adapter inventory; it never assigns or completes generic subtasks. */
-export interface CoverageInventory {
+interface CoverageInventory {
   resourceKey: string;
   revision: number;
   complete: boolean;

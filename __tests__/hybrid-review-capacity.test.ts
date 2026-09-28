@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { processObservation } from "../src/core/hybrid";
 import {
-  checkpointBytes,
   encodeSubtaskCheckpoint,
   type SubtaskMonitorCheckpointMetadata,
+  subtaskCheckpointBytes,
 } from "../src/core/hybrid-checkpoint";
 import { type HybridState, observationRef } from "../src/core/hybrid-state";
 import { fixtureHealthCard } from "./fixtures/health-card";
@@ -161,7 +161,7 @@ it.each([false, true])(
         return accepted;
       };
       const unpadded = await acceptGate();
-      const extra = 512 * 1024 - checkpointBytes(unpadded, f.meta);
+      const extra = 512 * 1024 - subtaskCheckpointBytes(unpadded, f.meta);
       expect(extra).toBeGreaterThan(0);
       // Change exactly one historical event ref, not cursor/context refs whose
       // repeated byte growth makes iterative target padding oscillate.
@@ -175,7 +175,7 @@ it.each([false, true])(
     }
     const checkpoint = encodeSubtaskCheckpoint(state, f.meta);
     expect(size(checkpoint)).toBe(512 * 1024);
-    expect(checkpointBytes(state, { ...f.meta, enabled: false })).toBe(
+    expect(subtaskCheckpointBytes(state, { ...f.meta, enabled: false })).toBe(
       512 * 1024 + 1,
     );
     const prefix = JSON.stringify(state.pending?.journal);

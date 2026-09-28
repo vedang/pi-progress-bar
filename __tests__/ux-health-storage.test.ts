@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
-  checkpointBytes,
   type HealthCard,
   MAX_CHECKPOINT_BYTES,
   type SubtaskMonitorCheckpointMetadata,
+  subtaskCheckpointBytes,
 } from "../src/core/hybrid-checkpoint";
 import { initialMessage, observation } from "./fixtures/hybrid";
 import { monitorHarness } from "./fixtures/hybrid-monitor";
@@ -300,9 +300,11 @@ it("evicts optional health when mandatory core work fits only without the map", 
     [undefined, new Map(), candidate],
   ) as SubtaskMonitorCheckpointMetadata;
   candidate.scopeError = "x".repeat(
-    MAX_CHECKPOINT_BYTES - checkpointBytes(candidate, coreMetadata) - 128,
+    MAX_CHECKPOINT_BYTES -
+      subtaskCheckpointBytes(candidate, coreMetadata) -
+      128,
   );
-  expect(checkpointBytes(candidate, coreMetadata)).toBeLessThan(
+  expect(subtaskCheckpointBytes(candidate, coreMetadata)).toBeLessThan(
     MAX_CHECKPOINT_BYTES,
   );
   const before = structuredClone(h.monitor.state);
@@ -396,13 +398,14 @@ it("preflights prospective idle-DONE selector after restored-open work completes
   delete withoutSelector.idleDoneTaskId;
   h.monitor.state.scopeError = "";
   h.monitor.state.scopeError = "x".repeat(
-    MAX_CHECKPOINT_BYTES - checkpointBytes(h.monitor.state, withoutSelector),
+    MAX_CHECKPOINT_BYTES -
+      subtaskCheckpointBytes(h.monitor.state, withoutSelector),
   );
-  expect(checkpointBytes(h.monitor.state, withoutSelector)).toBe(
+  expect(subtaskCheckpointBytes(h.monitor.state, withoutSelector)).toBe(
     MAX_CHECKPOINT_BYTES,
   );
   expect(
-    checkpointBytes(h.monitor.state, {
+    subtaskCheckpointBytes(h.monitor.state, {
       ...withoutSelector,
       idleDoneTaskId: task.id,
     }),

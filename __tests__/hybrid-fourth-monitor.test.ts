@@ -2,9 +2,9 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { extractionInput } from "../src/analysis/extractor";
 import {
-  checkpointBytes,
   encodeSubtaskCheckpoint,
   type SubtaskMonitorCheckpointMetadata,
+  subtaskCheckpointBytes,
 } from "../src/core/hybrid-checkpoint";
 import { selectedModelExtractor } from "../src/core/selected-model";
 import { fixtureHealthCard } from "./fixtures/health-card";
@@ -125,7 +125,7 @@ it("health envelope covers retained old card with prospective dispatch and usage
     lastJevCallAt: Number.MAX_SAFE_INTEGER,
     lastExtractionCallAt: Number.MAX_SAFE_INTEGER,
   };
-  expect(checkpointBytes(h.monitor.state, dispatched)).toBeLessThanOrEqual(
-    envelope.maximum,
-  );
+  expect(
+    subtaskCheckpointBytes(h.monitor.state, dispatched),
+  ).toBeLessThanOrEqual(envelope.maximum);
 });

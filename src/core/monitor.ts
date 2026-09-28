@@ -4326,6 +4326,7 @@ export class Monitor {
     this.usage.jev.outputTokens = usage?.jev.outputTokens ?? 0;
     this.usage.extraction.calls = usage?.extraction.calls ?? 0;
     this.usage.extraction.inputTokens = usage?.extraction.inputTokens ?? 0;
+    this.usage.extraction.outputTokens = usage?.extraction.outputTokens ?? 0;
   }
 
   /** Reset passive adapter capabilities on control, model, or branch lifecycle changes. */

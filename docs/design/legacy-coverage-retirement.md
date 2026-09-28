@@ -52,3 +52,9 @@ Restored SHA256: Monitor `4f4978acf5edfe869f803470a9be8da5d3ab96bfbbbb52c5fff70c
 Main removes only the ten named obsolete semantic suites and unused legacy-only fixture helpers. Keep `coverageNames` and frozen diagnostic corpus unchanged. Keep all adapter, generic Monitor/UI/reconciliation/host, mandatory, health and continuation tests.
 
 Source worker removes old semantic store/intent/report, Monitor fields/methods/gateway/queue/telemetry and old-v10 codec surface as one coherent candidate. Rehome shared passive adapter data types and mandatory validators in their live owner; no facade, migration, fallback, aliases or weakened bounds. Main owns any further test edit. Whole gates and independent cumulative preservation review remain mandatory before accepting retirement or C05–C09.
+
+## Source cleanup verification
+
+Worker3527ce16 removes the three legacy modules and their Monitor/v10 codec graph (5308 deleted lines). Main ports six remaining capacity-test imports to the existing `subtaskCheckpointBytes` v11 helper, without aliases or assertion changes. Main removes the unused public export on the adapter-local inventory type.
+
+Full gates caught a real deletion regression: `hybrid-fourth-monitor` extraction saturation restored output tokens as0 instead of the saved maximum (1985PASS/1FAIL). Cleanup had accidentally removed the mandatory output-token assignment adjacent to the obsolete graph. Main restores that assignment; the retained regression now passes. Final `make format`, `make check`, `make test`: **1986 unit /86 integration PASS**, with three historical Biome warnings. Independent full-stage review remains pending; no C05–C09 acceptance or continuation/semantic-QA claim follows from this green run.

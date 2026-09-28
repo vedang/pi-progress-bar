@@ -6,9 +6,9 @@ import {
 } from "../src/analysis/extractor";
 import { type AdmissionPlan, processObservation } from "../src/core/hybrid";
 import {
-  checkpointBytes,
   encodeSubtaskCheckpoint,
   restoreSubtaskCheckpoint,
+  subtaskCheckpointBytes,
 } from "../src/core/hybrid-checkpoint";
 import type { HybridState } from "../src/core/hybrid-state";
 import {
@@ -54,7 +54,7 @@ function padEvents(state: HybridState, target: number) {
       id: `event:${index + 1}`,
       kind: "revise",
     });
-  const remaining = target - checkpointBytes(state);
+  const remaining = target - subtaskCheckpointBytes(state);
   const padding = Math.floor(remaining / (900 - start));
   expect(padding).toBeGreaterThan(0);
   for (let index = start; index < 900; index++) {
@@ -63,8 +63,8 @@ function padEvents(state: HybridState, target: number) {
   }
   const tail = state.events.at(-1);
   if (!tail) throw new Error("Missing last event");
-  tail.source.entryId += "r".repeat(target - checkpointBytes(state));
-  expect(checkpointBytes(state)).toBe(target);
+  tail.source.entryId += "r".repeat(target - subtaskCheckpointBytes(state));
+  expect(subtaskCheckpointBytes(state)).toBe(target);
 }
 function restore(checkpoint: unknown) {
   return restoreSubtaskCheckpoint(
@@ -189,7 +189,8 @@ it.each(["archive-add-revise", "archive-restore-revise"])(
       {
         admit: (plan: AdmissionPlan) => {
           if (plan.phase === "extraction")
-            admitted = checkpointBytes(plan.candidate) + plan.schemaBytes;
+            admitted =
+              subtaskCheckpointBytes(plan.candidate) + plan.schemaBytes;
           return plan.phase !== "completion";
         },
       },
@@ -200,7 +201,7 @@ it.each(["archive-add-revise", "archive-restore-revise"])(
     if (!accepted) throw new Error("Patch never committed");
     expect(accepted.tasks.filter((t) => t.included)).toHaveLength(20);
     expect(Number.isFinite(admitted)).toBe(true);
-    expect(checkpointBytes(accepted)).toBeLessThanOrEqual(admitted);
+    expect(subtaskCheckpointBytes(accepted)).toBeLessThanOrEqual(admitted);
   },
 );
 it("gate admission covers both longest scalar/reason copies", async () => {
@@ -214,7 +215,7 @@ it("gate admission covers both longest scalar/reason copies", async () => {
     {
       admit: (plan: AdmissionPlan) => {
         if (plan.phase === "gate")
-          admitted = checkpointBytes(plan.candidate) + plan.schemaBytes;
+          admitted = subtaskCheckpointBytes(plan.candidate) + plan.schemaBytes;
         return plan.phase === "gate";
       },
     },
@@ -237,7 +238,7 @@ it("gate admission covers both longest scalar/reason copies", async () => {
   await processObservation(await initial(), latest, p);
   const accepted = saved.find((s) => s.pending?.journal.gate);
   if (!accepted) throw new Error("Gate never committed");
-  expect(checkpointBytes(accepted)).toBeLessThanOrEqual(admitted);
+  expect(subtaskCheckpointBytes(accepted)).toBeLessThanOrEqual(admitted);
 });
 
 it.each([false, true])(
@@ -266,7 +267,7 @@ it.each([false, true])(
         admit: (plan: AdmissionPlan) => {
           if (plan.phase !== "completion") return true;
           if (++chunks > 1) return false;
-          admitted = checkpointBytes(plan.candidate) + plan.schemaBytes;
+          admitted = subtaskCheckpointBytes(plan.candidate) + plan.schemaBytes;
           return true;
         },
       },
@@ -291,7 +292,7 @@ it.each([false, true])(
       "task:29",
     );
     expect(accepted.focusTaskId).toBe("task:29");
-    expect(checkpointBytes(accepted)).toBeLessThanOrEqual(admitted);
+    expect(subtaskCheckpointBytes(accepted)).toBeLessThanOrEqual(admitted);
   },
 );
 

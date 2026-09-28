@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
-  checkpointBytes,
   MAX_CHECKPOINT_BYTES,
+  subtaskCheckpointBytes,
   subtaskMonitorCheckpointMetadata,
 } from "../src/core/hybrid-checkpoint";
 import { normalizedChoiceAssessment } from "../src/core/hybrid-proof";
@@ -254,7 +254,7 @@ it("detail admission reserves long normalized fractional assessment bytes, not s
   );
   metadata.taskDetails = [maximum];
   h.monitor.state.scopeError = "";
-  const shortSize = checkpointBytes(h.monitor.state, metadata);
+  const shortSize = subtaskCheckpointBytes(h.monitor.state, metadata);
   const legal = structuredClone(record);
   legal.receipts = [
     {
@@ -279,7 +279,7 @@ it("detail admission reserves long normalized fractional assessment bytes, not s
     },
   ];
   metadata.taskDetails = [legal];
-  const legalSize = checkpointBytes(h.monitor.state, metadata);
+  const legalSize = subtaskCheckpointBytes(h.monitor.state, metadata);
   // At minimum the advertised maximum must dominate every valid receipt.
   expect(shortSize).toBeGreaterThanOrEqual(legalSize);
   h.monitor.state.scopeError = "x".repeat(MAX_CHECKPOINT_BYTES - legalSize + 1);

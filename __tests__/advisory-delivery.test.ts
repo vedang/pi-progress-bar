@@ -365,6 +365,33 @@ it.each(["reconciliation", "continuation"] as const)(
   },
 );
 
+it.each([
+  ["continuation", "test-correction"],
+  ["continuation", "review-correction"],
+  ["test-correction", "continuation"],
+  ["review-correction", "continuation"],
+] as const)(
+  "suppresses competing %s → %s without queuing the loser",
+  async (winner, loser) => {
+    const h = await fixture();
+    expect(h.delivery.request({ ...request, kind: winner })).toBe("started");
+    const competing = {
+      ...request,
+      kind: loser,
+      opportunityId: "00000000-0000-4000-8000-000000000099",
+    };
+    expect(h.delivery.request(competing)).toBe("suppressed");
+    expect(h.sendMessage).toHaveBeenCalledTimes(1);
+    h.delivery.onAgentStart();
+    h.branch.push(h.canonical());
+    h.delivery.onContext(h.branch);
+    expect(h.delivery.onAgentSettled(h.branch)).toBe("advisory-only");
+    h.set({ opportunityId: competing.opportunityId, idle: true });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.sendMessage).toHaveBeenCalledTimes(1);
+  },
+);
+
 it.each(["test-correction", "review-correction"] as const)(
   "steers %s immediately during active external work without misclassifying its run",
   async (kind) => {

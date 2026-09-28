@@ -784,6 +784,8 @@ it.each([
   { mode: "rpc", choice: "yes", scenario: "retry-model" },
   { mode: "tui", choice: "yes", scenario: "diagnostic-success" },
   { mode: "tui", choice: "yes", scenario: "diagnostic-failure" },
+  { mode: "rpc", choice: "yes", scenario: "own-retry" },
+  { mode: "rpc", choice: "yes", scenario: "own-compaction" },
 ] as const)(
   "actual Pi $mode production continuation consumes one status-reply root ($choice, $scenario)",
   async ({ mode, choice, scenario }) => {
@@ -838,7 +840,18 @@ it.each([
     const projections = vi.spyOn(Monitor.prototype, "continuationAuthority");
     const h = await host(
       mode,
-      {},
+      {
+        retry: {
+          enabled: scenario === "own-retry",
+          maxRetries: 1,
+          baseDelayMs: 1,
+        },
+        compaction: {
+          enabled: scenario === "own-compaction",
+          reserveTokens: 100,
+          keepRecentTokens: 10,
+        },
+      },
       true,
       false,
       true,
@@ -849,6 +862,8 @@ it.each([
       scenario.startsWith("retry-"),
       scenario.startsWith("diagnostic-"),
     );
+    const draftTransport = vi.spyOn(h.context.modelRegistry, "complete");
+    const effectivePolicy = vi.spyOn(h.session, "systemPrompt", "get");
     const nativeTimeout = globalThis.setTimeout;
     const deadlines: Array<{
       callback: () => void;
@@ -930,10 +945,19 @@ it.each([
               ],
             }),
           );
-          response.usage.input = 7;
-          response.usage.output = 9;
           return response;
         },
+        ...(scenario === "own-retry" || scenario === "own-compaction"
+          ? [
+              fauxAssistantMessage("", {
+                stopReason: "error",
+                errorMessage:
+                  scenario === "own-retry"
+                    ? "429 rate limit"
+                    : "prompt is too long: 200000 tokens > 128000 maximum",
+              }),
+            ]
+          : []),
         fauxAssistantMessage("I will continue the authorized parser work."),
       ];
       h.faux.setResponses(responses);
@@ -1127,6 +1151,16 @@ it.each([
               ).toHaveLength(3),
             );
           await new Promise<void>((resolve) => setImmediate(resolve));
+          // Faux recomputes usage from the actual request. Observe the real
+          // registry result, not the pre-stream message's placeholder counts.
+          expect(draftTransport).toHaveBeenCalledTimes(1);
+          const usage = failed
+            ? { input: 0, output: 0 }
+            : (await draftTransport.mock.results[0].value).usage;
+          if (!failed) {
+            expect(usage.input).toBeGreaterThan(0);
+            expect(usage.output).toBeGreaterThan(0);
+          }
           for (const enabled of [true, false, true]) {
             await bounded(
               h.session.prompt(enabled ? "/progress on" : "/progress off"),
@@ -1140,7 +1174,7 @@ it.each([
               "Continuation dispatches: 2/64 (Jev 1/32, draft 1/32)",
             );
             expect(text).toContain(
-              `Continuation tokens: ${failed ? 2 : 9} input • ${failed ? 1 : 10} output`,
+              `Continuation tokens: ${2 + usage.input} input • ${1 + usage.output} output`,
             );
             expect(text).not.toMatch(
               /PRIVATE_CONTINUATION|Implement parser|standing authorization|untrusted suggested next step/,
@@ -1160,9 +1194,13 @@ it.each([
               h.manager.appendMessage(
                 fauxAssistantMessage("New independent execution has resumed."),
               );
-            if (scenario === "retry-policy")
-              h.session.agent.state.systemPrompt =
-                "Pause implementation pending user approval.";
+            if (scenario === "retry-policy") {
+              const before = h.session.systemPrompt;
+              effectivePolicy.mockReturnValue(
+                "Pause implementation pending user approval.",
+              );
+              expect(h.session.systemPrompt).not.toBe(before);
+            }
             if (scenario === "retry-model") {
               const model = h.session.model;
               if (!model) throw new Error("Missing actual host model");
@@ -1210,7 +1248,18 @@ it.each([
             ),
           });
           expect(h.sent[1].content).toContain("not instructions");
-          expect(h.faux.state.callCount).toBe(4);
+          expect(h.faux.state.callCount).toBe(
+            scenario === "own-retry" || scenario === "own-compaction" ? 5 : 4,
+          );
+          if (scenario === "own-retry" || scenario === "own-compaction") {
+            expect(deadlines).toHaveLength(2); // One reconciliation, one draft timeout; no rearm.
+            if (scenario === "own-compaction")
+              expect(
+                h.trace.some(
+                  (entry) => entry.hook === "session_compact:overflow",
+                ),
+              ).toBe(true);
+          }
         } else {
           expect(drafts).toEqual([]);
           expect(h.sent).toHaveLength(1);
@@ -1234,6 +1283,8 @@ it.each([
       for (const retry of retries) clearTimeout(retry.timer);
       released.release();
       projections.mockRestore();
+      draftTransport.mockRestore();
+      effectivePolicy.mockRestore();
       await h.dispose();
       vi.unstubAllGlobals();
       vi.unstubAllEnvs();

@@ -160,6 +160,74 @@ it.each([false, true])(
     });
   },
 );
+it.each(["stop", "restore-off", "restore-on"])(
+  "retains successfully saved restore history across reentrant %s and later saves",
+  async (mode) => {
+    const { h, base, withSummary } = summaryFixture();
+    const emptyBranch = () => [];
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      withSummary({ entries: [omitted(1)], saturated: false }),
+      false,
+      emptyBranch,
+    );
+    const incoming = withSummary({ entries: [omitted(2)], saturated: false });
+    const nested = withSummary({ entries: [omitted(3)], saturated: true });
+    if (!incoming.monitor || !nested.monitor)
+      throw new Error("Missing metadata");
+    incoming.monitor.enabled = mode === "restore-on";
+    nested.monitor.enabled = mode === "restore-on";
+    let nestedRestore: Promise<void> | undefined;
+    let interrupted = false;
+    h.save.mockImplementationOnce(() => {
+      interrupted = true;
+      if (mode === "stop") h.monitor.stop();
+      else
+        nestedRestore = h.monitor.restore(
+          "/nonexistent-hybrid-test",
+          nested,
+          false,
+          emptyBranch,
+        );
+    });
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      incoming,
+      false,
+      emptyBranch,
+    );
+    await nestedRestore;
+    expect(interrupted).toBe(true);
+    const expected = {
+      entries:
+        mode === "stop"
+          ? [omitted(1), omitted(2)]
+          : [omitted(1), omitted(2), omitted(3)],
+      saturated: mode !== "stop",
+    };
+    expect.soft(h.checkpoint().monitor?.subtaskOmissions).toEqual(expected);
+    // A later valid save must not roll back the successfully persisted candidate.
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      base,
+      false,
+      emptyBranch,
+    );
+    const durable = h.save.mock.calls.at(-1)?.[0] as ReturnType<
+      typeof h.checkpoint
+    >;
+    expect.soft(durable.monitor?.subtaskOmissions).toEqual(expected);
+    expect(h.checkpoint().monitor?.subtaskOmissions).toEqual(expected);
+    expect(h.counts()).toEqual({
+      gate: 0,
+      proposal: 0,
+      report: 0,
+      mandatory: 0,
+      extraction: 0,
+    });
+  },
+);
+
 it("retains same-source omission history when an older target has no summary", async () => {
   const { h, base, withSummary } = summaryFixture();
   const summary = { entries: [omitted(1)], saturated: false };

@@ -122,6 +122,78 @@ it.each([
   },
 );
 
+it.each(["stop", "restore"])(
+  "retains a newly persisted real wallet across reentrant %s without adopting stale queue authority",
+  async (mode) => {
+    const donor = await chargedFixture();
+    donor.h.monitor.turnOff();
+    const incoming = donor.h.checkpoint();
+    const older = structuredClone(donor.older);
+    if (!older.monitor) throw new Error("Missing metadata");
+    older.monitor.enabled = false;
+    const branch = structuredClone(donor.h.reader());
+    const h = subtaskMetadataMonitor();
+    running.push(h);
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      older,
+      false,
+      () => branch,
+    );
+    expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(
+      older.monitor.subtasks?.journal.dispatches,
+    );
+    const calls = h.counts();
+    let nested: Promise<void> | undefined;
+    let interrupted = false;
+    h.save.mockImplementationOnce(() => {
+      interrupted = true;
+      if (mode === "stop") h.monitor.stop();
+      else
+        nested = h.monitor.restore(
+          "/nonexistent-hybrid-test",
+          older,
+          false,
+          () => branch,
+        );
+    });
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      incoming,
+      false,
+      () => branch,
+    );
+    await nested;
+    expect(interrupted).toBe(true);
+    expect
+      .soft(h.checkpoint().monitor?.subtasks?.journal.dispatches)
+      .toBe(donor.charged.dispatches);
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      older,
+      false,
+      () => branch,
+    );
+    const durable = h.save.mock.calls.at(-1)?.[0] as typeof incoming;
+    const restored = h.checkpoint().monitor?.subtasks?.journal;
+    expect
+      .soft(durable.monitor?.subtasks?.journal.dispatches)
+      .toBe(donor.charged.dispatches);
+    expect(restored?.dispatches).toBe(donor.charged.dispatches);
+    expect(restored?.usage).toEqual(donor.charged.usage);
+    expect(restored?.records.map((record) => record.identity)).toEqual(
+      expect.arrayContaining(
+        donor.charged.records.map((record) => record.identity),
+      ),
+    );
+    expect(restored?.reports.map((job) => job.identity)).toEqual(
+      expect.arrayContaining(donor.charged.reports.map((job) => job.identity)),
+    );
+    expect(h.monitor.enabled).toBe(false);
+    expect(h.counts()).toEqual(calls);
+  },
+);
+
 it("refuses a thrown restore save without adopting target history or dispatching", async () => {
   const { h, older, olderBranch, charged, calls } = await chargedFixture();
   if (!older.monitor) throw new Error("Missing metadata");

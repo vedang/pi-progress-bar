@@ -295,12 +295,20 @@ it("enforces one16-candidate limit shared by pending inventories and access", as
   expect(h.monitor.coverageSnapshot().omissions).toBeGreaterThan(0);
   expect(h.monitor.coverageSnapshot().groups).toEqual([]);
 });
-it("shows omitted coverage even before any group exists", async () => {
+it("shows omitted generic subtasks even before any group exists", async () => {
   const h = await ready();
   const snapshot = {
     presentation: h.monitor.presentationSnapshot(),
     board: h.monitor.boardSnapshot(),
-    coverage: { ...h.monitor.coverageSnapshot(), groups: [], omissions: 3 },
+    subtasks: { ...h.monitor.subtaskSnapshot(), groups: [] },
+    subtaskAccess: h.monitor.subtaskAccessSnapshot(),
+    subtaskDiagnostics: {
+      ...h.monitor.subtaskDiagnosticsSnapshot(),
+      adapter: {
+        ...h.monitor.subtaskDiagnosticsSnapshot().adapter,
+        omissions: 3,
+      },
+    },
   };
   const theme = {
     fg: (_: string, t: string) => t,
@@ -318,7 +326,7 @@ it("shows omitted coverage even before any group exists", async () => {
     "3 optional candidates omitted",
   );
   expect(renderWidget(snapshot, true, 120, theme).join("\n")).toMatch(
-    /Coverage incomplete.*3 optional candidates omitted/,
+    /Subtasks incomplete.*3 optional candidates omitted/,
   );
   expect(h.monitor.state.tasks).toHaveLength(1);
 });

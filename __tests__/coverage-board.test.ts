@@ -168,6 +168,20 @@ it("renders active access separately from durable reported completion", async ()
   expect(h.text()).toMatch(/reported completed[^\n]*1\s*\/\s*22/i);
   h.board.dispose();
 });
+it("shows active-access and group-omission rows only once within the subtask pane", async () => {
+  const h = await fixture();
+  active(h.view, [1, 2]);
+  h.view.subtasks.groups[0].omissions.push("Optional context omitted");
+  h.board.update(h.view);
+  h.board.handleInput(keys.tab);
+  h.board.handleInput(keys.tab);
+  const text = h.text();
+  expect(text.match(/Active access:/g)).toHaveLength(1);
+  expect(text.match(/Optional context omitted/g)).toHaveLength(1);
+  expect(text).toContain("Phase 1");
+  expect(text).toContain("Phase 2");
+  h.board.dispose();
+});
 it("shows exhausted subtasks even without an admitted group", async () => {
   const h = await fixture();
   h.view.subtasks.groups = [];
@@ -205,6 +219,9 @@ it("keeps global exhaustion and omission warnings visible in the subtask pane", 
   h.board.handleInput(keys.tab);
   expect(h.text()).toMatch(/exhausted/i);
   expect(h.text()).toMatch(/3[^\n]*omitted/i);
+  const widget = renderWidget(h.view, false, 120, theme).join("\n");
+  expect(widget).toMatch(/exhausted/i);
+  expect(widget).toMatch(/3[^\n]*omitted/i);
   h.board.dispose();
 });
 it("does not carry one parent's subtask scroll into another parent", async () => {
@@ -316,6 +333,36 @@ it("distinguishes unavailable access from observed zero and keeps semantic compl
   expect(h.text()).toMatch(/reported completed[^\n]*1\s*\/\s*22/i);
   h.board.dispose();
 });
+it.each([
+  "unavailable",
+  "mixed",
+  "no-observation",
+  "partial-positive",
+] as const)(
+  "distinguishes full-roster %s access from known observed zero",
+  async (mode) => {
+    const h = await fixture();
+    h.view.subtaskAccess.groups[0].children.forEach((child, index) => {
+      child.status =
+        mode === "partial-positive" && index === 0
+          ? "observed"
+          : mode === "no-observation" || (mode === "mixed" && index === 0)
+            ? "no-observation"
+            : "unavailable";
+    });
+    h.board.update(h.view);
+    const text = h.text();
+    if (mode === "no-observation") expect(text).toMatch(/0 observed access/i);
+    else if (mode === "partial-positive")
+      expect(text).toMatch(/1 observed access/i);
+    else {
+      expect(text).toMatch(/access[^\n]*unavailable|unavailable[^\n]*access/i);
+      expect(text).not.toMatch(/0 observed access/i);
+    }
+    expect(text).toMatch(/reported completed[^\n]*1\s*\/\s*22/i);
+    h.board.dispose();
+  },
+);
 it.each([56, 80, 160])(
   "clips sanitized subtasks at%i columns without changing snapshots",
   async (width) => {

@@ -2,6 +2,12 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## C08 UI source review and repair REDs
+
+Main inspected `7bd4f943` and independently passed all25 frozen UI units (including the minimal generic control). Review found matched full-roster unavailable access rendered as observed0, widget exhaustion hiding omission warnings, and duplicate active-access/group-omission rows within the same subtask pane. Main froze **4 RED/26 passing controls**: all-unavailable and mixed unavailable/no-observation must not infer zero; actual all-no-observation zero and partial positive observed1 remain passing controls; widget must retain both warnings; pane rows appear once. Logs `c08-ui-review-red.log`, format/check pass in `c08-ui-repair-*`.
+
+The extra legacy failure reported by worker was the existing positive omission-without-group test. Main ported that assertion to generic groups/access/diagnostics, retaining both board/widget text and parent-count checks. `coverage-monitor.test.ts` independently returns to **6 known failures/6 passes** (`c08-ui-omission-port.log`); the other legacy cases are not silently waived. Worker full1923pass/51fail and84integration are worker-only evidence at this point. C08 remains unaccepted.
+
 ## C08 generic UI/navigation RED freeze
 
 Main ported all13 historical board cases and both real-TUI cases onto generic groups, separate C04 access and diagnostics. The fixture uses `SubtaskStore`, not `CoverageStore`, and contains no legacy `coverage` facade. Existing parent OPEN/DONE/fraction, provenance, unknown scope, independent scrolling, mid-list anchoring, parent switching, health headings, Escape, widths56/80/160, sanitization, detached updates and every-child reachability assertions remain executable.

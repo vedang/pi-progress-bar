@@ -440,12 +440,10 @@ it("preserves real parked report A across oversized C and restore, then retries 
         ),
     )
     .toEqual(parked);
-  expect
-    .soft(h.checkpoint().monitor?.subtaskOmissions)
-    .toMatchObject({
-      entries: [{ reason: "report-oversized" }],
-      saturated: false,
-    });
+  expect.soft(h.checkpoint().monitor?.subtaskOmissions).toMatchObject({
+    entries: [{ reason: "report-oversized" }],
+    saturated: false,
+  });
   await vi.advanceTimersByTimeAsync(
     Math.max(0, parked.parkedUntil - Date.now()) + 1,
   );
@@ -502,12 +500,10 @@ it("keeps eligible B behind held A when newest C is oversized, and retains C's r
     await h.settle("oversized-c");
     expect(reportSources(h)).toEqual(["held-a"]);
     const summary = h.checkpoint().monitor?.subtaskOmissions;
-    expect
-      .soft(summary)
-      .toMatchObject({
-        entries: [{ reason: "report-oversized" }],
-        saturated: false,
-      });
+    expect.soft(summary).toMatchObject({
+      entries: [{ reason: "report-oversized" }],
+      saturated: false,
+    });
     release?.();
     await vi.advanceTimersByTimeAsync(300);
     const reports = reportSources(h);

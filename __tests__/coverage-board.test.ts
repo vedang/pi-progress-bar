@@ -314,13 +314,15 @@ it("shows omission diagnostics without a group or exhausted wallet", async () =>
   h.board.dispose();
 });
 it.each([
-  { total: 5, saturated: false },
-  { total: 64, saturated: true },
-  { total: 0, saturated: true },
-  { total: 0, saturated: false },
+  { total: 5, saturated: false, empty: false },
+  { total: 64, saturated: true, empty: false },
+  { total: 0, saturated: true, empty: false },
+  { total: 0, saturated: false, empty: false },
+  { total: 5, saturated: false, empty: true },
+  { total: 0, saturated: true, empty: true },
 ])(
-  "shows durable omission counts with no group while OFF (retained=$total, saturated=$saturated)",
-  async ({ total, saturated }) => {
+  "shows durable omission counts with no group while OFF (retained=$total, saturated=$saturated, empty=$empty)",
+  async ({ total, saturated, empty }) => {
     const h = await fixture();
     h.view.subtasks.groups = [];
     h.view.subtaskDiagnostics.semanticOmissions = {
@@ -329,6 +331,11 @@ it.each([
       saturated,
     };
     h.view.presentation.enabled = false;
+    if (empty) {
+      h.view.board.tasks = [];
+      delete h.view.board.currentTask;
+      h.view.presentation.progress = { done: 0, total: 0, kind: "current" };
+    }
     const before = structuredClone(h.view);
     h.board.update(h.view);
     const detail = h.text();

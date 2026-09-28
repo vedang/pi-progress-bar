@@ -1,10 +1,5 @@
 import { createHash } from "node:crypto";
 import { completionRequest } from "../analysis/completion";
-import type {
-  CoverageIntentDispatchReceipt,
-  CoverageIntentJob,
-  CoverageIntentJournal,
-} from "../analysis/coverage-intent";
 import { extractionInput } from "../analysis/extractor";
 import { gateRequest } from "../analysis/gate";
 import type {
@@ -13,11 +8,6 @@ import type {
   DetailKey,
   TaskDetailRecord,
 } from "../analysis/task-details";
-import {
-  type CoverageCheckpoint,
-  coverageCheckpointIsValid,
-  MAX_COVERAGE_CHECKPOINT_BYTES,
-} from "./coverage";
 import {
   acceptedCompletionIds,
   applyCompletionRecord,
@@ -72,7 +62,6 @@ import {
   subtaskCheckpointIsValid,
 } from "./subtasks";
 
-const VERSION = 10;
 const SUBTASK_VERSION = 11;
 const MAX_SUBTASK_OPTIONAL_BYTES = 64 * 1024;
 const MAX_TASKS = 200;
@@ -127,86 +116,6 @@ export interface HealthCard {
   };
 }
 
-export interface CoverageReportJobCheckpoint {
-  version: 1;
-  identity: string;
-  parentTaskId: string;
-  parentRevision: number;
-  parentSourceDigest: string;
-  groupId: string;
-  inventoryRevision: number;
-  source: SourceRef;
-  state: "ready" | "parked" | "permanent" | "complete";
-  parkedUntil?: number;
-}
-
-export interface CoverageQueueCheckpoint {
-  kind: "intent" | "report";
-  /** Intent uses a digest; report uses exact parent task ID. */
-  key: string;
-}
-
-export interface CoverageReportDispatchCheckpoint {
-  jobIdentity: string;
-  requestHash: string;
-  groupId: string;
-  inventoryRevision: number;
-  source: SourceRef;
-  childIds: string[];
-  assessments: Array<{
-    childId: string;
-    choice: "reviewed" | "retracted" | "blocked" | "unchanged" | "uncertain";
-    confidence: number;
-    probability: number;
-  }>;
-  dispatch: number;
-  at: number;
-  usage: { inputTokens: number; outputTokens: number };
-  outcome: "accepted";
-}
-
-interface CoverageCheckpointMetadata {
-  state: CoverageCheckpoint;
-  dispatches: number;
-  usage: {
-    jev: { calls: number; inputTokens: number; outputTokens: number };
-    extraction: { calls: number; inputTokens: number; outputTokens: number };
-  };
-  /** Durable optional omissions; never infer semantic scope from them. */
-  omissions?: number;
-  intents?: CoverageIntentJournal;
-  intentJobs?: CoverageIntentJob[];
-  intentReceipts?: CoverageIntentDispatchReceipt[];
-  queue?: CoverageQueueCheckpoint[];
-  jobs?: CoverageReportJobCheckpoint[];
-  reportReceipts?: CoverageReportDispatchCheckpoint[];
-}
-
-export interface MonitorCheckpointMetadata {
-  enabled: boolean;
-  usage: {
-    jev: { calls: number; inputTokens: number; outputTokens: number };
-    extraction: { calls: number; inputTokens: number; outputTokens: number };
-  };
-  lastJevCallAt?: number;
-  lastExtractionCallAt?: number;
-  /** Exact completed task eligible for qualified idle display; no health payload. */
-  idleDoneTaskId?: string;
-  /** At most one exact accepted health fact for every retained task. */
-  healthCards?: HealthCard[];
-  /** Optional exact source spans and normalized field assessments; never quote text. */
-  /** Validated at storage boundary; public type stays broad for checkpoint readers. */
-  taskDetails?: unknown[];
-  /** Optional durable coverage state; no host ingress or classifier result is implied. */
-  coverage?: CoverageCheckpointMetadata;
-}
-
-interface Checkpoint {
-  version: typeof VERSION;
-  state: HybridState;
-  monitor?: MonitorCheckpointMetadata;
-}
-
 interface SubtaskCheckpointMetadata {
   state: SubtaskCheckpoint;
   journal: SubtaskJournalCheckpoint;
@@ -226,7 +135,7 @@ export interface SubtaskOmissionSummary {
   saturated: boolean;
 }
 
-/** v11 staged monitor projection. It deliberately has no legacy coverage field. */
+/** Strict-v11 monitor projection contains only live optional state. */
 export interface SubtaskMonitorCheckpointMetadata {
   enabled: boolean;
   usage: {
@@ -284,7 +193,6 @@ const eventIdIsValid = (value: unknown): value is string =>
   numericIdIsValid(value, /^event:[1-9]\d*$/);
 const roleIsValid = (value: unknown): value is ObservationRole =>
   value === "user" || value === "assistant" || value === "intercom";
-const byteLength = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
 const unit = (value: unknown): value is number =>
   typeof value === "number" &&
   Number.isFinite(value) &&
@@ -945,499 +853,6 @@ function validTaskDetailRecord(value: unknown): value is TaskDetailRecord {
   );
 }
 
-function validCoverageUsage(
-  value: unknown,
-): value is CoverageCheckpointMetadata["usage"] {
-  if (!record(value) || !exactKeys(value, ["jev", "extraction"])) return false;
-  return [value.jev, value.extraction].every(
-    (item) =>
-      record(item) &&
-      exactKeys(item, ["calls", "inputTokens", "outputTokens"]) &&
-      nonNegativeInteger(item.calls) &&
-      nonNegativeInteger(item.inputTokens) &&
-      nonNegativeInteger(item.outputTokens),
-  );
-}
-
-const coverageJobIdIsValid = (value: unknown): value is string =>
-  numericIdIsValid(value, /^coverage-group:[1-9]\d*$/);
-const coverageChildIdIsValid = (value: unknown): value is string =>
-  numericIdIsValid(value, /^coverage-child:[1-9]\d*$/);
-const coverageChoices = new Set([
-  "reviewed",
-  "retracted",
-  "blocked",
-  "unchanged",
-  "uncertain",
-]);
-const MAX_COVERAGE_PENDING_JOBS = 20;
-/** Adaptive 24KiB requests can legally shrink to one of 200 retained children. */
-const MAX_COVERAGE_REPORT_RECEIPTS = 200;
-const MAX_COVERAGE_INTENT_RECEIPTS = 40;
-
-function validCoverageIntentJournal(
-  value: unknown,
-): value is CoverageIntentJournal {
-  if (
-    !record(value) ||
-    !exactKeys(value, ["accepted", "negative"]) ||
-    !Array.isArray(value.accepted) ||
-    value.accepted.length > 20 ||
-    !Array.isArray(value.negative) ||
-    value.negative.length > 20
-  )
-    return false;
-  const acceptedKeys = new Set<string>();
-  const acceptedIdentities = new Set<string>();
-  for (const receipt of value.accepted) {
-    if (
-      !record(receipt) ||
-      !exactKeys(receipt, [
-        "identity",
-        "parentTaskId",
-        "parentRevision",
-        "parentSourceDigest",
-        "resourceKey",
-        "source",
-      ]) ||
-      !hashIsValid(receipt.identity) ||
-      !taskIdIsValid(receipt.parentTaskId) ||
-      !positiveInteger(receipt.parentRevision) ||
-      !hashIsValid(receipt.parentSourceDigest) ||
-      !hashIsValid(receipt.resourceKey) ||
-      !validSourceRef(receipt.source)
-    )
-      return false;
-    const key = JSON.stringify([
-      receipt.identity,
-      receipt.parentTaskId,
-      receipt.parentRevision,
-      receipt.parentSourceDigest,
-      receipt.resourceKey,
-      receipt.source,
-    ]);
-    if (acceptedKeys.has(key)) return false;
-    acceptedKeys.add(key);
-    acceptedIdentities.add(receipt.identity);
-  }
-  const negative = new Set<string>();
-  for (const receipt of value.negative) {
-    if (
-      !record(receipt) ||
-      !exactKeys(receipt, ["identity", "source"]) ||
-      !hashIsValid(receipt.identity) ||
-      !validObservationRef(receipt.source) ||
-      negative.has(receipt.identity)
-    )
-      return false;
-    negative.add(receipt.identity);
-  }
-  return ![...acceptedIdentities].some((identity) => negative.has(identity));
-}
-
-function validCoverageIntentJob(value: unknown): value is CoverageIntentJob {
-  if (
-    !record(value) ||
-    !exactKeys(
-      value,
-      [
-        "version",
-        "identity",
-        "targetKey",
-        "source",
-        "owners",
-        "parents",
-        "state",
-      ],
-      ["parkedUntil"],
-    ) ||
-    value.version !== 1 ||
-    !hashIsValid(value.identity) ||
-    !hashIsValid(value.targetKey) ||
-    !validObservationRef(value.source) ||
-    !Array.isArray(value.owners) ||
-    value.owners.length < 1 ||
-    value.owners.length > 20 ||
-    !value.owners.every(
-      (owner) =>
-        record(owner) &&
-        exactKeys(owner, ["id", "revision", "sourceDigest"]) &&
-        taskIdIsValid(owner.id) &&
-        positiveInteger(owner.revision) &&
-        hashIsValid(owner.sourceDigest),
-    ) ||
-    new Set(value.owners.map((owner) => owner.id)).size !==
-      value.owners.length ||
-    hash(JSON.stringify(value.owners)) !== value.targetKey ||
-    !Array.isArray(value.parents) ||
-    value.parents.length < 1 ||
-    value.parents.length > 20 ||
-    !value.parents.every(
-      (parent) =>
-        record(parent) &&
-        exactKeys(parent, ["id", "revision", "sourceDigest"]) &&
-        taskIdIsValid(parent.id) &&
-        positiveInteger(parent.revision) &&
-        hashIsValid(parent.sourceDigest),
-    ) ||
-    new Set(value.parents.map((parent) => parent.id)).size !==
-      value.parents.length ||
-    value.owners.some(
-      (owner) =>
-        !(
-          value.parents as Array<{
-            id: unknown;
-            revision: unknown;
-            sourceDigest: unknown;
-          }>
-        ).some(
-          (parent) =>
-            parent.id === owner.id &&
-            parent.revision === owner.revision &&
-            parent.sourceDigest === owner.sourceDigest,
-        ),
-    ) ||
-    (value.state !== "ready" &&
-      value.state !== "parked" &&
-      value.state !== "permanent") ||
-    (Object.hasOwn(value, "parkedUntil") &&
-      (!nonNegativeInteger(value.parkedUntil) || value.state !== "parked"))
-  )
-    return false;
-  return value.state === "parked"
-    ? Object.hasOwn(value, "parkedUntil")
-    : !Object.hasOwn(value, "parkedUntil");
-}
-
-function validCoverageIntentReceipt(
-  value: unknown,
-): value is CoverageIntentDispatchReceipt {
-  return !!(
-    record(value) &&
-    exactKeys(value, [
-      "identity",
-      "requestHash",
-      "dispatch",
-      "at",
-      "usage",
-      "outcome",
-    ]) &&
-    hashIsValid(value.identity) &&
-    hashIsValid(value.requestHash) &&
-    positiveInteger(value.dispatch) &&
-    value.dispatch <= 1024 &&
-    nonNegativeInteger(value.at) &&
-    record(value.usage) &&
-    exactKeys(value.usage, ["inputTokens", "outputTokens"]) &&
-    nonNegativeInteger(value.usage.inputTokens) &&
-    nonNegativeInteger(value.usage.outputTokens) &&
-    (value.outcome === "dispatched" || value.outcome === "accepted")
-  );
-}
-
-function validCoverageQueue(value: unknown): value is CoverageQueueCheckpoint {
-  return !!(
-    record(value) &&
-    exactKeys(value, ["kind", "key"]) &&
-    ((value.kind === "intent" && hashIsValid(value.key)) ||
-      (value.kind === "report" && taskIdIsValid(value.key)))
-  );
-}
-
-function validCoverageReportJob(
-  value: unknown,
-): value is CoverageReportJobCheckpoint {
-  if (
-    !record(value) ||
-    !exactKeys(
-      value,
-      [
-        "version",
-        "identity",
-        "parentTaskId",
-        "parentRevision",
-        "parentSourceDigest",
-        "groupId",
-        "inventoryRevision",
-        "source",
-        "state",
-      ],
-      ["parkedUntil"],
-    ) ||
-    value.version !== 1 ||
-    !hashIsValid(value.identity) ||
-    !taskIdIsValid(value.parentTaskId) ||
-    !positiveInteger(value.parentRevision) ||
-    !hashIsValid(value.parentSourceDigest) ||
-    !coverageJobIdIsValid(value.groupId) ||
-    !positiveInteger(value.inventoryRevision) ||
-    !validSourceRef(value.source) ||
-    (value.state !== "ready" &&
-      value.state !== "parked" &&
-      value.state !== "permanent" &&
-      value.state !== "complete") ||
-    (Object.hasOwn(value, "parkedUntil") &&
-      (!nonNegativeInteger(value.parkedUntil) || value.state !== "parked"))
-  )
-    return false;
-  return value.state === "parked"
-    ? Object.hasOwn(value, "parkedUntil")
-    : !Object.hasOwn(value, "parkedUntil");
-}
-
-function validCoverageReportReceipt(
-  value: unknown,
-): value is CoverageReportDispatchCheckpoint {
-  if (
-    !record(value) ||
-    !exactKeys(value, [
-      "jobIdentity",
-      "requestHash",
-      "groupId",
-      "inventoryRevision",
-      "source",
-      "childIds",
-      "assessments",
-      "dispatch",
-      "at",
-      "usage",
-      "outcome",
-    ]) ||
-    !hashIsValid(value.jobIdentity) ||
-    !hashIsValid(value.requestHash) ||
-    !coverageJobIdIsValid(value.groupId) ||
-    !positiveInteger(value.inventoryRevision) ||
-    !validSourceRef(value.source) ||
-    !Array.isArray(value.childIds) ||
-    value.childIds.length < 1 ||
-    value.childIds.length > 20 ||
-    !value.childIds.every(coverageChildIdIsValid) ||
-    new Set(value.childIds).size !== value.childIds.length ||
-    !Array.isArray(value.assessments) ||
-    value.assessments.length !== value.childIds.length ||
-    !value.assessments.every(
-      (assessment, index) =>
-        record(assessment) &&
-        exactKeys(assessment, [
-          "childId",
-          "choice",
-          "confidence",
-          "probability",
-        ]) &&
-        assessment.childId === (value.childIds as unknown[])[index] &&
-        coverageChoices.has(assessment.choice as string) &&
-        unit(assessment.confidence) &&
-        unit(assessment.probability),
-    ) ||
-    !positiveInteger(value.dispatch) ||
-    value.dispatch > 1024 ||
-    !nonNegativeInteger(value.at) ||
-    !record(value.usage) ||
-    !exactKeys(value.usage, ["inputTokens", "outputTokens"]) ||
-    !nonNegativeInteger(value.usage.inputTokens) ||
-    !nonNegativeInteger(value.usage.outputTokens) ||
-    value.outcome !== "accepted"
-  )
-    return false;
-  return true;
-}
-
-function validCoverageMetadata(
-  value: unknown,
-): value is CoverageCheckpointMetadata {
-  if (
-    !record(value) ||
-    !exactKeys(
-      value,
-      ["state", "dispatches", "usage"],
-      [
-        "omissions",
-        "intents",
-        "intentJobs",
-        "intentReceipts",
-        "queue",
-        "jobs",
-        "reportReceipts",
-      ],
-    ) ||
-    !coverageCheckpointIsValid(value.state) ||
-    byteLength(value) > MAX_COVERAGE_CHECKPOINT_BYTES ||
-    !nonNegativeInteger(value.dispatches) ||
-    value.dispatches > 1024 ||
-    !validCoverageUsage(value.usage)
-  )
-    return false;
-  const intents = value.intents;
-  const intentJobs = value.intentJobs ?? [];
-  const intentReceipts = value.intentReceipts ?? [];
-  const queue = value.queue ?? [];
-  const jobs = value.jobs ?? [];
-  const receipts = value.reportReceipts ?? [];
-  if (
-    (value.omissions !== undefined && !nonNegativeInteger(value.omissions)) ||
-    (intents !== undefined && !validCoverageIntentJournal(intents)) ||
-    !Array.isArray(intentJobs) ||
-    intentJobs.length > MAX_COVERAGE_PENDING_JOBS ||
-    !intentJobs.every(validCoverageIntentJob) ||
-    new Set(intentJobs.map((job) => job.targetKey)).size !==
-      intentJobs.length ||
-    !Array.isArray(intentReceipts) ||
-    intentReceipts.length > MAX_COVERAGE_INTENT_RECEIPTS ||
-    !intentReceipts.every(validCoverageIntentReceipt) ||
-    new Set(intentReceipts.map((receipt) => receipt.identity)).size !==
-      intentReceipts.length ||
-    intentReceipts.some(
-      (receipt) => receipt.dispatch > (value.dispatches as number),
-    ) ||
-    !Array.isArray(queue) ||
-    queue.length > MAX_COVERAGE_PENDING_JOBS ||
-    !queue.every(validCoverageQueue) ||
-    new Set(queue.map((item) => `${item.kind}:${item.key}`)).size !==
-      queue.length ||
-    !Array.isArray(jobs) ||
-    jobs.length > MAX_COVERAGE_PENDING_JOBS ||
-    !jobs.every(validCoverageReportJob) ||
-    new Set(jobs.map((job) => job.identity)).size !== jobs.length ||
-    new Set(jobs.map((job) => job.parentTaskId)).size !== jobs.length ||
-    !Array.isArray(receipts) ||
-    receipts.length > MAX_COVERAGE_REPORT_RECEIPTS ||
-    !receipts.every(validCoverageReportReceipt) ||
-    new Set(receipts.map((receipt) => receipt.requestHash)).size !==
-      receipts.length ||
-    receipts.some((receipt) => receipt.dispatch > (value.dispatches as number))
-  )
-    return false;
-  // Legacy v10 checkpoints may omit queue; restore reconstructs canonical order.
-  if (value.queue !== undefined) {
-    const queuedIntent = new Map(intentJobs.map((job) => [job.targetKey, job]));
-    const queuedReport = new Map(jobs.map((job) => [job.parentTaskId, job]));
-    const owners = new Set<string>();
-    for (const item of queue) {
-      const bindings =
-        item.kind === "intent"
-          ? queuedIntent.get(item.key)?.owners
-          : (() => {
-              const job = queuedReport.get(item.key);
-              return job
-                ? [
-                    {
-                      id: job.parentTaskId,
-                      revision: job.parentRevision,
-                      sourceDigest: job.parentSourceDigest,
-                    },
-                  ]
-                : undefined;
-            })();
-      if (
-        !bindings ||
-        (item.kind === "intent"
-          ? queuedIntent.get(item.key)?.state === "permanent"
-          : queuedReport.get(item.key)?.state === "permanent" ||
-            queuedReport.get(item.key)?.state === "complete")
-      )
-        return false;
-      for (const binding of bindings) {
-        const key = `${binding.id}:${binding.revision}:${binding.sourceDigest}`;
-        if (owners.has(key)) return false;
-        owners.add(key);
-      }
-    }
-  }
-  return (
-    value.dispatches === value.usage.jev.calls + value.usage.extraction.calls
-  );
-}
-
-function validMonitorMetadata(
-  value: unknown,
-  state: HybridState,
-): value is MonitorCheckpointMetadata {
-  if (
-    !record(value) ||
-    !exactKeys(
-      value,
-      ["enabled", "usage"],
-      [
-        "lastJevCallAt",
-        "lastExtractionCallAt",
-        "idleDoneTaskId",
-        "healthCards",
-        "taskDetails",
-        "coverage",
-      ],
-    ) ||
-    typeof value.enabled !== "boolean" ||
-    !record(value.usage) ||
-    !exactKeys(value.usage, ["jev", "extraction"]) ||
-    ![value.usage.jev, value.usage.extraction].every(
-      (usage) =>
-        record(usage) &&
-        exactKeys(usage, ["calls", "inputTokens", "outputTokens"]) &&
-        nonNegativeInteger(usage.calls) &&
-        nonNegativeInteger(usage.inputTokens) &&
-        nonNegativeInteger(usage.outputTokens),
-    ) ||
-    (Object.hasOwn(value, "lastJevCallAt") &&
-      !nonNegativeInteger(value.lastJevCallAt)) ||
-    (Object.hasOwn(value, "lastExtractionCallAt") &&
-      !nonNegativeInteger(value.lastExtractionCallAt)) ||
-    (Object.hasOwn(value, "idleDoneTaskId") &&
-      !taskIdIsValid(value.idleDoneTaskId))
-  )
-    return false;
-  if (
-    Object.hasOwn(value, "coverage") &&
-    !validCoverageMetadata(value.coverage)
-  )
-    return false;
-  if (Object.hasOwn(value, "healthCards")) {
-    if (
-      !Array.isArray(value.healthCards) ||
-      value.healthCards.length > MAX_TASKS ||
-      !value.healthCards.every(validHealthCard) ||
-      new Set(value.healthCards.map((card) => card.taskId)).size !==
-        value.healthCards.length ||
-      !value.healthCards.every((card) =>
-        state.tasks.some((task) => task.id === card.taskId),
-      )
-    )
-      return false;
-  }
-  if (
-    Object.hasOwn(value, "taskDetails") &&
-    (!Array.isArray(value.taskDetails) ||
-      value.taskDetails.length > MAX_TASKS ||
-      !value.taskDetails.every(validTaskDetailRecord) ||
-      new Set(value.taskDetails.map((record) => record.taskId)).size !==
-        value.taskDetails.length ||
-      !value.taskDetails.every((record) => {
-        const task = state.tasks.find((item) => item.id === record.taskId);
-        return (
-          !!task &&
-          task.revision === record.revision &&
-          task.label === record.label &&
-          validSourceRef(record.taskSource) &&
-          task.source.entryId === record.taskSource.entryId &&
-          task.source.messageHash === record.taskSource.messageHash &&
-          task.source.role === record.taskSource.role &&
-          task.source.start === record.taskSource.start &&
-          task.source.end === record.taskSource.end &&
-          task.source.quoteHash === record.taskSource.quoteHash
-        );
-      }))
-  )
-    return false;
-  return (
-    !Object.hasOwn(value, "idleDoneTaskId") ||
-    state.tasks.some(
-      (task) =>
-        task.id === value.idleDoneTaskId &&
-        task.included &&
-        task.status === "done",
-    )
-  );
-}
-
 function validHealthCoverage(value: unknown): value is HealthCoverage {
   return (
     record(value) &&
@@ -1519,38 +934,6 @@ function validHealthCard(value: unknown): value is HealthCard {
   )
     return false;
   return true;
-}
-
-function validCheckpoint(value: unknown): value is Checkpoint {
-  return (
-    record(value) &&
-    exactKeys(value, ["version", "state"], ["monitor"]) &&
-    value.version === VERSION &&
-    validState(value.state) &&
-    (!Object.hasOwn(value, "monitor") ||
-      validMonitorMetadata(value.monitor, value.state))
-  );
-}
-
-/**
- * Classify persisted shape before source/reference replay. A current-shape
- * checkpoint whose canonical conversation changed remains `supported`; restore
- * reconciles that accepted amendment without being misreported as corruption.
- */
-export function checkpointStorageStatus(
-  data: unknown,
-): CheckpointStorageStatus {
-  if (data === undefined) return "absent";
-  if (!record(data)) return "corrupt";
-  if (typeof data.version === "number" && data.version !== VERSION)
-    return "unsupported";
-  try {
-    return validCheckpoint(data) && byteLength(data) <= MAX_CHECKPOINT_BYTES
-      ? "supported"
-      : "corrupt";
-  } catch {
-    return "corrupt";
-  }
 }
 
 function canonicalObservation(
@@ -1686,46 +1069,6 @@ function checkpointState(state: HybridState): HybridState {
   )
     (snapshot as unknown as { focusTaskId?: string | null }).focusTaskId = null;
   return snapshot;
-}
-
-/** Exact encoded bytes after strict v10 shape validation, before capacity denial. */
-export function checkpointBytes(
-  state: HybridState,
-  monitor?: MonitorCheckpointMetadata,
-) {
-  if (!validState(state)) throw new Error("Invalid hybrid checkpoint state");
-  const checkpoint: Checkpoint = {
-    version: VERSION,
-    state: checkpointState(state),
-    ...(monitor ? { monitor } : {}),
-  };
-  if (!validCheckpoint(checkpoint))
-    throw new Error("Invalid hybrid checkpoint");
-  return byteLength(checkpoint);
-}
-
-/** Encode only bounded derived state; source text and provider envelopes never persist. */
-export function encodeCheckpoint(
-  state: HybridState,
-  monitor?: MonitorCheckpointMetadata,
-): Checkpoint {
-  if (checkpointBytes(state, monitor) > MAX_CHECKPOINT_BYTES)
-    throw new Error("Hybrid checkpoint exceeds v10 bounds");
-  return JSON.parse(
-    JSON.stringify({
-      version: VERSION,
-      state: checkpointState(state),
-      ...(monitor ? { monitor } : {}),
-    }),
-  ) as Checkpoint;
-}
-
-/** Read only validated monitor-owned metadata; unknown checkpoint fields fail closed. */
-export function monitorCheckpointMetadata(
-  data: unknown,
-): MonitorCheckpointMetadata | undefined {
-  if (!validCheckpoint(data) || !data.monitor) return;
-  return structuredClone(data.monitor);
 }
 
 const operationCount = (outcome: NormalizedPatch) =>
@@ -2058,34 +1401,6 @@ function replayPending(
   return sameJson(replayCore(replayed), replayCore(finalState));
 }
 
-/**
- * Fail closed on malformed storage, missing canonical source, or journal whose
- * real gate/extraction/completion builders cannot reproduce its request hashes.
- */
-export function restoreCheckpoint(
-  data: unknown,
-  sourceId: string,
-  resolve: (entryId: string) => Observation | undefined,
-  preceding: (entryId: string) => readonly Observation[],
-): HybridState | undefined {
-  try {
-    if (
-      !validCheckpoint(data) ||
-      byteLength(data) > MAX_CHECKPOINT_BYTES ||
-      data.state.sourceId !== sourceId ||
-      !referencesResolve(data.state, resolve) ||
-      !replayPending(data.state, resolve, preceding)
-    )
-      return;
-    const state = structuredClone(data.state);
-    if ((state as HybridState & { focusTaskId?: unknown }).focusTaskId === null)
-      state.focusTaskId = undefined;
-    return copyState(state);
-  } catch {
-    return;
-  }
-}
-
 const MAX_STRICT_DATA_ARRAY_ITEMS = 8192;
 const MAX_STRICT_DATA_OBJECT_KEYS = 64;
 const MAX_STRICT_DATA_STRING_CODE_UNITS = MAX_CHECKPOINT_BYTES;
@@ -2095,7 +1410,7 @@ const STRICT_DATA_REJECTED = Symbol("strict-data-rejected");
 
 /**
  * Copy only enumerable own data properties before staged-v11 validation. This
- * keeps legacy validators reusable without allowing input hooks to run first.
+ * keeps structural validation side-effect free before staged-v11 checks.
  */
 function strictDetachedData(
   value: unknown,
@@ -2367,7 +1682,7 @@ function validSubtaskCheckpointEnvelope(
   );
 }
 
-/** Read only validated strict-v11 metadata; never accepts a legacy envelope. */
+/** Read only validated strict-v11 metadata; reject every non-v11 envelope. */
 export function subtaskMonitorCheckpointMetadata(
   data: unknown,
 ): SubtaskMonitorCheckpointMetadata | undefined {
@@ -2386,7 +1701,7 @@ export function subtaskMonitorCheckpointMetadata(
   }
 }
 
-/** Staged v11 classification only. It intentionally has no legacy fallback. */
+/** Staged v11 classification only. */
 export function subtaskCheckpointStorageStatus(
   data: unknown,
 ): CheckpointStorageStatus {
@@ -2437,7 +1752,7 @@ function stagedSubtaskCheckpoint(
   return checkpoint;
 }
 
-/** Exact v11 byte count before capacity denial; it never invokes v10 codecs. */
+/** Exact v11 byte count before capacity denial. */
 export function subtaskCheckpointBytes(
   state: HybridState,
   monitor?: SubtaskMonitorCheckpointMetadata,
@@ -2590,8 +1905,8 @@ export function canCommitSubtaskCheckpoint(
 }
 
 /**
- * Encode strict v11 staged data without changing the active v10 codec or
- * reserving optional bytes when no optional projection is present.
+ * Encode strict v11 staged data without reserving optional bytes when no
+ * optional projection is present.
  */
 export function encodeSubtaskCheckpoint(
   state: HybridState,
@@ -2693,7 +2008,7 @@ function journalRecordIsCurrent(
 
 /**
  * Restore v11 mandatory state exactly, then locally prune stale optional facts.
- * It never routes a v11 payload through the active v10 reader.
+ * It never routes a strict payload through a compatibility reader.
  */
 export function restoreSubtaskCheckpoint(
   data: unknown,

@@ -36,19 +36,6 @@ import {
   readLabelSelections,
   type VisibilityTask,
 } from "../analysis/activity-label";
-import {
-  type CoverageIntentDispatchReceipt,
-  type CoverageIntentJob,
-  type CoverageIntentJournal,
-  type CoverageIntentParentBinding,
-  type CoverageIntentRequest,
-  CoverageIntentRequests,
-} from "../analysis/coverage-intent";
-import {
-  type CoverageReportBatch,
-  coverageReportBatches,
-  coverageReportDecisions,
-} from "../analysis/coverage-report";
 import type { ExtractionInput } from "../analysis/extractor";
 import {
   type EvaluationRequest,
@@ -100,13 +87,6 @@ import {
   visibilityTaskSourceDigest,
 } from "./board-projection";
 import {
-  type CoverageAccess,
-  type CoverageInventory,
-  type CoverageRestoreReference,
-  type CoverageSnapshot,
-  CoverageStore,
-} from "./coverage";
-import {
   type ExecutionVisibilitySnapshot,
   ExecutionVisibilityStore,
   type VisibilityToolPhase,
@@ -119,18 +99,13 @@ import {
   RetryableProviderError,
 } from "./hybrid";
 import {
-  type CoverageQueueCheckpoint,
-  type CoverageReportDispatchCheckpoint,
-  type CoverageReportJobCheckpoint,
   canCommitSubtaskCheckpoint,
   commitSubtaskCheckpoint,
-  encodeCheckpoint,
   encodeSubtaskCheckpoint,
   type HealthCard,
   type HealthCoverage,
   type HealthFields,
   MAX_CHECKPOINT_BYTES,
-  type MonitorCheckpointMetadata,
   restoreSubtaskCheckpoint,
   type SubtaskMonitorCheckpointMetadata,
   type SubtaskOmissionSummary,
@@ -344,10 +319,6 @@ interface ActiveWork {
 interface Telemetry {
   sourceId: string;
   usage: { jev: ProviderUsage; extraction: ProviderUsage };
-  coverage: {
-    dispatches: number;
-    usage: { jev: ProviderUsage; extraction: ProviderUsage };
-  };
   lastJevCallAt?: number;
   lastExtractionCallAt?: number;
 }
@@ -360,7 +331,7 @@ interface ControlWork {
   scan?: ContextScan;
   data?: unknown;
   sourceId: string;
-  metadata?: MonitorCheckpointMetadata;
+  metadata?: SubtaskMonitorCheckpointMetadata;
   preserveControls: boolean;
   telemetry: Telemetry;
   /** Raw strict-v11 metadata retains original-store proof for history merge. */
@@ -407,15 +378,6 @@ export interface DebugSnapshot {
   processing: "idle" | "processing" | "waiting";
   service: { code: string; label: string };
   diagnostics: { code: string; label: string; count: number }[];
-}
-
-/** Detached optional coverage display; current reads remain runtime-only. */
-export interface CoverageMonitorSnapshot extends CoverageSnapshot {
-  current: Array<{ groupId: string; childIds: string[] }>;
-  pendingCount: number;
-  pendingBytes: number;
-  omissions: number;
-  exhausted: boolean;
 }
 
 /** Detached generic sidecar projection. It cannot change parent task state. */
@@ -501,9 +463,6 @@ const diagnosticLabels: Record<string, string> = {
 };
 
 class RetryableJevError extends RetryableProviderError {}
-
-/** Optional transport must stop before selected-model network dispatch. */
-class CoverageDispatchRejected extends Error {}
 
 const copyUsage = (usage: ProviderUsage): ProviderUsage => ({ ...usage });
 const sha256 = (value: string) =>
@@ -651,26 +610,7 @@ const assistantVisibleText = (message: unknown) => {
   return text.join("");
 };
 
-const MAX_COVERAGE_TOOL_RESULT_BYTES = 32 * 1024;
-const MAX_PENDING_COVERAGE_CANDIDATES = 16;
-const MAX_PENDING_COVERAGE_BYTES = 64 * 1024;
 const MAX_PENDING_SUBTASK_CAPTURE_BYTES = 64 * 1024;
-
-/** Matches the bounded text-block join used by passive tool adapters. */
-const coverageToolResultText = (message: Record<string, unknown>) => {
-  if (!Array.isArray(message.content)) return;
-  const text = message.content
-    .flatMap((part) => {
-      const value = record(part);
-      return value?.type === "text" && typeof value.text === "string"
-        ? [value.text]
-        : [];
-    })
-    .join("\n");
-  return Buffer.byteLength(text, "utf8") <= MAX_COVERAGE_TOOL_RESULT_BYTES
-    ? text
-    : undefined;
-};
 
 /**
  * Atomic host runtime for hybrid transactions. Display reads receive copied
@@ -689,8 +629,6 @@ export class Monitor {
   private readonly activityGateway: JevGateway;
   /** Optional grounded details never share semantic/health retry state. */
   private readonly detailGateway: JevGateway;
-  /** Coverage report classification has isolated retries, accounting, and flight. */
-  private readonly coverageGateway: JevGateway;
   /** Generic subtask gate has its own durable runtime admission callback. */
   private readonly subtaskGateway: JevGateway;
   private subtaskGateDispatch?: (at: number) => boolean;
@@ -719,59 +657,9 @@ export class Monitor {
     jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
     extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
   };
-  /** Optional coverage never participates in semantic task reduction. */
-  private coverage = new CoverageStore();
+  /** Passive host ingress feeds generic subtask evidence and access gates. */
   private coverageAdapter = new CoverageAdapter();
-  private coverageIntents = new CoverageIntentRequests();
-  private coverageEpoch = 0;
-  /** One optional coverage transport owner across intent and report work. */
-  private coverageFlight?:
-    | {
-        kind: "intent";
-        epoch: number;
-        jobKey: string;
-        request: CoverageIntentRequest;
-        controller: AbortController;
-        dispatchAt?: number;
-      }
-    | {
-        kind: "report";
-        epoch: number;
-        jobIdentity: string;
-        batch: CoverageReportBatch;
-        dispatchAt?: number;
-      };
-  /** One durable ungrounded job per exact candidate-owner set. */
-  private coverageIntentJobs = new Map<string, CoverageIntentJob>();
-  /** Single ordered union of intent and report work; keys remain content-free. */
-  private coverageQueue: CoverageQueueCheckpoint[] = [];
-  /** Frozen runtime prompts; durable intent jobs rebuild only from canonical refs. */
-  private coverageIntentRequests = new Map<string, CoverageIntentRequest>();
-  /** One latest content-free proof per selected-model intent identity. */
-  private coverageIntentReceipts = new Map<
-    string,
-    CoverageIntentDispatchReceipt
-  >();
-  /** One position-preserving report job per parent/resource, shared with intent jobs. */
-  private coverageJobs = new Map<string, CoverageReportJobCheckpoint>();
-  /** Full assessed chunks, content-free and durable, suppress rebilling. */
-  private coverageReportReceipts = new Map<
-    string,
-    CoverageReportDispatchCheckpoint
-  >();
-  private optionalTurn: "coverage" | "detail" = "coverage";
-  private pendingCoverageInventories: CoverageInventory[] = [];
-  private pendingCoverageAccess: ReturnType<
-    CoverageAdapter["confirm"]
-  >["access"] = [];
-  /** Durable optional omission count; it never changes semantic task state. */
-  private coverageOmissions = 0;
-  private coverageAdapterOmissions = 0;
-  private coverageDispatches = 0;
-  private readonly coverageUsage = {
-    jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
-    extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
-  };
+  private coverageAdapterEpoch = 0;
   /** Runtime owns subtask store/journal; Monitor owns envelope publication. */
   private subtaskRuntime?: SubtaskRuntime;
   /** Last authority-validated projection; passive views never reopen host history. */
@@ -927,13 +815,6 @@ export class Monitor {
       onDispatch: (at) => this.recordJevDispatch(at),
       onPermanentError: () => this.note("detail-capacity-skipped"),
     });
-    this.coverageGateway = new JevGateway({
-      fetch: (url, init) => globalThis.fetch(url, init),
-      getApiKey: () => process.env.TYPESAFE_API_KEY,
-      // Durable coverage budget/job proof must exist before optional fetch.
-      beforeDispatch: (at) => this.recordCoverageJevDispatch(at),
-      onPermanentError: () => this.note("jev-unavailable"),
-    });
     this.subtaskGateway = new JevGateway({
       fetch: (url, init) => globalThis.fetch(url, init),
       getApiKey: () => process.env.TYPESAFE_API_KEY,
@@ -986,9 +867,8 @@ export class Monitor {
     if (!this.enabled) return;
     this.coverageAdapter.start(
       { toolCallId: callId, toolName, args },
-      this.coverageEpoch,
+      this.coverageAdapterEpoch,
     );
-    this.syncCoverageAdapterOmissions();
     this.publish();
   }
 
@@ -997,7 +877,7 @@ export class Monitor {
     if (!this.enabled) return;
     this.coverageAdapter.end(
       { toolCallId: callId, toolName },
-      this.coverageEpoch,
+      this.coverageAdapterEpoch,
     );
     this.publish();
   }
@@ -1010,13 +890,7 @@ export class Monitor {
     if (!this.enabled) return;
     const pass = new CanonicalPass(entries);
     try {
-      const accepted = this.coverageAdapter.confirm(
-        pass.entries,
-        this.coverageEpoch,
-      );
-      // Keep bounded passive adapter ingress visible, but do not admit it into
-      // CoverageStore, schedule legacy intent/report work, or wake a provider.
-      this.enqueueCoverageAdapterResult(accepted, pass);
+      this.coverageAdapter.confirm(pass.entries, this.coverageAdapterEpoch);
     } catch {
       // Optional adapter confirmation never changes mandatory scheduling.
     }
@@ -1025,43 +899,6 @@ export class Monitor {
     this.publish();
   }
 
-  /** Detached optional projection. Runtime reads do not enter checkpoints. */
-  coverageSnapshot(): CoverageMonitorSnapshot {
-    const snapshot = this.coverage.snapshot();
-    const groups = snapshot.groups;
-    const current = this.coverageAdapter.activity().flatMap((activity) => {
-      const matching = groups.filter(
-        (group) =>
-          group.resourceKey === activity.resourceKey &&
-          group.complete &&
-          this.state.tasks.some(
-            (task) =>
-              task.id === group.parentTaskId &&
-              task.revision === group.parentRevision &&
-              task.included,
-          ),
-      );
-      if (matching.length !== 1) return [];
-      const group = matching[0];
-      const childIds = activity.itemKeys.flatMap((key) => {
-        const child = group.children.find((item) => item.key === key);
-        return child ? [child.id] : [];
-      });
-      return childIds.length === activity.itemKeys.length
-        ? [{ groupId: group.id, childIds }]
-        : [];
-    });
-    return {
-      ...snapshot,
-      current,
-      pendingCount: this.pendingCoverageCount(),
-      pendingBytes: this.pendingCoverageBytes(),
-      omissions: this.coverageOmissions,
-      exhausted: this.coverageDispatches >= 1024,
-    };
-  }
-
-  /** Detached generic sidecar view. Reading it never schedules or mutates. */
   subtaskSnapshot(): SubtaskMonitorSnapshot {
     if (this.pendingSubtaskCheckpoint)
       return structuredClone(
@@ -1388,7 +1225,6 @@ export class Monitor {
       this.healthGateway.pause();
       this.activityGateway.pause();
       this.detailGateway.pause();
-      this.coverageGateway.pause();
       const retainReportAuthority = this.subtaskFlightIsReport;
       if (retainReportAuthority)
         this.subtaskGatewayResetAfterReportDrain = true;
@@ -1400,7 +1236,7 @@ export class Monitor {
       this.subtaskDiagnosticAuthority = undefined;
       this.subtaskOwners = [];
       this.subtaskWakeKey = undefined;
-      this.resetCoverageRuntime();
+      this.resetCoverageAdapter();
       this.correctionGateway.pause();
       this.dropVisibilityFlight();
       this.visibilityGateway.pause();
@@ -1410,12 +1246,10 @@ export class Monitor {
       this.wakeHealthFromCurrent("control", true, pass);
       this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
-      this.coverageGateway.enable(this.identity());
       if (!retainReportAuthority)
         this.subtaskGateway.enable(this.subtaskIdentity());
       this.correctionGateway.enable(this.identity());
       this.visibilityGateway.enable(this.visibilityIdentity());
-      this.wakeCoverage(true);
       this.waitingForWake = false;
       this.requeue(pass);
       if (!this.queued.length) this.wakeSubtasks(pass, true);
@@ -1442,13 +1276,9 @@ export class Monitor {
           job.state !== "terminal" &&
           !this.healthWorkCurrent(job.successor ?? job.work, pass),
       );
-      // Amendments can affect pending coverage without touching an older card.
+      // Amendments can affect pending health work without touching an older card.
       if (healthChanged || staleHealthWork)
         this.wakeHealthFromCurrent("canonical", false, pass);
-      this.reconcileCoverageCanonical(pass);
-      this.reconcileCoverageReportJournal(pass);
-      this.reconcileCoverageIntentJournal(pass);
-      this.wakeCoverage();
       this.requeue(pass);
       if (this.queued.length) {
         this.idleDoneInvalidated = true;
@@ -1529,13 +1359,6 @@ export class Monitor {
         jev: copyUsage(this.usage.jev),
         extraction: copyUsage(this.usage.extraction),
       },
-      coverage: {
-        dispatches: this.coverageDispatches,
-        usage: {
-          jev: copyUsage(this.coverageUsage.jev),
-          extraction: copyUsage(this.coverageUsage.extraction),
-        },
-      },
       ...(this.lastJevCallAt ? { lastJevCallAt: this.lastJevCallAt } : {}),
       ...(this.lastExtractionCallAt
         ? { lastExtractionCallAt: this.lastExtractionCallAt }
@@ -1591,7 +1414,6 @@ export class Monitor {
     this.healthGateway.pause();
     this.activityGateway.pause();
     this.detailGateway.pause();
-    this.coverageGateway.pause();
     this.subtaskRuntime?.invalidate();
     this.subtaskGateway.pause();
     this.subtaskGateDispatch = undefined;
@@ -1600,7 +1422,7 @@ export class Monitor {
     this.subtaskWakeKey = undefined;
     this.correctionGateway.pause();
     this.resetVisibility();
-    this.resetCoverageRuntime();
+    this.resetCoverageAdapter();
     this.clearActivity(false);
     this.evidence.clearPending();
   }
@@ -1610,7 +1432,7 @@ export class Monitor {
   }
 
   private mergeTelemetry(
-    metadata: MonitorCheckpointMetadata | undefined,
+    metadata: SubtaskMonitorCheckpointMetadata | undefined,
     work: ControlWork,
     pass: CanonicalPass,
   ) {
@@ -1642,34 +1464,6 @@ export class Monitor {
     this.usage.extraction.outputTokens = Math.max(
       this.usage.extraction.outputTokens,
       work.telemetry.usage.extraction.outputTokens,
-    );
-    this.coverageDispatches = Math.max(
-      this.coverageDispatches,
-      work.telemetry.coverage.dispatches,
-    );
-    this.coverageUsage.jev.calls = Math.max(
-      this.coverageUsage.jev.calls,
-      work.telemetry.coverage.usage.jev.calls,
-    );
-    this.coverageUsage.jev.inputTokens = Math.max(
-      this.coverageUsage.jev.inputTokens,
-      work.telemetry.coverage.usage.jev.inputTokens,
-    );
-    this.coverageUsage.jev.outputTokens = Math.max(
-      this.coverageUsage.jev.outputTokens,
-      work.telemetry.coverage.usage.jev.outputTokens,
-    );
-    this.coverageUsage.extraction.calls = Math.max(
-      this.coverageUsage.extraction.calls,
-      work.telemetry.coverage.usage.extraction.calls,
-    );
-    this.coverageUsage.extraction.inputTokens = Math.max(
-      this.coverageUsage.extraction.inputTokens,
-      work.telemetry.coverage.usage.extraction.inputTokens,
-    );
-    this.coverageUsage.extraction.outputTokens = Math.max(
-      this.coverageUsage.extraction.outputTokens,
-      work.telemetry.coverage.usage.extraction.outputTokens,
     );
     this.lastJevCallAt =
       Math.max(this.lastJevCallAt ?? 0, work.telemetry.lastJevCallAt ?? 0) ||
@@ -1910,11 +1704,9 @@ export class Monitor {
     this.wakeHealthFromCurrent("control", true, pass);
     this.activityGateway.enable(this.identity());
     this.detailGateway.enable(this.identity());
-    this.coverageGateway.enable(this.identity());
     this.subtaskGateway.enable(this.subtaskIdentity());
     this.correctionGateway.enable(this.identity());
     this.visibilityGateway.enable(this.visibilityIdentity());
-    this.wakeCoverage();
     this.rememberVisibilityFrontier(pass);
     this.requeue(pass, true);
     if (this.queued.length) this.idleDoneInvalidated = true;
@@ -2404,16 +2196,7 @@ export class Monitor {
     this.invalidateCorrections();
     this.replaceSubtaskRuntime(subtasks);
     this.state = emptyState(sourceId);
-    this.coverage = new CoverageStore();
-    this.resetCoverageRuntime();
-    this.coverageIntents = new CoverageIntentRequests();
-    this.coverageIntentJobs.clear();
-    this.coverageQueue = [];
-    this.coverageIntentRequests.clear();
-    this.coverageIntentReceipts.clear();
-    this.coverageJobs.clear();
-    this.coverageReportReceipts.clear();
-    this.coverageOmissions = 0;
+    this.resetCoverageAdapter();
     this.card = undefined;
     this.healthCards.clear();
     this.taskDetails.clear();
@@ -2450,13 +2233,6 @@ export class Monitor {
     this.usage.extraction.calls = 0;
     this.usage.extraction.inputTokens = 0;
     this.usage.extraction.outputTokens = 0;
-    this.coverageDispatches = 0;
-    this.coverageUsage.jev = { calls: 0, inputTokens: 0, outputTokens: 0 };
-    this.coverageUsage.extraction = {
-      calls: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-    };
   }
 
   /** Reject only persisted shape; canonical amendments remain normal restore reconciliation. */
@@ -2495,97 +2271,6 @@ export class Monitor {
       : undefined;
   }
 
-  private durableCoverageMetadata() {
-    const state = this.coverage.checkpoint();
-    const usage = {
-      jev: validUsage(this.coverageUsage.jev),
-      extraction: validUsage(this.coverageUsage.extraction),
-    };
-    const intents = this.coverageIntents.journalSnapshot();
-    const intentJobs = [...this.coverageIntentJobs.values()].map((job) =>
-      structuredClone(job),
-    );
-    const intentReceipts = [...this.coverageIntentReceipts.values()].map(
-      (receipt) => structuredClone(receipt),
-    );
-    const queue = this.coverageQueue.map((item) => ({ ...item }));
-    const jobs = [...this.coverageJobs.values()].map((job) =>
-      structuredClone(job),
-    );
-    const reportReceipts = [...this.coverageReportReceipts.values()].map(
-      (receipt) => structuredClone(receipt),
-    );
-    if (
-      state.groups.length === 0 &&
-      state.nextGroupId === 1 &&
-      state.nextChildId === 1 &&
-      this.coverageDispatches === 0 &&
-      usage.jev.calls === 0 &&
-      usage.jev.inputTokens === 0 &&
-      usage.jev.outputTokens === 0 &&
-      usage.extraction.calls === 0 &&
-      usage.extraction.inputTokens === 0 &&
-      usage.extraction.outputTokens === 0 &&
-      this.coverageOmissions === 0 &&
-      intents.accepted.length === 0 &&
-      intents.negative.length === 0 &&
-      intentJobs.length === 0 &&
-      intentReceipts.length === 0 &&
-      queue.length === 0 &&
-      jobs.length === 0 &&
-      reportReceipts.length === 0
-    )
-      return;
-    return {
-      state,
-      dispatches: this.coverageDispatches,
-      usage,
-      ...(this.coverageOmissions ? { omissions: this.coverageOmissions } : {}),
-      ...(intents.accepted.length || intents.negative.length
-        ? { intents }
-        : {}),
-      ...(intentJobs.length ? { intentJobs } : {}),
-      ...(intentReceipts.length ? { intentReceipts } : {}),
-      ...(queue.length ? { queue } : {}),
-      ...(jobs.length ? { jobs } : {}),
-      ...(reportReceipts.length ? { reportReceipts } : {}),
-    };
-  }
-
-  private metadata(
-    enabled = this.enabled,
-    healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
-    state: HybridState = this.state,
-    prospectiveIdleDoneTaskId?: string,
-    taskDetails: ReadonlyMap<string, TaskDetailRecord> = this.taskDetails,
-  ): MonitorCheckpointMetadata {
-    const idleDoneTaskId = this.idleDoneTaskIdFor(
-      state,
-      prospectiveIdleDoneTaskId,
-    );
-    const coverage = this.durableCoverageMetadata();
-    return {
-      enabled,
-      usage: {
-        jev: validUsage(this.usage.jev),
-        extraction: validUsage(this.usage.extraction),
-      },
-      ...(this.lastJevCallAt ? { lastJevCallAt: this.lastJevCallAt } : {}),
-      ...(this.lastExtractionCallAt
-        ? { lastExtractionCallAt: this.lastExtractionCallAt }
-        : {}),
-      ...(idleDoneTaskId ? { idleDoneTaskId } : {}),
-      ...(healthCards.size
-        ? { healthCards: [...healthCards.values()].map(copyHealthCard) }
-        : {}),
-      ...(this.options.richDetailsEnabled && taskDetails.size
-        ? { taskDetails: [...taskDetails.values()].map(copyDetailRecord) }
-        : {}),
-      ...(coverage ? { coverage } : {}),
-    };
-  }
-
-  /** Reentrant controls may read only a same-source restore candidate. */
   private stagedRestoredSubtaskHistory() {
     for (const candidate of [
       this.savingRestoredSubtaskHistory,
@@ -2616,7 +2301,7 @@ export class Monitor {
       : prior;
   }
 
-  /** Strict-v11 monitor projection; generic sidecar replaces legacy coverage. */
+  /** Strict-v11 monitor projection includes only live generic sidecar state. */
   private subtaskMetadata(
     enabled = this.enabled,
     healthCards: ReadonlyMap<string, HealthCard> = this.healthCards,
@@ -2893,7 +2578,7 @@ export class Monitor {
       try {
         // Capability must come from a fresh confirmation of this exact active
         // canonical branch, never listener payloads or stored adapter state.
-        this.coverageAdapter.confirm(pass.entries, this.coverageEpoch);
+        this.coverageAdapter.confirm(pass.entries, this.coverageAdapterEpoch);
         const confirmed = this.coverageAdapter.metadata();
         if (!confirmed) this.subtaskEvidence = undefined;
         else if (
@@ -4609,7 +4294,7 @@ export class Monitor {
   }
 
   private applyMetadata(
-    metadata: MonitorCheckpointMetadata | undefined,
+    metadata: SubtaskMonitorCheckpointMetadata | undefined,
     pass?: CanonicalPass,
   ) {
     const cards = metadata?.healthCards ?? [];
@@ -4630,145 +4315,6 @@ export class Monitor {
     );
     this.parkedDetails.clear();
     this.rebuildDetailValues(pass);
-    const savedCoverage = metadata?.coverage;
-    const restoredCoverage = savedCoverage
-      ? CoverageStore.restore(savedCoverage.state, {
-          parents: this.state.tasks,
-          sourceCurrent: (reference) =>
-            this.coverageSourceCurrent(reference, pass),
-        })
-      : undefined;
-    this.coverage = restoredCoverage ?? new CoverageStore();
-    this.coverageDispatches = savedCoverage?.dispatches ?? 0;
-    this.coverageUsage.jev = validUsage(
-      savedCoverage?.usage.jev ?? { calls: 0, inputTokens: 0, outputTokens: 0 },
-    );
-    this.coverageUsage.extraction = validUsage(
-      savedCoverage?.usage.extraction ?? {
-        calls: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-      },
-    );
-    const intentJournal: CoverageIntentJournal | undefined =
-      savedCoverage?.intents;
-    this.coverageIntents = CoverageIntentRequests.restoreJournal(
-      intentJournal,
-      this.state,
-      (entryId) => (pass ? this.resolveObservation(pass, entryId) : undefined),
-    );
-    this.coverageIntentJobs = new Map(
-      (savedCoverage?.intentJobs ?? [])
-        .filter((job) => this.coverageIntentJobCurrent(job, pass))
-        .map((job) => [job.targetKey, structuredClone(job)]),
-    );
-    this.coverageIntentRequests.clear();
-    const restoredIntentIdentities = new Set(
-      [
-        ...this.coverageIntentJobs.values(),
-        ...this.coverageIntents
-          .journalSnapshot()
-          .accepted.map((receipt) => ({ identity: receipt.identity })),
-        ...this.coverageIntents
-          .journalSnapshot()
-          .negative.map((receipt) => ({ identity: receipt.identity })),
-      ].map((item) => item.identity),
-    );
-    this.coverageIntentReceipts = new Map(
-      (savedCoverage?.intentReceipts ?? [])
-        .filter((receipt) => restoredIntentIdentities.has(receipt.identity))
-        .map((receipt) => [receipt.identity, structuredClone(receipt)]),
-    );
-    this.coverageOmissions = savedCoverage?.omissions ?? 0;
-    this.coverageJobs = new Map(
-      (savedCoverage?.jobs ?? [])
-        .filter((job) => this.coverageReportJobCurrent(job, pass))
-        .map((job) => [job.parentTaskId, structuredClone(job)]),
-    );
-    this.coverageReportReceipts = new Map(
-      (savedCoverage?.reportReceipts ?? [])
-        .filter((receipt) => {
-          const job = [...this.coverageJobs.values()].find(
-            (candidate) => candidate.identity === receipt.jobIdentity,
-          );
-          return !!(
-            job &&
-            this.coverageReportReceiptCurrent(receipt, pass) &&
-            this.coverageReportBatchesFor(job, pass).some(
-              (batch) =>
-                batch.requestHash === receipt.requestHash &&
-                batch.childIds.length === receipt.childIds.length &&
-                batch.childIds.every(
-                  (childId, index) => childId === receipt.childIds[index],
-                ),
-            )
-          );
-        })
-        .map((receipt) => [receipt.requestHash, structuredClone(receipt)]),
-    );
-    this.coverageQueue = [];
-    let droppedQueueItems = 0;
-    const enqueueRestored = (item: CoverageQueueCheckpoint) => {
-      const job =
-        item.kind === "intent"
-          ? this.coverageIntentJobs.get(item.key)
-          : this.coverageJobs.get(item.key);
-      if (
-        !job ||
-        job.state === "permanent" ||
-        (item.kind === "report" && job.state === "complete") ||
-        this.coverageQueue.length >= 20 ||
-        this.coverageQueuePosition(item, this.coverageQueueOwners(item)) >= 0
-      ) {
-        droppedQueueItems++;
-        return;
-      }
-      this.coverageQueue.push({ ...item });
-    };
-    for (const item of savedCoverage?.queue ?? []) enqueueRestored(item);
-    // Only persisted queue order outranks later durable job order. Fallback
-    // entries are reconstructed after stale owner authority is removed.
-    if (this.normalizeCoverageIntentOverlaps()) {
-      droppedQueueItems++;
-      const retainedIntentIdentities = new Set(
-        [
-          ...this.coverageIntentJobs.values(),
-          ...this.coverageIntents
-            .journalSnapshot()
-            .accepted.map((receipt) => ({ identity: receipt.identity })),
-          ...this.coverageIntents
-            .journalSnapshot()
-            .negative.map((receipt) => ({ identity: receipt.identity })),
-        ].map((item) => item.identity),
-      );
-      this.coverageIntentReceipts = new Map(
-        [...this.coverageIntentReceipts].filter(([identity]) =>
-          retainedIntentIdentities.has(identity),
-        ),
-      );
-    }
-    for (const job of this.coverageJobs.values())
-      if (
-        job.state !== "permanent" &&
-        job.state !== "complete" &&
-        !this.coverageQueue.some(
-          (item) => item.kind === "report" && item.key === job.parentTaskId,
-        )
-      )
-        enqueueRestored({ kind: "report", key: job.parentTaskId });
-    for (const job of this.coverageIntentJobs.values())
-      if (
-        job.state !== "permanent" &&
-        !this.coverageQueue.some(
-          (item) => item.kind === "intent" && item.key === job.targetKey,
-        )
-      )
-        enqueueRestored({ kind: "intent", key: job.targetKey });
-    if (droppedQueueItems)
-      this.coverageOmissions = saturatingAdd(
-        this.coverageOmissions,
-        droppedQueueItems,
-      );
     this.lastDisplayedTaskId = metadata?.idleDoneTaskId;
     this.idleDoneInvalidated = !this.lastDisplayedTaskId;
     this.syncPresentationCard();
@@ -4780,1568 +4326,14 @@ export class Monitor {
     this.usage.jev.outputTokens = usage?.jev.outputTokens ?? 0;
     this.usage.extraction.calls = usage?.extraction.calls ?? 0;
     this.usage.extraction.inputTokens = usage?.extraction.inputTokens ?? 0;
-    this.usage.extraction.outputTokens = usage?.extraction.outputTokens ?? 0;
   }
 
-  private coverageSourceCurrent(
-    reference: CoverageRestoreReference,
-    pass?: CanonicalPass,
-  ) {
-    if (!pass) return false;
-    if ("role" in reference) {
-      const observation = pass.observation(reference.entryId);
-      return !!(
-        observation &&
-        observation.hash === reference.messageHash &&
-        observation.role === reference.role &&
-        reference.start >= 0 &&
-        reference.end <= observation.text.length &&
-        sha256(observation.text.slice(reference.start, reference.end)) ===
-          reference.quoteHash
-      );
-    }
-    const entry = record(pass.entry(reference.entryId));
-    const message =
-      entry && entry.type === "message" ? record(entry.message) : undefined;
-    if (!message) return false;
-    if (
-      message.role !== "toolResult" ||
-      typeof message.toolName !== "string" ||
-      !message.toolName ||
-      typeof message.toolCallId !== "string" ||
-      message.isError === true ||
-      message.excludeFromContext === true
-    )
-      return false;
-    const text = coverageToolResultText(message);
-    return !!(
-      text !== undefined &&
-      sha256(text) === reference.messageHash &&
-      sha256(message.toolCallId) === reference.callIdDigest
-    );
-  }
-
-  /** Drop optional receipts whose canonical source no longer validates. */
-  private reconcileCoverageCanonical(pass: CanonicalPass) {
-    const current = CoverageStore.restore(this.coverage.checkpoint(), {
-      parents: this.state.tasks,
-      sourceCurrent: (reference) => this.coverageSourceCurrent(reference, pass),
-    });
-    if (current) this.coverage = current;
-  }
-
-  private coverageToolSourceCurrent(
-    source: { entryId: string; messageHash: string; callId: string },
-    pass: CanonicalPass,
-  ) {
-    return this.coverageSourceCurrent(
-      {
-        entryId: source.entryId,
-        messageHash: source.messageHash,
-        callIdDigest: sha256(source.callId),
-      },
-      pass,
-    );
-  }
-
-  private pendingCoverageCount(
-    inventories: readonly CoverageInventory[] = this.pendingCoverageInventories,
-    access: readonly ReturnType<
-      CoverageAdapter["confirm"]
-    >["access"][number][] = this.pendingCoverageAccess,
-  ) {
-    return inventories.length + access.length;
-  }
-
-  /** Measure only projected candidate metadata; never tool result bodies or paths. */
-  private pendingCoverageBytes(
-    inventories: readonly CoverageInventory[] = this.pendingCoverageInventories,
-    access: readonly ReturnType<
-      CoverageAdapter["confirm"]
-    >["access"][number][] = this.pendingCoverageAccess,
-  ) {
-    if (!this.pendingCoverageCount(inventories, access)) return 0;
-    try {
-      return Buffer.byteLength(
-        JSON.stringify({
-          inventories: inventories.map((inventory) => ({
-            resourceKey: inventory.resourceKey,
-            revision: inventory.revision,
-            complete: inventory.complete,
-            ...(inventory.knownTotal === undefined
-              ? {}
-              : { knownTotal: inventory.knownTotal }),
-            ...(inventory.replacement ? { replacement: true } : {}),
-            source: {
-              entryId: inventory.source.entryId,
-              messageHash: inventory.source.messageHash,
-              callIdDigest: sha256(inventory.source.callId),
-            },
-            items: inventory.items.map((item) => ({
-              key: item.key,
-              label: item.label,
-            })),
-          })),
-          access: access.map((candidate) => ({
-            resourceKey: candidate.resourceKey,
-            itemKeys: [...candidate.itemKeys],
-            source: {
-              entryId: candidate.source.entryId,
-              messageHash: candidate.source.messageHash,
-              callIdDigest: sha256(candidate.source.callId),
-            },
-          })),
-        }),
-        "utf8",
-      );
-    } catch {
-      return Number.MAX_SAFE_INTEGER;
-    }
-  }
-
-  private recordCoverageOmission(count = 1, durable = false) {
-    if (!Number.isSafeInteger(count) || count <= 0) return;
-    this.coverageOmissions = saturatingAdd(this.coverageOmissions, count);
-    if (durable) this.persistCoverageState();
-  }
-
-  /** Adapter omissions are cumulative; consume each advance once. */
-  private syncCoverageAdapterOmissions(
-    omissions = this.coverageAdapter.snapshot().omissions,
-  ) {
-    if (!Number.isSafeInteger(omissions) || omissions < 0) return;
-    if (omissions < this.coverageAdapterOmissions) {
-      this.coverageAdapterOmissions = omissions;
-      return;
-    }
-    this.recordCoverageOmission(
-      omissions - this.coverageAdapterOmissions,
-      true,
-    );
-    this.coverageAdapterOmissions = omissions;
-  }
-
-  private fitsPendingCoverage(
-    inventories: readonly CoverageInventory[],
-    access: readonly ReturnType<CoverageAdapter["confirm"]>["access"][number][],
-  ) {
-    return (
-      this.pendingCoverageCount(inventories, access) <=
-        MAX_PENDING_COVERAGE_CANDIDATES &&
-      this.pendingCoverageBytes(inventories, access) <=
-        MAX_PENDING_COVERAGE_BYTES
-    );
-  }
-
-  /** Passive candidate insert/replacement keeps one shared bounded ingress. */
-  private enqueuePendingInventory(inventory: CoverageInventory) {
-    const existing = this.pendingCoverageInventories.findIndex(
-      (candidate) =>
-        candidate.resourceKey === inventory.resourceKey &&
-        candidate.revision === inventory.revision &&
-        candidate.source.entryId === inventory.source.entryId,
-    );
-    const inventories = [...this.pendingCoverageInventories];
-    if (existing >= 0) inventories[existing] = inventory;
-    else inventories.push(inventory);
-    if (!this.fitsPendingCoverage(inventories, this.pendingCoverageAccess)) {
-      this.recordCoverageOmission(1, true);
-      return;
-    }
-    this.pendingCoverageInventories = inventories;
-  }
-
-  private enqueuePendingAccess(
-    access: ReturnType<CoverageAdapter["confirm"]>["access"][number],
-  ) {
-    const existing = this.pendingCoverageAccess.findIndex(
-      (candidate) => candidate.source.entryId === access.source.entryId,
-    );
-    const accesses = [...this.pendingCoverageAccess];
-    if (existing >= 0) accesses[existing] = access;
-    else accesses.push(access);
-    if (!this.fitsPendingCoverage(this.pendingCoverageInventories, accesses)) {
-      this.recordCoverageOmission(1, true);
-      return;
-    }
-    this.pendingCoverageAccess = accesses;
-  }
-
-  private prunePendingCoverage(pass: CanonicalPass) {
-    this.pendingCoverageInventories = this.pendingCoverageInventories.filter(
-      (inventory) => this.coverageToolSourceCurrent(inventory.source, pass),
-    );
-    this.pendingCoverageAccess = this.pendingCoverageAccess.filter((access) =>
-      this.coverageToolSourceCurrent(access.source, pass),
-    );
-  }
-
-  private enqueueCoverageAdapterResult(
-    result: ReturnType<CoverageAdapter["confirm"]>,
-    pass: CanonicalPass,
-  ) {
-    this.syncCoverageAdapterOmissions(result.omissions);
-    for (const inventory of result.inventories)
-      if (this.coverageToolSourceCurrent(inventory.source, pass))
-        this.enqueuePendingInventory(inventory);
-    for (const access of result.access)
-      if (this.coverageToolSourceCurrent(access.source, pass))
-        this.enqueuePendingAccess(access);
-  }
-
-  /** Clone through bounded checkpoint validation before an optional transaction. */
-  private clonedCoverage() {
-    return CoverageStore.restore(this.coverage.checkpoint(), {
-      parents: this.state.tasks,
-      sourceCurrent: () => true,
-    });
-  }
-
-  private currentCoverageIntent(resourceKey: string) {
-    const candidates = this.coverageIntents
-      .snapshot()
-      .filter((intent) => intent.resourceKey === resourceKey)
-      .flatMap((intent) => {
-        const parent = this.state.tasks.find(
-          (task) =>
-            task.id === intent.parentTaskId &&
-            task.revision === intent.parentRevision &&
-            task.included &&
-            visibilityTaskSourceDigest(task) === intent.parentSourceDigest,
-        );
-        return parent ? [{ parent, intent }] : [];
-      });
-    return candidates.length === 1 ? candidates[0] : undefined;
-  }
-
-  /** Persist current optional coverage state under both ON and OFF projections. */
-  private persistCoverageState() {
-    try {
-      if (this.subtaskOmissions !== undefined) {
-        encodeSubtaskCheckpoint(
-          this.state,
-          this.subtaskMetadata(false, this.healthCards, this.state),
-        );
-        const checkpoint = encodeSubtaskCheckpoint(
-          this.state,
-          this.subtaskMetadata(this.enabled, this.healthCards, this.state),
-        );
-        this.persist(checkpoint);
-        return true;
-      }
-      encodeCheckpoint(
-        this.state,
-        this.metadata(false, this.healthCards, this.state),
-      );
-      const checkpoint = encodeCheckpoint(
-        this.state,
-        this.metadata(this.enabled, this.healthCards, this.state),
-      );
-      this.persist(checkpoint);
-      return true;
-    } catch {
-      this.note("saved-state-rejected");
-      return false;
-    }
-  }
-
-  /** Persist optional coverage as one all-or-nothing checkpoint transition. */
-  private persistCoverageCandidate(candidate: CoverageStore) {
-    const previous = this.coverage;
-    this.coverage = candidate;
-    if (this.persistCoverageState()) return true;
-    this.coverage = previous;
-    return false;
-  }
-
-  /** Admit only canonical inventory/access pending an already-grounded intent. */
-  private admitPendingCoverage(pass = this.beginCanonicalPass()) {
-    this.prunePendingCoverage(pass);
-    const candidate = this.clonedCoverage();
-    if (!candidate) return;
-    const before = JSON.stringify(candidate.checkpoint());
-    const retainedInventories: CoverageInventory[] = [];
-    for (const inventory of this.pendingCoverageInventories) {
-      const binding = this.currentCoverageIntent(inventory.resourceKey);
-      if (!binding) {
-        retainedInventories.push(inventory);
-        continue;
-      }
-      const accepted = candidate.admit({
-        parent: binding.parent,
-        intent: binding.intent.source,
-        inventory,
-      });
-      if (!accepted.accepted && accepted.reason === "stale") continue;
-      if (!accepted.accepted) continue;
-    }
-    const retainedAccess: ReturnType<CoverageAdapter["confirm"]>["access"] = [];
-    for (const access of this.pendingCoverageAccess) {
-      const matches = candidate
-        .snapshot()
-        .groups.filter((group) => group.resourceKey === access.resourceKey);
-      if (matches.length !== 1) {
-        retainedAccess.push(access);
-        continue;
-      }
-      const group = matches[0];
-      const childIds = access.itemKeys.flatMap((key) => {
-        const child = group.children.find((item) => item.key === key);
-        return child ? [child.id] : [];
-      });
-      if (childIds.length !== access.itemKeys.length) continue;
-      const accepted = candidate.access({
-        groupId: group.id,
-        inventoryRevision: group.inventoryRevision,
-        childIds,
-        source: access.source,
-      } satisfies CoverageAccess);
-      if (!accepted.accepted && accepted.reason === "stale") continue;
-      if (!accepted.accepted) continue;
-    }
-    const changed = JSON.stringify(candidate.checkpoint()) !== before;
-    if (!changed || this.persistCoverageCandidate(candidate)) {
-      this.pendingCoverageInventories = retainedInventories;
-      this.pendingCoverageAccess = retainedAccess;
-    }
-  }
-
-  private coverageOwnerKey(owner: CoverageIntentParentBinding) {
-    return `${owner.id}:${owner.revision}:${owner.sourceDigest}`;
-  }
-
-  private coverageIntentJobCurrent(
-    job: CoverageIntentJob,
-    pass = this.beginCanonicalPass(),
-  ) {
-    if (
-      !CoverageIntentRequests.jobCurrent(job, this.state, (entryId) =>
-        this.resolveObservation(pass, entryId),
-      )
-    )
-      return false;
-    const groups = this.coverage.snapshot().groups;
-    return job.owners.every(
-      (owner) =>
-        !groups.some(
-          (group) =>
-            group.parentTaskId === owner.id &&
-            group.parentRevision === owner.revision,
-        ),
-    );
-  }
-
-  private coverageQueueOwners(
-    item: CoverageQueueCheckpoint,
-    intentJobs = this.coverageIntentJobs,
-    reportJobs = this.coverageJobs,
-  ) {
-    if (item.kind === "intent") return intentJobs.get(item.key)?.owners ?? [];
-    const job = reportJobs.get(item.key);
-    return job
-      ? [
-          {
-            id: job.parentTaskId,
-            revision: job.parentRevision,
-            sourceDigest: job.parentSourceDigest,
-          },
-        ]
-      : [];
-  }
-
-  /** Exact work identity wins; owner overlap preserves one queue position across kinds. */
-  private coverageQueuePosition(
-    item: CoverageQueueCheckpoint,
-    owners: readonly CoverageIntentParentBinding[],
-    queue = this.coverageQueue,
-  ) {
-    const exact = queue.findIndex(
-      (candidate) => candidate.kind === item.kind && candidate.key === item.key,
-    );
-    if (exact >= 0) return exact;
-    const keys = new Set(owners.map((owner) => this.coverageOwnerKey(owner)));
-    return queue.findIndex((candidate) =>
-      this.coverageQueueOwners(candidate).some((owner) =>
-        keys.has(this.coverageOwnerKey(owner)),
-      ),
-    );
-  }
-
-  /** Keep one latest authority per owner while retaining legal queue order. */
-  private normalizeCoverageIntentOverlaps() {
-    const jobs = [...this.coverageIntentJobs.entries()];
-    const queuedAt = new Map(
-      this.coverageQueue.flatMap((item, index) =>
-        item.kind === "intent" ? [[item.key, index] as const] : [],
-      ),
-    );
-    const superseded = new Set<string>();
-    for (let index = 0; index < jobs.length; index++) {
-      const current = jobs[index];
-      if (!current) continue;
-      const [key, job] = current;
-      const owners = new Set(
-        job.owners.map((owner) => this.coverageOwnerKey(owner)),
-      );
-      for (const newer of jobs.slice(index + 1)) {
-        const [newerKey, newerJob] = newer;
-        if (
-          !newerJob.owners.some((owner) =>
-            owners.has(this.coverageOwnerKey(owner)),
-          )
-        )
-          continue;
-        const currentPosition = queuedAt.get(key);
-        const newerPosition = queuedAt.get(newerKey);
-        if (
-          currentPosition !== undefined &&
-          (newerPosition === undefined || currentPosition < newerPosition)
-        )
-          superseded.add(newerKey);
-        else superseded.add(key);
-      }
-    }
-    this.fenceCoverageIntentJobs(superseded);
-    return superseded.size;
-  }
-
-  /** Build report supersession before semantic cursor persistence; no provider work starts here. */
-  private coverageReportPlan(
-    observation: Observation,
-    state = this.state,
-    pass = this.beginCanonicalPass(),
-  ) {
-    const jobs = new Map(this.coverageJobs);
-    const receipts = new Map(this.coverageReportReceipts);
-    const queue = this.coverageQueue.map((item) => ({ ...item }));
-    const superseded = new Set<string>();
-    const supersededIntentJobs = new Set<string>();
-    let changed = false;
-    let omissions = 0;
-    for (const group of this.coverage.snapshot().groups) {
-      const parent = state.tasks.find(
-        (task) =>
-          task.id === group.parentTaskId &&
-          task.revision === group.parentRevision &&
-          task.included,
-      );
-      if (!parent) continue;
-      const source = {
-        entryId: observation.id,
-        messageHash: observation.hash,
-        role: observation.role,
-        start: 0,
-        end: observation.text.length,
-        quoteHash: sha256(observation.text),
-      } as const;
-      if (!this.coverageSourceCurrent(source, pass)) continue;
-      const parentSourceDigest = visibilityTaskSourceDigest(parent);
-      const identity = sha256(
-        JSON.stringify([
-          1,
-          parent.id,
-          parent.revision,
-          parentSourceDigest,
-          group.id,
-          group.inventoryRevision,
-          source,
-        ]),
-      );
-      const existing = jobs.get(parent.id);
-      if (existing?.identity === identity) continue;
-      const owner = {
-        id: parent.id,
-        revision: parent.revision,
-        sourceDigest: parentSourceDigest,
-      };
-      const item = { kind: "report" as const, key: parent.id };
-      const position = this.coverageQueuePosition(item, [owner], queue);
-      const occupied = position < 0 ? undefined : queue[position];
-      if (position < 0 && queue.length >= 20) {
-        omissions++;
-        continue;
-      }
-      if (occupied?.kind === "intent") {
-        supersededIntentJobs.add(occupied.key);
-        omissions++;
-      }
-      if (existing) {
-        if (existing.state !== "complete") omissions++;
-        superseded.add(existing.identity);
-        for (const [key, receipt] of receipts)
-          if (receipt.jobIdentity === existing.identity) receipts.delete(key);
-      }
-      if (position < 0) queue.push(item);
-      else queue[position] = item;
-      // Map#set preserves original parent position for a replacement key.
-      jobs.set(parent.id, {
-        version: 1,
-        identity,
-        parentTaskId: parent.id,
-        parentRevision: parent.revision,
-        parentSourceDigest,
-        groupId: group.id,
-        inventoryRevision: group.inventoryRevision,
-        source: { ...source },
-        state: "ready",
-      });
-      changed = true;
-    }
-    return {
-      jobs,
-      receipts,
-      queue,
-      superseded,
-      supersededIntentJobs,
-      omissions,
-      changed,
-    };
-  }
-
-  private coverageReportJobCurrent(
-    job: CoverageReportJobCheckpoint,
-    pass = this.beginCanonicalPass(),
-  ) {
-    const parent = this.state.tasks.find(
-      (task) =>
-        task.id === job.parentTaskId &&
-        task.revision === job.parentRevision &&
-        task.included &&
-        visibilityTaskSourceDigest(task) === job.parentSourceDigest,
-    );
-    const group = this.coverage
-      .snapshot()
-      .groups.find(
-        (candidate) =>
-          candidate.id === job.groupId &&
-          candidate.parentTaskId === job.parentTaskId &&
-          candidate.parentRevision === job.parentRevision &&
-          candidate.inventoryRevision === job.inventoryRevision,
-      );
-    const report = this.resolveObservation(pass, job.source.entryId);
-    const identity = parent
-      ? sha256(
-          JSON.stringify([
-            job.version,
-            parent.id,
-            parent.revision,
-            visibilityTaskSourceDigest(parent),
-            job.groupId,
-            job.inventoryRevision,
-            job.source,
-          ]),
-        )
-      : undefined;
-    return !!(
-      job.version === 1 &&
-      identity === job.identity &&
-      parent &&
-      group &&
-      report &&
-      report.hash === job.source.messageHash &&
-      report.role === job.source.role &&
-      job.source.start === 0 &&
-      job.source.end === report.text.length &&
-      job.source.quoteHash === report.hash &&
-      this.coverageSourceCurrent(job.source, pass)
-    );
-  }
-
-  private coverageReportReceiptCurrent(
-    receipt: CoverageReportDispatchCheckpoint,
-    pass = this.beginCanonicalPass(),
-  ) {
-    const group = this.coverage
-      .snapshot()
-      .groups.find(
-        (candidate) =>
-          candidate.id === receipt.groupId &&
-          candidate.inventoryRevision === receipt.inventoryRevision,
-      );
-    const report = this.resolveObservation(pass, receipt.source.entryId);
-    return !!(
-      group &&
-      report &&
-      report.hash === receipt.source.messageHash &&
-      report.role === receipt.source.role &&
-      receipt.source.start === 0 &&
-      receipt.source.end === report.text.length &&
-      receipt.source.quoteHash === report.hash &&
-      receipt.childIds.every((id) =>
-        group.children.some((child) => child.id === id),
-      ) &&
-      this.coverageSourceCurrent(receipt.source, pass)
-    );
-  }
-
-  /** Canonical amendment drops stale optional jobs/receipts before any resume. */
-  private reconcileCoverageReportJournal(pass = this.beginCanonicalPass()) {
-    const previousJobs = this.coverageJobs;
-    const previousReceipts = this.coverageReportReceipts;
-    const previousQueue = this.coverageQueue;
-    const jobs = new Map(
-      [...previousJobs].filter(([, job]) =>
-        this.coverageReportJobCurrent(job, pass),
-      ),
-    );
-    const jobsByIdentity = new Map(
-      [...jobs.values()].map((job) => [job.identity, job]),
-    );
-    const receipts = new Map(
-      [...previousReceipts].filter(([, receipt]) => {
-        const job = jobsByIdentity.get(receipt.jobIdentity);
-        return !!(
-          job &&
-          this.coverageReportReceiptCurrent(receipt, pass) &&
-          this.coverageReportBatchesFor(job, pass).some(
-            (batch) =>
-              batch.requestHash === receipt.requestHash &&
-              batch.childIds.length === receipt.childIds.length &&
-              batch.childIds.every(
-                (childId, index) => childId === receipt.childIds[index],
-              ),
-          )
-        );
-      }),
-    );
-    const queue = previousQueue.filter(
-      (item) => item.kind !== "report" || jobs.has(item.key),
-    );
-    if (
-      jobs.size === previousJobs.size &&
-      receipts.size === previousReceipts.size &&
-      queue.length === previousQueue.length
-    )
-      return;
-    this.coverageJobs = jobs;
-    this.coverageReportReceipts = receipts;
-    this.coverageQueue = queue;
-    const flight = this.coverageFlight;
-    if (
-      flight?.kind === "report" &&
-      ![...jobs.values()].some((job) => job.identity === flight.jobIdentity)
-    ) {
-      this.coverageFlight = undefined;
-      this.coverageGateway.invalidate();
-    }
-    if (this.persistCoverageState()) return;
-    // Never revive a fenced stale flight after storage denial.
-    this.coverageJobs = jobs;
-    this.coverageReportReceipts = receipts;
-    this.coverageQueue = queue;
-  }
-
-  /** Remove obsolete intent jobs before cached reservations can reach transport. */
-  private reconcileCoverageIntentJournal(pass = this.beginCanonicalPass()) {
-    const stale = [...this.coverageIntentJobs.entries()].filter(
-      ([, job]) => !this.coverageIntentJobCurrent(job, pass),
-    );
-    if (!stale.length) return;
-    for (const [key] of stale) {
-      const request = this.coverageIntentRequests.get(key);
-      if (request) this.coverageIntents.cancel(request);
-      this.coverageIntentRequests.delete(key);
-      this.coverageIntentJobs.delete(key);
-      this.coverageQueue = this.coverageQueue.filter(
-        (item) => !(item.kind === "intent" && item.key === key),
-      );
-      if (
-        this.coverageFlight?.kind === "intent" &&
-        this.coverageFlight.jobKey === key
-      ) {
-        this.coverageFlight.controller.abort();
-        this.coverageFlight = undefined;
-      }
-    }
-    // Stale optional work stays removed even when this cleanup checkpoint is denied.
-    this.persistCoverageState();
-  }
-
-  private coverageReportBatchesFor(
-    job: CoverageReportJobCheckpoint,
-    pass = this.beginCanonicalPass(),
-  ) {
-    if (!this.coverageReportJobCurrent(job, pass)) return [];
-    const group = this.coverage
-      .snapshot()
-      .groups.find((candidate) => candidate.id === job.groupId);
-    const parent = this.state.tasks.find(
-      (task) => task.id === job.parentTaskId,
-    );
-    const report = this.resolveObservation(pass, job.source.entryId);
-    if (!group || !parent || !report) return [];
-    return coverageReportBatches({
-      parent,
-      group,
-      report,
-      resolve: (entryId) => this.resolveObservation(pass, entryId),
-    }).filter(
-      (batch) =>
-        batch.parentSourceDigest === job.parentSourceDigest &&
-        batch.groupId === job.groupId &&
-        batch.inventoryRevision === job.inventoryRevision &&
-        batch.source.entryId === job.source.entryId &&
-        batch.source.messageHash === job.source.messageHash,
-    );
-  }
-
-  /** Named canonical/control wake only; coverage owns no retry timer or poller. */
-  private wakeCoverage(revivePermanent = false) {
-    const now = Date.now();
-    if (this.normalizeCoverageIntentOverlaps())
-      this.recordCoverageOmission(1, true);
-    const enqueue = (
-      item: CoverageQueueCheckpoint,
-      owners: readonly CoverageIntentParentBinding[],
-    ) => {
-      const position = this.coverageQueuePosition(item, owners);
-      if (position >= 0)
-        return (
-          this.coverageQueue[position]?.kind === item.kind &&
-          this.coverageQueue[position]?.key === item.key
-        );
-      if (this.coverageQueue.length >= 20) return false;
-      this.coverageQueue.push(item);
-      return true;
-    };
-    for (const job of this.coverageIntentJobs.values()) {
-      if (job.state === "parked" && now >= (job.parkedUntil ?? Infinity)) {
-        job.state = "ready";
-        delete job.parkedUntil;
-      } else if (revivePermanent && job.state === "permanent") {
-        job.state = "ready";
-        if (!enqueue({ kind: "intent", key: job.targetKey }, job.owners)) {
-          job.state = "permanent";
-          this.recordCoverageOmission();
-        }
-      }
-    }
-    for (const job of this.coverageJobs.values()) {
-      if (job.state === "parked" && now >= (job.parkedUntil ?? Infinity)) {
-        job.state = "ready";
-        delete job.parkedUntil;
-      } else if (revivePermanent && job.state === "permanent") {
-        job.state = "ready";
-        if (
-          !enqueue({ kind: "report", key: job.parentTaskId }, [
-            {
-              id: job.parentTaskId,
-              revision: job.parentRevision,
-              sourceDigest: job.parentSourceDigest,
-            },
-          ])
-        ) {
-          job.state = "permanent";
-          this.recordCoverageOmission();
-        }
-      }
-    }
-  }
-
-  /** Remove stale runtime reservation and durable work together; no canceled cache survives. */
-  private discardCoverageIntentJob(jobKey: string) {
-    const request = this.coverageIntentRequests.get(jobKey);
-    if (request) this.coverageIntents.cancel(request);
-    this.coverageIntentRequests.delete(jobKey);
-    this.coverageIntentJobs.delete(jobKey);
-    this.coverageQueue = this.coverageQueue.filter(
-      (item) => !(item.kind === "intent" && item.key === jobKey),
-    );
-    if (
-      this.coverageFlight?.kind === "intent" &&
-      this.coverageFlight.jobKey === jobKey
-    ) {
-      this.coverageFlight.controller.abort();
-      this.coverageFlight = undefined;
-    }
-    this.persistCoverageState();
-  }
-
-  /** Report supersession owns parent reservation and cancels competing intent work. */
-  private fenceCoverageIntentJobs(jobKeys: ReadonlySet<string>) {
-    if (!jobKeys.size) return;
-    const jobs = new Map(this.coverageIntentJobs);
-    const requests = new Map(this.coverageIntentRequests);
-    for (const key of jobKeys) {
-      const request = requests.get(key);
-      if (request) this.coverageIntents.cancel(request);
-      requests.delete(key);
-      jobs.delete(key);
-      if (
-        this.coverageFlight?.kind === "intent" &&
-        this.coverageFlight.jobKey === key
-      ) {
-        this.coverageFlight.controller.abort();
-        this.coverageFlight = undefined;
-      }
-    }
-    this.coverageIntentJobs = jobs;
-    this.coverageIntentRequests = requests;
-    this.coverageQueue = this.coverageQueue.filter(
-      (item) => !(item.kind === "intent" && jobKeys.has(item.key)),
-    );
-  }
-
-  private discardCoverageReportJob(job: CoverageReportJobCheckpoint) {
-    this.coverageJobs.delete(job.parentTaskId);
-    for (const [key, receipt] of this.coverageReportReceipts)
-      if (receipt.jobIdentity === job.identity)
-        this.coverageReportReceipts.delete(key);
-    this.coverageQueue = this.coverageQueue.filter(
-      (item) => !(item.kind === "report" && item.key === job.parentTaskId),
-    );
-    if (
-      this.coverageFlight?.kind === "report" &&
-      this.coverageFlight.jobIdentity === job.identity
-    ) {
-      this.coverageFlight = undefined;
-      this.coverageGateway.invalidate();
-    }
-    this.persistCoverageState();
-  }
-
-  private nextCoverageWork():
-    | { kind: "intent"; jobKey: string; request: CoverageIntentRequest }
-    | {
-        kind: "report";
-        job: CoverageReportJobCheckpoint;
-        batch: CoverageReportBatch;
-      }
-    | undefined {
-    if (
-      !this.enabled ||
-      this.coverageFlight ||
-      this.coverageDispatches >= 1024 ||
-      this.coverageGateway.isPaused ||
-      !this.coverageQueue.length
-    )
-      return;
-    let pass: CanonicalPass;
-    try {
-      pass = this.beginCanonicalPass();
-    } catch {
-      // Only a later host wake may resume optional work after a stale reader.
-      return;
-    }
-    for (const item of [...this.coverageQueue]) {
-      if (item.kind === "intent") {
-        const job = this.coverageIntentJobs.get(item.key);
-        if (!job || !this.coverageIntentJobCurrent(job, pass)) {
-          this.discardCoverageIntentJob(item.key);
-          continue;
-        }
-        if (job.state !== "ready") continue;
-        let request = this.coverageIntentRequests.get(item.key);
-        if (request && request.identity !== job.identity) {
-          this.coverageIntents.cancel(request);
-          this.coverageIntentRequests.delete(item.key);
-          request = undefined;
-        }
-        if (!request) {
-          request = this.coverageIntents.resume(
-            job,
-            this.state,
-            (entryId) => this.resolveObservation(pass, entryId),
-            this.coverageEpoch,
-          );
-          if (!request) {
-            this.discardCoverageIntentJob(item.key);
-            continue;
-          }
-          this.coverageIntentRequests.set(item.key, request);
-        }
-        // Recheck immediately before dispatch; cached reservations never outrun revision.
-        if (!this.coverageIntentJobCurrent(job, pass)) {
-          this.discardCoverageIntentJob(item.key);
-          continue;
-        }
-        return { kind: "intent", jobKey: item.key, request };
-      }
-      const job = this.coverageJobs.get(item.key);
-      if (!job || !this.coverageReportJobCurrent(job, pass)) {
-        if (job) this.discardCoverageReportJob(job);
-        else
-          this.coverageQueue = this.coverageQueue.filter(
-            (candidate) =>
-              !(candidate.kind === "report" && candidate.key === item.key),
-          );
-        continue;
-      }
-      if (job.state !== "ready") continue;
-      const batches = this.coverageReportBatchesFor(job, pass);
-      if (!batches.length) {
-        this.terminalCoverageReportJob(job);
-        continue;
-      }
-      const batch = batches.find(
-        (candidate) => !this.coverageReportReceipts.has(candidate.requestHash),
-      );
-      if (batch) return { kind: "report", job, batch };
-      job.state = "complete";
-      this.coverageQueue = this.coverageQueue.filter(
-        (candidate) =>
-          !(candidate.kind === "report" && candidate.key === job.parentTaskId),
-      );
-      this.persistCoverageState();
-    }
-  }
-
-  /** Persist one selected-model job state without changing coverage children. */
-  private updateCoverageIntentJob(
-    jobKey: string,
-    state: CoverageIntentJob["state"],
-    parkedUntil?: number,
-  ) {
-    const previous = this.coverageIntentJobs;
-    const previousQueue = this.coverageQueue;
-    const current = previous.get(jobKey);
-    if (!current) return false;
-    const jobs = new Map(previous);
-    const updated = structuredClone(current);
-    updated.state = state;
-    if (state === "parked" && parkedUntil !== undefined)
-      updated.parkedUntil = parkedUntil;
-    else delete updated.parkedUntil;
-    jobs.set(jobKey, updated);
-    this.coverageIntentJobs = jobs;
-    if (state === "permanent")
-      this.coverageQueue = this.coverageQueue.filter(
-        (item) => !(item.kind === "intent" && item.key === jobKey),
-      );
-    if (this.persistCoverageState()) return true;
-    this.coverageIntentJobs = previous;
-    this.coverageQueue = previousQueue;
-    // A failed optional persistence cannot create a synchronous paid retry.
-    current.state = state;
-    if (state === "parked" && parkedUntil !== undefined)
-      current.parkedUntil = parkedUntil;
-    else delete current.parkedUntil;
-    if (state === "permanent")
-      this.coverageQueue = this.coverageQueue.filter(
-        (item) => !(item.kind === "intent" && item.key === jobKey),
-      );
-    return false;
-  }
-
-  /** Keep paid optional intent failures recoverable but outside runnable queue slots. */
-  private terminalCoverageIntentJob(
-    jobKey: string,
-    request: CoverageIntentRequest,
-    usage: { inputTokens: number; outputTokens: number },
-  ) {
-    const current = this.coverageIntentJobs.get(jobKey);
-    if (!current || current.identity !== request.identity) return false;
-    const jobs = new Map(this.coverageIntentJobs);
-    jobs.set(jobKey, { ...current, state: "permanent" });
-    const receipts = new Map(this.coverageIntentReceipts);
-    const proof = receipts.get(request.identity);
-    if (proof)
-      receipts.set(request.identity, {
-        ...proof,
-        usage: { ...usage },
-        outcome: "dispatched",
-      });
-    this.coverageIntentJobs = jobs;
-    this.coverageIntentReceipts = receipts;
-    this.coverageQueue = this.coverageQueue.filter(
-      (item) => !(item.kind === "intent" && item.key === jobKey),
-    );
-    this.coverageOmissions = saturatingAdd(this.coverageOmissions, 1);
-    // Storage loss must not turn a paid/invalid response into runnable work.
-    return this.persistCoverageCandidate(this.coverage);
-  }
-
-  private async runCoverageIntent(
-    jobKey: string,
-    request: CoverageIntentRequest,
-    controller: AbortController,
-    epoch: number,
-  ) {
-    try {
-      const currentJob = this.coverageIntentJobs.get(jobKey);
-      let beforeDispatch: CanonicalPass;
-      try {
-        beforeDispatch = this.beginCanonicalPass();
-      } catch {
-        return;
-      }
-      if (
-        currentJob?.identity !== request.identity ||
-        !this.coverageIntentJobCurrent(currentJob, beforeDispatch)
-      ) {
-        this.discardCoverageIntentJob(jobKey);
-        return;
-      }
-      const result = await this.options.extract(
-        request.input,
-        controller.signal,
-        (at) => this.recordCoverageExtractionDispatch(epoch, at),
-      );
-      const live = this.coverageIntentJobs.get(jobKey);
-      const usageValid =
-        safeUsageValue(result.usage.inputTokens) &&
-        safeUsageValue(result.usage.outputTokens);
-      const responseAccounted =
-        this.enabled && epoch === this.coverageEpoch && usageValid;
-      if (responseAccounted) {
-        this.coverageUsage.extraction.inputTokens = saturatingAdd(
-          this.coverageUsage.extraction.inputTokens,
-          result.usage.inputTokens,
-        );
-        this.coverageUsage.extraction.outputTokens = saturatingAdd(
-          this.coverageUsage.extraction.outputTokens,
-          result.usage.outputTokens,
-        );
-        const proof = this.coverageIntentReceipts.get(request.identity);
-        if (proof) {
-          const receipts = new Map(this.coverageIntentReceipts);
-          receipts.set(request.identity, {
-            ...proof,
-            usage: {
-              inputTokens: result.usage.inputTokens,
-              outputTokens: result.usage.outputTokens,
-            },
-          });
-          this.coverageIntentReceipts = receipts;
-        }
-      }
-      if (
-        controller.signal.aborted ||
-        this.coverageFlight?.kind !== "intent" ||
-        this.coverageFlight.jobKey !== jobKey ||
-        this.coverageFlight.request !== request ||
-        live?.identity !== request.identity ||
-        !responseAccounted
-      ) {
-        if (responseAccounted) this.persistCoverageState();
-        return;
-      }
-      const pass = this.beginCanonicalPass();
-      if (!live || !this.coverageIntentJobCurrent(live, pass)) {
-        this.discardCoverageIntentJob(jobKey);
-        return;
-      }
-      const priorJournal = this.coverageIntents.journalSnapshot();
-      const completed = this.coverageIntents.finish(
-        request,
-        result.text,
-        this.state,
-        (entryId) => this.resolveObservation(pass, entryId),
-        epoch,
-      );
-      if (completed.status !== "accepted") {
-        if (
-          completed.code === "stale-epoch" ||
-          completed.code === "stale-source" ||
-          completed.code === "stale-parent"
-        )
-          this.discardCoverageIntentJob(jobKey);
-        else
-          this.terminalCoverageIntentJob(jobKey, request, {
-            inputTokens: result.usage.inputTokens,
-            outputTokens: result.usage.outputTokens,
-          });
-        return;
-      }
-      const previousJobs = this.coverageIntentJobs;
-      const previousRequests = this.coverageIntentRequests;
-      const previousReceipts = this.coverageIntentReceipts;
-      const jobs = new Map(previousJobs);
-      jobs.delete(jobKey);
-      const requests = new Map(previousRequests);
-      requests.delete(jobKey);
-      const receipts = new Map(previousReceipts);
-      const proof = receipts.get(request.identity);
-      if (!proof) return;
-      receipts.set(request.identity, {
-        ...proof,
-        usage: {
-          inputTokens: result.usage.inputTokens,
-          outputTokens: result.usage.outputTokens,
-        },
-        outcome: "accepted",
-      });
-      this.coverageIntentJobs = jobs;
-      this.coverageIntentRequests = requests;
-      this.coverageQueue = this.coverageQueue.filter(
-        (item) => !(item.kind === "intent" && item.key === jobKey),
-      );
-      this.coverageIntentReceipts = receipts;
-      // Journal and accepted dispatch proof become durable before inventory admission.
-      if (!this.persistCoverageCandidate(this.coverage)) {
-        this.coverageIntents = CoverageIntentRequests.restoreJournal(
-          priorJournal,
-          this.state,
-          (entryId) => this.resolveObservation(pass, entryId),
-        );
-        // Paid output was not admitted. Retain original durable reservation for
-        // explicit recovery rather than deleting it or immediately rebilling.
-        this.coverageIntentJobs = previousJobs;
-        this.coverageIntentRequests = requests;
-        this.coverageQueue = this.coverageQueue.filter(
-          (item) => !(item.kind === "intent" && item.key === jobKey),
-        );
-        this.coverageIntentReceipts = previousReceipts;
-        this.terminalCoverageIntentJob(jobKey, request, {
-          inputTokens: result.usage.inputTokens,
-          outputTokens: result.usage.outputTokens,
-        });
-        return;
-      }
-      this.admitPendingCoverage();
-      this.publish();
-    } catch {
-      controller.abort();
-      const live = this.coverageIntentJobs.get(jobKey);
-      if (live?.identity === request.identity) {
-        try {
-          if (!this.coverageIntentJobCurrent(live, this.beginCanonicalPass()))
-            this.discardCoverageIntentJob(jobKey);
-          else this.updateCoverageIntentJob(jobKey, "permanent");
-        } catch {
-          this.discardCoverageIntentJob(jobKey);
-        }
-      }
-    } finally {
-      this.coverageIntents.cancel(request);
-      if (this.coverageIntentRequests.get(jobKey) === request)
-        this.coverageIntentRequests.delete(jobKey);
-      if (
-        this.coverageFlight?.kind === "intent" &&
-        this.coverageFlight.jobKey === jobKey &&
-        this.coverageFlight.request === request
-      )
-        this.coverageFlight = undefined;
-      this.drain();
-    }
-  }
-
-  /** Mark one no-fit/preflight-rejected report terminal once and retain durable incompleteness. */
-  private terminalCoverageReportJob(job: CoverageReportJobCheckpoint) {
-    const current = this.coverageJobs.get(job.parentTaskId);
-    if (
-      !current ||
-      current.identity !== job.identity ||
-      current.state === "permanent"
-    )
-      return;
-    const jobs = new Map(this.coverageJobs);
-    jobs.set(job.parentTaskId, { ...current, state: "permanent" });
-    this.coverageJobs = jobs;
-    this.coverageQueue = this.coverageQueue.filter(
-      (item) => !(item.kind === "report" && item.key === job.parentTaskId),
-    );
-    this.coverageOmissions = saturatingAdd(this.coverageOmissions, 1);
-    // Keep terminal runtime state even if storage rejects the omission checkpoint.
-    this.persistCoverageState();
-  }
-
-  /** Persist retry/permanent state without changing coverage children. */
-  private updateCoverageJob(
-    job: CoverageReportJobCheckpoint,
-    state: CoverageReportJobCheckpoint["state"],
-    parkedUntil?: number,
-  ) {
-    const previous = this.coverageJobs;
-    const previousQueue = this.coverageQueue;
-    const jobs = new Map(previous);
-    const updated = structuredClone(job);
-    updated.state = state;
-    if (state === "parked" && parkedUntil !== undefined)
-      updated.parkedUntil = parkedUntil;
-    else delete updated.parkedUntil;
-    jobs.set(updated.parentTaskId, updated);
-    this.coverageJobs = jobs;
-    if (state === "permanent")
-      this.coverageQueue = this.coverageQueue.filter(
-        (item) =>
-          !(item.kind === "report" && item.key === updated.parentTaskId),
-      );
-    if (this.persistCoverageState()) return true;
-    this.coverageJobs = previous;
-    this.coverageQueue = previousQueue;
-    // A storage failure cannot be retried synchronously. Keep a runtime-only
-    // recovery marker until changed canonical input or explicit recovery.
-    const transient = previous.get(job.parentTaskId);
-    if (transient?.identity === job.identity) {
-      transient.state = state;
-      if (state === "parked" && parkedUntil !== undefined)
-        transient.parkedUntil = parkedUntil;
-      else delete transient.parkedUntil;
-    }
-    return false;
-  }
-
-  private async runCoverageReport(
-    job: CoverageReportJobCheckpoint,
-    batch: CoverageReportBatch,
-    epoch: number,
-  ) {
-    try {
-      let beforeDispatch: CanonicalPass;
-      try {
-        beforeDispatch = this.beginCanonicalPass();
-      } catch {
-        return;
-      }
-      if (
-        !this.coverageReportJobCurrent(job, beforeDispatch) ||
-        !this.coverageReportBatchesFor(job, beforeDispatch).some(
-          (candidate) => candidate.requestHash === batch.requestHash,
-        )
-      ) {
-        this.discardCoverageReportJob(job);
-        return;
-      }
-      const result = await this.coverageGateway.evaluate(
-        batch.request,
-        this.identity(),
-        true,
-      );
-      const live = this.coverageJobs.get(job.parentTaskId);
-      if (
-        this.coverageFlight?.kind !== "report" ||
-        this.coverageFlight.jobIdentity !== job.identity ||
-        this.coverageFlight.batch !== batch ||
-        live?.identity !== job.identity ||
-        !this.enabled ||
-        epoch !== this.coverageEpoch
-      )
-        return;
-      if (!result) {
-        if (
-          this.coverageGateway.lastOutcome === "retryable" ||
-          this.coverageGateway.lastOutcome === "backoff"
-        ) {
-          this.updateCoverageJob(
-            job,
-            "parked",
-            Date.now() + (this.coverageGateway.retryDelayMs ?? 0),
-          );
-        } else {
-          // Pre-network rejection and terminal provider outcomes expose one omission.
-          this.terminalCoverageReportJob(job);
-        }
-        return;
-      }
-      const pass = this.beginCanonicalPass();
-      const batches = this.coverageReportBatchesFor(job, pass);
-      const current = batches.find(
-        (candidate) => candidate.requestHash === batch.requestHash,
-      );
-      if (!current) return;
-      const group = this.coverage
-        .snapshot()
-        .groups.find((candidate) => candidate.id === job.groupId);
-      const parent = this.state.tasks.find(
-        (task) => task.id === job.parentTaskId,
-      );
-      const report = this.resolveObservation(pass, job.source.entryId);
-      if (!group || !parent || !report) return;
-      const decisions = coverageReportDecisions(current, result, {
-        parent,
-        group,
-        report,
-        resolve: (entryId) => this.resolveObservation(pass, entryId),
-      });
-      if (!decisions.receipt) {
-        this.terminalCoverageReportJob(job);
-        return;
-      }
-      if (this.coverageJobs.get(job.parentTaskId)?.identity !== job.identity)
-        return;
-      const candidate = this.clonedCoverage();
-      if (!candidate) {
-        this.terminalCoverageReportJob(job);
-        return;
-      }
-      for (const reportFact of decisions.reports)
-        if (!candidate.report(reportFact).accepted) {
-          this.terminalCoverageReportJob(job);
-          return;
-        }
-      const receipt: CoverageReportDispatchCheckpoint = {
-        jobIdentity: job.identity,
-        requestHash: current.requestHash,
-        groupId: job.groupId,
-        inventoryRevision: job.inventoryRevision,
-        source: { ...job.source },
-        childIds: [...decisions.receipt.childIds],
-        assessments: decisions.receipt.assessments.map((assessment) => ({
-          ...assessment,
-        })),
-        dispatch: this.coverageDispatches,
-        at:
-          this.coverageFlight?.kind === "report"
-            ? (this.coverageFlight.dispatchAt ?? Date.now())
-            : Date.now(),
-        usage: {
-          inputTokens: result.usage.input_tokens,
-          outputTokens: result.usage.output_tokens,
-        },
-        outcome: "accepted",
-      };
-      const previousCoverage = this.coverage;
-      const previousJobs = this.coverageJobs;
-      const previousQueue = this.coverageQueue;
-      const previousReceipts = this.coverageReportReceipts;
-      const previousInputTokens = this.coverageUsage.jev.inputTokens;
-      const previousOutputTokens = this.coverageUsage.jev.outputTokens;
-      const receipts = new Map(previousReceipts);
-      receipts.set(receipt.requestHash, receipt);
-      const jobs = new Map(previousJobs);
-      const updated = structuredClone(job);
-      updated.state = batches.every(
-        (candidateBatch) =>
-          candidateBatch.requestHash === receipt.requestHash ||
-          receipts.has(candidateBatch.requestHash),
-      )
-        ? "complete"
-        : "ready";
-      delete updated.parkedUntil;
-      jobs.set(updated.parentTaskId, updated);
-      this.coverage = candidate;
-      this.coverageJobs = jobs;
-      if (updated.state === "complete")
-        this.coverageQueue = this.coverageQueue.filter(
-          (item) =>
-            !(item.kind === "report" && item.key === updated.parentTaskId),
-        );
-      this.coverageReportReceipts = receipts;
-      this.coverageUsage.jev.inputTokens = saturatingAdd(
-        previousInputTokens,
-        result.usage.input_tokens,
-      );
-      this.coverageUsage.jev.outputTokens = saturatingAdd(
-        previousOutputTokens,
-        result.usage.output_tokens,
-      );
-      if (!this.persistCoverageState()) {
-        this.coverage = previousCoverage;
-        this.coverageJobs = previousJobs;
-        this.coverageQueue = previousQueue;
-        this.coverageReportReceipts = previousReceipts;
-        this.coverageUsage.jev.inputTokens = previousInputTokens;
-        this.coverageUsage.jev.outputTokens = previousOutputTokens;
-        // Result was already paid. Keep one durable terminal omission; never rebill.
-        this.terminalCoverageReportJob(job);
-        return;
-      }
-      this.publish();
-    } finally {
-      if (
-        this.coverageFlight?.kind === "report" &&
-        this.coverageFlight.jobIdentity === job.identity &&
-        this.coverageFlight.batch === batch
-      )
-        this.coverageFlight = undefined;
-      this.drain();
-    }
-  }
-
-  /** Durable optional dispatch proof is required before selected-model transport. */
-  private recordCoverageExtractionDispatch(epoch: number, at: number) {
-    const flight = this.coverageFlight;
-    const job =
-      flight?.kind === "intent"
-        ? this.coverageIntentJobs.get(flight.jobKey)
-        : undefined;
-    const current = job ? this.coverageIntentJobCurrent(job) : false;
-    if (
-      !this.enabled ||
-      epoch !== this.coverageEpoch ||
-      !flight ||
-      flight.kind !== "intent" ||
-      !job ||
-      job.identity !== flight.request.identity ||
-      !current ||
-      this.coverageDispatches >= 1024 ||
-      !Number.isSafeInteger(at) ||
-      at < 0
-    )
-      throw new CoverageDispatchRejected();
-    const dispatches = this.coverageDispatches;
-    const calls = this.coverageUsage.extraction.calls;
-    const previousJobs = this.coverageIntentJobs;
-    const previousQueue = this.coverageQueue;
-    const previousReceipts = this.coverageIntentReceipts;
-    const receipts = new Map(previousReceipts);
-    if (!receipts.has(job.identity) && receipts.size >= 40) {
-      this.recordCoverageOmission(1, true);
-      throw new CoverageDispatchRejected();
-    }
-    const jobs = new Map(previousJobs);
-    jobs.set(flight.jobKey, { ...job, state: "permanent" });
-    receipts.set(job.identity, {
-      identity: job.identity,
-      requestHash: CoverageIntentRequests.requestHash(flight.request),
-      dispatch: saturatingAdd(dispatches, 1),
-      at,
-      usage: { inputTokens: 0, outputTokens: 0 },
-      outcome: "dispatched",
-    });
-    try {
-      this.coverageIntentJobs = jobs;
-      this.coverageQueue = this.coverageQueue.filter(
-        (item) => !(item.kind === "intent" && item.key === flight.jobKey),
-      );
-      this.coverageIntentReceipts = receipts;
-      this.coverageDispatches = saturatingAdd(dispatches, 1);
-      this.coverageUsage.extraction.calls = saturatingAdd(calls, 1);
-      if (this.persistCoverageCandidate(this.coverage)) {
-        flight.dispatchAt = at;
-        return;
-      }
-    } catch {
-      // Revert local accounting when no durable pre-network proof exists.
-    }
-    this.coverageIntentJobs = previousJobs;
-    this.coverageQueue = previousQueue;
-    this.coverageIntentReceipts = previousReceipts;
-    this.coverageDispatches = dispatches;
-    this.coverageUsage.extraction.calls = calls;
-    throw new CoverageDispatchRejected();
-  }
-
-  /** Prove worst legal receipt/status footprint before report transport spends. */
-  private coverageReportDurabilityFits(
-    job: CoverageReportJobCheckpoint,
-    batch: CoverageReportBatch,
-  ) {
-    const candidate = this.clonedCoverage();
-    if (
-      !candidate?.report({
-        groupId: job.groupId,
-        inventoryRevision: job.inventoryRevision,
-        childIds: [...batch.childIds],
-        source: { ...batch.source },
-        status: "reported-blocked",
-      }).accepted
-    )
-      return false;
-    const previousCoverage = this.coverage;
-    const previousReceipts = this.coverageReportReceipts;
-    const previousDispatches = this.coverageDispatches;
-    const previousCalls = this.coverageUsage.jev.calls;
-    const previousInputTokens = this.coverageUsage.jev.inputTokens;
-    const previousOutputTokens = this.coverageUsage.jev.outputTokens;
-    const receipts = new Map(previousReceipts);
-    receipts.set(batch.requestHash, {
-      jobIdentity: job.identity,
-      requestHash: batch.requestHash,
-      groupId: job.groupId,
-      inventoryRevision: job.inventoryRevision,
-      source: { ...job.source },
-      childIds: [...batch.childIds],
-      assessments: batch.childIds.map((childId) => ({
-        childId,
-        choice: "uncertain" as const,
-        confidence: 0.0000012345678901234567,
-        probability: 0.0000012345678901234567,
-      })),
-      dispatch: this.coverageDispatches + 1,
-      at: Number.MAX_SAFE_INTEGER,
-      usage: {
-        inputTokens: Number.MAX_SAFE_INTEGER,
-        outputTokens: Number.MAX_SAFE_INTEGER,
-      },
-      outcome: "accepted" as const,
-    });
-    try {
-      this.coverage = candidate;
-      this.coverageReportReceipts = receipts;
-      this.coverageDispatches = this.coverageDispatches + 1;
-      this.coverageUsage.jev.calls = this.coverageUsage.jev.calls + 1;
-      this.coverageUsage.jev.inputTokens = Number.MAX_SAFE_INTEGER;
-      this.coverageUsage.jev.outputTokens = Number.MAX_SAFE_INTEGER;
-      if (this.subtaskOmissions !== undefined) {
-        encodeSubtaskCheckpoint(
-          this.state,
-          this.subtaskMetadata(false, this.healthCards, this.state),
-        );
-        encodeSubtaskCheckpoint(
-          this.state,
-          this.subtaskMetadata(this.enabled, this.healthCards, this.state),
-        );
-      } else {
-        encodeCheckpoint(
-          this.state,
-          this.metadata(false, this.healthCards, this.state),
-        );
-        encodeCheckpoint(
-          this.state,
-          this.metadata(this.enabled, this.healthCards, this.state),
-        );
-      }
-      return true;
-    } catch {
-      return false;
-    } finally {
-      this.coverage = previousCoverage;
-      this.coverageReportReceipts = previousReceipts;
-      this.coverageDispatches = previousDispatches;
-      this.coverageUsage.jev.calls = previousCalls;
-      this.coverageUsage.jev.inputTokens = previousInputTokens;
-      this.coverageUsage.jev.outputTokens = previousOutputTokens;
-    }
-  }
-
-  /** Return false before fetch when report accounting/job proof cannot persist. */
-  private recordCoverageJevDispatch(at: number) {
-    const flight = this.coverageFlight;
-    const job =
-      flight?.kind === "report"
-        ? [...this.coverageJobs.values()].find(
-            (candidate) => candidate.identity === flight.jobIdentity,
-          )
-        : undefined;
-    if (
-      !this.enabled ||
-      !flight ||
-      flight.kind !== "report" ||
-      flight.epoch !== this.coverageEpoch ||
-      this.coverageDispatches >= 1024 ||
-      !job ||
-      !this.coverageReportJobCurrent(job) ||
-      !this.coverageReportDurabilityFits(job, flight.batch) ||
-      !Number.isSafeInteger(at) ||
-      at < 0
-    )
-      return false;
-    const dispatches = this.coverageDispatches;
-    const calls = this.coverageUsage.jev.calls;
-    try {
-      flight.dispatchAt = at;
-      this.coverageDispatches = saturatingAdd(dispatches, 1);
-      this.coverageUsage.jev.calls = saturatingAdd(calls, 1);
-      if (this.persistCoverageCandidate(this.coverage)) return true;
-    } catch {
-      // Revert local accounting when no durable pre-network receipt exists.
-    }
-    flight.dispatchAt = undefined;
-    this.coverageDispatches = dispatches;
-    this.coverageUsage.jev.calls = calls;
-    return false;
-  }
-
-  private resetCoverageRuntime() {
-    this.coverageEpoch++;
-    const flight = this.coverageFlight;
-    if (flight?.kind === "intent") {
-      flight.controller.abort();
-      this.coverageIntents.cancel(flight.request);
-    }
-    for (const request of this.coverageIntentRequests.values())
-      this.coverageIntents.cancel(request);
-    this.coverageIntentRequests.clear();
-    this.coverageFlight = undefined;
-    this.coverageGateway.invalidate();
-    this.coverageAdapter.reset(this.coverageEpoch);
+  /** Reset passive adapter capabilities on control, model, or branch lifecycle changes. */
+  private resetCoverageAdapter() {
+    this.coverageAdapterEpoch++;
+    this.coverageAdapter.reset(this.coverageAdapterEpoch);
     this.subtaskEvidence = undefined;
     this.subtaskRuntime?.resetAccess();
-    this.pendingCoverageInventories = [];
-    this.pendingCoverageAccess = [];
-    this.coverageAdapterOmissions = 0;
   }
 
   private healthCardMatchesCanonical(
@@ -7039,10 +5031,8 @@ export class Monitor {
       this.healthGateway.enable(this.identity());
       this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
-      this.coverageGateway.enable(this.identity());
       this.correctionGateway.enable(this.identity());
       this.visibilityGateway.enable(this.visibilityIdentity());
-      this.wakeCoverage();
       // Rebuild from current canonical branch after discarding stale semantics.
       this.requeue(this.beginCanonicalPass(), true);
       this.drain();
@@ -7855,40 +5845,7 @@ export class Monitor {
       this.subtaskOptionalTurn = "detail";
       return;
     }
-    const coverage = this.nextCoverageWork();
-    if (coverage && (!detail || this.optionalTurn === "coverage")) {
-      this.optionalTurn = "detail";
-      if (coverage.kind === "intent") {
-        const controller = new AbortController();
-        this.coverageFlight = {
-          kind: "intent",
-          epoch: this.coverageEpoch,
-          jobKey: coverage.jobKey,
-          request: coverage.request,
-          controller,
-        };
-        void this.runCoverageIntent(
-          coverage.jobKey,
-          coverage.request,
-          controller,
-          this.coverageEpoch,
-        );
-      } else {
-        this.coverageFlight = {
-          kind: "report",
-          epoch: this.coverageEpoch,
-          jobIdentity: coverage.job.identity,
-          batch: coverage.batch,
-        };
-        void this.runCoverageReport(
-          coverage.job,
-          coverage.batch,
-          this.coverageEpoch,
-        );
-      }
-      return;
-    }
-    if (detail && this.startDetails(detail)) this.optionalTurn = "coverage";
+    if (detail) this.startDetails(detail);
   }
 
   private startDetails(detail: TaskDetailRecord) {
@@ -7937,7 +5894,7 @@ export class Monitor {
       );
       const next = this.retainUnchangedTaskAssessments(produced, priorTasks);
       if (!this.enabled || epoch !== this.epoch) return;
-      this.commit(next, undefined, observation);
+      this.commit(next);
       if (next.capacity === "limit") {
         this.blockedPending = { id: observation.id, hash: observation.hash };
         this.note("capacity-exhausted");
@@ -8718,7 +6675,7 @@ export class Monitor {
 
   /**
    * Strict v11 capacity projection retained at this named seam for admission
-   * callers. It contains no legacy coverage payload or fallback codec.
+   * callers. It contains only strict-v11 optional payloads.
    */
   private capacityMetadata(
     _card = this.card,
@@ -9048,11 +7005,7 @@ export class Monitor {
     this.publish();
   }
 
-  private commit(
-    state: HybridState,
-    options?: AcceptedSaveOptions,
-    coverageObservation?: Observation,
-  ) {
+  private commit(state: HybridState, options?: AcceptedSaveOptions) {
     const previous = {
       card: this.card ? copyCard(this.card) : undefined,
       healthCards: this.healthCards,
@@ -9061,38 +7014,7 @@ export class Monitor {
       currentHealthProofs: new Map(this.currentHealthProofs),
       lastDisplayedTaskId: this.lastDisplayedTaskId,
       idleDoneInvalidated: this.idleDoneInvalidated,
-      coverageIntentJobs: this.coverageIntentJobs,
-      coverageIntentRequests: this.coverageIntentRequests,
-      coverageJobs: this.coverageJobs,
-      coverageReportReceipts: this.coverageReportReceipts,
-      coverageQueue: this.coverageQueue,
-      coverageOmissions: this.coverageOmissions,
     };
-    let coveragePlan: ReturnType<Monitor["coverageReportPlan"]> | undefined;
-    let reportObservation = coverageObservation;
-    if (!reportObservation && state.cursor) {
-      try {
-        const pass = this.beginCanonicalPass();
-        const observation = this.resolveObservation(pass, state.cursor.id);
-        if (
-          observation &&
-          observation.hash === state.cursor.hash &&
-          observation.role === state.cursor.role &&
-          (this.state.cursor?.id !== state.cursor.id ||
-            this.state.cursor.hash !== state.cursor.hash)
-        )
-          reportObservation = observation;
-      } catch {
-        // Canonical source absence leaves optional report planning inert.
-      }
-    }
-    if (reportObservation && this.enabled) {
-      try {
-        coveragePlan = this.coverageReportPlan(reportObservation, state);
-      } catch {
-        // Optional planning never blocks mandatory semantic durability.
-      }
-    }
     const candidateCards = this.healthCardsForState(state);
     let candidateDetails = this.detailsForState(state);
     if (this.options.richDetailsEnabled) {
@@ -9127,57 +7049,6 @@ export class Monitor {
     // Source replacement and every derived surface update before first commit
     // publication. No intermediate snapshot can mix new tasks with old health.
     this.syncPresentationCard(state, candidateCards);
-    const supersededReportJobs = coveragePlan?.superseded ?? new Set<string>();
-    const supersededIntentJobs =
-      coveragePlan?.supersededIntentJobs ?? new Set<string>();
-    if (coveragePlan) {
-      this.coverageJobs = coveragePlan.jobs;
-      this.coverageReportReceipts = coveragePlan.receipts;
-      this.coverageQueue = coveragePlan.queue;
-      this.recordCoverageOmission(coveragePlan.omissions);
-      try {
-        encodeSubtaskCheckpoint(
-          state,
-          this.subtaskMetadata(
-            false,
-            candidateCards,
-            state,
-            undefined,
-            candidateDetails,
-          ),
-        );
-        encodeSubtaskCheckpoint(
-          state,
-          this.subtaskMetadata(
-            this.enabled,
-            candidateCards,
-            state,
-            undefined,
-            candidateDetails,
-          ),
-        );
-      } catch {
-        // Replacement may not fit, but stale in-flight work remains fenced.
-        this.coverageJobs = new Map(
-          [...previous.coverageJobs].filter(
-            ([, job]) => !supersededReportJobs.has(job.identity),
-          ),
-        );
-        this.coverageReportReceipts = new Map(
-          [...previous.coverageReportReceipts].filter(
-            ([, receipt]) => !supersededReportJobs.has(receipt.jobIdentity),
-          ),
-        );
-        this.coverageQueue = previous.coverageQueue.filter(
-          (item) => item.kind !== "report" || this.coverageJobs.has(item.key),
-        );
-        this.coverageOmissions = previous.coverageOmissions;
-        this.recordCoverageOmission(1);
-        coveragePlan = undefined;
-      }
-    }
-    // Parent report reservation wins over stale ungrounded candidate work.
-    this.fenceCoverageIntentJobs(supersededIntentJobs);
     let checkpoint: unknown;
     try {
       // No new semantic state may fit only while ON: OFF control is durable.
@@ -9236,12 +7107,6 @@ export class Monitor {
           this.currentHealthProofs = previous.currentHealthProofs;
           this.lastDisplayedTaskId = previous.lastDisplayedTaskId;
           this.idleDoneInvalidated = previous.idleDoneInvalidated;
-          this.coverageIntentJobs = previous.coverageIntentJobs;
-          this.coverageIntentRequests = previous.coverageIntentRequests;
-          this.coverageJobs = previous.coverageJobs;
-          this.coverageReportReceipts = previous.coverageReportReceipts;
-          this.coverageQueue = previous.coverageQueue;
-          this.coverageOmissions = previous.coverageOmissions;
           this.rejectCapacity();
           throw new DurabilityCapacityError();
         }
@@ -9253,27 +7118,11 @@ export class Monitor {
         this.currentHealthProofs = previous.currentHealthProofs;
         this.lastDisplayedTaskId = previous.lastDisplayedTaskId;
         this.idleDoneInvalidated = previous.idleDoneInvalidated;
-        this.coverageIntentJobs = previous.coverageIntentJobs;
-        this.coverageIntentRequests = previous.coverageIntentRequests;
-        this.coverageJobs = previous.coverageJobs;
-        this.coverageReportReceipts = previous.coverageReportReceipts;
-        this.coverageQueue = previous.coverageQueue;
-        this.coverageOmissions = previous.coverageOmissions;
         this.rejectCapacity();
         throw new DurabilityCapacityError();
       }
     }
     this.state = copyState(state);
-    // New report work is serialized with this cursor before stale flight can resume.
-    if (
-      this.coverageFlight?.kind === "report" &&
-      supersededReportJobs.has(this.coverageFlight.jobIdentity)
-    ) {
-      this.coverageFlight = undefined;
-      this.coverageGateway.invalidate();
-    }
-    // A semantic revision/source replacement cannot leave an old report bound
-    // to a task that no longer exists under its exact identity.
     this.visibility.reconcileCurrentTasks(this.visibilityTasks() ?? []);
     this.rebuildDetailValues();
     try {

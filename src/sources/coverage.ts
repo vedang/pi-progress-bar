@@ -1,7 +1,21 @@
 import { createHash } from "node:crypto";
 
 import { ownDataJson } from "../analysis/own-data-json";
-import type { CoverageInventory } from "../core/coverage";
+
+/** Passive adapter inventory; it never assigns or completes generic subtasks. */
+export interface CoverageInventory {
+  resourceKey: string;
+  revision: number;
+  complete: boolean;
+  knownTotal?: number;
+  replacement?: true;
+  source: {
+    entryId: string;
+    messageHash: string;
+    callId: string;
+  };
+  items: Array<{ key: string; label: string }>;
+}
 
 const MAX_PENDING = 16;
 const MAX_RETAINED_RECEIPTS = 16;

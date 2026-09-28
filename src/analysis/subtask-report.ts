@@ -685,6 +685,52 @@ const jobIdentityFor = (binding: Binding): string | undefined =>
     },
   });
 
+/**
+ * Content-free durable diagnostic identity. Caller validates canonical
+ * bindings and decides eligibility; this fingerprint grants no report authority.
+ */
+export const subtaskReportOmissionIdentity = (input: {
+  sourceId: string;
+  parent: Readonly<HybridTask>;
+  group: Readonly<SubtaskGroupSnapshot>;
+  reportSource: Readonly<SourceRef>;
+}): string | undefined =>
+  jsonHash({
+    domain: "subtask-report-omission:v1",
+    sourceId: input.sourceId,
+    model: MODEL,
+    rubric,
+    report: { source: cloneSource(input.reportSource) },
+    parent: {
+      id: input.parent.id,
+      label: input.parent.label,
+      revision: input.parent.revision,
+      source: cloneSource(input.parent.source),
+    },
+    subtasks: {
+      parentTaskId: input.group.parentTaskId,
+      parentRevision: input.group.parentRevision,
+      groupId: input.group.id,
+      parentSourceDigest: input.group.parentSourceDigest,
+      listRevision: input.group.listRevision,
+      source: cloneSource(input.group.source),
+      proof: {
+        contextHash: input.group.proof.contextHash,
+        gateRequestHash: input.group.proof.gateRequestHash,
+        proposalRequestHash: input.group.proof.proposalRequestHash,
+      },
+      complete: input.group.complete,
+      ...(input.group.knownTotal === undefined
+        ? {}
+        : { knownTotal: input.group.knownTotal }),
+      children: input.group.children.map((child) => ({
+        id: child.id,
+        label: child.label,
+        source: cloneSource(child.source),
+      })),
+    },
+  });
+
 const selectedChildren = (
   children: readonly SubtaskChild[],
   selection: unknown | undefined,

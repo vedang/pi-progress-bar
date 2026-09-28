@@ -194,6 +194,97 @@ it.each(["stop", "restore"])(
   },
 );
 
+it.each(["stop", "nested-save-failure"])(
+  "adopts saved wallet before plain ON after reentrant %s and preserves new charges through OFF/reload",
+  async (mode) => {
+    const donor = await chargedFixture();
+    donor.h.monitor.turnOff();
+    const incoming = donor.h.checkpoint();
+    const older = structuredClone(donor.older);
+    if (!older.monitor) throw new Error("Missing metadata");
+    older.monitor.enabled = false;
+    const h = subtaskMetadataMonitor();
+    running.push(h);
+    h.replace(structuredClone(donor.h.reader()));
+    await h.monitor.restore("/nonexistent-hybrid-test", older, false, h.reader);
+    let nested: Promise<void> | undefined;
+    h.save.mockImplementationOnce(() => {
+      if (mode === "stop") h.monitor.stop();
+      else {
+        h.save.mockImplementationOnce(() => {
+          throw new Error("Nested restore save refused");
+        });
+        nested = h.monitor.restore(
+          "/nonexistent-hybrid-test",
+          older,
+          false,
+          h.reader,
+        );
+      }
+    });
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      incoming,
+      false,
+      h.reader,
+    );
+    await nested;
+    expect(h.monitor.enabled).toBe(false);
+    expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(
+      donor.charged.dispatches,
+    );
+    h.save.mockReset();
+    h.monitor.turnOn("/nonexistent-hybrid-test");
+    await h.settle("wallet-report");
+    await vi.advanceTimersByTimeAsync(200);
+    expect.soft(h.counts().report).toBe(0); // The donor already paid for this exact source/roster.
+    h.append("new-paid-report", "Further workbook checks are still pending.");
+    await h.settle("new-paid-report");
+    await vi.advanceTimersByTimeAsync(200);
+    const calls = h.counts();
+    expect.soft(calls.report).toBe(2);
+    const expectedDispatches =
+      donor.charged.dispatches + calls.gate + calls.report + calls.proposal;
+    const beforeOff = h.checkpoint().monitor?.subtasks?.journal;
+    expect.soft(beforeOff?.dispatches).toBe(expectedDispatches);
+    h.monitor.turnOff();
+    const durable = h.save.mock.calls.at(-1)?.[0] as typeof incoming;
+    const journal = durable.monitor?.subtasks?.journal;
+    expect.soft(journal?.dispatches).toBe(expectedDispatches);
+    expect
+      .soft(journal?.reports.map((job) => job.identity))
+      .toEqual(
+        expect.arrayContaining(
+          donor.charged.reports.map((job) => job.identity),
+        ),
+      );
+    expect
+      .soft(
+        journal?.reports.some(
+          (job) =>
+            job.source.entryId === "new-paid-report" &&
+            job.state === "complete",
+        ),
+      )
+      .toBe(true);
+    expect
+      .soft(journal?.usage.jev.calls)
+      .toBe(donor.charged.usage.jev.calls + calls.gate + calls.report);
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      durable,
+      false,
+      h.reader,
+    );
+    h.monitor.turnOn("/nonexistent-hybrid-test");
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.counts()).toEqual(calls);
+    expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(
+      expectedDispatches,
+    );
+  },
+);
+
 it("does not let an outer staged wallet override newer nested history during a second nested restore", async () => {
   const donor = await chargedFixture();
   const incoming = donor.h.checkpoint();

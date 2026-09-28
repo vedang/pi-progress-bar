@@ -2,6 +2,14 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## C08 diagnostic producer RED freeze
+
+Main froze **13 RED/34 passing controls** across real Monitor/report and exact adapter-budget suites. New cases exercise passive/detached empty diagnostics, supported v11 wallets at1023/1024, charged invalid-proposal permanent ownership, and stop-time authority invalidation with wallet retention. Existing parked-A/newer-B, permanent-A/superseded history and real capacity-refusal tests retain their original assertions and now inspect truthful diagnostic counts. The decomposition fixture explicitly calls dispatch admission and returns a malformed proposal with known usage; an unknown-usage throw deliberately leaves dispatched proof, so it is not mislabeled permanent in this test.
+
+Adapter fixtures execute mixed preconfirmation metadata/read candidates:16 retained, overflow omissions, stable unchanged confirmation, shared64KiB budget, reset emptiness and unchanged semantic store. Read-only measurement reuses the documented inert budget projection, including exact65536-byte pending/manifest/receipt boundaries; inherited-hook tests now call the diagnostic snapshot while hooks are installed. This is producer-layer evidence, not a completed replacement of the old Monitor post-confirm buffer test: actual Monitor OFF/confirmed allocation and UI omission/navigation ports remain required.
+
+Format/check pass with three historical warnings. Logs `c08-diagnostics-{red,format,check}.log`; C08 source/UI implementation and acceptance remain open.
+
 ## C09 scoped source verification (not acceptance)
 
 `0d69583e` replaces legacy reconciliation summaries with generic `subtasks` in Monitor and the formatter. Main inspected both source files and independently verified **56/56 focused**, **1906 unit pass/50 existing coverage-port failures**, **83/83 integration**, format/check pass (three historical warnings). Logs `c09-main-{green,test,integration,format,check}.log`. Worker separately reported886 broad passes. The integration pass does not diagnose or waive the historical TUI/RPC correction race. C09 remains unaccepted pending C08 closure, remaining assertion ports/legacy removal, complete gates and independent whole-stage review.

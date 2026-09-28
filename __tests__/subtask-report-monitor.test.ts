@@ -189,6 +189,130 @@ async function fixture(
         .groups[0]?.children.map((child) => child.status),
   };
 }
+type Diagnostics = {
+  dispatches: number;
+  exhausted: boolean;
+  parkedOwners?: number;
+  permanentOwners?: number;
+  adapter: {
+    pendingCount: number;
+    pendingBytes: number;
+    retainedBytes: number;
+    omissions: number;
+  };
+};
+function diagnostics(h: Awaited<ReturnType<typeof fixture>>): Diagnostics {
+  const project = Reflect.get(h.monitor, "subtaskDiagnosticsSnapshot");
+  expect(project).toBeTypeOf("function");
+  return Reflect.apply(project, h.monitor, []) as Diagnostics;
+}
+it("projects detached empty diagnostics without reopening host or selected-model readers", async () => {
+  const selectedModel = vi.fn(() => "fixture/selected");
+  const h = await fixture(false, false, 1, { selectedModel });
+  const before = [
+    h.reader.mock.calls.length,
+    selectedModel.mock.calls.length,
+    h.fetch.mock.calls.length,
+    h.extract.mock.calls.length,
+  ];
+  const parents = structuredClone(h.monitor.state.tasks);
+  const first = diagnostics(h);
+  expect(first).toMatchObject({
+    dispatches: 0,
+    exhausted: false,
+    parkedOwners: 0,
+    permanentOwners: 0,
+    adapter: { pendingCount: 0, pendingBytes: 0, omissions: 0 },
+  });
+  expect(first.adapter.retainedBytes).toBeGreaterThan(0);
+  expect(first.adapter.retainedBytes).toBeLessThanOrEqual(65536);
+  Reflect.set(first.adapter, "omissions", 999);
+  for (let i = 0; i < 4; i++) expect(diagnostics(h).adapter.omissions).toBe(0);
+  expect([
+    h.reader.mock.calls.length,
+    selectedModel.mock.calls.length,
+    h.fetch.mock.calls.length,
+    h.extract.mock.calls.length,
+  ]).toEqual(before);
+  expect(h.monitor.state.tasks).toEqual(parents);
+});
+it.each([1023, 1024])(
+  "projects exact durable dispatch-wallet exhaustion at %i",
+  async (dispatches) => {
+    const h = await fixture();
+    const saved = h.checkpoint();
+    const journal = saved.monitor?.subtasks?.journal;
+    if (!journal) throw new Error("Missing journal");
+    journal.dispatches = dispatches;
+    journal.usage.jev.calls = dispatches;
+    expect(subtaskCheckpointStorageStatus(saved)).toBe("supported");
+    await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+    expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(
+      dispatches,
+    );
+    expect(diagnostics(h)).toMatchObject({
+      dispatches,
+      exhausted: dispatches === 1024,
+    });
+    expect(h.calls).toHaveLength(0);
+  },
+);
+it("captures decomposition permanent ownership without lazy credential reads", async () => {
+  let available = false;
+  const selectedModel = vi.fn(() =>
+    available ? "fixture/selected" : undefined,
+  );
+  const proposeSubtasks = vi.fn<NonNullable<MonitorOptions["proposeSubtasks"]>>(
+    async (_request, _signal, onDispatch) => {
+      expect(onDispatch?.(Date.now())).toBe(true);
+      return {
+        text: "not a proposal",
+        provider: "fixture",
+        model: "selected",
+        usage: { inputTokens: 3, outputTokens: 2 },
+      };
+    },
+  );
+  const h = await fixture(false, false, 1, { selectedModel, proposeSubtasks });
+  h.setChoice("unchanged");
+  const original = h.fetch.getMockImplementation();
+  if (!original) throw new Error("Missing offline transport");
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+    return request.questions["subtask:0"]
+      ? answer(request, "yes")
+      : original(url, init);
+  });
+  available = true;
+  h.append(
+    "refinement",
+    "Add deployment and recovery planning to the agreed obligations.",
+    "user",
+  );
+  await h.settle("refinement");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(proposeSubtasks).toHaveBeenCalledTimes(1);
+  const journal = h.checkpoint().monitor?.subtasks?.journal;
+  expect(journal?.records).toContainEqual(
+    expect.objectContaining({ state: "permanent" }),
+  );
+  const before = [
+    h.reader.mock.calls.length,
+    selectedModel.mock.calls.length,
+    h.fetch.mock.calls.length,
+  ];
+  expect(diagnostics(h)).toMatchObject({
+    dispatches: journal?.dispatches,
+    exhausted: false,
+    parkedOwners: 0,
+    permanentOwners: 1,
+  });
+  expect([
+    h.reader.mock.calls.length,
+    selectedModel.mock.calls.length,
+    h.fetch.mock.calls.length,
+  ]).toEqual(before);
+});
 it("projects detached no-file reconciliation gaps and reported counts without parent or correction authority", async () => {
   const h = await fixture();
   const parents = structuredClone(h.monitor.state.tasks);
@@ -683,6 +807,12 @@ it.each(["unrelated", "corrective"])(
     expect(h.checkpoint().monitor?.subtasks?.journal.reports[0].state).toBe(
       "parked",
     );
+    expect(diagnostics(h)).toMatchObject({
+      dispatches: 2,
+      exhausted: false,
+      parkedOwners: 1,
+      permanentOwners: 0,
+    });
     h.setTransport(async (request) =>
       answer(
         request,
@@ -846,6 +976,12 @@ it("unknown failed A never retries but genuinely newer B may supersede it", asyn
   h.append("report-a", reportText);
   await h.settle("report-a");
   expect(h.calls).toHaveLength(1);
+  expect(diagnostics(h)).toMatchObject({
+    dispatches: 1,
+    exhausted: false,
+    parkedOwners: 0,
+    permanentOwners: 1,
+  });
   await vi.advanceTimersByTimeAsync(11000);
   h.observe();
   await vi.advanceTimersByTimeAsync(100);
@@ -854,8 +990,34 @@ it("unknown failed A never retries but genuinely newer B may supersede it", asyn
   h.append("report-b", "I confirm completion of all agreed obligations.");
   await h.settle("report-b");
   expect(h.calls.map(sourceId)).toEqual(["report-a", "report-b", "report-b"]);
+  expect(diagnostics(h)).toMatchObject({
+    dispatches: 3,
+    exhausted: false,
+    parkedOwners: 0,
+    permanentOwners: 0,
+  });
   expect(h.checkpoint().monitor?.subtasks?.journal.reports[0].state).toBe(
     "superseded",
+  );
+});
+it("invalidates diagnostic owner authority on stop without erasing the durable wallet", async () => {
+  const h = await fixture();
+  h.setTransport(async () => {
+    throw new Error("Ambiguous report failure");
+  });
+  h.append("report", reportText);
+  await h.settle("report");
+  expect(h.checkpoint().monitor?.subtasks?.journal.reports[0].state).toBe(
+    "permanent",
+  );
+  h.monitor.stop();
+  const before = [h.reader.mock.calls.length, h.fetch.mock.calls.length];
+  const stopped = diagnostics(h);
+  expect(stopped.dispatches).toBe(1);
+  expect(stopped).not.toHaveProperty("parkedOwners");
+  expect(stopped).not.toHaveProperty("permanentOwners");
+  expect([h.reader.mock.calls.length, h.fetch.mock.calls.length]).toEqual(
+    before,
   );
 });
 it("binds the real full-envelope capacity predicate before report transport", async () => {
@@ -877,6 +1039,7 @@ it("binds the real full-envelope capacity predicate before report transport", as
     ).toBe(true);
     expect(h.calls).toHaveLength(0);
     expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(0);
+    expect(diagnostics(h)).toMatchObject({ dispatches: 0, exhausted: false });
   } finally {
     capacity.mockRestore();
   }

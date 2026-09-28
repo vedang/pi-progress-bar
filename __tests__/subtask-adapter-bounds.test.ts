@@ -171,7 +171,68 @@ function boundary(kind: "pending" | "manifest" | "receipt", overflow: number) {
   };
 }
 
+function assertMeasuredBudget(adapter: CoverageAdapter) {
+  const current = state(adapter);
+  expect(adapter.snapshot()).toMatchObject({
+    pendingCount: current.pending.length,
+    pendingBytes: current.pending.length ? bytes(current.pending) : 0,
+    retainedBytes: bytes(current),
+  });
+}
+
 describe("hook-free exact shared adapter budget", () => {
+  it("measures mixed preconfirmation candidates, confirmed allocation, stable confirmation and reset without child admission", () => {
+    const f = subtaskAccessFixture([["One", "Two"]]);
+    const children = f.store.snapshot();
+    const measurements = [
+      { snapshot: f.adapter.snapshot(), state: state(f.adapter) },
+    ];
+    expect(bytes(state(f.adapter))).toBeGreaterThan(0);
+    for (let i = 0; i < 20; i++) {
+      const toolName = i % 2 ? "read" : "bash";
+      const args =
+        i % 2
+          ? { path: "extracted/r0-0.txt" }
+          : { command: `unzip -p docs/pending-${i}.xlsx xl/workbook.xml` };
+      f.adapter.start({ toolCallId: `pending-${i}`, toolName, args }, 1);
+      f.adapter.end({ toolCallId: `pending-${i}`, toolName }, 1);
+    }
+    expect(f.adapter.snapshot().pendingCount).toBe(16);
+    expect(f.adapter.snapshot().omissions).toBeGreaterThanOrEqual(4);
+    measurements.push({
+      snapshot: f.adapter.snapshot(),
+      state: state(f.adapter),
+    });
+    expect(bytes(state(f.adapter).pending)).toBeGreaterThan(2);
+    expect(bytes(state(f.adapter))).toBeLessThanOrEqual(65536);
+    const before = f.adapter.snapshot();
+    f.adapter.confirm(f.entries, 1);
+    expect(f.adapter.snapshot()).toEqual(before);
+    expect(f.store.snapshot()).toEqual(children);
+    f.adapter.reset(2);
+    measurements.push({
+      snapshot: f.adapter.snapshot(),
+      state: state(f.adapter),
+    });
+    expect(f.adapter.snapshot()).toMatchObject({
+      pendingCount: 0,
+      omissions: 0,
+    });
+    expect(f.adapter.metadata()).toBeUndefined();
+    expect(f.adapter.accessEvidence()).toMatchObject({
+      mapped: [],
+      active: [],
+      confirmed: [],
+    });
+    expect(f.store.snapshot()).toEqual(children);
+    for (const measurement of measurements)
+      expect(measurement.snapshot).toMatchObject({
+        pendingBytes: measurement.state.pending.length
+          ? bytes(measurement.state.pending)
+          : 0,
+        retainedBytes: bytes(measurement.state),
+      });
+  });
   it("includes mapping-stale pending cleanup in exact listing replacement preflight", () => {
     const f = seed(),
       probe = seed();
@@ -225,6 +286,7 @@ describe("hook-free exact shared adapter budget", () => {
       const result = boundary(kind, 0);
       expect(result.accepted).toBe(true);
       expect(bytes(state(result.adapter))).toBe(65536);
+      assertMeasuredBudget(result.adapter);
     },
   );
   it.each(["pending", "manifest", "receipt"] as const)(
@@ -257,6 +319,8 @@ describe("hook-free exact shared adapter budget", () => {
           "One rows 2 nonempty rows 1 file extracted/changed.txt";
         f.adapter.confirm(f.entries, 1);
         oldCurrent = isCurrentSubtaskAccessEvidence(old);
+        // Call diagnostics while hooks are installed, but assert outside them.
+        f.adapter.snapshot();
       } finally {
         if (previous) Object.defineProperty(prototype, "toJSON", previous);
         else Reflect.deleteProperty(prototype, "toJSON");

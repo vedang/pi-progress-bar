@@ -1,26 +1,28 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import {
-  fauxAssistantMessage,
-  fauxProvider,
-  fauxToolCall,
-  InMemoryCredentialStore,
-} from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import * as pinnedPi from "@earendil-works/pi-coding-agent";
 import { expect, it, vi } from "vitest";
 import { processObservation } from "../src/core/hybrid";
 import { encodeSubtaskCheckpoint } from "../src/core/hybrid-checkpoint";
 import { emptyState } from "../src/core/hybrid-state";
 import { Monitor } from "../src/core/monitor";
 import progressBar from "../src/index";
+import { coverageHost } from "./fixtures/coverage-host";
 import { addPatch, backend, observation } from "./fixtures/hybrid";
 import { jevReply } from "./fixtures/hybrid-monitor";
+
+// Runtime helpers must share the selected host's transcript/provider protocol.
+const { host: pi, ai } = await coverageHost();
+const {
+  InMemoryCredentialStore,
+  fauxProvider,
+  fauxAssistantMessage,
+  fauxToolCall,
+} = ai;
 
 function latch() {
   let release = () => {};
@@ -71,17 +73,11 @@ const message = {
 
 async function host(
   mode: Mode,
-  settings: Parameters<typeof pinnedPi.SettingsManager.inMemory>[0] = {},
+  settings: Parameters<typeof pi.SettingsManager.inMemory>[0] = {},
   production = false,
   correctionProof = false,
   waitForCorrection = true,
 ) {
-  const pi = process.env.PROGRESS_PI_HOST_ROOT
-    ? ((await import(
-        pathToFileURL(join(process.env.PROGRESS_PI_HOST_ROOT, "dist/index.js"))
-          .href
-      )) as typeof pinnedPi)
-    : pinnedPi;
   const cwd = await mkdtemp(join(tmpdir(), "progress-advisory-host-"));
   const settingsManager = pi.SettingsManager.inMemory({
     compaction: { enabled: false },
@@ -166,8 +162,13 @@ async function host(
         : []),
       (extension) => {
         api = extension;
-        if (correctionProof)
-          extension.on("tool_call", async () => {
+        if (correctionProof) {
+          extension.on("tool_execution_start", (event, ctx) => {
+            if (event.toolName === "write")
+              record("tool_execution_start:write", ctx);
+          });
+          extension.on("tool_call", async (event, ctx) => {
+            if (event.toolName === "write") record("tool_call:write", ctx);
             if (waitForCorrection)
               await vi.waitFor(() => expect(sent).toHaveLength(1), {
                 timeout: 3000,
@@ -177,6 +178,7 @@ async function host(
               reason: "Offline attempted-start transport proof",
             };
           });
+        }
         extension.on("session_start", (_e, ctx) =>
           record("session_start", ctx),
         );
@@ -636,7 +638,10 @@ it.each([
         deadlines.push({ callback: () => callback(...args), timer });
       return timer;
     }) as typeof setTimeout);
-    let dateSpy: ReturnType<typeof vi.spyOn> | undefined;
+    // settled() and arm() sample separately: freeze the observer's clock so a
+    // valid 59_999ms delay cannot disappear from the exact 60_000ms assertion.
+    const frozen = Date.now();
+    const dateSpy = vi.spyOn(Date, "now").mockReturnValue(frozen);
     try {
       h.faux.setResponses([
         fauxAssistantMessage("The parser is still pending."),
@@ -660,9 +665,8 @@ it.each([
       );
       await vi.waitFor(() => expect(deadlines).toHaveLength(1));
       const deadline = deadlines[0];
-      const now = Date.now();
       // Accelerate only the extension deadline; actual Pi lifecycle/provider remain real.
-      dateSpy = vi.spyOn(Date, "now").mockReturnValue(now + 60_001);
+      dateSpy.mockReturnValue(frozen + 60_001);
       clearTimeout(deadline.timer);
       deadline.callback();
       await vi.waitFor(() =>
@@ -920,6 +924,12 @@ it.each(["tui", "rpc"] as const)(
       ]);
       await bounded(h.session.prompt("Continue the current task."));
       expect(correctionCalls, JSON.stringify(probe.events)).toBe(1);
+      expect(
+        h.trace.filter((entry) => entry.hook === "tool_execution_start:write"),
+      ).toHaveLength(1);
+      expect(
+        h.trace.filter((entry) => entry.hook === "tool_call:write"),
+      ).toHaveLength(1);
       expect(
         probe.events.find((event) => event.event === "correction-admission"),
       ).toMatchObject({ ready: true, targetFact: true, coverage: "complete" });

@@ -1,6 +1,22 @@
 # C05 cutover regression accounting
 
-This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
+## Current acceptance (2026-09-28)
+
+C05–C09 are separately accepted in dependency order at source **81174ff4**, after the preserved regression ports, coherent legacy retirement, and full-stage independent reviews. Earlier sections below are historical work logs, not outstanding blockers or deletion authority. Exact retirement dispositions and mutation evidence are in [legacy-coverage-retirement.md](legacy-coverage-retirement.md).
+
+Main gates: `make format`, `make check`, `make test` **PASS:1990 unit/88 integration**; three historical activity-label lint warnings remain. Additional actual installed Pi0.87.1 paired-provider host run: **24/24 PASS** across subtask-live-host, coverage-live-host and advisory-host. Full integration uses pinned Pi0.84.2. No real provider calls, installation, release or push in these gates.
+
+| Stage | Accepted evidence and independent review |
+|---|---|
+| C05 | Conversation-only actual host yes/no/uncertain gate→selected proposal; canonical/no-op/multi-parent, stale/OFF/revision and pre-network persistence fences;22-child optional adapter access; strict-v11 restoration. Reviewer dc23bb16 **OK** after Main gate/proposal/report reentrant OFF disk-reload and refused-result token repairs. |
+| C06 | Generic implementation/research/review obligation-aware report choices, retraction/blocking/uncertainty, complete-set veto, exact source/list/parent binding, bounded20-question batching and unchanged parent/health. Reviewer dc23bb16 **OK with notes**: semantic accuracy belongs to C10, not mocked mechanics. C05 separately accepted first. |
+| C07 | Shared1024 charged gate/proposal/report wallet, failed-attempt usage, crash/no-rebill/recovery, ready/parked A priority,20-owner scheduling/detail fairness/physical drain, adaptive receipt fit and durable omissions. Reviewer dc23bb16 **OK**, including retained ru7 and source/serial history fences. C05/C06 separately accepted first. |
+| C08 | Generic Reported complete copy, no-file and22-child UI, unknown/exhaustive/access/omission/exhaustion distinctions, stable anchors and real TuiMainScreen80x24/140x40 cases, parent fraction/health preservation. Reviewer de572c85 **OK**. C05–C07 separately accepted first. |
+| C09 | Exact unfinished-parent/revision detached summaries,20 parent rows/8 MAYBE receipts,24576UTF8/32768JSON bounds and whole-block fallback, no all-DONE/readiness/correction authority changes. Reviewer de572c85 **OK**. C08 separately accepted first. |
+
+Retirement review: de572c85 **OK with notes** for current-tree/keeper preservation; reviewer tooling could not inspect committed deletion ranges. Main separately inspected read-only JJ diffs and preserved this limitation rather than claiming independent line-by-line deletion attestation. Test-only mandatory byte consumers now use real v11 helpers. No legacy compatibility reader or semantic graph remains.
+
+Remaining work is **N05 production continuation, fresh C10/N06 semantic QA, final C11/N07/C12 gates and owner manual review**. These acceptances do not claim release readiness or semantic-provider accuracy.
 
 ## Mandatory codec retirement prerequisite (2026-09-28)
 

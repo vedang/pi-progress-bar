@@ -644,7 +644,16 @@ export class SubtaskRuntime {
     }
 
     const journal = this.finalJournal("jev", decision, usage);
-    if (!journal || !this.commitCandidate(this.store, journal)) return;
+    if (!journal || !this.commitCandidate(this.store, journal)) {
+      this.saveGateFailure(
+        batch,
+        ticket,
+        usage,
+        flight,
+        prepared.current.sourceId,
+      );
+      return;
+    }
     if (
       !this.exactBatch(
         batch,
@@ -788,7 +797,17 @@ export class SubtaskRuntime {
     if (applied.status === "noop") {
       const record = this.proposalFinal(gateRecord, request, ticket, "noop");
       const journal = this.finalJournal("extraction", record, usage);
-      if (!journal || !this.commitCandidate(this.store, journal)) return;
+      if (!journal || !this.commitCandidate(this.store, journal)) {
+        this.saveProposalFailure(
+          gateRecord,
+          request,
+          ticket,
+          usage,
+          flight,
+          prepared.current.sourceId,
+        );
+        return;
+      }
       if (
         !this.exactBatch(
           batch,
@@ -835,7 +854,17 @@ export class SubtaskRuntime {
       admitted.listRevision,
     );
     const journal = this.finalJournal("extraction", record, usage);
-    if (!journal || !this.commitCandidate(candidate, journal)) return;
+    if (!journal || !this.commitCandidate(candidate, journal)) {
+      this.saveProposalFailure(
+        gateRecord,
+        request,
+        ticket,
+        usage,
+        flight,
+        prepared.current.sourceId,
+      );
+      return;
+    }
     if (
       !this.exactBatch(
         batch,

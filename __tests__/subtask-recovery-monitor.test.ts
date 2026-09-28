@@ -151,6 +151,12 @@ it.each(["transport", "malformed", "persistence"])(
       throw new Error("Missing real charged proposal history");
     expect(previous.dispatches).toBe(2);
     expect(owner.proposal?.dispatch).toBe(2);
+    const returnedUsage =
+      failure === "transport"
+        ? { inputTokens: 0, outputTokens: 0 }
+        : { inputTokens: 3, outputTokens: 2 };
+    expect(owner.proposal?.usage).toEqual(returnedUsage);
+    expect(previous.usage.extraction).toEqual({ calls: 1, ...returnedUsage });
     const before = counts();
 
     // Named wake alone cannot replay unknown/invalid/unpublished work.
@@ -177,9 +183,11 @@ it.each(["transport", "malformed", "persistence"])(
       gate: owner.gate,
       proposal: owner.proposal,
     });
-    expect(recovered?.usage.extraction.calls).toBe(
-      previous.usage.extraction.calls + 1,
-    );
+    expect(recovered?.usage.extraction).toEqual({
+      calls: previous.usage.extraction.calls + 1,
+      inputTokens: returnedUsage.inputTokens + 3,
+      outputTokens: returnedUsage.outputTokens + 2,
+    });
     const after = counts();
     h.monitor.modelSelected();
     await vi.advanceTimersByTimeAsync(200);

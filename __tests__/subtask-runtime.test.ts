@@ -767,26 +767,78 @@ describe("durable generic subtask runtime", () => {
     await runtime.run(h.parent.id);
     expect(runtime.checkpoint().journal.dispatches).toBe(1);
     expect(h.propose).not.toHaveBeenCalled();
+    const saved = h.saved.at(-1);
+    if (!saved) throw new Error("Missing durable gate attempt");
+    const restored = h.create(saved);
     await runtime.run(h.parent.id);
-    await h.create(runtime.checkpoint()).run(h.parent.id);
+    await restored.run(h.parent.id);
+    for (const checkpoint of [
+      runtime.checkpoint(),
+      saved,
+      restored.checkpoint(),
+    ]) {
+      expect(checkpoint.journal.records[0].gate?.usage).toEqual({
+        inputTokens: 3,
+        outputTokens: 5,
+      });
+      expect(checkpoint.journal.usage.jev).toEqual({
+        calls: 1,
+        inputTokens: 3,
+        outputTokens: 5,
+      });
+    }
     expect(h.gate).toHaveBeenCalledTimes(1);
   });
-  it("does not expose a rejected admission or refund its two charged calls", async () => {
-    const h = fixture();
-    h.commit.mockImplementation((candidate) => {
-      if (candidate.state.groups.length) return false;
-      h.saved.push(structuredClone(candidate));
-      return true;
-    });
-    const runtime = h.create();
-    await runtime.run(h.parent.id);
-    expect(runtime.snapshot().groups).toEqual([]);
-    expect(runtime.checkpoint().journal.dispatches).toBe(2);
-    await runtime.run(h.parent.id);
-    await h.create(runtime.checkpoint()).run(h.parent.id);
-    expect(h.gate).toHaveBeenCalledTimes(1);
-    expect(h.propose).toHaveBeenCalledTimes(1);
-  });
+  it.each(["accepted", "noop"] as const)(
+    "does not expose a rejected proposal %s or lose its paid usage",
+    async (outcome) => {
+      const h = fixture();
+      if (outcome === "noop") {
+        const original = h.propose.getMockImplementation();
+        if (!original) throw new Error("Missing proposal fixture");
+        h.propose.mockImplementation(async (...args) => ({
+          ...(await original(...args)),
+          text: '{"proposals":[]}',
+        }));
+      }
+      h.commit.mockImplementation((candidate) => {
+        if (
+          candidate.journal.records.some(
+            (record) => record.proposal?.outcome === outcome,
+          )
+        )
+          return false;
+        h.saved.push(structuredClone(candidate));
+        return true;
+      });
+      const runtime = h.create();
+      await runtime.run(h.parent.id);
+      expect(runtime.snapshot().groups).toEqual([]);
+      expect(runtime.checkpoint().journal.dispatches).toBe(2);
+      const saved = h.saved.at(-1);
+      if (!saved) throw new Error("Missing durable proposal attempt");
+      const restored = h.create(saved);
+      await runtime.run(h.parent.id);
+      await restored.run(h.parent.id);
+      for (const checkpoint of [
+        runtime.checkpoint(),
+        saved,
+        restored.checkpoint(),
+      ]) {
+        expect(checkpoint.state.groups).toEqual([]);
+        expect(checkpoint.journal.records[0].proposal?.usage).toEqual({
+          inputTokens: 7,
+          outputTokens: 9,
+        });
+        expect(checkpoint.journal.usage).toEqual({
+          jev: { calls: 1, inputTokens: 3, outputTokens: 5 },
+          extraction: { calls: 1, inputTokens: 7, outputTokens: 9 },
+        });
+      }
+      expect(h.gate).toHaveBeenCalledTimes(1);
+      expect(h.propose).toHaveBeenCalledTimes(1);
+    },
+  );
   it("retains one physical flight through invalidation and cancellation-ignore drain", async () => {
     const h = fixture();
     let release = () => {};

@@ -19,8 +19,8 @@ type DevelopmentCase = {
   eligible: number[];
 };
 const criteria = {
-  yes: "Authorized unfinished work stopped at status and can advance now; no veto applies.",
-  no: "Scope, pause/status-or-planning-only, approval, blocker/dependency, ownership conflict/unknown, or legitimate-wait barrier; or execution already resumed.",
+  yes: "Authorized unfinished work stopped at status; an actionable next step has no task-local veto.",
+  no: "Next step blocked by scope, pause/status/planning only, approval, blocker/dependency, conflicting/unknown ownership or legitimate wait; or execution resumed.",
   uncertain: "Insufficient evidence; never infer permission.",
 };
 function variants(item: DevelopmentCase, parents = item.secondLabel ? 2 : 1) {

@@ -16,7 +16,7 @@ import {
   type CorrectionTask,
 } from "../advisory/corrections";
 import type {
-  ReconciliationCoverageSummary,
+  ReconciliationSubtaskSummary,
   ReconciliationUncertainActivity,
 } from "../advisory/reconciliation";
 import {
@@ -416,7 +416,7 @@ export interface AdvisorySettlementSnapshot {
   reason: AdvisorySettlementReason;
   tasks: AdvisorySettlementTask[];
   uncertainActivities?: ReconciliationUncertainActivity[];
-  coverage?: ReconciliationCoverageSummary[];
+  subtasks?: ReconciliationSubtaskSummary[];
 }
 
 const rejectedStorageMessage = (kind: "unsupported" | "corrupt") =>
@@ -1800,7 +1800,7 @@ export class Monitor {
    */
   advisorySettlementSnapshot(): AdvisorySettlementSnapshot {
     const uncertainActivities = this.visibilityUncertainActivities();
-    const coverage = this.reconciliationCoverage();
+    const subtasks = this.reconciliationSubtasks();
     return {
       enabled: this.enabled,
       reason: this.advisorySettlementReason(),
@@ -1818,7 +1818,7 @@ export class Monitor {
           : [],
       ),
       ...(uncertainActivities.length ? { uncertainActivities } : {}),
-      ...(coverage.length ? { coverage } : {}),
+      ...(subtasks.length ? { subtasks } : {}),
     };
   }
 
@@ -5893,46 +5893,114 @@ export class Monitor {
   }
 
   /**
-   * Copy current parent/revision coverage as reported facts only. This cannot
+   * Copy exact current generic child status as reported facts only. This cannot
    * affect settlement, parent health, corrections, or task authority.
    */
-  private reconciliationCoverage(): ReconciliationCoverageSummary[] {
+  private reconciliationSubtasks(): ReconciliationSubtaskSummary[] {
     const parents = new Map(
-      this.state.tasks
-        .filter((task) => task.included)
-        .map((task) => [`${task.id}:${task.revision}`, task]),
+      this.state.tasks.flatMap((task) =>
+        task.included && task.status !== "done"
+          ? [[task.id, task] as const]
+          : [],
+      ),
     );
-    return this.coverage.snapshot().groups.flatMap((group) => {
-      if (!parents.has(`${group.parentTaskId}:${group.parentRevision}`))
-        return [];
-      const reviewed = group.children.filter(
-        (child) => child.status === "reported-reviewed",
-      ).length;
-      const blocked = group.children.filter(
-        (child) => child.status === "reported-blocked",
-      ).length;
-      const pending = group.children.length - reviewed - blocked;
-      const unconfirmed = group.children.filter(
-        (child) => child.status !== "reported-reviewed",
+    const access = this.subtaskAccessSnapshot();
+    const summaries: ReconciliationSubtaskSummary[] = [];
+    const parentIds = new Set<string>();
+    const groupIds = new Set<string>();
+    let trackedChildren = 0;
+
+    for (const group of this.subtaskSnapshot().groups) {
+      const parent = parents.get(group.parentTaskId);
+      if (
+        !parent ||
+        parent.revision !== group.parentRevision ||
+        parentIds.has(group.parentTaskId) ||
+        groupIds.has(group.id) ||
+        group.children.length > 64 ||
+        summaries.length >= 20 ||
+        trackedChildren + group.children.length > 200
+      )
+        continue;
+
+      let reportedCompleted = 0;
+      let reportedBlocked = 0;
+      let pending = 0;
+      for (const child of group.children) {
+        if (child.status === "reported-completed") reportedCompleted += 1;
+        else if (child.status === "reported-blocked") reportedBlocked += 1;
+        else if (child.status === "pending") pending += 1;
+        else {
+          pending = -1;
+          break;
+        }
+      }
+      if (pending < 0) continue;
+
+      const knownTotal = group.knownTotal;
+      if (
+        (knownTotal !== undefined &&
+          (!Number.isSafeInteger(knownTotal) || knownTotal < 0)) ||
+        (group.complete
+          ? knownTotal !== undefined && knownTotal !== group.children.length
+          : knownTotal !== undefined && knownTotal < group.children.length)
+      )
+        continue;
+
+      const open = group.children.filter(
+        (child) => child.status !== "reported-completed",
       );
-      const knownTotal = group.complete
-        ? (group.knownTotal ?? group.children.length)
-        : group.knownTotal;
-      return [
-        {
-          parentTaskId: group.parentTaskId,
-          parentRevision: group.parentRevision,
-          complete: group.complete,
-          ...(knownTotal === undefined ? {} : { knownTotal }),
-          reviewed,
-          blocked,
-          pending,
-          accessed: group.children.filter((child) => child.accessed).length,
-          gaps: unconfirmed.slice(0, 3).map((child) => child.label),
-          omittedChildren: Math.max(0, unconfirmed.length - 3),
-        },
-      ];
-    });
+      const observedAccess = this.reconciliationObservedAccess(group, access);
+      summaries.push({
+        parentTaskId: group.parentTaskId,
+        parentRevision: group.parentRevision,
+        groupId: group.id,
+        listRevision: group.listRevision,
+        complete: group.complete,
+        ...(knownTotal === undefined ? {} : { knownTotal }),
+        reportedCompleted,
+        reportedBlocked,
+        pending,
+        ...(observedAccess === undefined ? {} : { observedAccess }),
+        gaps: open.slice(0, 3).map((child) => child.label),
+        omittedChildren: open.length - Math.min(open.length, 3),
+      });
+      parentIds.add(group.parentTaskId);
+      groupIds.add(group.id);
+      trackedChildren += group.children.length;
+    }
+    return summaries;
+  }
+
+  /** Count only exact current C04 observed links; unavailable is never zero. */
+  private reconciliationObservedAccess(
+    group: SubtaskSnapshot["groups"][number],
+    access: SubtaskAccessSnapshot,
+  ): number | undefined {
+    const matches = access.groups.filter(
+      (candidate) =>
+        candidate.groupId === group.id &&
+        candidate.parentTaskId === group.parentTaskId &&
+        candidate.parentRevision === group.parentRevision &&
+        candidate.listRevision === group.listRevision,
+    );
+    const candidate = matches.length === 1 ? matches[0] : undefined;
+    if (
+      !candidate ||
+      candidate.children.length !== group.children.length ||
+      !candidate.children.every(
+        (child, index) =>
+          child.childId === group.children[index]?.id &&
+          (child.status === "observed" ||
+            child.status === "no-observation" ||
+            child.status === "unavailable"),
+      )
+    )
+      return;
+    const observed = candidate.children.filter(
+      (child) => child.status === "observed",
+    ).length;
+    return observed > 0 ? observed : undefined;
   }
 
   /**

@@ -2,6 +2,27 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## First12 Monitor assertion ports executed
+
+Main added live public-ingress fixture `__tests__/fixtures/subtask-metadata-monitor.ts` and ported all12 existing `coverage-monitor.test.ts` cases without production changes. Admission is real need-gate→selected proposal with canonical goal spans, explicit22 resource/item bindings and dispatch/physical-drain callbacks; no seeded store. Reports explicitly answer unchanged.
+
+Executed keeper map (same12 cases, no deletion/skip):
+
+1. Selected-proposer pre-network save veto: positive gate reaches proposer, admission false/network0, no group, prior wallet2 retained.
+2. Manifest-triggered22 pending children: parent/health/mandatory counters unchanged, exact extra gate+proposal, supported checkpoint wallet3.
+3. Preappend remains provisional; later accepted-group save failure happens after real charged analysis, retains wallet3 but publishes/persists no group.
+4. Actual held mandatory extraction: metadata confirmed while parent/group absent; release yields real22 admission with wallet2.
+5. Exact individual/batch active-call hashes, unmatched/matched ends, pending child statuses and zero additional calls.
+6. OFF/reload retains exact semantic store/allocators and wallet, clears access runtime, calls unchanged and private read body absent from checkpoint. OFF restore exposes an **empty access binding projection**, not a manufactured22-row roster; semantic22 remain visible and missing binding means unavailable, never observed0.
+7. Metadata removal retains group/child IDs/statuses and parent/health; links unavailable; exactly one negative optional gate, no proposal/report/mandatory calls; unchanged confirmation no calls.
+8. Confirmed distinct-resource pressure: positive retained allocation, omissions, <=64KiB, no direct child admission, one parent, stable confirmation/counters; OFF returns to measured empty allocation overhead.
+9. Actual Monitor mixed preconfirmation metadata/read candidates: exactly16, positive pending bytes, overflow omissions, shared bound, no children/no calls.
+10. Existing positive omission-without-group board/widget and one-parent assertions retained.
+11. Listing alone establishes no-observation; separate confirmed22-path read gives observed22, no billing/status change; detached exact generic reconciliation counts/gaps preserve parent/correction/settlement.
+12. Read-only selected-parent board shows Subtasks/22/Overview with unchanged parent/counters.
+
+Main configured **51/51 focused** (12 ports plus existing generic/report Monitor cases), **1935 unit passes/44 remaining failures** (scheduler34, storage10), **83/84 integration** (known TUI correction `:773`), format/check pass with three historical warnings. Logs `c05-monitor-port-{green,test,integration,format,check}.log`. Initial fixture corrections were readonly snapshot assignment, OFF-access shape and unused export; no source repair or weakened safety assertion. C05–C09 remain unaccepted; `ru7`, remaining ports/legacy removal, host diagnosis, independent reviews and manual prerequisites remain.
+
 ## Remaining Monitor ports and semantic-omission blockers
 
 Read-only oracle `4903fb75` returned a first12-case Monitor port plan using only public APIs. Main approved: separate mandatory/need/proposal/report counters; live22 proposal admission with original metadata associations and canonical goal spans; goal-first wallet1 then manifest +2, versus genuinely held mandatory extraction with metadata-first wallet2. Listing establishes mapping/no-observation; a separate canonically confirmed read of all22 mapped paths establishes observed22 with no extra billing or semantic changes. Metadata-removal named wake may spend exactly one negative gate under the controlled fixture, never a proposer/report or mandatory call. Passive reads, unchanged confirmation and access-only events do not share that exception. Any differing execution must be diagnosed, not accommodated with widened expectations.

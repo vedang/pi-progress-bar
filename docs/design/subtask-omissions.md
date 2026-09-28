@@ -40,3 +40,11 @@ Expose detached `semanticOmissions: {total, byReason, saturated}` alongside—no
 Permanent generic phase failures do not retry on unchanged `modelSelected`. Changed selected model/context is a new identity after physical drain, not a compatibility retry. Invalid overlapping report/decomposition ownership is rejected by schema, not normalized into a legacy queue. These source-grounded corrections supersede tentative audit handoff questions.
 
 No ru7/C05–C09 acceptance is claimed by this freeze; no paid semantic evidence or manual acceptance.
+
+## Implementation evidence (in progress)
+
+Codec source `11b66ebd` plus typed-input repair `cd09645f` passes Main's61 configured envelope tests and format/check. The initial worker widened public metadata inputs to unknown; Main rejected that and added compile-time contract proof (`95bb7d11`). Negative fixtures now explicitly cross the untrusted boundary; production inputs remain typed. This is codec validation, not ru7 acceptance.
+
+Actual public-ingress Monitor REDs now establish two missing runtime behaviors: oversized canonical report omission persistence and summary-only saturated restore/projection. A separate real-dispatch wallet regression builds22 children through host metadata/gate/proposal ingress, charges a new negative gate plus two report chunks, then navigates to an older same-source checkpoint: wallet drops6→4. No synthetic journal counters were used. Both accounting rollback and any unnecessary restoration dispatch need scoped investigation; no blanket max of independent usage buckets.
+
+Main full gates with these intentional REDs:1930 unit pass/47 fail (44 retained legacy fixtures plus3 new Monitor regressions),86 integration pass, format/check pass with three historical warnings. No paid calls or stage acceptance.

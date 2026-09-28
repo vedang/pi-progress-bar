@@ -46,6 +46,97 @@ async function chargedFixture(sourceId = () => "session:test") {
   return { h, older, olderBranch, charged, calls: h.counts() };
 }
 
+it.each(["gate", "proposal", "report"] as const)(
+  "retains a successfully saved %s dispatch through reentrant OFF and disk reload",
+  async (phase) => {
+    const h = subtaskMetadataMonitor();
+    running.push(h);
+    h.start();
+    await h.settle("goal");
+    if (phase === "report") await h.map();
+    const before = h.checkpoint().monitor?.subtasks?.journal.dispatches ?? 0;
+    const calls = h.counts();
+    let disk = h.checkpoint();
+    let charged: typeof disk | undefined;
+    h.save.mockImplementation((raw: unknown) => {
+      // The host saves first, then invokes a synchronous public control.
+      disk = structuredClone(raw) as typeof disk;
+      const journal = disk.monitor?.subtasks?.journal;
+      const matches =
+        phase === "report"
+          ? journal?.reports.some((job) =>
+              job.attempts.some(
+                (attempt) =>
+                  attempt.dispatch > before && attempt.outcome === "dispatched",
+              ),
+            )
+          : journal?.records.some(
+              (record) =>
+                (record[phase]?.dispatch ?? 0) > before &&
+                record[phase]?.outcome === "dispatched",
+            );
+      if (!charged && matches) {
+        charged = structuredClone(disk);
+        h.monitor.turnOff();
+      }
+    });
+    if (phase === "report") {
+      h.append(
+        "dispatch-off-report",
+        "I reviewed all tabs; synthesis is still pending.",
+      );
+      await h.settle("dispatch-off-report");
+    } else await h.map();
+    if (!charged?.monitor?.subtasks)
+      throw new Error("Dispatch boundary not reached");
+    expect(charged.monitor.subtasks.journal.dispatches).toBe(
+      before + (phase === "proposal" ? 2 : 1),
+    );
+    expect(disk.monitor?.enabled).toBe(false);
+    expect
+      .soft(disk.monitor?.subtasks?.journal)
+      .toEqual(charged.monitor.subtasks.journal);
+    const after = h.counts();
+    expect(after[phase]).toBe(calls[phase]); // OFF vetoes transport after durable admission.
+    const reloaded = subtaskMetadataMonitor();
+    running.push(reloaded);
+    reloaded.replace(structuredClone(h.reader()));
+    await reloaded.monitor.restore(
+      "/nonexistent-hybrid-test",
+      disk,
+      false,
+      reloaded.reader,
+    );
+    await vi.advanceTimersByTimeAsync(11000);
+    reloaded.observe();
+    await vi.advanceTimersByTimeAsync(100);
+    const restored = reloaded.checkpoint();
+    expect(restored.monitor?.enabled).toBe(false);
+    expect
+      .soft(restored.monitor?.subtasks?.journal.dispatches)
+      .toBe(charged.monitor.subtasks.journal.dispatches);
+    expect
+      .soft(restored.monitor?.subtasks?.journal.usage)
+      .toEqual(charged.monitor.subtasks.journal.usage);
+    const original = charged.monitor.subtasks.journal;
+    const journal = restored.monitor?.subtasks?.journal;
+    expect
+      .soft(journal?.records.map((record) => record.identity))
+      .toEqual(original.records.map((record) => record.identity));
+    expect
+      .soft(journal?.reports.map((report) => report.identity))
+      .toEqual(original.reports.map((report) => report.identity));
+    expect(h.counts()).toEqual(after);
+    expect(reloaded.counts()).toEqual({
+      gate: 0,
+      proposal: 0,
+      report: 0,
+      mandatory: 0,
+      extraction: 0,
+    });
+  },
+);
+
 it.each([
   { enabled: false, preserveControls: false },
   { enabled: true, preserveControls: false },

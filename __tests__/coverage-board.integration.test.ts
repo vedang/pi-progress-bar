@@ -5,19 +5,25 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import { expect, it, vi } from "vitest";
+import { SubtaskStore } from "../src/core/subtasks";
 import { createBoard } from "../src/ui/board";
+import type { WidgetSnapshot } from "../src/ui/widget";
 import {
   coverageBoardView,
   coverageKeys as keys,
   coverageTheme as theme,
 } from "./fixtures/coverage-board";
+import { subtaskAdmission } from "./fixtures/subtasks";
+import { uxView } from "./fixtures/ux-view";
 
 it.each([
-  [80, 24],
-  [140, 40],
+  { columns: 80, rows: 24, kind: "22-child" },
+  { columns: 140, rows: 40, kind: "22-child" },
+  { columns: 80, rows: 24, kind: "no-file" },
+  { columns: 140, rows: 40, kind: "no-file" },
 ])(
-  "real TUI routes generic subtask navigation and clips overlay at%ix%i",
-  async (columns, rows) => {
+  "real TUI routes $kind subtask navigation and clips overlay at $columns x $rows",
+  async ({ columns, rows, kind }) => {
     let input: ((data: string) => void) | undefined;
     let output = "";
     const terminal: Terminal = {
@@ -43,7 +49,24 @@ it.each([
     };
     const tui = new TuiMainScreen(terminal);
     let close = () => {};
-    const board = await createBoard(coverageBoardView(), {
+    let view: WidgetSnapshot;
+    const firstLabel = kind === "22-child" ? "Overview" : "Compare options";
+    const lastLabel = kind === "22-child" ? "Lookup" : "Recommend approach";
+    if (kind === "22-child") view = coverageBoardView();
+    else {
+      const store = new SubtaskStore();
+      expect(store.admit(subtaskAdmission([firstLabel, lastLabel]))).toEqual({
+        accepted: true,
+      });
+      view = { ...uxView(), subtasks: store.snapshot() };
+      view.board.tasks[0].label = "Recommend deployment approach";
+      view.board.tasks[0].status = "OPEN";
+      view.board.currentTask = { taskId: "task:1", status: "OPEN" };
+      view.presentation.progress = { done: 0, total: 1, kind: "current" };
+      expect(view.subtaskAccess).toBeUndefined();
+    }
+    const before = structuredClone(view);
+    const board = await createBoard(view, {
       theme,
       screenRows: () => rows,
       isFocused: () => tui.getFocusedComponent() === board,
@@ -72,7 +95,7 @@ it.each([
       input?.(keys.end);
       tui.requestRender(true);
       await vi.waitFor(() =>
-        expect(stripVTControlCharacters(output)).toContain("Lookup"),
+        expect(stripVTControlCharacters(output)).toContain(lastLabel),
       );
       expect(
         stripVTControlCharacters(output)
@@ -83,8 +106,15 @@ it.each([
       input?.(keys.home);
       tui.requestRender(true);
       await vi.waitFor(() =>
-        expect(stripVTControlCharacters(output)).toContain("Overview"),
+        expect(stripVTControlCharacters(output)).toContain(firstLabel),
       );
+      if (kind === "no-file") {
+        expect(stripVTControlCharacters(output)).toMatch(/access unavailable/i);
+        expect(stripVTControlCharacters(output)).not.toMatch(
+          /0 observed access/i,
+        );
+      }
+      expect(view).toEqual(before);
       input?.(keys.escape);
       expect(tui.hasOverlay()).toBe(false);
     } finally {

@@ -653,7 +653,23 @@ it.each(["parent", "source"])(
     });
     const runtime = h.create();
     await runtime.runReport(h.options.parent.id, h.source());
-    expect(runtime.checkpoint().journal.dispatches).toBe(1);
+    const charged = runtime.checkpoint();
+    expect(charged.journal.dispatches).toBe(1);
+    expect(charged.journal.reports[0].attempts[0].usage).toEqual({
+      inputTokens: 3,
+      outputTokens: 5,
+    });
+    expect(charged.journal.usage.jev).toEqual({
+      calls: 1,
+      inputTokens: 3,
+      outputTokens: 5,
+    });
+    const reloaded = h.create(structuredClone(charged)).checkpoint();
+    expect(reloaded.journal.usage).toEqual(charged.journal.usage);
+    expect(reloaded.journal.reports[0].attempts[0].usage).toEqual({
+      inputTokens: 3,
+      outputTokens: 5,
+    });
     expect(h.onPublish).not.toHaveBeenCalled();
     expect(
       runtime

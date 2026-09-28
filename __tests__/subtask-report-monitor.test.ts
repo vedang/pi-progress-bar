@@ -1126,6 +1126,7 @@ it("refused report dispatch persistence causes no fetch, charge or child publica
 });
 it("failed final save keeps charged proof and does not publish or retry after Monitor reload", async () => {
   const h = await fixture();
+  let disk = h.checkpoint();
   h.save.mockImplementation((raw: unknown) => {
     if (
       (raw as Envelope).monitor?.subtasks?.journal.reports.some((job) =>
@@ -1133,25 +1134,33 @@ it("failed final save keeps charged proof and does not publish or retry after Mo
       )
     )
       throw new Error("Report result save refused");
+    disk = structuredClone(raw) as Envelope;
   });
   h.append("report", reportText);
   await h.settle("report");
   expect(h.calls).toHaveLength(1);
   expect(h.statuses()).toEqual(Array(22).fill("pending"));
   expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(1);
+  expect(disk.monitor?.subtasks?.journal.reports[0].attempts[0].usage).toEqual({
+    inputTokens: 7,
+    outputTokens: 3,
+  });
+  expect(disk.monitor?.subtasks?.journal.usage.jev).toEqual({
+    calls: 1,
+    inputTokens: 7,
+    outputTokens: 3,
+  });
   h.save.mockReset();
-  await h.monitor.restore(
-    "/nonexistent-hybrid-test",
-    h.checkpoint(),
-    false,
-    h.reader,
-  );
+  await h.monitor.restore("/nonexistent-hybrid-test", disk, false, h.reader);
   await vi.advanceTimersByTimeAsync(11000);
   h.observe();
   await vi.advanceTimersByTimeAsync(100);
   expect(h.calls).toHaveLength(1);
   expect(h.checkpoint().monitor?.subtasks?.journal.reports[0].state).toBe(
     "permanent",
+  );
+  expect(h.checkpoint().monitor?.subtasks?.journal.usage).toEqual(
+    disk.monitor?.subtasks?.journal.usage,
   );
 });
 it.each(["advance", "off"])(

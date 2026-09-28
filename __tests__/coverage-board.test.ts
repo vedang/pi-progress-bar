@@ -39,7 +39,11 @@ it.each(["OPEN", "DONE"] as const)(
     h.view.board.currentTask = { taskId: h.view.board.tasks[0].taskId, status };
     h.board.update(h.view);
     const output = h.text();
-    expect(output).toMatch(/reported completed[^\n]*1\s*\/\s*22/i);
+    expect(output).toMatch(/reported complete\b[^\n]*1\s*\/\s*22/i);
+    expect(output).not.toMatch(/optional review|reported reviewed/i);
+    expect(renderWidget(h.view, false, 200, theme).join("\n")).not.toMatch(
+      /optional review|reported reviewed/i,
+    );
     expect(output).toMatch(
       /(?:2\s+(?:observed\s+)?access(?:ed)?\b|(?:observed\s+)?access(?:ed)?\s*:?\s*2\b)/i,
     );
@@ -165,7 +169,7 @@ it("renders active access separately from durable reported completion", async ()
   h.board.update(h.view);
   expect(h.text()).toMatch(/active[^\n]*access/i);
   expect(h.text()).toMatch(/active[^\n]*Phase 1[^\n]*Phase 2/i);
-  expect(h.text()).toMatch(/reported completed[^\n]*1\s*\/\s*22/i);
+  expect(h.text()).toMatch(/reported complete\b[^\n]*1\s*\/\s*22/i);
   h.board.dispose();
 });
 it("shows active-access and group-omission rows only once within the subtask pane", async () => {
@@ -189,6 +193,10 @@ it("shows exhausted subtasks even without an admitted group", async () => {
   h.view.subtaskDiagnostics.exhausted = true;
   h.board.update(h.view);
   expect(h.text()).toMatch(/subtasks[^\n]*exhausted|exhausted[^\n]*subtasks/i);
+  expect(h.text()).not.toMatch(/optional review/i);
+  expect(renderWidget(h.view, true, 200, theme).join("\n")).not.toMatch(
+    /optional review/i,
+  );
   expect(renderWidget(h.view, true, 120, theme).join("\n")).toMatch(
     /subtasks[^\n]*exhausted|exhausted[^\n]*subtasks/i,
   );
@@ -385,7 +393,7 @@ it.each(["group", "parent", "revision", "list", "child"])(
     expect(h.text()).not.toMatch(
       /(?:2\s+(?:observed\s+)?access(?:ed)?\b|(?:observed\s+)?access(?:ed)?\s*:?\s*2\b)/i,
     );
-    expect(h.text()).toMatch(/reported completed[^\n]*1\s*\/\s*22/i);
+    expect(h.text()).toMatch(/reported complete\b[^\n]*1\s*\/\s*22/i);
     h.board.dispose();
   },
 );
@@ -395,7 +403,7 @@ it("distinguishes unavailable access from observed zero and keeps semantic compl
   h.board.update(h.view);
   expect(h.text()).toMatch(/access[^\n]*unavailable|unavailable[^\n]*access/i);
   expect(h.text()).not.toMatch(/(?:0\s+observed|observed\s*:?\s*0)/i);
-  expect(h.text()).toMatch(/reported completed[^\n]*1\s*\/\s*22/i);
+  expect(h.text()).toMatch(/reported complete\b[^\n]*1\s*\/\s*22/i);
   h.board.dispose();
 });
 it.each([
@@ -424,7 +432,7 @@ it.each([
       expect(text).toMatch(/access[^\n]*unavailable|unavailable[^\n]*access/i);
       expect(text).not.toMatch(/0 observed access/i);
     }
-    expect(text).toMatch(/reported completed[^\n]*1\s*\/\s*22/i);
+    expect(text).toMatch(/reported complete\b[^\n]*1\s*\/\s*22/i);
     h.board.dispose();
   },
 );

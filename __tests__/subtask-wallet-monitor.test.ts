@@ -330,3 +330,27 @@ it("persists the same preserved mandatory telemetry that OFF restore adopts", as
     adopted?.lastExtractionCallAt,
   );
 });
+
+it("normalizes stale optional health facts before saving a disabled history restore", async () => {
+  const { h } = await chargedFixture();
+  const target = h.checkpoint();
+  if (!target.monitor?.subtasks) throw new Error("Missing generic history");
+  const card = target.monitor.healthCards?.[0];
+  expect(card).toBeDefined();
+  if (!card) throw new Error("Missing actual health assessment");
+  // Strictly valid supplied metadata, but not the target task's revision.
+  card.revision++;
+  target.monitor.enabled = false;
+  expect(subtaskCheckpointStorageStatus(target)).toBe("supported");
+  h.save.mockClear();
+  await h.monitor.restore("/nonexistent-hybrid-test", target, false, h.reader);
+  expect(h.monitor.enabled).toBe(false);
+  const adopted = h.checkpoint().monitor;
+  expect(adopted?.healthCards ?? []).toEqual([]);
+  expect(h.save).toHaveBeenCalled();
+  const saved = h.save.mock.calls.at(-1)?.[0] as ReturnType<
+    typeof h.checkpoint
+  >;
+  expect(saved.monitor?.healthCards ?? []).toEqual(adopted?.healthCards ?? []);
+  expect(saved.monitor?.subtasks).toEqual(adopted?.subtasks);
+});

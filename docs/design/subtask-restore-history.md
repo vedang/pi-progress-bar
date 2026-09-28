@@ -59,3 +59,9 @@ Main reproduced all three with configured Monitor tests (3 RED / 45 PASS, types 
 ### Repair candidate awaiting independent re-review
 
 `27fd9f1f` removes the physical-flight await, captures detached pending-target wake authority and projection, and merges preserved mandatory counters/timestamps into prospective metadata before persistence. Main reran135 focused tests and `make check`: PASS, including all three review regressions and veto metadata retention. Worker reports552 broader tests and86 integration tests passing; full configured unit result1958 PASS/46 known residual FAIL (44 legacy fixtures,2 omission Monitor). Independent retained review is pending; these results do not accept the batch or C05–C09.
+
+### Re-review outcome and next regression batch
+
+Retained re-review after timeout recovery confirms the original three findings repaired, but still blocks acceptance on four new findings: cloned adapter evidence loses its private attestation; pending scheduling confuses parked ownership with immediate runnability; saved optional health/details can differ from canonical adoption; detached source capture has no aggregate byte/lifetime bound.
+
+Main has reproduced the optional-health mismatch with an actual health assessment whose supplied revision is stale but strictly codec-valid: disabled restore persists the stale card while its immediate checkpoint omits it. The wallet suite is1 RED/10 PASS and types pass. Remaining findings still need Main regressions. A read-only contract consultation is resolving bounded pending capture and invalidation semantics before source delegation; it must preserve normal deep direct-reference validation and exact original evidence capabilities. No new capture limit or implementation is accepted yet.

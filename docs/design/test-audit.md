@@ -101,6 +101,8 @@ Review `2d5e16c9-b845-4e9d-9336-9e9918aafc36` found no lost contract, but blocke
 
 The first attempt supplied source ID rather than gateway consent identity, so the gateway correctly rejected it before dispatch and the test passed. That attempt is retained as invalid mutation evidence, not credited as proof. The corrected fault and its diff/log are recorded separately. All calls stayed behind the offline fixture; paid calls remain zero.
 
-## Final audit acceptance pending
+## Audit accepted; feature completion resumes
 
-All planned cleanup candidates are applied. Final independent cumulative preservation review must evaluate both batches and this retained-requirement handoff before closing `hmv`. Full product gates remain red until feature completion. No release, install, push, paid semantic proof or manual acceptance is claimed.
+Final independent cumulative review `584dfc88-dcea-41b8-a919-dae9c930f241` passed after the idle-mutation follow-up. Main accepts the completed audit and its retained-requirement handoff; `hmv` may close. All planned evidence-backed cleanup candidates are applied. Final sizes: production38,706 lines (−500), tests39,393 (−474), support3,077 unchanged. The source/test candidate remains `29c8b69f`; later commits record evidence/closure only.
+
+Full product gates remain red until feature completion:1912 unit pass/44 retained obsolete-fixture failures,86 integration pass, format/check pass with three historical warnings. C05-C09, N05 and fresh C10/N06 semantic acceptance remain open. Owner manual review follows both completed features. No release, install, push, paid semantic proof or manual acceptance is claimed.

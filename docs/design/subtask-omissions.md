@@ -71,3 +71,24 @@ Before identity/detection integration, `src/core/subtask-omissions.ts` provides 
 Inputs are `Readonly<SubtaskOmissionSummary> | undefined`; append entry is a readonly summary-entry type. Append/saturate always return a present summary. `changed` compares the candidate to live state, never to incoming. Every result is detached even on no-op; no mutation, storage, byte-admission callback, reader, clock, provider, retry or scheduling effect. Monitor later applies full-envelope byte preflight and atomic commit before publishing any candidate. Session matching is a caller precondition for merge.
 
 Main added12 declarations/14 expanded pure cases. Initial configured run is collection-RED because the module is absent;61 existing envelope cases pass. This is not14 executed failures. Identity hashing and Monitor/UI integration remain separate unfinished layers.
+
+### Summary implementation verified; identity API frozen
+
+Pure summary source `b12616d2` passes Main75 configured summary/envelope cases and `make check`; source inspected. This is helper verification, not Monitor integration or ru7 acceptance.
+
+Next export in `src/analysis/subtask-report.ts`:
+
+```ts
+subtaskReportOmissionIdentity(input: {
+  sourceId: string;
+  parent: Readonly<HybridTask>;
+  group: Readonly<SubtaskGroupSnapshot>;
+  reportSource: Readonly<SourceRef>;
+}): string | undefined
+```
+
+This pure content-free fingerprint takes canonical bindings already validated by the caller. It does not admit work, validate live provenance, read bodies/resolvers, or classify size/capacity. Monitor must validate current parent/group and exact canonical report reference plus post-admission order before counting. Isolated binding-mutation tests exercise hashing distinctions, not claims of actual admitted changed groups.
+
+Use inert hashing with domain `subtask-report-omission:v1`, session sourceId, and the existing pinned report `MODEL` and rubric. Semantic projection mirrors existing job identity's parent (`id,label,revision,source`) and subtasks (`parentTaskId,parentRevision,groupId,parentSourceDigest,listRevision,source,proof,complete,knownTotal?`, ordered active children `id,label,source`), replacing the whole report observation with `reportSource` only. Omit mutable parent/child statuses, retired/diagnostic group history, reason, time, selected proposal model, adapter evidence and chunk selection. Use original pinned model/rubric constants, not copies that can drift. Keep existing report job/request identities and request validation/limits unchanged; a golden existing-job fixture guards accidental identity reordering.
+
+Main26 identity cases include25 REDs for the absent export and a passing old-job identity guard; summary/report controls bring the configured run to25 RED/62 PASS. A100KiB report cannot build a report request but has a hashable content-free reference. Inherited serialization hooks must remain inert. No source identity implementation or production omission detection is accepted yet.

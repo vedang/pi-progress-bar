@@ -214,6 +214,11 @@ it("keeps global exhaustion and omission warnings visible in the subtask pane", 
   h.view.subtaskDiagnostics.dispatches = 1024;
   h.view.subtaskDiagnostics.exhausted = true;
   h.view.subtaskDiagnostics.adapter.omissions = 3;
+  h.view.subtaskDiagnostics.semanticOmissions = {
+    total: 9,
+    byReason: { "report-oversized": 2, coalesced: 3, capacity: 4 },
+    saturated: false,
+  };
   h.board.update(h.view);
   h.board.handleInput(keys.tab);
   h.board.handleInput(keys.tab);
@@ -222,6 +227,8 @@ it("keeps global exhaustion and omission warnings visible in the subtask pane", 
   const widget = renderWidget(h.view, false, 120, theme).join("\n");
   expect(widget).toMatch(/exhausted/i);
   expect(widget).toMatch(/3[^\n]*omitted/i);
+  expect(h.text()).toMatch(/9[^\n]*reports?[^\n]*(?:omitted|skipped)/i);
+  expect(widget).toMatch(/9[^\n]*reports?[^\n]*(?:omitted|skipped)/i);
   h.board.dispose();
 });
 it("does not carry one parent's subtask scroll into another parent", async () => {
@@ -306,6 +313,57 @@ it("shows omission diagnostics without a group or exhausted wallet", async () =>
   }
   h.board.dispose();
 });
+it.each([
+  { total: 5, saturated: false },
+  { total: 64, saturated: true },
+  { total: 0, saturated: true },
+  { total: 0, saturated: false },
+])(
+  "shows durable omission counts with no group while OFF (retained=$total, saturated=$saturated)",
+  async ({ total, saturated }) => {
+    const h = await fixture();
+    h.view.subtasks.groups = [];
+    h.view.subtaskDiagnostics.semanticOmissions = {
+      total,
+      byReason: { "report-oversized": total, coalesced: 0, capacity: 0 },
+      saturated,
+    };
+    h.view.presentation.enabled = false;
+    const before = structuredClone(h.view);
+    h.board.update(h.view);
+    const detail = h.text();
+    h.board.handleInput(keys.tab);
+    h.board.handleInput(keys.tab);
+    const pane = h.text();
+    for (const text of [
+      detail,
+      pane,
+      renderWidget(h.view, false, 120, theme).join("\n"),
+    ]) {
+      if (total > 0)
+        expect(text).toMatch(
+          new RegExp(`${total}[^\\n]*reports?[^\\n]*(?:omitted|skipped)`, "i"),
+        );
+      if (saturated) {
+        expect(text).toMatch(
+          /omission[^\n]*(?:summary|history)[^\n]*incomplete/i,
+        );
+        if (total > 0) expect(text).toMatch(/at least\s+64|64\+/i);
+        else
+          expect(text).not.toMatch(
+            /\b0\s+(?:reports?|omissions?)[^\n]*(?:omitted|skipped)/i,
+          );
+      }
+      if (total === 0 && !saturated)
+        expect(text).not.toMatch(
+          /omission[^\n]*(?:summary|history)|reports?[^\n]*(?:omitted|skipped)/i,
+        );
+      expect(text).not.toMatch(/exhausted/i);
+    }
+    expect(h.view).toEqual(before);
+    h.board.dispose();
+  },
+);
 it.each(["group", "parent", "revision", "list", "child"])(
   "does not present foreign %s access as observed",
   async (kind) => {

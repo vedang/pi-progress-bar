@@ -641,6 +641,8 @@ export class Monitor {
   /** Continuation has its own Jev transport; it never borrows semantic capacity. */
   private readonly continuationGateway: JevGateway;
   private continuationGateDispatch?: (at: number) => boolean;
+  /** Raw continuation transport drain remains controller-owned across invalidation. */
+  private continuationPhysicalFlight?: (drain: Promise<void>) => void;
   /** Visibility transport and spend are isolated from semantic/advisory telemetry. */
   private readonly visibilityGateway: JevGateway;
   private readonly visibility = new ExecutionVisibilityStore();
@@ -846,6 +848,13 @@ export class Monitor {
       fetch: (url, init) => globalThis.fetch(url, init),
       getApiKey: () => process.env.TYPESAFE_API_KEY,
       beforeDispatch: (at) => this.continuationGateDispatch?.(at) === true,
+      onPhysicalFlight: (drain) => {
+        try {
+          this.continuationPhysicalFlight?.(drain);
+        } catch {
+          // Observation never controls continuation transport admission.
+        }
+      },
       // Continuation is optional; availability is surfaced by its controller.
       onPermanentError: () => this.note("jev-unavailable"),
     });
@@ -1935,10 +1944,12 @@ export class Monitor {
     batch: ContinuationGateBatch,
     signal: AbortSignal,
     admit: () => boolean,
+    onPhysicalFlight: (drain: Promise<void>) => void,
   ): Promise<ValidatedResult | undefined> {
     if (!this.continuationCanStart() || signal.aborted) return;
     const dispatch = (_at: number) => !signal.aborted && admit();
     this.continuationGateDispatch = dispatch;
+    this.continuationPhysicalFlight = onPhysicalFlight;
     const abort = () => this.continuationGateway.invalidate();
     signal.addEventListener("abort", abort, { once: true });
     try {
@@ -1952,6 +1963,8 @@ export class Monitor {
       signal.removeEventListener("abort", abort);
       if (this.continuationGateDispatch === dispatch)
         this.continuationGateDispatch = undefined;
+      if (this.continuationPhysicalFlight === onPhysicalFlight)
+        this.continuationPhysicalFlight = undefined;
     }
   }
 

@@ -67,11 +67,13 @@ export type ContinuationControllerOptions = Readonly<{
     batch: ContinuationGateBatch,
     signal: AbortSignal,
     admit: () => boolean,
+    onPhysicalFlight: (drain: Promise<void>) => void,
   ) => Promise<ValidatedResult | undefined>;
   draft: (
     request: ContinuationDraftRequest,
     signal: AbortSignal,
     admit: () => boolean,
+    onPhysicalFlight: (drain: Promise<void>) => void,
   ) => Promise<ContinuationDraftProviderResult | undefined>;
   emit: (draft: AppliedContinuationDraft) => boolean;
 }>;
@@ -354,7 +356,10 @@ export class ContinuationController {
   private receipt?: ReconciliationSettlement;
   private highWater?: ContinuationRoot;
   private abortController?: AbortController;
+  /** Logical scheduler reservation; it may settle before raw provider work. */
   private flight?: Promise<void>;
+  /** Raw provider ownership survives logical cancellation until transport drain. */
+  private physicalFlight?: Promise<void>;
   private generation = 0;
   private gateDispatches = 0;
   private draftDispatches = 0;
@@ -366,6 +371,7 @@ export class ContinuationController {
     if (
       !validRoot(root) ||
       this.flight ||
+      this.physicalFlight ||
       (this.phase !== "idle" && this.phase !== "consumed") ||
       (this.highWater && rootOrder(root, this.highWater) <= 0)
     )
@@ -513,7 +519,12 @@ export class ContinuationController {
     );
     let result: ValidatedResult | undefined;
     try {
-      result = await this.options.gate(batch, signal, admission.admit);
+      result = await this.options.gate(
+        batch,
+        signal,
+        admission.admit,
+        (drain) => this.retainPhysicalFlight(drain),
+      );
     } catch {
       this.consumeIfActive(generation, root);
       return;
@@ -589,7 +600,12 @@ export class ContinuationController {
     );
     let result: ContinuationDraftProviderResult | undefined;
     try {
-      result = await this.options.draft(request, signal, admission.admit);
+      result = await this.options.draft(
+        request,
+        signal,
+        admission.admit,
+        (drain) => this.retainPhysicalFlight(drain),
+      );
     } catch {
       this.consumeIfActive(generation, root);
       return;
@@ -641,6 +657,27 @@ export class ContinuationController {
       return;
     }
     this.consumeIfActive(generation, root);
+  }
+
+  /**
+   * Raw provider work can ignore abort. Hold one detached, nonrejecting drain
+   * across invalidation so no later root can overlap this continuation flight.
+   */
+  private retainPhysicalFlight(drain: Promise<void>): void {
+    if (this.physicalFlight) return;
+    let physical: Promise<void>;
+    try {
+      physical = Promise.resolve(drain).then(
+        () => undefined,
+        () => undefined,
+      );
+    } catch {
+      return;
+    }
+    this.physicalFlight = physical;
+    void physical.then(() => {
+      if (this.physicalFlight === physical) this.physicalFlight = undefined;
+    });
   }
 
   private admission(

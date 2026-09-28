@@ -253,8 +253,8 @@ export default function progressBar(pi: ExtensionAPI): void {
       monitor.continuationCanStart() &&
       (context?.isIdle() ?? false) &&
       !(context?.hasPendingMessages() ?? true),
-    gate: (batch, signal, admit) =>
-      monitor.evaluateContinuationGate(batch, signal, admit),
+    gate: (batch, signal, admit, onPhysicalFlight) =>
+      monitor.evaluateContinuationGate(batch, signal, admit, onPhysicalFlight),
     draft: selectedModelContinuation(() => {
       if (!context) throw new Error("No active Pi context");
       return context;

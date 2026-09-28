@@ -134,8 +134,9 @@ export function selectedModelContinuation(
   request: unknown,
   signal: AbortSignal,
   onDispatch?: (at: number) => boolean | undefined,
+  onPhysicalFlight?: (drain: Promise<void>) => void,
 ) => Promise<ContinuationSelectedModelResult> {
-  return async (request, signal, onDispatch) => {
+  return async (request, signal, onDispatch, onPhysicalFlight) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let removeAbort = () => {};
     try {
@@ -172,30 +173,46 @@ export function selectedModelContinuation(
         controller.abort();
         rejectDeadline(unavailable());
       }, DEADLINE_MS);
-      const response = await Promise.race([
-        beforeDispatch.registry.complete(
-          beforeDispatch.model,
-          {
-            systemPrompt: SYSTEM_PROMPT,
-            messages: [
-              {
-                role: "user" as const,
-                content: [{ type: "text" as const, text }],
-                timestamp: Date.now(),
-              },
-            ],
-            tools: [],
-          },
-          {
-            signal: controller.signal,
-            maxTokens: MAX_TOKENS,
-            maxRetries: 0,
-            timeoutMs: DEADLINE_MS,
-          },
-        ),
-        deadline,
-        aborted,
-      ]);
+      let physical: Promise<unknown>;
+      try {
+        physical = Promise.resolve(
+          beforeDispatch.registry.complete(
+            beforeDispatch.model,
+            {
+              systemPrompt: SYSTEM_PROMPT,
+              messages: [
+                {
+                  role: "user" as const,
+                  content: [{ type: "text" as const, text }],
+                  timestamp: Date.now(),
+                },
+              ],
+              tools: [],
+            },
+            {
+              signal: controller.signal,
+              maxTokens: MAX_TOKENS,
+              maxRetries: 0,
+              timeoutMs: DEADLINE_MS,
+            },
+          ),
+        );
+      } catch (error) {
+        physical = Promise.reject(error);
+      }
+      // Registry work can outlive logical abort/deadline. Publish raw drain
+      // separately so controller retains single-flight ownership until settle.
+      try {
+        onPhysicalFlight?.(
+          physical.then(
+            () => undefined,
+            () => undefined,
+          ),
+        );
+      } catch {
+        // Lifetime observation never controls a host registry attempt.
+      }
+      const response = await Promise.race([physical, deadline, aborted]);
       if (signal.aborted || controller.signal.aborted) throw unavailable();
       const afterResponse = bindContext(currentContext, request);
       return {

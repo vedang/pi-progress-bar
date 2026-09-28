@@ -2,6 +2,10 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## C09 scoped source verification (not acceptance)
+
+`0d69583e` replaces legacy reconciliation summaries with generic `subtasks` in Monitor and the formatter. Main inspected both source files and independently verified **56/56 focused**, **1906 unit pass/50 existing coverage-port failures**, **83/83 integration**, format/check pass (three historical warnings). Logs `c09-main-{green,test,integration,format,check}.log`. Worker separately reported886 broad passes. The integration pass does not diagnose or waive the historical TUI/RPC correction race. C09 remains unaccepted pending C08 closure, remaining assertion ports/legacy removal, complete gates and independent whole-stage review.
+
 ## C09 generic reconciliation RED freeze
 
 Under approved C08/C09 implementation overlap, Main ported all seven historical `coverage-reconciliation.test.ts` cases to the new `subtasks` summary schema, retaining20 parent rows,8 MAYBE receipts, malicious-label escaping, both byte limits/whole-block fallback, stale/foreign/DONE filtering and no all-DONE wake. Added excluded-parent, count-only knownTotal1000,240-scalar astral gap, duplicate parent/group, total200/per-group64 limits and malformed-scope/access/omission controls. Overflow fixtures have unique groups and exactly200 tracked children, so fallback tests real byte overflow rather than accidental identity/count invalidity.

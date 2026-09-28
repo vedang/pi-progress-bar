@@ -1,0 +1,42 @@
+# Durable semantic omission summaries (ru7)
+
+Owner approved bounded persisted omission summaries after the test audit; this narrowly supersedes earlier no-new-schema wording. No raw content, automatic retry, legacy facade, or additional report-disable threshold. C05/C07 acceptance remains gated on implementation and real Monitor proof.
+
+## Schema and storage contract
+
+[tag:subtask_omission_summary] Strict v11 Monitor metadata gains optional `subtaskOmissions: { entries: Array<{identity, reason}>, saturated: boolean }`. Identity is lowercase SHA256 hex; reason is exactly `report-oversized`, `coalesced`, or `capacity`. Maximum64 entries, unique by identity alone; first durable reason wins. Exact own-data keys/dense arrays only; reject getters/prototypes and duplicate identities, including conflicting reasons. No text, labels, paths, raw source references, timestamps, provider output, retry state or persisted counters.
+
+Absence means genuine zero state. Present empty/unsaturated is noncanonical and rejected; empty/saturated is valid. Summary can exist without a subtask store/journal and survives group pruning within its session. No version migration or v10 reader.
+
+Measure the shared64KiB optional budget using inert UTF8 JSON of `{...(subtasks ?? {}), ...(summary === undefined ? {} : {subtaskOmissions: summary})}`; both actual512KiB ON/OFF envelopes also include the sibling summary. Standalone store/journal limits and existing report final-growth reserves remain unchanged; equality allowed, one byte over rejected. No fixed64-entry headroom reservation or increased limits. Use identical byte projection for validation and preflight, not summed component lengths.
+
+## Identity and meaning
+
+One identity per eligible parent/group report opportunity: hash domain/version, session sourceId, semantic parent binding, status-free group/list/admission proof and ordered child bindings, validated canonical report source reference, pinned report model/rubric. It must be computable without building an oversized request. Exclude reason, wake/time, mutable child status, selected proposal model, adapter evidence and chunk size. Main freezes the concrete helper signature before Monitor implementation.
+
+Only never-admitted work needs this summary. Existing permanent/superseded report records already preserve charged outcomes. Ready/parked owners are delayed, not omitted. Record oversize only for an otherwise eligible post-admission canonical report with a validated current group; record coalescing for displaced unadmitted B when C replaces it, not A merely retaining priority. Oversized C must not evict eligible B. Capacity needs an explicit validated runtime/queue refusal, not inference from unchanged journal, credentials, cancellation or arbitrary errors. Adaptive prefix success is not loss.
+
+## Saturation and persistence
+
+Append until64 or byte capacity; never evict. First unretainable distinct identity sets sticky saturation. Counts derive from retained entries and become explicit lower bounds; unknown identities after saturation do not cause repeated increments/unchanged-summary writes. Saturation can occur below64 due bytes and must never disable future valid reports or act as retry authority.
+
+Monitor owns summary independently of runtime journal so in-flight report commits cannot erase it. Build detached full-envelope candidate before mutating summary/pending queue. Only internal exact-true synchronous commit permits publication and B→C replacement. Host persist retains its existing synchronous void/throw API; normal return is success, throw vetoes. No new false/Promise-return guarantee.
+
+On veto keep prior summary/B; C remains discoverable via existing named wakes, not a new retry timer. If identity growth cannot fit, a smaller saturation-only transaction may be attempted; if that cannot fit/save, retain prior state and make no durable visibility claim. This is explicitly bounded best-effort visibility under storage failure/capacity. A successful save survives subsequent observer failure; lifecycle revalidation prevents stale queue admission and cross-session leakage.
+
+## Restore and projection
+
+Same-source restore retains live entries first, appends distinct incoming identities up to64, keeps live reason for conflicts, ORs saturation and marks truncated unions saturated. Never sum counters, erase live history on incoming absence, or resurrect semantic jobs from summary. Different source resets isolate history. Failure to persist merged history cannot silently drop live entries or claim durability.
+
+Expose detached `semanticOmissions: {total, byReason, saturated}` alongside—not inside—volatile adapter omissions. No identities in UI and no host/model/credential reads or writes from getters. Render positive counts distinctly; saturated zero must say summary incomplete, not falsely zero loss. Keep adapter and wallet-exhaustion warnings together, including no-group/OFF/reload views.
+
+## Execution layers and required proof
+
+1. Strict codec/schema/shared byte-capacity support; keep existing product working. Main codec REDs precede source-only implementation.
+2. Main freezes concrete identity/merge/projection APIs and authors pure plus actual public-Monitor REDs: oversize/no-provider/reload, saved A + B→C coalescing, save veto, lifecycle/concurrent-flight preservation, saturation/continued admission, capacity classification and passive UI. Separate report authority from newest-source size eligibility so oversized C cannot invalidate saved A.
+3. Separate actual Monitor older-checkpoint wallet no-refund RED/fix; summary does not solve usage accounting. Never independently max usage call buckets into an invalid journal.
+4. Execute retained R1–R9 ports and legacy keeper mappings before old semantic/codecs removal and stage acceptance.
+
+Permanent generic phase failures do not retry on unchanged `modelSelected`. Changed selected model/context is a new identity after physical drain, not a compatibility retry. Invalid overlapping report/decomposition ownership is rejected by schema, not normalized into a legacy queue. These source-grounded corrections supersede tentative audit handoff questions.
+
+No ru7/C05–C09 acceptance is claimed by this freeze; no paid semantic evidence or manual acceptance.

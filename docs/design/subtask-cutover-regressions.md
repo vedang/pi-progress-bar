@@ -2,6 +2,14 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## Actual-host correction authority timing proof
+
+Worker read-only diagnosis `bfbf557f` identified a fixture precondition gap: the old success case waited only for a health HTTP dispatch, not accepted task-local authority. Main added bounded passthrough traces (readiness, target-fact flag, coverage enum and identity hash only) and two controlled actual-host cases. Holding health response until correction observation settles produces `ready:true`, complete authority, **target fact absent**, correction dispatch0. Releasing health yields a current fact later but no retry or delivery. Both pinned TUI/RPC cases pass; this directly validates the missing-fact mechanism rather than attributing each historical uninstrumented failure by inference.
+
+The two existing success cases now await a new health dispatch **and** actual current accepted target fact/readiness before releasing their faux assistant tool response; they assert accepted fact at admission and preserve all classifier/delivery/policy/finalized-action/privacy/one-turn assertions. No production change, timeout increase, hidden retry or weakened expected1. Pinned targeted **4/4 pass** (`c07-host-authority-proof.log`); format/check pass. Unit gates remain1935pass/44 existing failures.
+
+**Host gate remains open:** full pinned integration **85/86**, failing the separate production reconciliation deadline assertion (historical655, now661: expected one60s deadline, got0). All four correction controls passed in that run. An additional installed-host probe failed all four cases: missing initial target fact/timeout in the held controls and no observed correction-admission callback despite a pre-attempt fact in positive controls. This is not explained by the pinned missing-fact diagnosis; installed fixture/API compatibility and lifecycle evidence require separate investigation, not a timeout increase or fallback. Logs `c07-host-proof-{unit,integration,installed,format,check}.log`. No overall host acceptance or assertion that all historical races are resolved.
+
 ## First12 Monitor assertion ports executed
 
 Main added live public-ingress fixture `__tests__/fixtures/subtask-metadata-monitor.ts` and ported all12 existing `coverage-monitor.test.ts` cases without production changes. Admission is real need-gate→selected proposal with canonical goal spans, explicit22 resource/item bindings and dispatch/physical-drain callbacks; no seeded store. Reports explicitly answer unchanged.

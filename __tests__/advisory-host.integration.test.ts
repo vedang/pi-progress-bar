@@ -17,6 +17,7 @@ import { expect, it, vi } from "vitest";
 import { processObservation } from "../src/core/hybrid";
 import { encodeSubtaskCheckpoint } from "../src/core/hybrid-checkpoint";
 import { emptyState } from "../src/core/hybrid-state";
+import { Monitor } from "../src/core/monitor";
 import progressBar from "../src/index";
 import { addPatch, backend, observation } from "./fixtures/hybrid";
 import { jevReply } from "./fixtures/hybrid-monitor";
@@ -73,6 +74,7 @@ async function host(
   settings: Parameters<typeof pinnedPi.SettingsManager.inMemory>[0] = {},
   production = false,
   correctionProof = false,
+  waitForCorrection = true,
 ) {
   const pi = process.env.PROGRESS_PI_HOST_ROOT
     ? ((await import(
@@ -166,9 +168,10 @@ async function host(
         api = extension;
         if (correctionProof)
           extension.on("tool_call", async () => {
-            await vi.waitFor(() => expect(sent).toHaveLength(1), {
-              timeout: 3000,
-            });
+            if (waitForCorrection)
+              await vi.waitFor(() => expect(sent).toHaveLength(1), {
+                timeout: 3000,
+              });
             return {
               block: true,
               reason: "Offline attempted-start transport proof",
@@ -712,6 +715,145 @@ it.each([
   },
 );
 
+function correctionAdmissionTrace() {
+  const events: Array<{
+    event: string;
+    ready?: boolean;
+    targetFact?: boolean;
+    coverage?: string;
+    identity?: string;
+  }> = [];
+  let monitor: Monitor | undefined;
+  const attempted = latch();
+  const originalRestore = Monitor.prototype.restore;
+  const originalObserve = Monitor.prototype.observeCorrectionAttempt;
+  const restore = vi
+    .spyOn(Monitor.prototype, "restore")
+    .mockImplementation(function (this: Monitor, ...args) {
+      monitor = this;
+      return originalRestore.apply(this, args);
+    });
+  const sample = (event: string) => {
+    const snapshot = monitor?.correctionSnapshot();
+    const task = snapshot?.tasks.find((item) => item.id === "task:1");
+    const targetFact = !!(
+      task?.red?.choice === "not-needed" &&
+      task.red.revision === task.revision &&
+      task.red.confidence >= 0.5 &&
+      task.red.probability >= 0.8
+    );
+    const value = {
+      event,
+      ready: snapshot?.ready,
+      targetFact,
+      coverage: snapshot?.authority.coverage,
+      identity: snapshot?.identity,
+    };
+    if (events.length < 128) events.push(value);
+    return value;
+  };
+  const observe = vi
+    .spyOn(Monitor.prototype, "observeCorrectionAttempt")
+    .mockImplementation(function (this: Monitor, ...args) {
+      sample("correction-admission");
+      return originalObserve.apply(this, args).finally(() => {
+        sample("correction-settled");
+        attempted.release();
+      });
+    });
+  return {
+    events,
+    sample,
+    attempted,
+    restore: () => {
+      observe.mockRestore();
+      restore.mockRestore();
+    },
+  };
+}
+
+it.each(["tui", "rpc"] as const)(
+  "actual Pi %s abstains when health dispatch precedes accepted correction authority",
+  async (mode) => {
+    vi.stubEnv("TYPESAFE_API_KEY", "offline-correction-proof");
+    const probe = correctionAdmissionTrace();
+    const health = latch();
+    let holdHealth = false;
+    let held = false;
+    let correctionCalls = 0;
+    let h: Awaited<ReturnType<typeof host>> | undefined;
+    let prompting: Promise<unknown> | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body));
+        if (holdHealth && request.questions.redApplicability) {
+          held = true;
+          probe.sample("health-dispatch-held");
+          await health.promise;
+        }
+        if (
+          Object.keys(request.questions).some((key) =>
+            key.startsWith("correct:"),
+          )
+        )
+          correctionCalls++;
+        return jevReply(request);
+      }),
+    );
+    try {
+      h = await host(mode, {}, true, true, false);
+      await vi.waitFor(() =>
+        expect(probe.sample("initial-health").targetFact).toBe(true),
+      );
+      holdHealth = true;
+      h.faux.setResponses([
+        async () => {
+          await vi.waitFor(() => expect(held).toBe(true));
+          probe.sample("assistant-response-released");
+          return fauxAssistantMessage(
+            [
+              fauxToolCall("write", {
+                path: "regression.test.ts",
+                content: "// PRIVATE_TEST_BODY",
+              }),
+            ],
+            { stopReason: "toolUse" },
+          );
+        },
+        fauxAssistantMessage("The implementation remains pending."),
+      ]);
+      prompting = bounded(h.session.prompt("Continue the current task."));
+      await bounded(probe.attempted.promise);
+      expect(
+        probe.events.find((event) => event.event === "correction-admission"),
+        JSON.stringify(probe.events),
+      ).toMatchObject({ ready: true, targetFact: false, coverage: "complete" });
+      expect(correctionCalls).toBe(0);
+      holdHealth = false;
+      health.release();
+      await prompting;
+      await vi.waitFor(() =>
+        expect(probe.sample("late-health").targetFact).toBe(true),
+      );
+      expect(correctionCalls).toBe(0);
+      expect(h.sent).toEqual([]);
+      expect(h.errors).toEqual([]);
+      expect(JSON.stringify(probe.events)).not.toMatch(
+        /PRIVATE_TEST_BODY|FINAL_POST_LISTENER|Loaded policy/,
+      );
+    } finally {
+      holdHealth = false;
+      health.release();
+      await prompting?.catch(() => {});
+      await h?.dispose();
+      probe.restore();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  },
+);
+
 it.each(["tui", "rpc"] as const)(
   "actual Pi %s delivers production correction during a builtin attempted start",
   async (mode) => {
@@ -719,6 +861,7 @@ it.each(["tui", "rpc"] as const)(
     let healthCalls = 0;
     let correctionCalls = 0;
     let correctionRequest: unknown;
+    const probe = correctionAdmissionTrace();
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_url: unknown, init?: RequestInit) => {
@@ -754,9 +897,15 @@ it.each(["tui", "rpc"] as const)(
       const initialHealthCalls = healthCalls;
       h.faux.setResponses([
         async () => {
-          await vi.waitFor(() =>
-            expect(healthCalls).toBeGreaterThan(initialHealthCalls),
-          );
+          await vi.waitFor(() => {
+            expect(healthCalls).toBeGreaterThan(initialHealthCalls);
+            // A request being dispatched is not an accepted health fact.
+            expect(probe.sample("eligible-before-attempt")).toMatchObject({
+              ready: true,
+              targetFact: true,
+              coverage: "complete",
+            });
+          });
           return fauxAssistantMessage(
             [
               fauxToolCall("write", {
@@ -770,7 +919,10 @@ it.each(["tui", "rpc"] as const)(
         fauxAssistantMessage("The implementation remains pending."),
       ]);
       await bounded(h.session.prompt("Continue the current task."));
-      expect(correctionCalls).toBe(1);
+      expect(correctionCalls, JSON.stringify(probe.events)).toBe(1);
+      expect(
+        probe.events.find((event) => event.event === "correction-admission"),
+      ).toMatchObject({ ready: true, targetFact: true, coverage: "complete" });
       if (process.env.PROGRESS_CORRECTION_REQUEST_OUTPUT)
         await writeFile(
           process.env.PROGRESS_CORRECTION_REQUEST_OUTPUT,
@@ -823,6 +975,7 @@ it.each(["tui", "rpc"] as const)(
       expect(h.errors).toEqual([]);
     } finally {
       await h.dispose();
+      probe.restore();
       vi.unstubAllGlobals();
       vi.unstubAllEnvs();
     }

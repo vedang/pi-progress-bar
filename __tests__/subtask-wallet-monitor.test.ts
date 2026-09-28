@@ -194,6 +194,71 @@ it.each(["stop", "restore"])(
   },
 );
 
+it("does not let an outer staged wallet override newer nested history during a second nested restore", async () => {
+  const donor = await chargedFixture();
+  const incoming = donor.h.checkpoint();
+  donor.h.append(
+    "later-wallet-report",
+    "The additional workbook checks remain pending.",
+  );
+  await donor.h.settle("later-wallet-report");
+  donor.h.monitor.turnOff();
+  const newest = donor.h.checkpoint();
+  const latest = newest.monitor?.subtasks?.journal;
+  if (!latest || !incoming.monitor || !donor.older.monitor)
+    throw new Error("Missing real history");
+  expect(latest.dispatches).toBeGreaterThan(donor.charged.dispatches);
+  incoming.monitor.enabled = false;
+  donor.older.monitor.enabled = false;
+  const branch = structuredClone(donor.h.reader());
+  const h = subtaskMetadataMonitor();
+  running.push(h);
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    donor.older,
+    false,
+    () => branch,
+  );
+  const calls = h.counts();
+  const nested: Promise<void>[] = [];
+  h.save.mockImplementationOnce(() => {
+    nested.push(
+      h.monitor.restore(
+        "/nonexistent-hybrid-test",
+        newest,
+        false,
+        () => branch,
+      ),
+    );
+    nested.push(
+      h.monitor.restore(
+        "/nonexistent-hybrid-test",
+        donor.older,
+        false,
+        () => branch,
+      ),
+    );
+  });
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    incoming,
+    false,
+    () => branch,
+  );
+  await Promise.all(nested);
+  expect(nested).toHaveLength(2);
+  const durable = h.save.mock.calls.at(-1)?.[0] as typeof incoming;
+  expect
+    .soft(durable.monitor?.subtasks?.journal.dispatches)
+    .toBe(latest.dispatches);
+  expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(
+    latest.dispatches,
+  );
+  expect(h.checkpoint().monitor?.subtasks?.journal.usage).toEqual(latest.usage);
+  expect(h.monitor.enabled).toBe(false);
+  expect(h.counts()).toEqual(calls);
+});
+
 it("refuses a thrown restore save without adopting target history or dispatching", async () => {
   const { h, older, olderBranch, charged, calls } = await chargedFixture();
   if (!older.monitor) throw new Error("Missing metadata");

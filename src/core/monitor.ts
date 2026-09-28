@@ -1871,6 +1871,12 @@ export class Monitor {
       work.scan = undefined;
     }
 
+    if (
+      work.kind === "enable" &&
+      !this.adoptSavedSubtaskHistoryForEnable(work, pass)
+    )
+      return;
+
     // Optional health references never trigger semantic replay/reset.
     this.reconcileHealthCards(pass);
     this.controlWork = undefined;
@@ -3243,6 +3249,71 @@ export class Monitor {
     const floor = this.restoredSubtaskHistoryFloor;
     if (floor?.sourceId === staged.sourceId && floor.serial === staged.serial)
       this.restoredSubtaskHistoryFloor = undefined;
+  }
+
+  /** Plain ON consumes saved history before its runtime may charge new work. */
+  private adoptSavedSubtaskHistoryForEnable(
+    work: ControlWork,
+    pass: CanonicalPass,
+  ) {
+    const floor = this.restoredSubtaskHistoryFloor;
+    if (
+      !floor ||
+      floor.serial < this.latestRestoredSubtaskHistorySerial ||
+      floor.sourceId !== work.sourceId ||
+      floor.sourceId !== this.state.sourceId ||
+      floor.sourceId !== this.options.sourceId()
+    )
+      return true;
+    const live = work.liveSubtasks;
+    const current = structuredClone(
+      this.pendingSubtaskCheckpoint ??
+        this.subtaskRuntime?.checkpoint() ??
+        this.emptySubtaskCheckpoint(),
+    );
+    const component =
+      live &&
+      this.mergedRestoredSubtaskHistory(
+        live,
+        current,
+        current.state,
+        this.state,
+        pass,
+      );
+    if (!component) {
+      this.refuseRestoredSubtaskHistory(work);
+      return false;
+    }
+    const omissions = this.durableSubtaskOmissions();
+    const metadata = this.subtaskMetadata(
+      work.wantEnabled,
+      this.healthCards,
+      this.state,
+      undefined,
+      this.taskDetails,
+      component,
+      omissions,
+    );
+    const saved = this.commitRestoredSubtaskHistory(
+      this.state,
+      metadata,
+      component,
+    );
+    if (!saved) {
+      this.refuseRestoredSubtaskHistory(work);
+      return false;
+    }
+    if (!this.restoredWorkIsCurrent(work)) return false;
+    this.replaceSubtaskRuntime(component);
+    this.hydrateSubtaskProjection(pass, component);
+    this.captureSubtaskDiagnosticAuthoritySafely(component, () =>
+      this.subtaskCurrent(this.state, pass, true),
+    );
+    this.adoptRestoredSubtaskHistory(saved);
+    this.subtaskOmissions = omissions;
+    this.latchHistoricalCatchup = true;
+    work.persisted = metadata.enabled === work.wantEnabled;
+    return true;
   }
 
   /** Refusal remains locally OFF with prior state/history and no fallback write. */

@@ -2,6 +2,10 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## C08 diagnostic repair independently verified
+
+Main inspected `9863447a`: diagnostic failures invalidate only optional owner facts, successful persistence remains successful, and the original proposer return type is restored. Independent results: **48 focused passes**, **1913 unit passes/50 known coverage-port failures**, **83/83 integration**, format/check pass with three historical warnings. Logs `c08-fixed-main-{focused,test,integration,format,check}.log`. Worker separately reported893 broad passes and82/83 integration. The variable host correction failure remains undiagnosed and unwaived. C08 producer repair is verified, not stage acceptance; UI/navigation and remaining Monitor/legacy ports follow.
+
 ## C08 producer review: post-save capture blocker
 
 Main verified the original47 focused cases on `b3b162a9`, then reproduced a new durability failure: a real save callback accepts the dispatched checkpoint and makes the canonical reader unavailable. Added diagnostic capture throws after persistence, causing the runtime to decline adoption of the already saved charge: persisted dispatches1, live journal0, transport0. New batch **1 RED/47 passing controls** (`c08-capture-red.log`). Diagnostics must invalidate unavailable owner facts without changing commit success or losing durable charges. No acceptance.

@@ -95,6 +95,12 @@ Audit does not revive obsolete workbook/v10 semantics. Keep the44 failing fixtur
 
 Existing generic Monitor/runtime tests already cover20+2 waves, saved-prefix recovery, deadline plus named wake, durable pre/post-dispatch save fences, detail fairness, all report roles and physical drain. Reuse those real keepers rather than adding disconnected duplicates. C05-C09 remain unaccepted; N05, C10/N06 semantic QA and owner manual review remain later gates.
 
+## Final preservation follow-up
+
+Review `2d5e16c9-b845-4e9d-9336-9e9918aafc36` found no lost contract, but blocked closure on missing idle-periodic-dispatch mutation evidence. Main supplied the control without changing shipping code/tests: a temporary30-second timer in `Monitor.turnOn` called the real scope-gate builder and real gateway with the current consent identity. The retained60-second no-fetch assertion failed with exactly two mocked provider calls. Source was byte-restored to the recorded Monitor SHA256; the full focused Monitor file then passed15/15 and the source/test tree was clean.
+
+The first attempt supplied source ID rather than gateway consent identity, so the gateway correctly rejected it before dispatch and the test passed. That attempt is retained as invalid mutation evidence, not credited as proof. The corrected fault and its diff/log are recorded separately. All calls stayed behind the offline fixture; paid calls remain zero.
+
 ## Final audit acceptance pending
 
 All planned cleanup candidates are applied. Final independent cumulative preservation review must evaluate both batches and this retained-requirement handoff before closing `hmv`. Full product gates remain red until feature completion. No release, install, push, paid semantic proof or manual acceptance is claimed.

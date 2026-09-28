@@ -752,10 +752,17 @@ it("does not count unchanged queued B or parked A as omitted on repeated named w
   expect(reportSources(h)).toEqual(["parked-a"]);
 });
 
-it.each(["stop", "off", "restore"])(
-  "retains saved B receipt without publishing C after reentrant %s",
+it.each(["stop", "off", "restore", "restore-enabled"])(
+  "retains saved B receipt and incoming history after reentrant %s",
   async (control) => {
-    const { h, expected } = await parkedWithQueuedB();
+    const { h, expected: coalesced } = await parkedWithQueuedB();
+    const isRestore = control.startsWith("restore");
+    const expected = isRestore
+      ? {
+          entries: [...coalesced.entries, omitted(77)],
+          saturated: false,
+        }
+      : coalesced;
     const wallet = structuredClone(h.checkpoint().monitor?.subtasks?.journal);
     let durable: ReturnType<typeof h.checkpoint> | undefined;
     let reentered = false;
@@ -770,7 +777,11 @@ it.each(["stop", "off", "restore"])(
         else {
           const older = h.checkpoint();
           if (!older.monitor) throw new Error("Missing metadata");
-          older.monitor.enabled = false;
+          older.monitor.enabled = control === "restore-enabled";
+          older.monitor.subtaskOmissions = {
+            entries: [omitted(77)],
+            saturated: false,
+          };
           restoring = h.monitor.restore(
             "/nonexistent-hybrid-test",
             older,
@@ -788,8 +799,11 @@ it.each(["stop", "off", "restore"])(
     await restoring;
     expect(reentered).toBe(true);
     expect.soft(durable?.monitor?.subtaskOmissions).toEqual(expected);
-    expect(h.monitor.enabled).toBe(false);
-    expect(queuedReport(h)?.source.entryId).not.toBe("queued-c");
+    expect(h.monitor.enabled).toBe(control === "restore-enabled");
+    if (control !== "restore-enabled")
+      expect(queuedReport(h)?.source.entryId).not.toBe("queued-c");
+    if (isRestore)
+      expect.soft(h.checkpoint().monitor?.subtaskOmissions).toEqual(expected);
     expect(reportSources(h)).toEqual(["parked-a"]);
     if (!durable?.monitor) throw new Error("Missing durable omission");
     durable.monitor.enabled = false;

@@ -6,6 +6,8 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { expect, it, vi } from "vitest";
+import type { ContinuationDraftRequest } from "../src/advisory/continuation-draft";
+import type { EvaluationRequest } from "../src/analysis/gateway";
 import { processObservation } from "../src/core/hybrid";
 import { encodeSubtaskCheckpoint } from "../src/core/hybrid-checkpoint";
 import { emptyState } from "../src/core/hybrid-state";
@@ -77,6 +79,7 @@ async function host(
   production = false,
   correctionProof = false,
   waitForCorrection = true,
+  continuationProof = false,
 ) {
   const cwd = await mkdtemp(join(tmpdir(), "progress-advisory-host-"));
   const settingsManager = pi.SettingsManager.inMemory({
@@ -144,9 +147,15 @@ async function host(
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    appendSystemPrompt: correctionProof
-      ? ["Loaded policy: preserve existing validation; new tests are optional."]
-      : [],
+    appendSystemPrompt: continuationProof
+      ? [
+          "Continue already-authorized work until complete unless the user pauses it. Do not duplicate work assigned to peers.",
+        ]
+      : correctionProof
+        ? [
+            "Loaded policy: preserve existing validation; new tests are optional.",
+          ]
+        : [],
     extensionFactories: [
       ...(production
         ? [
@@ -710,6 +719,190 @@ it.each([
       expect(h.errors).toEqual([]);
     } finally {
       dateSpy?.mockRestore();
+      timerSpy.mockRestore();
+      for (const deadline of deadlines) clearTimeout(deadline.timer);
+      await h.dispose();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  },
+);
+
+it.each([
+  { mode: "tui", choice: "yes" },
+  { mode: "rpc", choice: "yes" },
+  { mode: "rpc", choice: "no" },
+  { mode: "rpc", choice: "uncertain" },
+  { mode: "print", choice: "yes" },
+  { mode: "json", choice: "yes" },
+] as const)(
+  "actual Pi $mode production continuation consumes one status-reply root ($choice)",
+  async ({ mode, choice }) => {
+    vi.stubEnv("TYPESAFE_API_KEY", "offline-continuation-acceptance");
+    const gates: EvaluationRequest[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+        const response = (await jevReply(request).json()) as {
+          answers: Record<string, unknown>;
+        };
+        if (
+          Object.keys(request.questions).some((key) =>
+            key.startsWith("continuation:"),
+          )
+        ) {
+          gates.push(request);
+          for (const key of Object.keys(request.questions))
+            response.answers[key] = {
+              type: "choice",
+              choice,
+              confidence: 1,
+              probabilities: {
+                yes: Number(choice === "yes"),
+                no: Number(choice === "no"),
+                uncertain: Number(choice === "uncertain"),
+              },
+            };
+        }
+        return Response.json(response);
+      }),
+    );
+    const h = await host(mode, {}, true, false, true, true);
+    const nativeTimeout = globalThis.setTimeout;
+    const deadlines: Array<{
+      callback: () => void;
+      timer: ReturnType<typeof setTimeout>;
+    }> = [];
+    const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      callback: (...args: unknown[]) => void,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
+      const timer = nativeTimeout(callback, delay, ...args);
+      if (delay === 60_000)
+        deadlines.push({ callback: () => callback(...args), timer });
+      return timer;
+    }) as typeof setTimeout);
+    const frozen = Date.now();
+    const dateSpy = vi.spyOn(Date, "now").mockReturnValue(frozen);
+    const drafts: ContinuationDraftRequest["input"][] = [];
+    try {
+      h.faux.setResponses([
+        fauxAssistantMessage(
+          "The parser is pending. No implementation has started.",
+        ),
+        fauxAssistantMessage(
+          "The parser and regression tests remain pending, authorized and unblocked. No peer owns them; I have not resumed implementation.",
+        ),
+        (context) => {
+          const request = context as {
+            messages: Array<{
+              role: string;
+              content: string | Array<{ type: string; text?: string }>;
+            }>;
+          };
+          const user = request.messages
+            .filter((message) => message.role === "user")
+            .at(-1);
+          const text =
+            typeof user?.content === "string"
+              ? user.content
+              : (user?.content ?? [])
+                  .filter((part) => part.type === "text")
+                  .map((part) => part.text ?? "")
+                  .join("\n");
+          const input = JSON.parse(text) as ContinuationDraftRequest["input"];
+          drafts.push(input);
+          const contextIndex = input.authority.context.findIndex(
+            (item) =>
+              item.role === "user" && item.text.includes("Implement parser"),
+          );
+          if (contextIndex < 0)
+            throw new Error("Missing actual canonical authorization");
+          return fauxAssistantMessage(
+            JSON.stringify({
+              targetIndex: input.acceptedIndices[0],
+              action: "Implement the authorized parser change.",
+              evidence: [
+                {
+                  contextIndex,
+                  start: 0,
+                  end: input.authority.context[contextIndex].text.length,
+                },
+              ],
+            }),
+          );
+        },
+        fauxAssistantMessage("I will continue the authorized parser work."),
+      ]);
+      await bounded(
+        h.session.prompt(
+          "Continue the assigned parser work and regression tests until complete.",
+        ),
+      );
+      await vi.waitFor(() => expect(deadlines).toHaveLength(1));
+      const deadline = deadlines[0];
+      dateSpy.mockReturnValue(frozen + 60_001);
+      clearTimeout(deadline.timer);
+      deadline.callback();
+      const allowedMode = mode === "tui" || mode === "rpc";
+      if (!allowedMode) {
+        expect(h.sent).toEqual([]);
+        expect(gates).toEqual([]);
+        expect(drafts).toEqual([]);
+      } else {
+        await vi.waitFor(() =>
+          expect(
+            h.trace.filter((entry) => entry.hook === "agent_settled").length,
+          ).toBeGreaterThanOrEqual(2),
+        );
+        await vi.waitFor(() => expect(gates).toHaveLength(1));
+        const authority = gates[0]
+          .state as ContinuationDraftRequest["input"]["authority"];
+        expect(authority.policy.coverage).toBe("complete");
+        expect(authority.context.at(-1)?.text).toContain(
+          "have not resumed implementation",
+        );
+        expect(authority.tasks).toHaveLength(3);
+        expect(authority.receipt.replies.at(-1)?.entryId).toBe(
+          authority.context.at(-1)?.id,
+        );
+        if (choice === "yes") {
+          await vi.waitFor(() => expect(h.sent).toHaveLength(2));
+          await vi.waitFor(() =>
+            expect(
+              h.trace.filter((entry) => entry.hook === "agent_settled"),
+            ).toHaveLength(3),
+          );
+          expect(drafts).toHaveLength(1);
+          expect(h.sent[1]).toMatchObject({
+            customType: "pi-progress-advisory",
+            details: { kind: "continuation" },
+            content: expect.stringContaining(
+              "Implement the authorized parser change.",
+            ),
+          });
+          expect(h.sent[1].content).toContain("not instructions");
+          expect(h.faux.state.callCount).toBe(4);
+        } else {
+          expect(drafts).toEqual([]);
+          expect(h.sent).toHaveLength(1);
+          expect(h.faux.state.callCount).toBe(2);
+        }
+        expect(h.sent[0]).toMatchObject({
+          details: { kind: "reconciliation" },
+        });
+        expect(gates).toHaveLength(1);
+      }
+      // Draft transport also has a60s timeout, so count only live reconciliation
+      // deadlines before draft admission rather than treating every timer as a root.
+      expect(
+        h.trace.filter((entry) => entry.hook === "before_agent_start"),
+      ).toHaveLength(1);
+      expect(h.errors).toEqual([]);
+    } finally {
+      dateSpy.mockRestore();
       timerSpy.mockRestore();
       for (const deadline of deadlines) clearTimeout(deadline.timer);
       await h.dispose();

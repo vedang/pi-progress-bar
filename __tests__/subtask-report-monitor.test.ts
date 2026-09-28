@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { EvaluationRequest } from "../src/analysis/gateway";
+import { subtaskReportOmissionIdentity } from "../src/analysis/subtask-report";
 import { processObservation } from "../src/core/hybrid";
 import * as checkpointCodec from "../src/core/hybrid-checkpoint";
 import {
@@ -1722,158 +1723,223 @@ it.each([
   },
 );
 
-it("keeps a real parked report owner ahead of decomposition during a different parent's proposal drain", async () => {
-  let selected = false;
-  let proposalAttempts = 0;
-  let release: (() => void) | undefined;
-  const proposeSubtasks: NonNullable<
-    MonitorOptions["proposeSubtasks"]
-  > = async (_request, _signal, onDispatch, onPhysicalFlight) => {
-    proposalAttempts++;
-    if (proposalAttempts === 1) throw new Error("Unavailable before dispatch");
-    expect(onDispatch?.(Date.now())).toBe(true);
-    const drain = new Promise<void>((resolve) => {
-      release = resolve;
+it.each(["unchanged", "coalesced", "vetoed"])(
+  "keeps a real parked report owner ahead of decomposition during a different parent's proposal drain (%s)",
+  async (mode) => {
+    let selected = false;
+    let proposalAttempts = 0;
+    let release: (() => void) | undefined;
+    const proposeSubtasks: NonNullable<
+      MonitorOptions["proposeSubtasks"]
+    > = async (_request, _signal, onDispatch, onPhysicalFlight) => {
+      proposalAttempts++;
+      if (proposalAttempts === 1)
+        throw new Error("Unavailable before dispatch");
+      expect(onDispatch?.(Date.now())).toBe(true);
+      const drain = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      onPhysicalFlight?.(drain);
+      await drain;
+      throw new Error("Late aborted proposal must not publish");
+    };
+    const h = await fixture(
+      false,
+      false,
+      2,
+      {
+        selectedModel: () => (selected ? "fixture/selected" : undefined),
+        proposeSubtasks,
+      },
+      0,
+    );
+    const [a, p] = h.monitor.state.tasks;
+    const gates: EvaluationRequest[] = [];
+    const transport = h.fetch.getMockImplementation();
+    if (!transport) throw new Error("Missing fixture transport");
+    h.fetch.mockImplementation(async (url, init) => {
+      const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+      if (request.questions["subtask:0"]) {
+        gates.push(request);
+        const state = request.state as {
+          parent: { id: string };
+          latest: { id: string };
+        };
+        return answer(
+          request,
+          state.parent.id === p.id && state.latest.id === "report-a"
+            ? "yes"
+            : "no",
+        );
+      }
+      return transport(url, init);
     });
-    onPhysicalFlight?.(drain);
-    await drain;
-    throw new Error("Late aborted proposal must not publish");
-  };
-  const h = await fixture(
-    false,
-    false,
-    2,
-    {
-      selectedModel: () => (selected ? "fixture/selected" : undefined),
-      proposeSubtasks,
-    },
-    0,
-  );
-  const [a, p] = h.monitor.state.tasks;
-  const gates: EvaluationRequest[] = [];
-  const transport = h.fetch.getMockImplementation();
-  if (!transport) throw new Error("Missing fixture transport");
-  h.fetch.mockImplementation(async (url, init) => {
-    const request = JSON.parse(String(init?.body)) as EvaluationRequest;
-    if (request.questions["subtask:0"]) {
-      gates.push(request);
-      const state = request.state as {
-        parent: { id: string };
-        latest: { id: string };
-      };
-      return answer(
-        request,
-        state.parent.id === p.id && state.latest.id === "report-a"
-          ? "yes"
-          : "no",
-      );
-    }
-    return transport(url, init);
-  });
-  try {
-    selected = true;
-    h.append("report-a", reportText);
-    await h.settle("report-a");
-    await vi.advanceTimersByTimeAsync(200);
-    expect(proposalAttempts).toBe(1);
-    const target = h.checkpoint();
-    if (!target.monitor?.subtasks) throw new Error("Missing real yes gate");
-    expect(
-      target.monitor.subtasks.journal.records.find(
-        (record) => record.parentTaskId === p.id,
-      ),
-    ).toMatchObject({ state: "ready" });
-    expect(target.monitor.subtasks.journal.usage.extraction.calls).toBe(0);
-    // Existing report-fixture admission boundary only; all gate/proposal/report
-    // dispatches and the parked certificate below use real runtime hooks.
-    const store = new SubtaskStore();
-    expect(
-      store.admit({
-        ...subtaskAdmission(labels),
-        parent: a,
-        source: a.source,
-        complete: true,
-        knownTotal: 22,
-        children: labels.map((label) => ({
-          kind: "add",
-          label,
+    try {
+      selected = true;
+      h.append("report-a", reportText);
+      await h.settle("report-a");
+      await vi.advanceTimersByTimeAsync(200);
+      expect(proposalAttempts).toBe(1);
+      const target = h.checkpoint();
+      if (!target.monitor?.subtasks) throw new Error("Missing real yes gate");
+      expect(
+        target.monitor.subtasks.journal.records.find(
+          (record) => record.parentTaskId === p.id,
+        ),
+      ).toMatchObject({ state: "ready" });
+      expect(target.monitor.subtasks.journal.usage.extraction.calls).toBe(0);
+      // Existing report-fixture admission boundary only; all gate/proposal/report
+      // dispatches and the parked certificate below use real runtime hooks.
+      const store = new SubtaskStore();
+      expect(
+        store.admit({
+          ...subtaskAdmission(labels),
+          parent: a,
           source: a.source,
-        })),
-      }),
-    ).toEqual({ accepted: true });
-    target.monitor.subtasks.state = store.checkpoint();
-    h.setTransport(async (request) =>
-      h.calls.length === 1
-        ? new Response(null, { status: 503, headers: { "Retry-After": "10" } })
-        : answer(request),
-    );
-    await h.monitor.restore(
-      "/nonexistent-hybrid-test",
-      target,
-      false,
-      h.reader,
-    );
-    await vi.advanceTimersByTimeAsync(200);
-    expect(h.calls).toHaveLength(1);
-    expect(proposalAttempts).toBe(2);
-    expect(release).toBeTypeOf("function");
-    const parked = h
-      .checkpoint()
-      .monitor?.subtasks?.journal.reports.find(
-        (job) => job.parentTaskId === a.id,
+          complete: true,
+          knownTotal: 22,
+          children: labels.map((label) => ({
+            kind: "add",
+            label,
+            source: a.source,
+          })),
+        }),
+      ).toEqual({ accepted: true });
+      target.monitor.subtasks.state = store.checkpoint();
+      h.setTransport(async (request) =>
+        h.calls.length === 1
+          ? new Response(null, {
+              status: 503,
+              headers: { "Retry-After": "10" },
+            })
+          : answer(request),
       );
-    expect(parked).toMatchObject({ state: "parked" });
-    if (!parked?.parkedUntil)
-      throw new Error("Missing admitted retry deadline");
-    expect(parked.parkedUntil).toBeGreaterThan(Date.now());
-    h.append(
-      "report-b",
-      "A newer report is waiting behind the parked assessment.",
-    );
-    await h.settle("report-b");
-    const sameLineage = h.checkpoint();
-    expect(
-      sameLineage.monitor?.subtasks?.journal.reports.find(
-        (job) => job.identity === parked.identity,
-      ),
-    ).toEqual(parked);
-    gates.splice(0);
-    await h.monitor.restore(
-      "/nonexistent-hybrid-test",
-      sameLineage,
-      false,
-      h.reader,
-    );
-    release?.();
-    await vi.advanceTimersByTimeAsync(200);
-    expect(
-      gates.filter(
-        (request) =>
-          (request.state as { parent: { id: string } }).parent.id === a.id,
-      ),
-    ).toEqual([]);
-    expect(
-      h
+      await h.monitor.restore(
+        "/nonexistent-hybrid-test",
+        target,
+        false,
+        h.reader,
+      );
+      await vi.advanceTimersByTimeAsync(200);
+      expect(h.calls).toHaveLength(1);
+      expect(proposalAttempts).toBe(2);
+      expect(release).toBeTypeOf("function");
+      const parked = h
         .checkpoint()
         .monitor?.subtasks?.journal.reports.find(
+          (job) => job.parentTaskId === a.id,
+        );
+      expect(parked).toMatchObject({ state: "parked" });
+      if (!parked?.parkedUntil)
+        throw new Error("Missing admitted retry deadline");
+      expect(parked.parkedUntil).toBeGreaterThan(Date.now());
+      h.append(
+        "report-b",
+        "A newer report is waiting behind the parked assessment.",
+      );
+      await h.settle("report-b");
+      const sameLineage = h.checkpoint();
+      expect(
+        sameLineage.monitor?.subtasks?.journal.reports.find(
           (job) => job.identity === parked.identity,
         ),
-    ).toEqual(parked);
-    expect(h.calls).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(
-      Math.max(0, parked.parkedUntil - Date.now()) + 1,
-    );
-    expect(h.calls).toHaveLength(1);
-    h.observe();
-    await vi.advanceTimersByTimeAsync(200);
-    expect(h.calls.length).toBeGreaterThan(1);
-    expect(sourceId(h.calls[1])).toBe("report-a");
-  } finally {
-    h.monitor.stop();
-    release?.();
-    await vi.advanceTimersByTimeAsync(100);
-  }
-});
+      ).toEqual(parked);
+      gates.splice(0);
+      await h.monitor.restore(
+        "/nonexistent-hybrid-test",
+        sameLineage,
+        false,
+        h.reader,
+      );
+      if (mode !== "unchanged") {
+        const pendingTarget = h.checkpoint().monitor?.subtasks;
+        const queuedBefore = (
+          Reflect.get(h.monitor, "subtaskReportCandidates") as Map<
+            string,
+            { source: SourceRef }
+          >
+        ).get(a.id);
+        const group = h.monitor
+          .subtaskSnapshot()
+          .groups.find((item) => item.parentTaskId === a.id);
+        if (!queuedBefore || !group) throw new Error("Missing pending B/group");
+        expect(queuedBefore.source.entryId).toBe("report-b");
+        const omittedIdentity = subtaskReportOmissionIdentity({
+          sourceId: h.monitor.state.sourceId,
+          parent: a,
+          group,
+          reportSource: queuedBefore.source,
+        });
+        expect(omittedIdentity).toMatch(/^[a-f0-9]{64}$/);
+        expect(
+          Reflect.get(h.monitor, "pendingSubtaskCheckpoint"),
+        ).toBeDefined();
+        expect(h.checkpoint().monitor?.subtaskOmissions).toBeUndefined();
+        let allow = mode !== "vetoed";
+        h.save.mockClear();
+        h.save.mockImplementation((raw: unknown) => {
+          if (!allow && (raw as Envelope).monitor?.subtaskOmissions)
+            throw new Error("Pending coalescing veto");
+        });
+        h.append(
+          "report-c",
+          "A third eligible report replaces only never-admitted B.",
+        );
+        await h.settle("report-c");
+        if (!allow) {
+          const queued = Reflect.get(
+            h.monitor,
+            "subtaskReportCandidates",
+          ) as Map<string, { source: SourceRef }>;
+          expect.soft(queued.get(a.id)?.source.entryId).toBe("report-b");
+          expect(h.checkpoint().monitor?.subtaskOmissions).toBeUndefined();
+          allow = true;
+          h.observe();
+          await vi.advanceTimersByTimeAsync(100);
+        }
+        const summary = h.checkpoint().monitor?.subtaskOmissions;
+        expect(summary).toEqual({
+          entries: [{ identity: omittedIdentity, reason: "coalesced" }],
+          saturated: false,
+        });
+        const firstSummarySave = h.save.mock.calls
+          .map(([raw]) => raw as Envelope)
+          .find((saved) => saved.monitor?.subtaskOmissions);
+        expect(firstSummarySave?.monitor?.subtasks).toEqual(pendingTarget);
+        expect(firstSummarySave?.state.cursor?.id).toBe("report-c");
+        expect(h.calls).toHaveLength(1);
+      }
+      release?.();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(
+        gates.filter(
+          (request) =>
+            (request.state as { parent: { id: string } }).parent.id === a.id,
+        ),
+      ).toEqual([]);
+      expect(
+        h
+          .checkpoint()
+          .monitor?.subtasks?.journal.reports.find(
+            (job) => job.identity === parked.identity,
+          ),
+      ).toEqual(parked);
+      expect(h.calls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(
+        Math.max(0, parked.parkedUntil - Date.now()) + 1,
+      );
+      expect(h.calls).toHaveLength(1);
+      h.observe();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(h.calls.length).toBeGreaterThan(1);
+      expect(sourceId(h.calls[1])).toBe("report-a");
+    } finally {
+      h.monitor.stop();
+      release?.();
+      await vi.advanceTimersByTimeAsync(100);
+    }
+  },
+);
 
 it("revokes an invalid pending wake and recovers identical generic work on the next named wake", async () => {
   let selected = false;

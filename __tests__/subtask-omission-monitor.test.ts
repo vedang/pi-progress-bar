@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
+import { subtaskReportOmissionIdentity } from "../src/analysis/subtask-report";
+import type { SourceRef } from "../src/core/hybrid-state";
 import type { SubtaskDiagnosticsSnapshot } from "../src/core/monitor";
 import type { projectSubtaskOmissions } from "../src/core/subtask-omissions";
 
@@ -594,4 +596,162 @@ it("persists reentrant OFF during an enabled omission-history restore", async ()
   h.save.mockReset();
   await h.monitor.restore("/nonexistent-hybrid-test", durable, false, h.reader);
   expect(h.monitor.enabled).toBe(false);
+});
+
+const queuedReport = (h: ReturnType<typeof subtaskMetadataMonitor>) =>
+  (
+    Reflect.get(h.monitor, "subtaskReportCandidates") as Map<
+      string,
+      { source: SourceRef; identity: string }
+    >
+  ).get(h.monitor.state.tasks[0].id);
+
+async function parkedWithQueuedB() {
+  const h = await mapped();
+  const transport = h.fetch.getMockImplementation();
+  if (!transport) throw new Error("Missing transport");
+  let first = true;
+  h.fetch.mockImplementation(async (url, init) => {
+    const request = JSON.parse(String(init?.body)) as {
+      questions: Record<string, unknown>;
+    };
+    const response = await transport(url, init);
+    if (
+      first &&
+      Object.keys(request.questions).some((key) =>
+        key.startsWith("subtask:subtask-child:"),
+      )
+    ) {
+      first = false;
+      return new Response(null, {
+        status: 503,
+        headers: { "Retry-After": "10" },
+      });
+    }
+    return response;
+  });
+  h.append("parked-a", "Workbook assessment A remains pending.");
+  await h.settle("parked-a");
+  const parked = h.checkpoint().monitor?.subtasks?.journal.reports[0];
+  expect(parked).toMatchObject({ state: "parked" });
+  h.append(
+    "queued-b",
+    "PRIVATE_QUEUED_B: a newer report still has pending workbook work.",
+  );
+  await h.settle("queued-b");
+  const b = queuedReport(h);
+  expect(b?.source.entryId).toBe("queued-b");
+  if (!b) throw new Error("Missing queued B");
+  expect(h.checkpoint().monitor?.subtaskOmissions).toBeUndefined();
+  expect(reportSources(h)).toEqual(["parked-a"]);
+  const identity = subtaskReportOmissionIdentity({
+    sourceId: h.monitor.state.sourceId,
+    parent: h.monitor.state.tasks[0],
+    group: h.monitor.subtaskSnapshot().groups[0],
+    reportSource: b.source,
+  });
+  expect(identity).toMatch(/^[a-f0-9]{64}$/);
+  return {
+    h,
+    parked,
+    expected: {
+      entries: [{ identity, reason: "coalesced" }],
+      saturated: false,
+    },
+  };
+}
+
+it("saves unadmitted B's coalescing receipt before C replaces it, without counting parked A", async () => {
+  const { h, parked, expected } = await parkedWithQueuedB();
+  const duringSave: unknown[] = [];
+  h.save.mockClear();
+  h.save.mockImplementation((raw: unknown) => {
+    if ((raw as ReturnType<typeof h.checkpoint>).monitor?.subtaskOmissions)
+      duringSave.push({
+        candidate: queuedReport(h)?.source.entryId,
+        summary: h.checkpoint().monitor?.subtaskOmissions,
+      });
+  });
+  h.append("queued-c", "PRIVATE_QUEUED_C: newer eligible workbook evidence.");
+  await h.settle("queued-c");
+  expect(duringSave[0]).toEqual({ candidate: "queued-b", summary: undefined });
+  expect(h.checkpoint().monitor?.subtaskOmissions).toEqual(expected);
+  expect(queuedReport(h)?.source.entryId).toBe("queued-c");
+  expect(h.checkpoint().monitor?.subtasks?.journal.reports[0]).toEqual(parked);
+  expect(reportSources(h)).toEqual(["parked-a"]);
+  h.monitor.turnOff();
+  const saved = h.checkpoint();
+  await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  expect(h.checkpoint().monitor?.subtaskOmissions).toEqual(expected);
+  expect(
+    h.monitor.subtaskDiagnosticsSnapshot().semanticOmissions,
+  ).toMatchObject({ total: 1, byReason: { coalesced: 1 } });
+});
+
+it("keeps B on coalescing-save veto and reconsiders C only on a named wake", async () => {
+  const { h, expected } = await parkedWithQueuedB();
+  let allow = false;
+  let attempts = 0;
+  h.save.mockImplementation((raw: unknown) => {
+    if ((raw as ReturnType<typeof h.checkpoint>).monitor?.subtaskOmissions) {
+      attempts++;
+      if (!allow) throw new Error("PRIVATE_COALESCING_VETO");
+    }
+  });
+  h.append(
+    "queued-c",
+    "A valid newer C should replace B only after storage succeeds.",
+  );
+  await h.settle("queued-c");
+  expect.soft(attempts).toBeGreaterThan(0);
+  expect.soft(queuedReport(h)?.source.entryId).toBe("queued-b");
+  expect(h.checkpoint().monitor?.subtaskOmissions).toBeUndefined();
+  const before = attempts;
+  allow = true;
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(attempts).toBe(before);
+  expect.soft(queuedReport(h)?.source.entryId).toBe("queued-b");
+  h.observe();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(h.checkpoint().monitor?.subtaskOmissions).toEqual(expected);
+  expect(queuedReport(h)?.source.entryId).toBe("queued-c");
+  expect(reportSources(h)).toEqual(["parked-a"]);
+});
+
+it("does not count unchanged queued B or parked A as omitted on repeated named wakes", async () => {
+  const { h, parked } = await parkedWithQueuedB();
+  for (let i = 0; i < 3; i++) {
+    h.observe();
+    await vi.advanceTimersByTimeAsync(100);
+  }
+  expect(h.checkpoint().monitor?.subtaskOmissions).toBeUndefined();
+  expect(queuedReport(h)?.source.entryId).toBe("queued-b");
+  expect(h.checkpoint().monitor?.subtasks?.journal.reports[0]).toEqual(parked);
+  expect(reportSources(h)).toEqual(["parked-a"]);
+});
+
+it("does not publish queued C after a successful coalescing save synchronously stops Monitor", async () => {
+  const { h, expected } = await parkedWithQueuedB();
+  let durable: ReturnType<typeof h.checkpoint> | undefined;
+  h.save.mockImplementation((raw: unknown) => {
+    const candidate = raw as ReturnType<typeof h.checkpoint>;
+    if (!durable && candidate.monitor?.subtaskOmissions) {
+      durable = structuredClone(candidate);
+      h.monitor.stop();
+    }
+  });
+  h.append(
+    "queued-c",
+    "A newer report reaches the reentrant persistence fence.",
+  );
+  await h.settle("queued-c");
+  expect(durable?.monitor?.subtaskOmissions).toEqual(expected);
+  expect(h.monitor.enabled).toBe(false);
+  expect(queuedReport(h)?.source.entryId).not.toBe("queued-c");
+  expect(reportSources(h)).toEqual(["parked-a"]);
+  if (!durable?.monitor) throw new Error("Missing durable omission");
+  durable.monitor.enabled = false;
+  h.save.mockReset();
+  await h.monitor.restore("/nonexistent-hybrid-test", durable, false, h.reader);
+  expect(h.checkpoint().monitor?.subtaskOmissions).toEqual(expected);
 });

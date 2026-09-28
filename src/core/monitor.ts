@@ -142,6 +142,7 @@ import {
   type HybridState,
   type HybridTask,
   type Observation,
+  type ObservationRole,
   observationRef,
   type SourceRef,
   tasksNewestFirst,
@@ -3514,25 +3515,48 @@ export class Monitor {
         (report) => report.state !== "superseded",
       ),
     );
+    const reportParentIds = new Set([
+      ...checkpoint.state.groups.map((group) => group.parentTaskId),
+      ...checkpoint.journal.reports
+        .filter((report) => report.state !== "superseded")
+        .map((report) => report.parentTaskId),
+    ]);
     for (const parent of current.parents)
-      if (genericParentIds.has(parent.id)) collect(parent.source);
+      if (genericParentIds.has(parent.id) || reportParentIds.has(parent.id))
+        collect(parent.source);
 
     const retained: Array<[string, Observation]> = [];
     let bytes = 2; // JSON array brackets.
     for (const entryId of entryIds) {
       const observation = pass.observation(entryId);
       if (!observation) return;
-      // Reject a raw oversized body before serializing or cloning it.
+      const id = Object.getOwnPropertyDescriptor(observation, "id")?.value;
+      const role = Object.getOwnPropertyDescriptor(observation, "role")?.value;
+      const text = Object.getOwnPropertyDescriptor(observation, "text")?.value;
+      const hash = Object.getOwnPropertyDescriptor(observation, "hash")?.value;
       if (
-        Buffer.byteLength(observation.text, "utf8") >
-        MAX_PENDING_SUBTASK_CAPTURE_BYTES
+        typeof id !== "string" ||
+        (role !== "user" && role !== "assistant" && role !== "intercom") ||
+        typeof text !== "string" ||
+        typeof hash !== "string"
       )
         return;
-      const encoded = Buffer.byteLength(JSON.stringify(observation), "utf8");
+      // Reject a raw oversized body before serializing or cloning it.
+      if (Buffer.byteLength(text, "utf8") > MAX_PENDING_SUBTASK_CAPTURE_BYTES)
+        return;
+      const inert = Object.create(null) as Record<string, string>;
+      inert.id = id;
+      inert.role = role;
+      inert.text = text;
+      inert.hash = hash;
+      const encoded = Buffer.byteLength(JSON.stringify(inert), "utf8");
       const next = bytes + encoded + (retained.length ? 1 : 0);
       if (next > MAX_PENDING_SUBTASK_CAPTURE_BYTES) return;
       bytes = next;
-      retained.push([entryId, observation]);
+      retained.push([
+        entryId,
+        { id, role: role as ObservationRole, text, hash },
+      ]);
     }
 
     const observations = new Map(
@@ -3565,33 +3589,46 @@ export class Monitor {
     };
   }
 
+  /** Revoke unavailable pending authority so later equal wakes can rebuild it. */
+  private blockPendingSubtaskWake() {
+    this.pendingSubtaskCurrentRevoke?.();
+    this.pendingSubtaskCurrentRevoke = undefined;
+    this.pendingSubtaskCurrent = null;
+    this.subtaskOwners = [];
+    this.subtaskReportOwners = [];
+    this.subtaskReportCandidates.clear();
+    this.subtaskReportBlocked.clear();
+    this.subtaskReportFrontiers.clear();
+    this.subtaskActiveReportParents.clear();
+    this.subtaskDiagnosticAuthority = undefined;
+    this.subtaskWakeKey = undefined;
+  }
+
   /** Capture pending target work while canonical authority is still available. */
   private wakePendingSubtasks(pass: CanonicalPass, force: boolean) {
     const checkpoint = this.pendingSubtaskCheckpoint;
-    if (!checkpoint) return;
+    if (!checkpoint) {
+      this.blockPendingSubtaskWake();
+      return;
+    }
     const reportParentIds = new Set(
       checkpoint.state.groups.map((group) => group.parentTaskId),
     );
     const hasReports = reportParentIds.size > 0;
     if (!hasReports && !this.options.proposeSubtasks) {
-      this.subtaskOwners = [];
-      this.subtaskReportOwners = [];
-      this.subtaskReportCandidates.clear();
-      this.subtaskActiveReportParents.clear();
-      this.subtaskDiagnosticAuthority = undefined;
+      this.blockPendingSubtaskWake();
       return;
     }
     const current = this.subtaskCurrent(this.state, pass, false, !hasReports);
     if (!current) {
-      this.subtaskOwners = [];
-      this.subtaskReportOwners = [];
-      this.subtaskReportCandidates.clear();
-      this.subtaskActiveReportParents.clear();
-      this.subtaskDiagnosticAuthority = undefined;
+      this.blockPendingSubtaskWake();
       return;
     }
     const store = this.restoreSubtaskStore(checkpoint, current);
-    if (!store) return;
+    if (!store) {
+      this.blockPendingSubtaskWake();
+      return;
+    }
     const snapshot = store.snapshot();
     this.subtaskProjection = structuredClone(snapshot);
     const parents = new Map(
@@ -3689,12 +3726,7 @@ export class Monitor {
       pass,
     );
     if (!captured) {
-      this.pendingSubtaskCurrent = null;
-      this.subtaskOwners = [];
-      this.subtaskReportOwners = [];
-      this.subtaskReportCandidates.clear();
-      this.subtaskActiveReportParents.clear();
-      this.subtaskDiagnosticAuthority = undefined;
+      this.blockPendingSubtaskWake();
       return;
     }
     this.pendingSubtaskCurrent = captured;

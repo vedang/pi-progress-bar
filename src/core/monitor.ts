@@ -129,6 +129,7 @@ import {
   MAX_CHECKPOINT_BYTES,
   type MonitorCheckpointMetadata,
   restoreSubtaskCheckpoint,
+  type SubtaskMonitorCheckpointMetadata,
   type SubtaskRestoreContext,
   subtaskCheckpointBytes,
   subtaskCheckpointStorageStatus,
@@ -146,7 +147,12 @@ import {
   tasksNewestFirst,
 } from "./hybrid-state";
 import type { SubtaskAccessSnapshot } from "./subtask-access";
-import type { SubtaskPhaseRecord, SubtaskReportJob } from "./subtask-journal";
+import {
+  restoreSubtaskJournal,
+  type SubtaskPhaseRecord,
+  type SubtaskReportJob,
+} from "./subtask-journal";
+import { mergeSubtaskRestoreHistory } from "./subtask-restore-history";
 import {
   type SubtaskPhysicalFlightObserver,
   type SubtaskProposalTransportResult,
@@ -346,6 +352,11 @@ interface ControlWork {
   metadata?: MonitorCheckpointMetadata;
   preserveControls: boolean;
   telemetry: Telemetry;
+  /** Raw strict-v11 metadata retains original-store proof for history merge. */
+  subtaskMetadata?: SubtaskMonitorCheckpointMetadata;
+  /** Captured before invalidation; a committed pending target takes precedence. */
+  liveSubtasks?: SubtaskRuntimeCheckpoint;
+  persisted?: boolean;
   done?: Deferred;
 }
 
@@ -990,6 +1001,10 @@ export class Monitor {
 
   /** Detached generic sidecar view. Reading it never schedules or mutates. */
   subtaskSnapshot(): SubtaskMonitorSnapshot {
+    if (this.pendingSubtaskCheckpoint)
+      return structuredClone(
+        this.subtaskProjection ?? new SubtaskStore().snapshot(),
+      );
     const runtime = this.subtaskRuntime;
     if (!runtime) return new SubtaskStore().snapshot();
     const snapshot = runtime.snapshot();
@@ -1009,7 +1024,7 @@ export class Monitor {
 
   /** Passive durable generic wallet and captured-owner projection. */
   subtaskDiagnosticsSnapshot(): SubtaskDiagnosticsSnapshot {
-    const journal = this.subtaskRuntime?.checkpoint().journal;
+    const journal = this.authoritativeSubtaskCheckpoint().journal;
     const dispatches = journal?.dispatches ?? 0;
     const adapter = this.coverageAdapter.snapshot();
     const authority = this.subtaskDiagnosticAuthority;
@@ -1422,8 +1437,8 @@ export class Monitor {
   }
 
   /** Accepted pending work is valid only against its exact complete gate context. */
-  private pendingContextAmended() {
-    const pending = this.state.pending;
+  private pendingContextAmended(state: HybridState = this.state) {
+    const pending = state.pending;
     return (
       !!pending &&
       !this.sameContext(pending.journal.gate.context, this.settledContext)
@@ -1460,6 +1475,10 @@ export class Monitor {
   }
 
   private beginControl(input: Omit<ControlWork, "epoch" | "done">) {
+    const liveSubtasks =
+      input.sourceId === this.state.sourceId
+        ? this.authoritativeSubtaskCheckpoint()
+        : undefined;
     this.disableRuntime();
     // Old work retains its local owner until its own finally block unwinds, but
     // target restore validation must not include old-branch references.
@@ -1467,6 +1486,7 @@ export class Monitor {
     this.clearRuntimeContext();
     const work: ControlWork = {
       ...input,
+      ...(liveSubtasks === undefined ? {} : { liveSubtasks }),
       epoch: this.epoch,
       ...(input.kind === "restore" ? { done: this.deferred() } : {}),
     };
@@ -1632,7 +1652,64 @@ export class Monitor {
         (report, candidate) =>
           this.subtaskRestoreReportCurrent(report, candidate, pass),
       );
-      if (restored) {
+      const emptySubtasks = this.emptySubtaskCheckpoint();
+      const liveSubtasks = work.liveSubtasks ?? emptySubtasks;
+      const incomingSubtasks = work.subtaskMetadata?.subtasks ?? emptySubtasks;
+      const targetStore = restored?.monitor?.subtasks?.state;
+      const preservesSubtaskHistory =
+        this.hasSubtaskCheckpointData(liveSubtasks) ||
+        this.hasSubtaskCheckpointData(incomingSubtasks) ||
+        (targetStore !== undefined &&
+          this.hasSubtaskCheckpointData({
+            state: targetStore,
+            journal: emptySubtasks.journal,
+          }));
+      if (restored && preservesSubtaskHistory) {
+        const canonicalReset =
+          this.directCanonicalAmendment(pass, restored.state) ||
+          this.pendingContextAmended(restored.state);
+        const state = canonicalReset
+          ? emptyState(work.sourceId)
+          : restored.state;
+        const component = this.mergedRestoredSubtaskHistory(
+          liveSubtasks,
+          incomingSubtasks,
+          canonicalReset
+            ? emptySubtasks.state
+            : (targetStore ?? emptySubtasks.state),
+          state,
+          pass,
+        );
+        const metadata = canonicalReset
+          ? this.resetSubtaskMetadata(work.subtaskMetadata)
+          : restored.monitor;
+        if (
+          !component ||
+          !this.commitRestoredSubtaskHistory(
+            state,
+            metadata,
+            component,
+            work.wantEnabled,
+          )
+        ) {
+          this.refuseRestoredSubtaskHistory(work);
+          return;
+        }
+        if (canonicalReset) {
+          this.mergeTelemetry(work.metadata, work, pass);
+          this.resetState(work.sourceId, false, component);
+        } else {
+          this.state = copyState(state);
+          this.replaceSubtaskRuntime(component);
+          this.hydrateSubtaskProjection(pass, component);
+          this.mergeTelemetry(metadata, work, pass);
+          this.captureSubtaskDiagnosticAuthoritySafely(component, () =>
+            this.subtaskCurrent(this.state, pass, true),
+          );
+          this.latchHistoricalCatchup = true;
+        }
+        work.persisted = true;
+      } else if (restored) {
         this.state = copyState(restored.state);
         this.replaceSubtaskRuntime(restored.monitor?.subtasks);
         this.hydrateSubtaskProjection(pass);
@@ -1644,6 +1721,34 @@ export class Monitor {
         this.latchHistoricalCatchup = true;
         if (this.directCanonicalAmendment(pass) || this.pendingContextAmended())
           this.resetState(work.sourceId, false);
+      } else if (
+        this.restoreSourceMatches(work.data, work.sourceId) &&
+        preservesSubtaskHistory
+      ) {
+        const state = emptyState(work.sourceId);
+        const component = this.mergedRestoredSubtaskHistory(
+          liveSubtasks,
+          incomingSubtasks,
+          emptySubtasks.state,
+          state,
+          pass,
+        );
+        if (
+          !component ||
+          !this.commitRestoredSubtaskHistory(
+            state,
+            this.resetSubtaskMetadata(work.subtaskMetadata),
+            component,
+            work.wantEnabled,
+          )
+        ) {
+          this.refuseRestoredSubtaskHistory(work);
+          return;
+        }
+        this.mergeTelemetry(work.metadata, work, pass);
+        this.resetState(work.sourceId, false, component);
+        this.latchHistoricalCatchup = true;
+        work.persisted = true;
       } else if (this.restoreSourceMatches(work.data, work.sourceId)) {
         this.mergeTelemetry(work.metadata, work, pass);
         this.resetState(work.sourceId, false);
@@ -1671,7 +1776,9 @@ export class Monitor {
     this.reconcileHealthCards(pass);
     this.controlWork = undefined;
     if (!work.wantEnabled) {
-      if (this.falseProjectionFits()) this.save();
+      if (work.persisted) {
+        // Transaction already saved exact disabled candidate.
+      } else if (this.falseProjectionFits()) this.save();
       else this.note("capacity-exhausted");
       this.finishControl(work);
       this.publish();
@@ -1683,7 +1790,7 @@ export class Monitor {
       this.publish();
       return;
     }
-    if (!this.falseProjectionFits()) {
+    if (!work.persisted && !this.falseProjectionFits()) {
       this.note("capacity-exhausted");
       this.finishControl(work);
       this.publish();
@@ -1709,9 +1816,9 @@ export class Monitor {
     else this.wakeSubtasks(pass, true);
     this.save();
     this.refreshBeads();
-    this.finishControl(work);
     this.publish();
     this.drain();
+    this.finishControl(work);
   }
 
   async restore(
@@ -1720,6 +1827,7 @@ export class Monitor {
     preserveControls = false,
     reader?: () => readonly unknown[],
   ) {
+    const priorSubtaskFlight = this.subtaskFlight;
     const storage = subtaskCheckpointStorageStatus(data);
     const prior = this.controlWork;
     const restored =
@@ -1755,12 +1863,16 @@ export class Monitor {
       wantEnabled: desired,
       sourceId,
       metadata: storage === "supported" ? restored : undefined,
+      subtaskMetadata: storage === "supported" ? restored : undefined,
       data,
       preserveControls,
       telemetry: this.captureTelemetry(this.state.sourceId),
       target: storage === "supported" ? this.restoreTarget(data) : undefined,
     });
     await promise;
+    // A new enabled restore exposes its first persisted optional outcome before
+    // this lifecycle promise resolves. Never wait for a preexisting drain.
+    if (!priorSubtaskFlight && this.subtaskFlight) await this.subtaskFlight;
   }
 
   /** Detached plain projection; it does not read history, persist, or schedule. */
@@ -2179,9 +2291,16 @@ export class Monitor {
   }
 
   /** Semantic authority resets on amendment; billing lifetime resets only by source. */
-  private resetState(sourceId: string, resetTelemetry = true) {
+  private resetState(
+    sourceId: string,
+    resetTelemetry = true,
+    retainedSubtasks?: SubtaskRuntimeCheckpoint,
+  ) {
+    const subtasks = resetTelemetry
+      ? undefined
+      : (retainedSubtasks ?? this.retiredSubtaskCheckpoint());
     this.invalidateCorrections();
-    this.replaceSubtaskRuntime();
+    this.replaceSubtaskRuntime(subtasks);
     this.state = emptyState(sourceId);
     this.coverage = new CoverageStore();
     this.resetCoverageRuntime();
@@ -2368,7 +2487,7 @@ export class Monitor {
     taskDetails: ReadonlyMap<string, TaskDetailRecord> = this.taskDetails,
     runtimeCheckpoint:
       | Readonly<SubtaskRuntimeCheckpoint>
-      | undefined = this.subtaskRuntime?.checkpoint(),
+      | undefined = this.authoritativeSubtaskCheckpoint(),
   ) {
     const idleDoneTaskId = this.idleDoneTaskIdFor(
       state,
@@ -2438,10 +2557,52 @@ export class Monitor {
     };
   }
 
+  private hasSubtaskCheckpointData(
+    checkpoint: Readonly<SubtaskRuntimeCheckpoint>,
+  ) {
+    return (
+      checkpoint.state.groups.length > 0 ||
+      checkpoint.state.nextGroupId !== 1 ||
+      checkpoint.state.nextChildId !== 1 ||
+      checkpoint.journal.dispatches > 0 ||
+      checkpoint.journal.records.length > 0 ||
+      checkpoint.journal.reports.length > 0
+    );
+  }
+
+  /** Pending committed target is the restore floor until an old flight drains. */
+  private authoritativeSubtaskCheckpoint(): SubtaskRuntimeCheckpoint {
+    return structuredClone(
+      this.pendingSubtaskCheckpoint ??
+        this.subtaskRuntime?.checkpoint() ??
+        this.emptySubtaskCheckpoint(),
+    );
+  }
+
+  /** Retire semantic authority while retaining validated lifetime history. */
+  private retiredSubtaskCheckpoint(
+    checkpoint = this.authoritativeSubtaskCheckpoint(),
+  ): SubtaskRuntimeCheckpoint {
+    const journal = restoreSubtaskJournal(
+      checkpoint.journal,
+      () => false,
+      () => false,
+    );
+    if (!journal)
+      throw new Error("Validated subtask history could not be retired");
+    return {
+      state: { ...structuredClone(checkpoint.state), groups: [] },
+      journal,
+    };
+  }
+
   /** Install only after prior runtime flight drains; no coordinator overlap. */
-  private installSubtaskRuntime(initial: SubtaskRuntimeCheckpoint) {
+  private installSubtaskRuntime(
+    initial: SubtaskRuntimeCheckpoint,
+    preserveProjection = false,
+  ) {
     this.pendingSubtaskCheckpoint = undefined;
-    this.subtaskProjection = undefined;
+    if (!preserveProjection) this.subtaskProjection = undefined;
     this.subtaskRuntime = new SubtaskRuntime({
       initial: structuredClone(initial),
       current: () => this.subtaskCurrent(this.state),
@@ -2623,6 +2784,127 @@ export class Monitor {
     return (
       !!current && subtaskRuntimeReportIsCurrent(report, current, candidate)
     );
+  }
+
+  /** Apply current target authority only after pure cumulative history merge. */
+  private normalizeRestoredSubtaskHistory(
+    component: Readonly<SubtaskRuntimeCheckpoint>,
+    state: HybridState,
+    pass: CanonicalPass,
+  ): SubtaskRuntimeCheckpoint | undefined {
+    const current = this.subtaskCurrent(state, pass, true);
+    const store = current
+      ? this.restoreSubtaskStore(component, current)
+      : undefined;
+    const groups = new Map(
+      (store?.snapshot().groups ?? []).map((group) => [
+        group.parentTaskId,
+        group,
+      ]),
+    );
+    const journal = restoreSubtaskJournal(
+      component.journal,
+      (record) => {
+        if (!current) return false;
+        const group = groups.get(record.parentTaskId);
+        return this.subtaskRestoreCurrent(
+          record,
+          { state, ...(group === undefined ? {} : { group }) },
+          pass,
+        );
+      },
+      (report) => {
+        if (!current) return false;
+        const group = groups.get(report.parentTaskId);
+        return this.subtaskRestoreReportCurrent(
+          report,
+          { state, ...(group === undefined ? {} : { group }) },
+          pass,
+        );
+      },
+    );
+    return journal
+      ? { state: structuredClone(component.state), journal }
+      : undefined;
+  }
+
+  /** Merge original incoming proof against canonical target without live groups. */
+  private mergedRestoredSubtaskHistory(
+    live: Readonly<SubtaskRuntimeCheckpoint>,
+    incoming: Readonly<SubtaskRuntimeCheckpoint>,
+    targetStore: Readonly<SubtaskRuntimeCheckpoint["state"]>,
+    state: HybridState,
+    pass: CanonicalPass,
+  ): SubtaskRuntimeCheckpoint | undefined {
+    const merged = mergeSubtaskRestoreHistory({
+      live,
+      incoming,
+      targetStore,
+    });
+    return merged.kind === "merged"
+      ? this.normalizeRestoredSubtaskHistory(merged.component, state, pass)
+      : undefined;
+  }
+
+  /** Preserve strict-v11 omission bytes while substituting merged history. */
+  private restoredSubtaskMetadata(
+    metadata: SubtaskMonitorCheckpointMetadata | undefined,
+    component: Readonly<SubtaskRuntimeCheckpoint>,
+    enabled: boolean,
+  ): SubtaskMonitorCheckpointMetadata {
+    const base = metadata
+      ? structuredClone(metadata)
+      : {
+          enabled,
+          usage: {
+            jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
+            extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
+          },
+        };
+    return { ...base, enabled, subtasks: structuredClone(component) };
+  }
+
+  /** Canonical reset keeps only nonsemantic strict-v11 fields plus history. */
+  private resetSubtaskMetadata(
+    metadata: SubtaskMonitorCheckpointMetadata | undefined,
+  ): SubtaskMonitorCheckpointMetadata | undefined {
+    if (!metadata) return;
+    return {
+      enabled: metadata.enabled,
+      usage: structuredClone(metadata.usage),
+      ...(metadata.subtaskOmissions === undefined
+        ? {}
+        : { subtaskOmissions: structuredClone(metadata.subtaskOmissions) }),
+    };
+  }
+
+  /** Preflight exact ON/OFF envelopes, then persist before target adoption. */
+  private commitRestoredSubtaskHistory(
+    state: HybridState,
+    metadata: SubtaskMonitorCheckpointMetadata | undefined,
+    component: Readonly<SubtaskRuntimeCheckpoint>,
+    enabled: boolean,
+  ) {
+    const candidate = this.restoredSubtaskMetadata(
+      metadata,
+      component,
+      enabled,
+    );
+    if (!canCommitSubtaskCheckpoint(state, candidate)) return false;
+    return (
+      commitSubtaskCheckpoint(state, candidate, (checkpoint) => {
+        this.persist(checkpoint);
+        return true;
+      }) !== undefined
+    );
+  }
+
+  /** Refusal remains locally OFF with prior state/history and no fallback write. */
+  private refuseRestoredSubtaskHistory(work: ControlWork) {
+    this.note("saved-state-rejected");
+    this.controlWork = undefined;
+    this.finishControl(work);
+    this.publish();
   }
 
   /** Report preflight shares real v11 component and ON/OFF envelope limits. */
@@ -2924,12 +3206,13 @@ export class Monitor {
       established && owners.size <= 20 ? { parked, permanent } : undefined;
   }
 
-  private hydrateSubtaskProjection(pass: CanonicalPass) {
-    const runtime = this.subtaskRuntime;
-    if (!runtime) return;
+  private hydrateSubtaskProjection(
+    pass: CanonicalPass,
+    checkpoint = this.authoritativeSubtaskCheckpoint(),
+  ) {
     const current = this.subtaskCurrent(this.state, pass, true);
     const store = current
-      ? this.restoredSubtaskStore(runtime, current)
+      ? this.restoreSubtaskStore(checkpoint, current)
       : undefined;
     this.subtaskProjection = store ? store.snapshot() : undefined;
   }
@@ -3253,7 +3536,7 @@ export class Monitor {
       if (this.pendingSubtaskCheckpoint) {
         const next = this.pendingSubtaskCheckpoint;
         this.pendingSubtaskCheckpoint = undefined;
-        this.installSubtaskRuntime(next);
+        this.installSubtaskRuntime(next, true);
         if (this.enabled) this.subtaskGateway.enable(this.subtaskIdentity());
       }
       if (this.enabled && this.subtaskRuntime) {
@@ -5455,27 +5738,25 @@ export class Monitor {
   }
 
   /** Mandatory semantic sources only; optional health validates independently. */
-  private canonicalReferences() {
+  private canonicalReferences(state: HybridState = this.state) {
     const references: {
       entryId: string;
       messageHash: string;
       role?: Observation["role"];
     }[] = [
-      ...this.state.tasks.flatMap((task) => [
+      ...state.tasks.flatMap((task) => [
         task.source,
         ...(task.latestAssessment ? [task.latestAssessment.source] : []),
       ]),
-      ...this.state.events.map((event) => event.source),
-      ...(this.state.scopeAssessment
-        ? [this.state.scopeAssessment.source]
-        : []),
-      ...(this.state.pending ? [this.state.pending.observation] : []),
-      ...(this.state.cursor
+      ...state.events.map((event) => event.source),
+      ...(state.scopeAssessment ? [state.scopeAssessment.source] : []),
+      ...(state.pending ? [state.pending.observation] : []),
+      ...(state.cursor
         ? [
             {
-              entryId: this.state.cursor.id,
-              messageHash: this.state.cursor.hash,
-              role: this.state.cursor.role,
+              entryId: state.cursor.id,
+              messageHash: state.cursor.hash,
+              role: state.cursor.role,
             },
           ]
         : []),
@@ -5546,7 +5827,7 @@ export class Monitor {
           ]
         : []),
     ];
-    const pending = this.state.pending;
+    const pending = state.pending;
     if (pending) {
       const { gate, patch, completions } = pending.journal;
       references.push(
@@ -5593,9 +5874,12 @@ export class Monitor {
   }
 
   /** Exhaustive direct ref validation. Exploratory context is handled separately. */
-  private directCanonicalAmendment(pass: CanonicalPass) {
+  private directCanonicalAmendment(
+    pass: CanonicalPass,
+    state: HybridState = this.state,
+  ) {
     const byId = new Map<string, ReturnType<typeof this.canonicalReferences>>();
-    for (const reference of this.canonicalReferences()) {
+    for (const reference of this.canonicalReferences(state)) {
       const expected = byId.get(reference.entryId) ?? [];
       expected.push(reference);
       byId.set(reference.entryId, expected);

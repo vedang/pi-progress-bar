@@ -64,6 +64,7 @@ import {
   type SubtaskReportBatch,
   subtaskReportBatches,
   subtaskReportOmissionIdentity,
+  subtaskReportRequestSize,
 } from "../analysis/subtask-report";
 import {
   detailQuestionKeys,
@@ -874,6 +875,11 @@ export class Monitor {
   private restoreRejection?: "unsupported" | "corrupt";
   /** Monitor-owned durable omission history survives runtime replacement. */
   private subtaskOmissions?: SubtaskOmissionSummary;
+  /** Source-scoped save candidate visible only to reentrant persistence writers. */
+  private savingSubtaskOmissionSummary?: {
+    sourceId: string;
+    summary: SubtaskOmissionSummary;
+  };
 
   constructor(
     private readonly changed: () => void,
@@ -1528,8 +1534,9 @@ export class Monitor {
     const liveSubtasks = sameSource
       ? this.authoritativeSubtaskCheckpoint()
       : undefined;
+    const omissions = this.durableSubtaskOmissions();
     const liveSubtaskOmissions = sameSource
-      ? this.subtaskOmissions && structuredClone(this.subtaskOmissions)
+      ? omissions && structuredClone(omissions)
       : undefined;
     this.disableRuntime();
     // Old work retains its local owner until its own finally block unwinds, but
@@ -2546,6 +2553,16 @@ export class Monitor {
     };
   }
 
+  /** Reentrant OFF/restore writes retain only same-source saved candidates. */
+  private durableSubtaskOmissions() {
+    const saving = this.savingSubtaskOmissionSummary;
+    return saving &&
+      saving.sourceId === this.state.sourceId &&
+      saving.sourceId === this.options.sourceId()
+      ? saving.summary
+      : this.subtaskOmissions;
+  }
+
   /** Strict-v11 monitor projection; generic sidecar replaces legacy coverage. */
   private subtaskMetadata(
     enabled = this.enabled,
@@ -2606,7 +2623,15 @@ export class Monitor {
     try {
       encodeSubtaskCheckpoint(
         state,
-        this.subtaskMetadata(false, this.healthCards, state),
+        this.subtaskMetadata(
+          false,
+          this.healthCards,
+          state,
+          undefined,
+          this.taskDetails,
+          this.authoritativeSubtaskCheckpoint(),
+          this.durableSubtaskOmissions(),
+        ),
       );
       return true;
     } catch {
@@ -3320,14 +3345,11 @@ export class Monitor {
         candidate.included,
     );
     if (!parent) return;
-    if (Buffer.byteLength(report.text, "utf8") > 12 * 1024)
-      return { kind: "oversized", parent, source };
-    const identity = subtaskReportBatches({
-      parent,
-      group,
-      report,
-      resolve: current.resolve,
-    })[0]?.jobIdentity;
+    const options = { parent, group, report, resolve: current.resolve };
+    const size = subtaskReportRequestSize(options);
+    if (size === "oversized") return { kind: "oversized", parent, source };
+    if (size !== "within-limit") return;
+    const identity = subtaskReportBatches(options)[0]?.jobIdentity;
     return identity ? { kind: "eligible", source, identity } : undefined;
   }
 
@@ -3346,21 +3368,28 @@ export class Monitor {
     if (!canCommitSubtaskCheckpoint(this.state, metadata)) return "capacity";
     const sourceId = this.state.sourceId;
     const epoch = this.epoch;
-    const saved = commitSubtaskCheckpoint(
-      this.state,
-      metadata,
-      (checkpoint) => {
+    const saving = { sourceId, summary: structuredClone(summary) };
+    const priorSaving = this.savingSubtaskOmissionSummary;
+    this.savingSubtaskOmissionSummary = saving;
+    let saved: ReturnType<typeof commitSubtaskCheckpoint>;
+    try {
+      saved = commitSubtaskCheckpoint(this.state, metadata, (checkpoint) => {
         this.persist(checkpoint);
         return true;
-      },
-    );
+      });
+    } finally {
+      if (this.savingSubtaskOmissionSummary === saving)
+        this.savingSubtaskOmissionSummary = priorSaving;
+    }
     if (!saved) return "vetoed";
-    if (
-      this.epoch !== epoch ||
-      this.state.sourceId !== sourceId ||
-      this.options.sourceId() !== sourceId
-    )
+    const sameSource =
+      this.state.sourceId === sourceId && this.options.sourceId() === sourceId;
+    if (!sameSource || this.epoch !== epoch) {
+      // Durable same-source receipts outlive reentrant control changes, but
+      // stale queue publication remains fenced at the caller.
+      if (sameSource) this.subtaskOmissions = structuredClone(summary);
       return "stale";
+    }
     this.subtaskOmissions = structuredClone(summary);
     return "committed";
   }
@@ -6381,7 +6410,20 @@ export class Monitor {
       return;
     }
     try {
-      this.persist(this.checkpoint());
+      this.persist(
+        encodeSubtaskCheckpoint(
+          this.state,
+          this.subtaskMetadata(
+            this.enabled,
+            this.healthCards,
+            this.state,
+            undefined,
+            this.taskDetails,
+            this.authoritativeSubtaskCheckpoint(),
+            this.durableSubtaskOmissions(),
+          ),
+        ),
+      );
     } catch {
       this.note("saved-state-rejected");
     }

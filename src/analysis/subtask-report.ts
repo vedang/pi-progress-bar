@@ -55,6 +55,9 @@ export interface SubtaskReportSelection {
   maxQuestions: number;
 }
 
+/** Canonical binding validity is distinct from the smallest Jev request size. */
+export type SubtaskReportRequestSize = "within-limit" | "oversized" | "invalid";
+
 export interface SubtaskReportBatch {
   request: EvaluationRequest;
   childIds: readonly string[];
@@ -437,7 +440,7 @@ const captureOptions = (value: unknown): CapturedOptions | undefined => {
       !snapshot ||
       !validParent(snapshot.parent) ||
       !validGroup(snapshot.group) ||
-      !validObservation(snapshot.report, MAX_REPORT_BYTES)
+      !validObservation(snapshot.report, MAX_CAPTURE_BYTES)
     )
       return;
     return {
@@ -497,9 +500,17 @@ const currentnessSnapshot = (captured: CapturedOptions) =>
     report: cloneObservation(captured.report),
   });
 
-const resolveBinding = (options: unknown): Binding | undefined => {
+const resolveBinding = (
+  options: unknown,
+  allowOversizedReport = false,
+): Binding | undefined => {
   const captured = captureOptions(options);
-  if (!captured) return;
+  if (
+    !captured ||
+    (!allowOversizedReport &&
+      Buffer.byteLength(captured.report.text, "utf8") > MAX_REPORT_BYTES)
+  )
+    return;
   const beforeCallbacks = currentnessSnapshot(captured);
   if (!beforeCallbacks) return;
   const { parent, group, report, resolve } = captured;
@@ -635,6 +646,30 @@ const requestFor = (
     children.map((child) => [`subtask:${child.id}`, question(child)]),
   ),
 });
+
+/**
+ * Classify a fully validated canonical report by its smallest whole Jev request.
+ * A caller may record only `oversized`; `invalid` grants no omission authority.
+ */
+export function subtaskReportRequestSize(
+  options: SubtaskReportOptions,
+): SubtaskReportRequestSize {
+  try {
+    const binding = resolveBinding(options, true);
+    if (!binding) return "invalid";
+    if (Buffer.byteLength(binding.report.text, "utf8") > MAX_REPORT_BYTES)
+      return "oversized";
+    const first = binding.group.children[0];
+    if (!first) return "invalid";
+    const encoded = json(requestFor(binding, [first]));
+    if (!encoded) return "invalid";
+    return Buffer.byteLength(encoded, "utf8") <= MAX_REQUEST_BYTES
+      ? "within-limit"
+      : "oversized";
+  } catch {
+    return "invalid";
+  }
+}
 
 const parentSourceDigestFor = (parent: HybridTask) =>
   jsonHash([

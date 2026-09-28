@@ -206,15 +206,58 @@ export default function progressBar(pi: ExtensionAPI): void {
     if (clearPendingPolicy) pendingContinuationPolicy = undefined;
   }
 
+  /**
+   * Rebuild continuation authority from host-effective policy/model state.
+   * The retained binding is immutable admission evidence; it must never be
+   * updated from a later prompt/model before comparison with that evidence.
+   */
+  function currentContinuationAuthority(binding: ContinuationAuthorityBinding) {
+    const ctx = context;
+    const model = ctx?.model;
+    if (
+      !ctx ||
+      !model?.provider ||
+      !model.id ||
+      `${model.provider}/${model.id}` !== binding.model
+    )
+      return;
+
+    let effectivePrompt: unknown;
+    try {
+      effectivePrompt = ctx.getSystemPrompt();
+    } catch {
+      return;
+    }
+    return monitor.continuationAuthority({
+      ...binding,
+      policy: validateContinuationPolicy(binding.policy, effectivePrompt),
+    });
+  }
+
+  /**
+   * Transport retries retain immutable content only while the exact authority
+   * accepted for the root is still current. This remains live after controller
+   * delivery has consumed its semantic phases.
+   */
+  function continuationTransportCurrent(): boolean {
+    const binding = continuationBinding;
+    const fingerprint = continuationFingerprint;
+    if (!binding || !fingerprint) return false;
+    const authority = currentContinuationAuthority(binding);
+    return (
+      authority?.available === true && authority.fingerprint === fingerprint
+    );
+  }
+
   function wakeContinuation(): void {
     const controller = continuationController;
     const binding = continuationBinding;
     if (!controller || !binding) return;
     const phase = controller.snapshot().phase;
     if (phase === "idle" || phase === "consumed") return;
-    const authority = monitor.continuationAuthority(binding);
-    if (!authority.available) {
-      if (authority.reason !== "frontier") invalidateContinuation();
+    const authority = currentContinuationAuthority(binding);
+    if (!authority?.available) {
+      if (authority?.reason !== "frontier") invalidateContinuation();
       else
         void controller.wake().finally(() => {
           if (
@@ -247,7 +290,10 @@ export default function progressBar(pi: ExtensionAPI): void {
   continuationController = new ContinuationController({
     authority: () =>
       continuationBinding
-        ? monitor.continuationAuthority(continuationBinding)
+        ? (currentContinuationAuthority(continuationBinding) ?? {
+            available: false,
+            reason: "stale",
+          })
         : { available: false, reason: "stale" },
     canStart: () =>
       monitor.continuationCanStart() &&
@@ -307,7 +353,9 @@ export default function progressBar(pi: ExtensionAPI): void {
                 ? !!continuationBinding &&
                   continuationBinding.receipt.opportunityId ===
                     currentOpportunity.id &&
-                  continuationBinding.originalRunId === currentOpportunity.runId
+                  continuationBinding.originalRunId ===
+                    currentOpportunity.runId &&
+                  continuationTransportCurrent()
                 : correctionRelevant),
         idle: context?.isIdle() ?? false,
         pendingMessages: context?.hasPendingMessages() ?? true,

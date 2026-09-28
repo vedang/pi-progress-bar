@@ -26,6 +26,7 @@ export type SettlementOrigin =
 
 export type AdvisoryDeliveryKind =
   | "reconciliation"
+  | "continuation"
   | "test-correction"
   | "review-correction";
 
@@ -472,7 +473,9 @@ export class ReconciliationDelivery {
   private validRequest(value: ReconciliationDeliveryRequest): boolean {
     if (
       !value ||
-      (value.kind !== RECONCILIATION_KIND && !this.isCorrection(value.kind)) ||
+      (value.kind !== RECONCILIATION_KIND &&
+        value.kind !== "continuation" &&
+        !this.isCorrection(value.kind)) ||
       !validUuid(value.opportunityId) ||
       typeof value.content !== "string" ||
       !isSafeEpoch(value.sessionEpoch) ||

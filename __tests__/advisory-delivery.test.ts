@@ -17,13 +17,18 @@ type Origin =
   | "uncertain-advisory";
 type Delivery = {
   request(value: {
-    kind: "reconciliation" | "test-correction" | "review-correction";
+    kind:
+      | "reconciliation"
+      | "continuation"
+      | "test-correction"
+      | "review-correction";
     opportunityId: string;
     content: string;
     sessionEpoch: number;
     branchEpoch: number;
   }): "started" | "duplicate" | "suppressed";
   onInput(): void;
+  onCorrectionRunInvalidated(): void;
   onAgentStart(): void;
   onMessageEnd(message: unknown, branch: readonly unknown[]): void;
   onContext(branch: readonly unknown[]): void;
@@ -100,39 +105,46 @@ async function fixture() {
     },
   };
 }
-it("invokes exact custom message with three distinct sends at0/2/10 seconds then exhausts", async () => {
-  const h = await fixture();
-  expect(h.delivery.request(request)).toBe("started");
-  expect(h.sendMessage).toHaveBeenCalledExactlyOnceWith(
-    {
-      customType: "pi-progress-advisory",
-      content,
-      display: true,
-      details: {
-        kind: "reconciliation",
-        opportunityId,
-        sendId: "00000000-0000-4000-8000-000000000010",
+it.each(["reconciliation", "continuation"] as const)(
+  "invokes exact %s message with three distinct sends at0/2/10 seconds then exhausts",
+  async (kind) => {
+    const h = await fixture();
+    expect(h.delivery.request({ ...request, kind })).toBe("started");
+    expect(h.sendMessage).toHaveBeenCalledExactlyOnceWith(
+      {
+        customType: "pi-progress-advisory",
+        content,
+        display: true,
+        details: {
+          kind,
+          opportunityId,
+          sendId: "00000000-0000-4000-8000-000000000010",
+        },
       },
-    },
-    { deliverAs: "steer", triggerTurn: true },
-  );
-  await vi.advanceTimersByTimeAsync(1_999);
-  expect(h.sendMessage).toHaveBeenCalledTimes(1);
-  await vi.advanceTimersByTimeAsync(1);
-  expect(h.sendMessage).toHaveBeenCalledTimes(2);
-  await vi.advanceTimersByTimeAsync(7_999);
-  expect(h.sendMessage).toHaveBeenCalledTimes(2);
-  await vi.advanceTimersByTimeAsync(1);
-  expect(h.sendMessage).toHaveBeenCalledTimes(3);
-  expect(
-    new Set(h.sendMessage.mock.calls.map(([message]) => message.details.sendId))
-      .size,
-  ).toBe(3);
-  await vi.advanceTimersByTimeAsync(8_000);
-  expect(vi.getTimerCount()).toBe(0);
-  await vi.advanceTimersByTimeAsync(100_000);
-  expect(h.sendMessage).toHaveBeenCalledTimes(3);
-});
+      { deliverAs: "steer", triggerTurn: true },
+    );
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(h.sendMessage).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.sendMessage).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(h.sendMessage).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.sendMessage).toHaveBeenCalledTimes(3);
+    expect(
+      h.sendMessage.mock.calls.map(([message]) => message.content),
+    ).toEqual([content, content, content]);
+    expect(
+      new Set(
+        h.sendMessage.mock.calls.map(([message]) => message.details.sendId),
+      ).size,
+    ).toBe(3);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(h.sendMessage).toHaveBeenCalledTimes(3);
+  },
+);
 it("dedupes request and never treats void return as acknowledgement", async () => {
   const h = await fixture();
   h.delivery.request(request);
@@ -197,13 +209,18 @@ it.each([
   ["irrelevant", { relevant: false }],
   ["user queue", { pendingMessages: true }],
   ["busy", { idle: false }],
-] as const)("suppresses initial send for %s", async (_name, patch) => {
-  const h = await fixture();
-  h.set(patch);
-  expect(h.delivery.request(request)).toBe("suppressed");
-  expect(h.sendMessage).not.toHaveBeenCalled();
-  expect(vi.getTimerCount()).toBe(0);
-});
+] as const)(
+  "suppresses idle-only initial send for %s",
+  async (_name, patch) => {
+    for (const kind of ["reconciliation", "continuation"] as const) {
+      const h = await fixture();
+      h.set(patch);
+      expect(h.delivery.request({ ...request, kind })).toBe("suppressed");
+      expect(h.sendMessage).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  },
+);
 it.each([
   "onInput",
   "onMasterOff",
@@ -332,16 +349,21 @@ it.each([
   );
 });
 
-it("preserves own origin across low-level retries before a single final settlement", async () => {
-  const h = await fixture();
-  h.delivery.request(request);
-  h.delivery.onAgentStart();
-  h.branch.push(h.canonical());
-  h.delivery.onContext(h.branch);
-  h.delivery.onAgentStart();
-  expect(h.delivery.onAgentSettled(h.branch)).toBe("advisory-only");
-  expect(h.delivery.onAgentSettled(h.branch)).toBeUndefined();
-});
+it.each(["reconciliation", "continuation"] as const)(
+  "preserves %s own origin across low-level retries and correction cleanup before a single final settlement",
+  async (kind) => {
+    const h = await fixture();
+    expect(h.delivery.request({ ...request, kind })).toBe("started");
+    h.delivery.onCorrectionRunInvalidated();
+    h.delivery.onAgentStart();
+    h.branch.push(h.canonical());
+    h.delivery.onContext(h.branch);
+    h.delivery.onCorrectionRunInvalidated();
+    h.delivery.onAgentStart();
+    expect(h.delivery.onAgentSettled(h.branch)).toBe("advisory-only");
+    expect(h.delivery.onAgentSettled(h.branch)).toBeUndefined();
+  },
+);
 
 it.each(["test-correction", "review-correction"] as const)(
   "steers %s immediately during active external work without misclassifying its run",

@@ -1154,29 +1154,127 @@ it("failed final save keeps charged proof and does not publish or retry after Mo
     "permanent",
   );
 });
-it("holds optional ownership until canceled report fetch physically drains while mandatory semantics advance", async () => {
+it.each(["advance", "off"])(
+  "keeps advisory ready during held report flight and fences %s while draining",
+  async (mode) => {
+    const h = await fixture();
+    let release = () => {};
+    releases.push(() => release());
+    h.setTransport(
+      (request) =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(answer(request));
+        }),
+    );
+    h.append("report-a", reportText);
+    await h.settle("report-a");
+    expect(h.calls).toHaveLength(1);
+    expect(h.monitor.advisorySettlementSnapshot().reason).toBe("ready");
+    if (mode === "off") {
+      h.monitor.turnOff();
+      release();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(h.statuses()).toEqual(Array(22).fill("pending"));
+      expect(h.calls).toHaveLength(1);
+      expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(1);
+      return;
+    }
+    h.append("report-b", "All agreed work is now completed.");
+    await h.settle("report-b");
+    expect(h.monitor.state.cursor?.id).toBe("report-b");
+    expect(h.calls).toHaveLength(1);
+    h.setTransport(undefined);
+    release();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.calls.map(sourceId)).toEqual(["report-a", "report-b", "report-b"]);
+    expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(3);
+  },
+);
+it.each(["complete", "newer-candidate", "off"])(
+  "enforces the final1024th report dispatch with %s results and durable unfinished children",
+  async (mode) => {
+    const h = await fixture();
+    const initial = h.checkpoint();
+    if (!initial.monitor?.subtasks) throw new Error("Missing component");
+    initial.monitor.subtasks.journal.dispatches = 1023;
+    initial.monitor.subtasks.journal.usage.jev.calls = 1023;
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      initial,
+      false,
+      h.reader,
+    );
+    let release = () => {};
+    releases.push(() => release());
+    if (mode !== "complete")
+      h.setTransport(
+        (request) =>
+          new Promise<Response>((resolve) => {
+            release = () => resolve(answer(request));
+          }),
+      );
+    h.append("last-paid-report", reportText);
+    await h.settle("last-paid-report");
+    expect(h.calls).toHaveLength(1);
+    expect(Object.keys(h.calls[0].questions)).toHaveLength(20);
+    if (mode === "newer-candidate") {
+      h.append(
+        "replacement",
+        "I retract all earlier completion claims. All obligations remain unfinished.",
+      );
+      await h.settle("replacement");
+    } else if (mode === "off") h.monitor.turnOff();
+    if (mode !== "complete") {
+      release();
+      await vi.advanceTimersByTimeAsync(200);
+    }
+    // Current contract retains admitted A before newer B; OFF revokes authority.
+    const completed = mode === "off" ? 0 : 20;
+    expect(
+      h.statuses()?.filter((status) => status === "reported-completed"),
+    ).toHaveLength(completed);
+    expect(h.statuses()?.filter((status) => status === "pending")).toHaveLength(
+      22 - completed,
+    );
+    const saved = h.checkpoint();
+    expect(saved.monitor?.subtasks?.journal.dispatches).toBe(1024);
+    expect(h.monitor.subtaskDiagnosticsSnapshot().exhausted).toBe(true);
+    await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+    h.observe();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(h.calls).toHaveLength(1);
+    expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(1024);
+    expect(
+      h.statuses()?.filter((status) => status === "reported-completed"),
+    ).toHaveLength(completed);
+  },
+);
+
+it("records report dispatch time rather than delayed response completion time", async () => {
   const h = await fixture();
+  let at = -1;
   let release = () => {};
   releases.push(() => release());
-  h.setTransport(
-    (request) =>
-      new Promise<Response>((resolve) => {
-        release = () => resolve(answer(request));
-      }),
-  );
-  h.append("report-a", reportText);
-  await h.settle("report-a");
+  h.setTransport((request) => {
+    if (at !== -1) return Promise.resolve(answer(request));
+    at = Date.now();
+    return new Promise<Response>((resolve) => {
+      release = () => resolve(answer(request));
+    });
+  });
+  h.append("timed-report", reportText);
+  await h.settle("timed-report");
   expect(h.calls).toHaveLength(1);
-  h.append("report-b", "All agreed work is now completed.");
-  await h.settle("report-b");
-  expect(h.monitor.state.cursor?.id).toBe("report-b");
-  expect(h.calls).toHaveLength(1);
-  h.setTransport(undefined);
+  await vi.advanceTimersByTimeAsync(2000);
   release();
-  await vi.advanceTimersByTimeAsync(200);
-  expect(h.calls.map(sourceId)).toEqual(["report-a", "report-b", "report-b"]);
-  expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(3);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.calls).toHaveLength(2);
+  const job = h.checkpoint().monitor?.subtasks?.journal.reports[0];
+  expect(job?.state).toBe("complete");
+  expect(job?.attempts[0].at).toBe(at);
+  expect(job?.attempts[1].at).toBeGreaterThanOrEqual(at + 2000);
 });
+
 it("alternates ready detail between report chunks after finite higher-priority work", async () => {
   const h = await fixture(true);
   const saved = h.checkpoint();

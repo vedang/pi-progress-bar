@@ -2,6 +2,12 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## Final report scheduling keeper ports (2026-09-28)
+
+Main strengthened `subtask-report-monitor.test.ts` with exact1023→1024 final-call behavior,20 completed plus2 pending through reload, held-call OFF fencing with no completion, and admitted-owner precedence when a newer corrective candidate arrives at exhaustion. The existing physical-drain keeper now explicitly proves advisory readiness and has an OFF late-response branch. A delayed-response case checks actual persisted dispatch timestamps rather than response time. Combined report/recovery/storage keepers **67/67 PASS**, make check PASS (three historical warnings).
+
+The first exhaustion draft incorrectly transplanted legacy latest-report supersession. Current approved C07 contract explicitly retains admitted ready A ahead of newer B, including corrective B; prose cannot itself retract accepted statuses. Corrected the fixture expectation to that documented policy, retaining OFF invalidation and wallet/no-extra-dispatch assertions. No source change or limit relaxation. Legacy source/tests still remain pending complete keeper mapping and coherent retirement.
+
 ## Selected-model recovery keeper ports (2026-09-28)
 
 `subtask-recovery-monitor.test.ts` exercises actual conversation-only Monitor gate→proposal for three charged failures: unknown transport failure, malformed result with known usage, and rejected admission persistence. Same-model named selection does not retry; a genuinely changed selected-model identity permits exactly one fresh gate+proposal, preserves old receipts as superseded history, retains all four charges, admits two grounded children and never re-extracts or re-assesses the parent. Repeating that selection does not rebill. This follows the explicit C07 supersession contract, not the obsolete unconditional same-context intent retry policy.

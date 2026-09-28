@@ -130,6 +130,7 @@ import {
   type MonitorCheckpointMetadata,
   restoreSubtaskCheckpoint,
   type SubtaskMonitorCheckpointMetadata,
+  type SubtaskOmissionSummary,
   type SubtaskRestoreContext,
   subtaskCheckpointBytes,
   subtaskCheckpointStorageStatus,
@@ -153,6 +154,10 @@ import {
   type SubtaskPhaseRecord,
   type SubtaskReportJob,
 } from "./subtask-journal";
+import {
+  mergeSubtaskOmissions,
+  projectSubtaskOmissions,
+} from "./subtask-omissions";
 import { mergeSubtaskRestoreHistory } from "./subtask-restore-history";
 import {
   type SubtaskPhysicalFlightObserver,
@@ -357,6 +362,8 @@ interface ControlWork {
   subtaskMetadata?: SubtaskMonitorCheckpointMetadata;
   /** Captured before invalidation; a committed pending target takes precedence. */
   liveSubtasks?: SubtaskRuntimeCheckpoint;
+  /** Monitor-owned durable history, independent of runtime checkpoint state. */
+  liveSubtaskOmissions?: SubtaskOmissionSummary;
   persisted?: boolean;
   done?: Deferred;
 }
@@ -405,6 +412,14 @@ export type SubtaskMonitorSnapshot = Readonly<SubtaskSnapshot>;
 export interface SubtaskDiagnosticsSnapshot {
   dispatches: number;
   exhausted: boolean;
+  semanticOmissions?: {
+    total: number;
+    byReason: Record<
+      SubtaskOmissionSummary["entries"][number]["reason"],
+      number
+    >;
+    saturated: boolean;
+  };
   parkedOwners?: number;
   permanentOwners?: number;
   adapter: {
@@ -840,6 +855,8 @@ export class Monitor {
   private diagnostics = new Map<string, number>();
   /** A rejected persisted shape remains OFF until a new restore boundary. */
   private restoreRejection?: "unsupported" | "corrupt";
+  /** Monitor-owned durable omission history survives runtime replacement. */
+  private subtaskOmissions?: SubtaskOmissionSummary;
 
   constructor(
     private readonly changed: () => void,
@@ -1045,6 +1062,7 @@ export class Monitor {
             parkedOwners: authority.parked.size,
             permanentOwners: authority.permanent.size,
           }),
+      semanticOmissions: projectSubtaskOmissions(this.subtaskOmissions),
       adapter: {
         pendingCount: adapter.pendingCount,
         pendingBytes: adapter.pendingBytes,
@@ -1483,10 +1501,13 @@ export class Monitor {
   }
 
   private beginControl(input: Omit<ControlWork, "epoch" | "done">) {
-    const liveSubtasks =
-      input.sourceId === this.state.sourceId
-        ? this.authoritativeSubtaskCheckpoint()
-        : undefined;
+    const sameSource = input.sourceId === this.state.sourceId;
+    const liveSubtasks = sameSource
+      ? this.authoritativeSubtaskCheckpoint()
+      : undefined;
+    const liveSubtaskOmissions = sameSource
+      ? this.subtaskOmissions && structuredClone(this.subtaskOmissions)
+      : undefined;
     this.disableRuntime();
     // Old work retains its local owner until its own finally block unwinds, but
     // target restore validation must not include old-branch references.
@@ -1495,6 +1516,7 @@ export class Monitor {
     const work: ControlWork = {
       ...input,
       ...(liveSubtasks === undefined ? {} : { liveSubtasks }),
+      ...(liveSubtaskOmissions === undefined ? {} : { liveSubtaskOmissions }),
       epoch: this.epoch,
       ...(input.kind === "restore" ? { done: this.deferred() } : {}),
     };
@@ -1670,6 +1692,7 @@ export class Monitor {
       const liveSubtasks = work.liveSubtasks ?? emptySubtasks;
       const incomingSubtasks = work.subtaskMetadata?.subtasks ?? emptySubtasks;
       const targetStore = restored?.monitor?.subtasks?.state;
+      const subtaskOmissions = this.restoredSubtaskOmissions(work);
       const preservesSubtaskHistory =
         this.hasSubtaskCheckpointData(liveSubtasks) ||
         this.hasSubtaskCheckpointData(incomingSubtasks) ||
@@ -1677,7 +1700,8 @@ export class Monitor {
           this.hasSubtaskCheckpointData({
             state: targetStore,
             journal: emptySubtasks.journal,
-          }));
+          })) ||
+        subtaskOmissions !== undefined;
       if (restored && preservesSubtaskHistory) {
         const canonicalReset =
           this.directCanonicalAmendment(pass, restored.state) ||
@@ -1703,11 +1727,14 @@ export class Monitor {
           work,
           state,
           pass,
+          subtaskOmissions,
         );
         if (!component || !this.commitRestoredSubtaskHistory(state, metadata)) {
           this.refuseRestoredSubtaskHistory(work);
           return;
         }
+        if (!this.restoredWorkIsCurrent(work)) return;
+        this.subtaskOmissions = subtaskOmissions;
         if (canonicalReset) {
           this.mergeTelemetry(metadata, work, pass);
           this.resetState(work.sourceId, false, component);
@@ -1723,6 +1750,7 @@ export class Monitor {
         }
         work.persisted = true;
       } else if (restored) {
+        this.subtaskOmissions = subtaskOmissions;
         this.state = copyState(restored.state);
         this.replaceSubtaskRuntime(restored.monitor?.subtasks);
         this.hydrateSubtaskProjection(pass);
@@ -1753,11 +1781,14 @@ export class Monitor {
           work,
           state,
           pass,
+          subtaskOmissions,
         );
         if (!component || !this.commitRestoredSubtaskHistory(state, metadata)) {
           this.refuseRestoredSubtaskHistory(work);
           return;
         }
+        if (!this.restoredWorkIsCurrent(work)) return;
+        this.subtaskOmissions = subtaskOmissions;
         this.mergeTelemetry(metadata, work, pass);
         this.resetState(work.sourceId, false, component);
         this.latchHistoricalCatchup = true;
@@ -2305,6 +2336,7 @@ export class Monitor {
     resetTelemetry = true,
     retainedSubtasks?: SubtaskRuntimeCheckpoint,
   ) {
+    const sourceChanged = sourceId !== this.state.sourceId;
     const subtasks = resetTelemetry
       ? undefined
       : (retainedSubtasks ?? this.retiredSubtaskCheckpoint());
@@ -2343,6 +2375,7 @@ export class Monitor {
     this.evidence.reset();
     this.beads.clear();
     this.beadsGeneration++;
+    if (sourceChanged) this.subtaskOmissions = undefined;
     if (!resetTelemetry) return;
     this.lastJevCallAt = undefined;
     this.lastExtractionCallAt = undefined;
@@ -2534,6 +2567,9 @@ export class Monitor {
         ? { taskDetails: [...taskDetails.values()].map(copyDetailRecord) }
         : {}),
       ...(hasSubtasks ? { subtasks: component } : {}),
+      ...(this.subtaskOmissions === undefined
+        ? {}
+        : { subtaskOmissions: structuredClone(this.subtaskOmissions) }),
     };
   }
 
@@ -2875,6 +2911,23 @@ export class Monitor {
       : undefined;
   }
 
+  /** Same-source restore retains live diagnostics before durable target history. */
+  private restoredSubtaskOmissions(work: ControlWork) {
+    return mergeSubtaskOmissions(
+      work.sourceId === work.telemetry.sourceId
+        ? work.liveSubtaskOmissions
+        : undefined,
+      work.subtaskMetadata?.subtaskOmissions,
+    ).summary;
+  }
+
+  /** A reentrant control/source change invalidates an older saved candidate. */
+  private restoredWorkIsCurrent(work: ControlWork) {
+    return (
+      this.controlWork === work && this.options.sourceId() === work.sourceId
+    );
+  }
+
   /** Build detached target metadata before persistence or live metadata adoption. */
   private restoredSubtaskMetadata(
     metadata: SubtaskMonitorCheckpointMetadata | undefined,
@@ -2883,6 +2936,7 @@ export class Monitor {
     work: ControlWork,
     state: HybridState,
     pass: CanonicalPass,
+    subtaskOmissions: Readonly<SubtaskOmissionSummary> | undefined,
   ): SubtaskMonitorCheckpointMetadata {
     const base: SubtaskMonitorCheckpointMetadata = metadata
       ? structuredClone(metadata)
@@ -2952,10 +3006,12 @@ export class Monitor {
       (task) =>
         task.id === idleDoneTaskId && task.included && task.status === "done",
     );
+    const hasSubtasks = this.hasSubtaskCheckpointData(component);
     const {
       healthCards: _healthCards,
       taskDetails: _taskDetails,
       idleDoneTaskId: _idleDoneTaskId,
+      subtaskOmissions: _subtaskOmissions,
       ...normalized
     } = base;
     return {
@@ -2967,7 +3023,10 @@ export class Monitor {
       ...(healthCards.length ? { healthCards } : {}),
       ...(taskDetails.length ? { taskDetails } : {}),
       ...(retainsIdleDone && idleDoneTaskId ? { idleDoneTaskId } : {}),
-      subtasks: structuredClone(component),
+      ...(hasSubtasks ? { subtasks: structuredClone(component) } : {}),
+      ...(subtaskOmissions === undefined
+        ? {}
+        : { subtaskOmissions: structuredClone(subtaskOmissions) }),
     };
   }
 
@@ -4397,6 +4456,18 @@ export class Monitor {
   /** Persist current optional coverage state under both ON and OFF projections. */
   private persistCoverageState() {
     try {
+      if (this.subtaskOmissions !== undefined) {
+        encodeSubtaskCheckpoint(
+          this.state,
+          this.subtaskMetadata(false, this.healthCards, this.state),
+        );
+        const checkpoint = encodeSubtaskCheckpoint(
+          this.state,
+          this.subtaskMetadata(this.enabled, this.healthCards, this.state),
+        );
+        this.persist(checkpoint);
+        return true;
+      }
       encodeCheckpoint(
         this.state,
         this.metadata(false, this.healthCards, this.state),
@@ -5622,14 +5693,25 @@ export class Monitor {
       this.coverageUsage.jev.calls = this.coverageUsage.jev.calls + 1;
       this.coverageUsage.jev.inputTokens = Number.MAX_SAFE_INTEGER;
       this.coverageUsage.jev.outputTokens = Number.MAX_SAFE_INTEGER;
-      encodeCheckpoint(
-        this.state,
-        this.metadata(false, this.healthCards, this.state),
-      );
-      encodeCheckpoint(
-        this.state,
-        this.metadata(this.enabled, this.healthCards, this.state),
-      );
+      if (this.subtaskOmissions !== undefined) {
+        encodeSubtaskCheckpoint(
+          this.state,
+          this.subtaskMetadata(false, this.healthCards, this.state),
+        );
+        encodeSubtaskCheckpoint(
+          this.state,
+          this.subtaskMetadata(this.enabled, this.healthCards, this.state),
+        );
+      } else {
+        encodeCheckpoint(
+          this.state,
+          this.metadata(false, this.healthCards, this.state),
+        );
+        encodeCheckpoint(
+          this.state,
+          this.metadata(this.enabled, this.healthCards, this.state),
+        );
+      }
       return true;
     } catch {
       return false;

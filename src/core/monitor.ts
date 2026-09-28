@@ -2559,7 +2559,7 @@ export class Monitor {
     return saving &&
       saving.sourceId === this.state.sourceId &&
       saving.sourceId === this.options.sourceId()
-      ? saving.summary
+      ? mergeSubtaskOmissions(this.subtaskOmissions, saving.summary).summary
       : this.subtaskOmissions;
   }
 
@@ -3391,10 +3391,17 @@ export class Monitor {
     if (!sameSource || this.epoch !== epoch) {
       // Durable same-source receipts outlive reentrant control changes, but
       // stale queue publication remains fenced at the caller.
-      if (sameSource) this.subtaskOmissions = structuredClone(summary);
+      if (sameSource)
+        this.subtaskOmissions = mergeSubtaskOmissions(
+          this.subtaskOmissions,
+          summary,
+        ).summary;
       return "stale";
     }
-    this.subtaskOmissions = structuredClone(summary);
+    this.subtaskOmissions = mergeSubtaskOmissions(
+      this.subtaskOmissions,
+      summary,
+    ).summary;
     return "committed";
   }
 

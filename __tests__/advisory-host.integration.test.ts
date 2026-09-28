@@ -80,6 +80,7 @@ async function host(
   correctionProof = false,
   waitForCorrection = true,
   continuationProof = false,
+  latePolicyOverride?: string,
 ) {
   const cwd = await mkdtemp(join(tmpdir(), "progress-advisory-host-"));
   const settingsManager = pi.SettingsManager.inMemory({
@@ -192,9 +193,10 @@ async function host(
           record("session_start", ctx),
         );
         extension.on("input", (e, ctx) => record(`input:${e.source}`, ctx));
-        extension.on("before_agent_start", (_e, ctx) =>
-          record("before_agent_start", ctx),
-        );
+        extension.on("before_agent_start", (_e, ctx) => {
+          record("before_agent_start", ctx);
+          if (latePolicyOverride) return { systemPrompt: latePolicyOverride };
+        });
         extension.on("agent_start", (_e, ctx) => record("agent_start", ctx));
         extension.on("context", (_e, ctx) => record("context", ctx));
         extension.on("message_end", (e, ctx) => {
@@ -729,21 +731,44 @@ it.each([
 );
 
 it.each([
-  { mode: "tui", choice: "yes" },
-  { mode: "rpc", choice: "yes" },
-  { mode: "rpc", choice: "no" },
-  { mode: "rpc", choice: "uncertain" },
-  { mode: "print", choice: "yes" },
-  { mode: "json", choice: "yes" },
+  ...(
+    [
+      { mode: "tui", choice: "yes" },
+      { mode: "rpc", choice: "yes" },
+      { mode: "rpc", choice: "no" },
+      { mode: "rpc", choice: "uncertain" },
+      { mode: "print", choice: "yes" },
+      { mode: "json", choice: "yes" },
+    ] as const
+  ).map((row) => ({ ...row, scenario: "normal" as const })),
+  { mode: "rpc", choice: "yes", scenario: "held-frontier" },
+  { mode: "rpc", choice: "yes", scenario: "off-gate" },
+  { mode: "rpc", choice: "yes", scenario: "off-draft" },
+  { mode: "rpc", choice: "yes", scenario: "input-gate" },
+  { mode: "rpc", choice: "yes", scenario: "tree-gate" },
+  { mode: "rpc", choice: "yes", scenario: "policy-override" },
 ] as const)(
-  "actual Pi $mode production continuation consumes one status-reply root ($choice)",
-  async ({ mode, choice }) => {
+  "actual Pi $mode production continuation consumes one status-reply root ($choice, $scenario)",
+  async ({ mode, choice, scenario }) => {
     vi.stubEnv("TYPESAFE_API_KEY", "offline-continuation-acceptance");
     const gates: EvaluationRequest[] = [];
+    const held = latch();
+    const released = latch();
+    const drained = latch();
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_url: unknown, init?: RequestInit) => {
         const request = JSON.parse(String(init?.body)) as EvaluationRequest;
+        const latest = (request.state as { latest?: { text?: string } }).latest;
+        if (
+          scenario === "held-frontier" &&
+          request.questions.gate &&
+          latest?.text?.includes("have not resumed implementation")
+        ) {
+          held.release();
+          await released.promise;
+          drained.release();
+        }
         const response = (await jevReply(request).json()) as {
           answers: Record<string, unknown>;
         };
@@ -753,6 +778,11 @@ it.each([
           )
         ) {
           gates.push(request);
+          if (scenario.endsWith("-gate")) {
+            held.release();
+            await released.promise;
+            drained.release();
+          }
           for (const key of Object.keys(request.questions))
             response.answers[key] = {
               type: "choice",
@@ -768,7 +798,18 @@ it.each([
         return Response.json(response);
       }),
     );
-    const h = await host(mode, {}, true, false, true, true);
+    const projections = vi.spyOn(Monitor.prototype, "continuationAuthority");
+    const h = await host(
+      mode,
+      {},
+      true,
+      false,
+      true,
+      true,
+      scenario === "policy-override"
+        ? "Pause all implementation until new user approval."
+        : undefined,
+    );
     const nativeTimeout = globalThis.setTimeout;
     const deadlines: Array<{
       callback: () => void;
@@ -795,7 +836,12 @@ it.each([
         fauxAssistantMessage(
           "The parser and regression tests remain pending, authorized and unblocked. No peer owns them; I have not resumed implementation.",
         ),
-        (context) => {
+        async (context) => {
+          if (scenario === "off-draft") {
+            held.release();
+            await released.promise;
+            drained.release();
+          }
           const request = context as {
             messages: Array<{
               role: string;
@@ -857,6 +903,61 @@ it.each([
             h.trace.filter((entry) => entry.hook === "agent_settled").length,
           ).toBeGreaterThanOrEqual(2),
         );
+        if (scenario === "policy-override") {
+          await vi.waitFor(() =>
+            expect(
+              projections.mock.results.some(
+                (result) =>
+                  result.type === "return" &&
+                  !result.value.available &&
+                  result.value.reason === "authority",
+              ),
+            ).toBe(true),
+          );
+          expect(gates).toEqual([]);
+          expect(drafts).toEqual([]);
+          expect(h.sent).toHaveLength(1);
+          expect(h.faux.state.callCount).toBe(2);
+          expect(h.errors).toEqual([]);
+          return;
+        }
+        if (scenario === "held-frontier") {
+          await bounded(held.promise);
+          expect(gates).toEqual([]);
+          expect(drafts).toEqual([]);
+          expect(h.sent).toHaveLength(1);
+          released.release();
+        }
+        if (scenario.endsWith("-gate") || scenario === "off-draft") {
+          await bounded(held.promise);
+          expect(gates).toHaveLength(1);
+          expect(h.sent).toHaveLength(1);
+          if (scenario === "input-gate") {
+            h.faux.setResponses([fauxAssistantMessage("Work is paused.")]);
+            await bounded(h.session.prompt("Pause the parser work."));
+          } else if (scenario === "tree-gate") {
+            const anchor = h.manager
+              .getBranch()
+              .find((entry) => entry.type === "message")?.id;
+            if (!anchor) throw new Error("Missing actual navigation anchor");
+            await bounded(h.session.navigateTree(anchor, { summarize: false }));
+          } else {
+            await bounded(h.session.prompt("/progress off"));
+            await bounded(h.session.prompt("/progress on"));
+          }
+          released.release();
+          await bounded(drained.promise);
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(gates).toHaveLength(1);
+          expect(h.sent).toHaveLength(1);
+          expect(drafts).toHaveLength(scenario === "off-draft" ? 1 : 0);
+          if (scenario !== "input-gate")
+            expect(h.faux.state.callCount).toBe(
+              scenario === "off-draft" ? 3 : 2,
+            );
+          expect(h.errors).toEqual([]);
+          return;
+        }
         await vi.waitFor(() => expect(gates).toHaveLength(1));
         const authority = gates[0]
           .state as ContinuationDraftRequest["input"]["authority"];
@@ -905,6 +1006,8 @@ it.each([
       dateSpy.mockRestore();
       timerSpy.mockRestore();
       for (const deadline of deadlines) clearTimeout(deadline.timer);
+      released.release();
+      projections.mockRestore();
       await h.dispose();
       vi.unstubAllGlobals();
       vi.unstubAllEnvs();

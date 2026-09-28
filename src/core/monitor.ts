@@ -181,7 +181,7 @@ export interface MonitorOptions {
     signal: AbortSignal,
     onDispatch?: (at: number) => boolean,
     onPhysicalFlight?: SubtaskPhysicalFlightObserver,
-  ) => Promise<unknown>;
+  ) => Promise<SubtaskProposalTransportResult>;
   /** Runtime-only grounded-detail gate; production enables it and tests may disable it. */
   richDetailsEnabled?: boolean;
   /** Accepted correction advice is runtime-only and delivered by the host seam. */
@@ -1637,13 +1637,10 @@ export class Monitor {
         this.replaceSubtaskRuntime(restored.monitor?.subtasks);
         this.hydrateSubtaskProjection(pass);
         this.mergeTelemetry(restored.monitor, work, pass);
-        const current = this.subtaskCurrent(this.state, pass, true);
-        if (current)
-          this.captureSubtaskDiagnosticAuthority(
-            current,
-            restored.monitor?.subtasks ?? this.emptySubtaskCheckpoint(),
-          );
-        else this.subtaskDiagnosticAuthority = undefined;
+        this.captureSubtaskDiagnosticAuthoritySafely(
+          restored.monitor?.subtasks ?? this.emptySubtaskCheckpoint(),
+          () => this.subtaskCurrent(this.state, pass, true),
+        );
         this.latchHistoricalCatchup = true;
         if (this.directCanonicalAmendment(pass) || this.pendingContextAmended())
           this.resetState(work.sourceId, false);
@@ -2458,7 +2455,7 @@ export class Monitor {
               signal,
               (at) => onDispatch(at) === true,
               onPhysicalFlight,
-            ).then((result) => result as SubtaskProposalTransportResult)
+            )
           : Promise.resolve(undefined);
       },
       report: (batch, signal, onDispatch, onPhysicalFlight) =>
@@ -2668,12 +2665,10 @@ export class Monitor {
         return true;
       },
     );
-    if (saved !== undefined) {
-      const pass = this.beginCanonicalPass();
-      const current = this.subtaskCurrent(this.state, pass);
-      if (current) this.captureSubtaskDiagnosticAuthority(current, candidate);
-      else this.subtaskDiagnosticAuthority = undefined;
-    }
+    if (saved !== undefined)
+      this.captureSubtaskDiagnosticAuthoritySafely(candidate, () =>
+        this.subtaskCurrent(this.state, this.beginCanonicalPass()),
+      );
     return saved !== undefined;
   }
 
@@ -2850,6 +2845,20 @@ export class Monitor {
         );
       },
     });
+  }
+
+  /** Diagnostic capture is observational; it cannot veto a saved transaction. */
+  private captureSubtaskDiagnosticAuthoritySafely(
+    checkpoint: Readonly<SubtaskRuntimeCheckpoint> | undefined,
+    current: () => SubtaskRuntimeCurrent | undefined,
+  ) {
+    try {
+      const value = current();
+      if (value) this.captureSubtaskDiagnosticAuthority(value, checkpoint);
+      else this.subtaskDiagnosticAuthority = undefined;
+    } catch {
+      this.subtaskDiagnosticAuthority = undefined;
+    }
   }
 
   /** Capture only current durable owner IDs; never retain canonical readers. */
@@ -3109,7 +3118,10 @@ export class Monitor {
     }
     if (hasReports) this.wakeSubtaskReports(pass, current);
     this.refreshActiveSubtaskReportParents(current);
-    this.captureSubtaskDiagnosticAuthority(current);
+    this.captureSubtaskDiagnosticAuthoritySafely(
+      this.subtaskRuntime?.checkpoint(),
+      () => current,
+    );
     const key = JSON.stringify({
       sourceId: current.sourceId,
       latest: current.latest,

@@ -267,6 +267,7 @@ it("captures decomposition permanent ownership without lazy credential reads", a
       expect(onDispatch?.(Date.now())).toBe(true);
       return {
         text: "not a proposal",
+        requestHash: _request.requestHash,
         provider: "fixture",
         model: "selected",
         usage: { inputTokens: 3, outputTokens: 2 },
@@ -1019,6 +1020,39 @@ it("invalidates diagnostic owner authority on stop without erasing the durable w
   expect([h.reader.mock.calls.length, h.fetch.mock.calls.length]).toEqual(
     before,
   );
+});
+it("does not lose a durably saved charge when diagnostic capture cannot read authority", async () => {
+  const h = await fixture();
+  const originalReader = h.reader.getMockImplementation();
+  if (!originalReader) throw new Error("Missing reader");
+  let savedCharge: Envelope | undefined;
+  h.save.mockImplementation((raw: unknown) => {
+    const candidate = raw as Envelope;
+    if (
+      !savedCharge &&
+      candidate.monitor?.subtasks?.journal.reports.some(
+        (job) => job.state === "dispatched",
+      )
+    ) {
+      savedCharge = structuredClone(candidate);
+      h.reader.mockImplementation(() => {
+        throw new Error("Authority unavailable after durable save");
+      });
+    }
+  });
+  try {
+    h.append("report", reportText);
+    await h.settle("report");
+    expect(savedCharge?.monitor?.subtasks?.journal.dispatches).toBe(1);
+    expect(h.calls).toHaveLength(0);
+    expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(1);
+    const projected = diagnostics(h);
+    expect(projected).toMatchObject({ dispatches: 1, exhausted: false });
+    expect(projected).not.toHaveProperty("parkedOwners");
+    expect(projected).not.toHaveProperty("permanentOwners");
+  } finally {
+    h.reader.mockImplementation(originalReader);
+  }
 });
 it("binds the real full-envelope capacity predicate before report transport", async () => {
   const h = await fixture();

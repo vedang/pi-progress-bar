@@ -2,6 +2,14 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## C08 producer review: post-save capture blocker
+
+Main verified the original47 focused cases on `b3b162a9`, then reproduced a new durability failure: a real save callback accepts the dispatched checkpoint and makes the canonical reader unavailable. Added diagnostic capture throws after persistence, causing the runtime to decline adoption of the already saved charge: persisted dispatches1, live journal0, transport0. New batch **1 RED/47 passing controls** (`c08-capture-red.log`). Diagnostics must invalidate unavailable owner facts without changing commit success or losing durable charges. No acceptance.
+
+Correction to the original freeze's gate claim: `c08-diagnostics-check.log` actually contains a TypeScript failure because Main's invalid-proposal fixture omitted the required `requestHash`. Worker widened the production proposer return type to `unknown` and cast it back internally. Main corrected the fixture to carry its request hash and requests removal of that unrelated type widening. Current format/check pass (`c08-repair-{format,check}.log`); the old freeze was not a clean check pass.
+
+A pre-producer source-swap comparison was blocked before execution by the sandbox (`path-outside-project-write: dynamic write target cannot be verified as inside the project`); no bypass or baseline proof claimed. Source remains unchanged. Worker reports1912 unit pass/50 legacy failures and81/83 integration (known correction failures); Main has not independently rerun those full gates on this candidate.
+
 ## C08 diagnostic producer RED freeze
 
 Main froze **13 RED/34 passing controls** across real Monitor/report and exact adapter-budget suites. New cases exercise passive/detached empty diagnostics, supported v11 wallets at1023/1024, charged invalid-proposal permanent ownership, and stop-time authority invalidation with wallet retention. Existing parked-A/newer-B, permanent-A/superseded history and real capacity-refusal tests retain their original assertions and now inspect truthful diagnostic counts. The decomposition fixture explicitly calls dispatch admission and returns a malformed proposal with known usage; an unknown-usage throw deliberately leaves dispatched proof, so it is not mislabeled permanent in this test.

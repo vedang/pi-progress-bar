@@ -79,8 +79,13 @@ it.each([false, true])(
       listRevision: older.monitor.subtasks.state.groups[0].listRevision,
       gate: { dispatch: charged.dispatches + 1, choice: "no" },
     });
-    expect(charged.records.map((record) => record.triggerHash)).not.toContain(
-      fresh[0].triggerHash,
+    const admission = charged.records.find(
+      (record) => record.gate?.choice === "yes",
+    );
+    expect(admission).toBeDefined();
+    expect(fresh[0].triggerHash).not.toBe(admission?.triggerHash);
+    expect(charged.records.map((record) => record.contextHash)).not.toContain(
+      fresh[0].contextHash,
     );
     expect(restored.usage.jev.calls).toBe(charged.usage.jev.calls + 1);
     expect(restored.usage.jev.inputTokens).toBeGreaterThanOrEqual(

@@ -3256,7 +3256,7 @@ export class Monitor {
     work: ControlWork,
     pass: CanonicalPass,
   ) {
-    const floor = this.restoredSubtaskHistoryFloor;
+    const floor = this.stagedRestoredSubtaskHistory();
     if (
       !floor ||
       floor.serial < this.latestRestoredSubtaskHistorySerial ||

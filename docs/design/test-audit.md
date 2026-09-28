@@ -36,6 +36,19 @@ Main owns all test edits, validation and acceptance. Children initially read onl
 
 Repository-native equivalents replace unavailable OpenClaw-specific campaign tooling: configured Vitest/offline guard, Make format/check/test, separate integration when unit fails, Biome/TypeScript/Knip, JJ diffs, independent native read-only preservation reviewers. Paid semantic proof occurs later under existing finite-manifest/ledger authorization; audit does not confer new semantic acceptance.
 
+## Discovery consumed; layer assessment in progress
+
+Main has read all eight discovery ledgers. They cover the140 assigned test files,1240 AST declaration candidates and27 primary support fixtures, with parameter factories manually reviewed by each lane. Discovery was read-only; no test run, paid call or source/test deletion occurred. This is inventory evidence, not automatic acceptance of every retention/deletion recommendation.
+
+Proposed whole-layer retirement targets are orphan `AnalysisScheduler`, the pre-hybrid `core/ledger.ts` reducer, obsolete `enrichBeadsTasks`, and unused `clarityLabel`, together with their test-only consumers. Live `Ledger` types, `HealthCoverage`, Beads filesystem parsing and Monitor presentation remain separate contracts. Other candidates concern duplicate package/association positives, private-property assertions and historical fixture-inventory checks. None is approved merely because a report marks it C/D.
+
+Main identified two discovery-quality caveats:
+
+- The runtime report's claim that175 AST candidates include two `describe` wrappers is inconsistent with the AST script, which only recognizes imported `it`/`test` aliases. A narrow correction has been requested; its283 executed case total agrees with the baseline.
+- Imports, construction and dormant scheduler call sites do not establish live legacy semantic authority under strict v11. A second reader is tracing actual entrypoint, restore and queue-population paths. Conversely, the44 failing legacy-fixture tests cannot be deleted without preserving their unique current product contracts, including durable omissions. N00-N04 continuation is intentionally awaiting N05 wiring, not orphan code.
+
+Second read-only assessment has three independent scopes: core/UI obsolete layers and real-host keepers; auxiliary fixture/access redundancy; generic/legacy/health reachability and contract preservation. Main will synthesize exact keeper-first edits and mutation controls after these reports. Source/test baseline remains frozen. In particular, the Beads reader must retain all valid records (not filter backlog), and an empty valid export is not a missing-file failure; proposed fixture repairs must respect the actual reader contract.
+
 ## Completion remains pending
 
-No audit lane or C05-C09 stage is accepted by baseline capture. Audit results, deletions/keepers, caught mutations, product-defect controls and final LOC/gates will be recorded here as executed. Feature work follows the audit, with final green gates and independent stage acceptance before manual handoff.
+No audit lane or C05-C09 stage is accepted by discovery consumption. Audit results, deletions/keepers, caught mutations, product-defect controls and final LOC/gates will be recorded here as executed. Feature work follows the audit, with final green gates and independent stage acceptance before manual handoff.

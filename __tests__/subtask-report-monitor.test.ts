@@ -2160,12 +2160,18 @@ it("persists oversized C during pending proposal drain without captured body or 
     if (!parked?.parkedUntil)
       throw new Error("Missing admitted retry deadline");
     expect(parked.parkedUntil).toBeGreaterThan(Date.now());
-    h.append(
-      "oversized-c",
-      `PRIVATE_PENDING_OVERSIZED ${"oversized report evidence ".repeat(700)}`,
-    );
-    await h.settle("oversized-c");
+    const text = `PRIVATE_PENDING_OVERSIZED ${"oversized report evidence ".repeat(700)}`;
     const sameLineage = h.checkpoint();
+    expect(sameLineage.monitor?.subtaskOmissions).toBeUndefined();
+    const liveComponent = structuredClone(sameLineage.monitor?.subtasks);
+    // Prepare target semantics without a public live observe/append wake for C.
+    sameLineage.state = await processObservation(
+      sameLineage.state,
+      observation("oversized-c", text, "assistant"),
+      backend(noPatch(), { gate: "unchanged" }),
+    );
+    expect(sameLineage.state.cursor?.id).toBe("oversized-c");
+    expect(h.checkpoint().monitor?.subtaskOmissions).toBeUndefined();
     expect(
       sameLineage.monitor?.subtasks?.journal.reports.find(
         (job) => job.identity === parked.identity,
@@ -2173,6 +2179,8 @@ it("persists oversized C during pending proposal drain without captured body or 
     ).toEqual(parked);
     gates.splice(0);
     const branch = h.reader();
+    branch.push(branchEntry("oversized-c", text, "assistant"));
+    h.save.mockClear();
     const reader = vi.fn(() => {
       if (disposed) throw new Error("Disposed pending canonical reader");
       return branch;
@@ -2195,13 +2203,23 @@ it("persists oversized C during pending proposal drain without captured body or 
     expect(JSON.stringify(installed)).not.toContain(
       "PRIVATE_PENDING_OVERSIZED",
     );
-    expect(
-      h.save.mock.calls.some(([raw]) =>
-        (raw as Envelope).monitor?.subtaskOmissions?.entries.some(
-          (entry) => entry.reason === "report-oversized",
-        ),
-      ),
-    ).toBe(true);
+    const boundarySaves = h.save.mock.calls.map(([raw]) => raw as Envelope);
+    const targetSave = boundarySaves[0];
+    expect(targetSave.monitor?.subtaskOmissions).toBeUndefined();
+    expect(targetSave.state.cursor?.id).toBe("oversized-c");
+    expect(targetSave.monitor?.subtasks).not.toEqual(liveComponent);
+    const firstSummarySave = boundarySaves.find(
+      (saved) => saved.monitor?.subtaskOmissions,
+    );
+    expect(firstSummarySave).toBeDefined();
+    expect(firstSummarySave?.state).toEqual(targetSave.state);
+    expect(firstSummarySave?.monitor?.subtasks).toEqual(
+      targetSave.monitor?.subtasks,
+    );
+    expect(firstSummarySave?.monitor?.subtaskOmissions).toEqual(
+      installed.monitor?.subtaskOmissions,
+    );
+    expect(installed.monitor?.subtasks).toEqual(targetSave.monitor?.subtasks);
     const reads = [reader.mock.calls.length, selectedModel.mock.calls.length];
     disposed = true;
     release?.();
@@ -2259,4 +2277,36 @@ it("persists oversized C during pending proposal drain without captured body or 
     release?.();
     await vi.advanceTimersByTimeAsync(100);
   }
+});
+
+it("reserves report launch before reentrant model selection in the dispatch persistence callback", async () => {
+  const h = await fixture();
+  let reentered = false;
+  const before = h.checkpoint().monitor?.subtasks?.journal.dispatches ?? 0;
+  h.save.mockImplementation((raw: unknown) => {
+    const saved = raw as Envelope;
+    if (
+      !reentered &&
+      saved.monitor?.subtasks?.journal.reports.some(
+        (job) => job.state === "dispatched",
+      )
+    ) {
+      reentered = true;
+      expect(h.calls).toHaveLength(0);
+      h.monitor.modelSelected();
+    }
+  });
+  h.append("reentrant-report", reportText);
+  await h.settle("reentrant-report");
+  await vi.advanceTimersByTimeAsync(200);
+  expect(reentered).toBe(true);
+  expect(h.calls.map(sourceId)).toEqual([
+    "reentrant-report",
+    "reentrant-report",
+  ]);
+  expect(h.statuses()).toEqual(Array(22).fill("reported-completed"));
+  expect(h.checkpoint().monitor?.subtasks?.journal.reports[0]).toMatchObject({
+    state: "complete",
+  });
+  expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(before + 2);
 });

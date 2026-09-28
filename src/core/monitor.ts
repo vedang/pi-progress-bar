@@ -442,7 +442,7 @@ interface SubtaskDiagnosticAuthority {
 type SubtaskReportOpportunity =
   | { kind: "eligible"; source: SourceRef; identity: string }
   | { kind: "oversized"; parent: HybridTask; source: SourceRef };
-type OversizedSubtaskReportReceipt = "recorded" | "not-recorded" | "stale";
+type SubtaskReportOmissionReceipt = "recorded" | "not-recorded" | "stale";
 
 export type AdvisorySettlementReason =
   | "disabled"
@@ -3365,13 +3365,14 @@ export class Monitor {
     return "committed";
   }
 
-  /** Persist oversized receipt before it may replace an eligible report candidate. */
-  private recordOversizedSubtaskReport(
+  /** Persist a content-free report omission before changing report queue ownership. */
+  private recordSubtaskReportOmission(
     group: SubtaskSnapshot["groups"][number],
     parent: HybridTask,
     source: SourceRef,
     sourceId: string,
-  ): OversizedSubtaskReportReceipt {
+    reason: "report-oversized" | "coalesced",
+  ): SubtaskReportOmissionReceipt {
     const identity = subtaskReportOmissionIdentity({
       sourceId,
       parent,
@@ -3381,7 +3382,7 @@ export class Monitor {
     if (!identity) return "not-recorded";
     const appended = appendSubtaskOmission(this.subtaskOmissions, {
       identity,
-      reason: "report-oversized",
+      reason,
     });
     if (!appended.changed) return "recorded";
     const result = this.commitSubtaskOmissionSummary(appended.summary);
@@ -3394,6 +3395,98 @@ export class Monitor {
     const saturation = this.commitSubtaskOmissionSummary(saturated.summary);
     if (saturation === "committed") return "recorded";
     return saturation === "stale" ? "stale" : "not-recorded";
+  }
+
+  /** Prove an unadmitted older B before C may replace it in the report queue. */
+  private coalescedSubtaskReportIdentity(
+    group: SubtaskSnapshot["groups"][number],
+    current: SubtaskRuntimeCurrent,
+    pass: CanonicalPass,
+    candidate: { source: SourceRef; identity: string },
+    known: readonly SubtaskReportJob[],
+  ) {
+    if (known.some((report) => report.identity === candidate.identity)) return;
+    const admission = pass.indexOf(group.source.entryId);
+    const cursor = this.state.cursor ? pass.indexOf(this.state.cursor.id) : -1;
+    const reportIndex = pass.indexOf(candidate.source.entryId);
+    if (admission < 0 || reportIndex <= admission || cursor <= reportIndex)
+      return;
+    const parent = current.parents.find(
+      (item) =>
+        item.id === group.parentTaskId &&
+        item.revision === group.parentRevision &&
+        item.included,
+    );
+    if (!parent) return;
+    try {
+      const report = current.resolve(candidate.source.entryId);
+      if (
+        !report ||
+        report.id !== candidate.source.entryId ||
+        report.hash !== candidate.source.messageHash ||
+        report.role !== candidate.source.role ||
+        candidate.source.start < 0 ||
+        candidate.source.end <= candidate.source.start ||
+        candidate.source.end > report.text.length ||
+        sha256(report.text) !== report.hash ||
+        sha256(
+          report.text.slice(candidate.source.start, candidate.source.end),
+        ) !== candidate.source.quoteHash
+      )
+        return;
+    } catch {
+      return;
+    }
+    return subtaskReportOmissionIdentity({
+      sourceId: current.sourceId,
+      parent,
+      group,
+      reportSource: candidate.source,
+    });
+  }
+
+  /** Replace B only after its durable coalescing receipt commits. */
+  private replaceSubtaskReportCandidate(
+    group: SubtaskSnapshot["groups"][number],
+    current: SubtaskRuntimeCurrent,
+    pass: CanonicalPass,
+    known: readonly SubtaskReportJob[],
+    candidate: { source: SourceRef; identity: string },
+  ) {
+    const parentTaskId = group.parentTaskId;
+    const prior = this.subtaskReportCandidates.get(parentTaskId);
+    if (prior && !sameSource(prior.source, candidate.source)) {
+      const identity = this.coalescedSubtaskReportIdentity(
+        group,
+        current,
+        pass,
+        prior,
+        known,
+      );
+      if (identity) {
+        const parent = current.parents.find(
+          (item) =>
+            item.id === group.parentTaskId &&
+            item.revision === group.parentRevision &&
+            item.included,
+        );
+        if (!parent) return "retained" as const;
+        const receipt = this.recordSubtaskReportOmission(
+          group,
+          parent,
+          prior.source,
+          current.sourceId,
+          "coalesced",
+        );
+        if (receipt === "stale") return "stale" as const;
+        if (receipt !== "recorded") return "retained" as const;
+      }
+    }
+    this.subtaskReportCandidates.set(parentTaskId, candidate);
+    const blocked = this.subtaskReportBlocked.get(parentTaskId);
+    if (blocked && !sameSource(blocked, candidate.source))
+      this.subtaskReportBlocked.delete(parentTaskId);
+    return "replaced" as const;
   }
 
   /** Fixed-size wake identity serializes inert own data, never host hooks or bodies. */
@@ -3580,11 +3673,12 @@ export class Monitor {
       const oversized =
         opportunity?.kind === "oversized" ? opportunity : undefined;
       if (oversized) {
-        const receipt = this.recordOversizedSubtaskReport(
+        const receipt = this.recordSubtaskReportOmission(
           group,
           oversized.parent,
           oversized.source,
           current.sourceId,
+          "report-oversized",
         );
         if (receipt === "stale") return;
         if (receipt === "recorded") {
@@ -3597,10 +3691,16 @@ export class Monitor {
         ? known.some((report) => report.identity === candidate.identity)
         : false;
       if (candidate && !alreadyRecorded) {
-        this.subtaskReportCandidates.set(parentTaskId, candidate);
-        const blocked = this.subtaskReportBlocked.get(parentTaskId);
-        if (blocked && !sameSource(blocked, candidate.source))
-          this.subtaskReportBlocked.delete(parentTaskId);
+        if (
+          this.replaceSubtaskReportCandidate(
+            group,
+            current,
+            pass,
+            known,
+            candidate,
+          ) === "stale"
+        )
+          return;
       } else if (!candidate && !oversized)
         this.subtaskReportCandidates.delete(parentTaskId);
 
@@ -3911,11 +4011,12 @@ export class Monitor {
       const oversized =
         opportunity?.kind === "oversized" ? opportunity : undefined;
       if (oversized) {
-        const receipt = this.recordOversizedSubtaskReport(
+        const receipt = this.recordSubtaskReportOmission(
           group,
           oversized.parent,
           oversized.source,
           authority.sourceId,
+          "report-oversized",
         );
         if (receipt === "stale") return;
         if (receipt === "recorded") active.add(parentTaskId);
@@ -3938,10 +4039,16 @@ export class Monitor {
           )
         : false;
       if (candidate && !alreadyRecorded) {
-        this.subtaskReportCandidates.set(parentTaskId, candidate);
-        const blocked = this.subtaskReportBlocked.get(parentTaskId);
-        if (blocked && !sameSource(blocked, candidate.source))
-          this.subtaskReportBlocked.delete(parentTaskId);
+        if (
+          this.replaceSubtaskReportCandidate(
+            group,
+            authority,
+            pass,
+            checkpoint.journal.reports,
+            candidate,
+          ) === "stale"
+        )
+          return;
       } else if (!candidate && !oversized)
         this.subtaskReportCandidates.delete(parentTaskId);
       if (!owner || !ownerCurrent) {

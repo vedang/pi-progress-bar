@@ -210,7 +210,12 @@ it("OFF and reload preserve children allocator and wallet but clear runtime acce
   const calls = h.counts();
   h.monitor.turnOff();
   const saved = h.checkpoint();
+  expect(saved.monitor?.healthCards?.length).toBeGreaterThan(0);
   await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
+  expect(h.checkpoint().monitor?.healthCards).toEqual(
+    saved.monitor?.healthCards,
+  );
+  expect(h.monitor.state.tasks).toEqual(saved.state.tasks);
   expect(h.checkpoint().monitor?.subtasks?.state).toEqual(before?.state);
   expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(
     before?.journal.dispatches,

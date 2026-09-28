@@ -2,6 +2,14 @@
 
 This is scoped cutover accounting, not the deferred comprehensive test audit. C05 remains unaccepted. No test deletion, skip, or compatibility fallback is authorized by this inventory.
 
+## Generic storage keeper ports (2026-09-28, retirement pending)
+
+Main added three actual public-Monitor restore keepers in `subtask-storage-monitor.test.ts`: removal of all tool metadata preserves conversation-grounded children, allocator and exhausted wallet through repeated restore while access becomes unavailable; exact canonical child sources survive more than64 later branch entries; a structurally valid but wrong child quote span prunes the group without refunding the wallet or disturbing parent/health/allocator state. Fixture admissions run the real generic gate and selected proposal before restoration. The exhausted wallet is an explicitly supported historical wallet, not fabricated provider receipts.
+
+The existing stronger `coverage-monitor.test.ts` OFF/reload keeper now additionally proves real nonempty health cards and parent tasks survive with no mandatory/optional rebilling; a redundant new restore-positive case was removed before commit. Existing `subtask-wallet-monitor.test.ts` remains the primary real charged-history/older-checkpoint/no-refund owner. Main configured focused **26/26 pass**, TypeScript previously passed the new storage fixture.
+
+Legacy storage's six tool-inventory invalidation rows cannot retain their old semantic-group deletion expectation: C04 makes adapter metadata nonauthoritative for conversation-grounded children. Current `coverage-monitor` metadata-amendment and new metadata-loss restore keepers protect that distinction; adapter protocol guard suites retain malformed/duplicate/call/error evidence checks. No legacy test/source deleted yet. Scheduler recovery/ownership accounting, omission review, coherent legacy retirement and C05–C09 acceptance remain outstanding.
+
 ## Host fixture follow-up: paired protocols and exact clock observer
 
 Read-only diagnosis `64baf7d5` separated two fixture problems from correction authority:

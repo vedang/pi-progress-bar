@@ -1,29 +1,46 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   canCommitSubtaskCheckpoint,
   commitSubtaskCheckpoint,
   encodeSubtaskCheckpoint,
   restoreSubtaskCheckpoint,
+  type SubtaskMonitorCheckpointMetadata,
+  type SubtaskOmissionReason,
+  type SubtaskOmissionSummary,
+  type subtaskCheckpointBytes,
   subtaskCheckpointStorageStatus,
 } from "../src/core/hybrid-checkpoint";
 import { emptyState } from "../src/core/hybrid-state";
 import { SubtaskStore } from "../src/core/subtasks";
+
+// Public encoders remain typed; only negative fixtures cross unknown-data boundaries.
+type EncoderMetadata =
+  | Parameters<typeof encodeSubtaskCheckpoint>[1]
+  | Parameters<typeof commitSubtaskCheckpoint>[1]
+  | Parameters<typeof canCommitSubtaskCheckpoint>[1]
+  | Parameters<typeof subtaskCheckpointBytes>[1];
+expectTypeOf<EncoderMetadata>().toEqualTypeOf<
+  SubtaskMonitorCheckpointMetadata | undefined
+>();
 
 const state = () => emptyState("session:omission-codec");
 const usage = () => ({
   jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
   extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
 });
-const entry = (index: number, reason = "coalesced") => ({
+const entry = (index: number, reason: SubtaskOmissionReason = "coalesced") => ({
   identity: index.toString(16).padStart(64, "0"),
   reason,
 });
 const summary = () => ({ entries: [entry(1)], saturated: false });
-const metadata = (subtaskOmissions: unknown) => ({
+const metadata = (subtaskOmissions: SubtaskOmissionSummary) => ({
   enabled: true,
   usage: usage(),
   subtaskOmissions,
 });
+// Deliberately invalid external data belongs only at negative-test boundaries.
+const invalidMetadata = (value: unknown) =>
+  metadata(value as SubtaskOmissionSummary);
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
 
 // [ref:subtask_omission_summary] Persistence is diagnostic, not report authority.
@@ -94,7 +111,7 @@ describe("strict v11 semantic omission metadata", () => {
       entries: [{ identity: "A".repeat(64), reason: "coalesced" }],
       saturated: false,
     },
-    { entries: [entry(1, "adapter")], saturated: false },
+    { entries: [{ ...entry(1), reason: "adapter" }], saturated: false },
     { entries: Array(1), saturated: false },
   ])("rejects malformed or noncanonical omission summary %#", (value) => {
     const checkpoint = encodeSubtaskCheckpoint(state(), {
@@ -114,7 +131,9 @@ describe("strict v11 semantic omission metadata", () => {
         () => [],
       ),
     ).toBeUndefined();
-    expect(canCommitSubtaskCheckpoint(state(), metadata(value))).toBe(false);
+    expect(canCommitSubtaskCheckpoint(state(), invalidMetadata(value))).toBe(
+      false,
+    );
   });
   it("never invokes getters or inherited serialization on summary input", () => {
     const getter = vi.fn(() => [entry(1)]);
@@ -127,7 +146,9 @@ describe("strict v11 semantic omission metadata", () => {
       accessor,
       Object.assign(Object.create({ toJSON }), summary()),
     ]) {
-      expect(canCommitSubtaskCheckpoint(state(), metadata(value))).toBe(false);
+      expect(canCommitSubtaskCheckpoint(state(), invalidMetadata(value))).toBe(
+        false,
+      );
     }
     expect(getter).not.toHaveBeenCalled();
     expect(toJSON).not.toHaveBeenCalled();

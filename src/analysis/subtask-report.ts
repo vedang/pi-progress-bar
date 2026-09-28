@@ -659,13 +659,13 @@ export function subtaskReportRequestSize(
     if (!binding) return "invalid";
     if (Buffer.byteLength(binding.report.text, "utf8") > MAX_REPORT_BYTES)
       return "oversized";
-    const first = binding.group.children[0];
-    if (!first) return "invalid";
-    const encoded = json(requestFor(binding, [first]));
-    if (!encoded) return "invalid";
-    return Buffer.byteLength(encoded, "utf8") <= MAX_REQUEST_BYTES
-      ? "within-limit"
-      : "oversized";
+    for (const child of binding.group.children) {
+      const encoded = json(requestFor(binding, [child]));
+      if (!encoded) return "invalid";
+      if (Buffer.byteLength(encoded, "utf8") > MAX_REQUEST_BYTES)
+        return "oversized";
+    }
+    return "within-limit";
   } catch {
     return "invalid";
   }

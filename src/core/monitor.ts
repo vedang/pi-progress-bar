@@ -3345,6 +3345,10 @@ export class Monitor {
         candidate.included,
     );
     if (!parent) return;
+    // Canonical cursor, admitted group, and current parent already prove this
+    // body-sized opportunity. Do not capture or construct an oversized request.
+    if (Buffer.byteLength(report.text, "utf8") > 12 * 1024)
+      return { kind: "oversized", parent, source };
     const options = { parent, group, report, resolve: current.resolve };
     const size = subtaskReportRequestSize(options);
     if (size === "oversized") return { kind: "oversized", parent, source };

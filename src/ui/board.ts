@@ -10,6 +10,7 @@ import { type BoardLayout, layoutBoard } from "./layout";
 import {
   lifecycleTone,
   sanitizeTerminalText,
+  subtaskOmissionWarning,
   type WidgetSnapshot,
 } from "./widget";
 
@@ -353,6 +354,7 @@ class TaskBoard implements BoardComponent {
         `Service: ${this.snapshot.board.service.label}`,
         layout.rightWidth,
       ),
+      ...this.subtaskWarningLines(layout.rightWidth),
     ];
     return this.compose(left, right, layout);
   }
@@ -551,6 +553,13 @@ class TaskBoard implements BoardComponent {
   private subtaskWarningLines(width: number, marker = "• ") {
     const diagnostics = this.snapshot.subtaskDiagnostics;
     const lines: string[] = [];
+    const semanticWarning = subtaskOmissionWarning(
+      diagnostics?.semanticOmissions,
+    );
+    if (semanticWarning)
+      lines.push(
+        ...this.wrapLines(`${marker}${semanticWarning}`, width, "warning"),
+      );
     if (diagnostics?.exhausted)
       lines.push(
         ...this.wrapLines(
@@ -647,7 +656,8 @@ class TaskBoard implements BoardComponent {
     if (
       !groups.length &&
       !diagnostics?.exhausted &&
-      !diagnostics?.adapter.omissions
+      !diagnostics?.adapter.omissions &&
+      !subtaskOmissionWarning(diagnostics?.semanticOmissions)
     )
       return [];
     const lines = [

@@ -19,9 +19,25 @@ export interface WidgetSnapshot {
   subtasks?: SubtaskMonitorSnapshot;
   /** Optional runtime access facts; never child report status authority. */
   subtaskAccess?: SubtaskAccessSnapshot;
-  /** Optional durable wallet and adapter allocation facts. */
+  /** Optional durable wallet/omission history and volatile adapter facts. */
   subtaskDiagnostics?: SubtaskDiagnosticsSnapshot;
 }
+
+/** [ref:subtask_omission_summary] Retained counts become lower bounds at saturation. */
+export const subtaskOmissionWarning = (
+  summary: SubtaskDiagnosticsSnapshot["semanticOmissions"] | undefined,
+): string | undefined => {
+  if (!summary || (summary.total === 0 && !summary.saturated)) return;
+  return [
+    "Subtasks incomplete",
+    ...(summary.total > 0
+      ? [
+          `${summary.saturated ? "At least " : ""}${summary.total} reports omitted`,
+        ]
+      : []),
+    ...(summary.saturated ? ["Omission history incomplete"] : []),
+  ].join(" · ");
+};
 
 const esc = String.fromCharCode(27);
 // Unterminated OSC tails have no visible label content. Drop before the proven
@@ -299,6 +315,9 @@ export function renderWidget(
     subtaskTask,
   );
   const subtaskDiagnostics = snapshot.subtaskDiagnostics;
+  const semanticOmissionWarning = subtaskOmissionWarning(
+    subtaskDiagnostics?.semanticOmissions,
+  );
   const subtaskOmissions = subtaskDiagnostics?.adapter.omissions ?? 0;
   const subtaskWarning =
     subtasksUnconfirmed || subtaskDiagnostics?.exhausted || subtaskOmissions > 0
@@ -329,6 +348,15 @@ export function renderWidget(
       : []),
     ...(subtaskWarning
       ? [{ text: subtaskWarning, tone: "warning" as const, wrap: true }]
+      : []),
+    ...(semanticOmissionWarning
+      ? [
+          {
+            text: semanticOmissionWarning,
+            tone: "warning" as const,
+            wrap: true,
+          },
+        ]
       : []),
     task,
     ...(selected

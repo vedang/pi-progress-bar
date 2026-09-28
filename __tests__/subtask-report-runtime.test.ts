@@ -198,7 +198,8 @@ it.each(["capacity", "unavailable", "throw", "stale-capacity"])(
         if (kind === "throw")
           throw new Error("Transient admission reader failure");
         if (kind === "stale-capacity") {
-          h.options.parent.label = "Changed authority during capacity preflight";
+          h.options.parent.label =
+            "Changed authority during capacity preflight";
           return "capacity";
         }
         return kind === "capacity" ? "capacity" : false;

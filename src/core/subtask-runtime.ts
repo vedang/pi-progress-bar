@@ -95,6 +95,8 @@ interface SubtaskReportCommitReserve {
 export interface SubtaskRuntimeOptions {
   initial: SubtaskRuntimeCheckpoint;
   current: () => SubtaskRuntimeCurrent | undefined;
+  /** Saved report authority may remain valid when newest generic input is oversized. */
+  reportCurrent?: () => SubtaskRuntimeCurrent | undefined;
   gate: (
     batch: SubtaskGateBatch,
     signal: AbortSignal,
@@ -846,7 +848,7 @@ export class SubtaskRuntime {
     source: SourceRef | undefined,
     flight: Flight,
   ): Promise<void> {
-    const current = this.readCurrent();
+    const current = this.readReportCurrent();
     if (!current || !this.initialize(current, flight)) return;
     if (
       !current.enabled ||
@@ -1053,9 +1055,9 @@ export class SubtaskRuntime {
       const journal = parked && this.replaceReport(parked);
       if (
         journal &&
-        this.maySaveLateUsage(flight, prepared.current.sourceId) &&
+        this.maySaveLateUsage(flight, prepared.current.sourceId, true) &&
         this.commitCandidate(this.store, journal) &&
-        this.maySaveLateUsage(flight, prepared.current.sourceId)
+        this.maySaveLateUsage(flight, prepared.current.sourceId, true)
       ) {
         this.journal = journal;
         return;
@@ -1077,7 +1079,7 @@ export class SubtaskRuntime {
     expectedSourceId: string,
   ): CurrentReport | undefined {
     if (!this.flightIsCurrent(flight) || this.sourceFenced) return;
-    const current = this.readCurrent();
+    const current = this.readReportCurrent();
     if (
       !current ||
       current.sourceId !== expectedSourceId ||
@@ -1354,8 +1356,20 @@ export class SubtaskRuntime {
   }
 
   private readCurrent(): SubtaskRuntimeCurrent | undefined {
+    return this.readCurrentFrom(this.options.current);
+  }
+
+  private readReportCurrent(): SubtaskRuntimeCurrent | undefined {
+    return this.readCurrentFrom(
+      this.options.reportCurrent ?? this.options.current,
+    );
+  }
+
+  private readCurrentFrom(
+    read: () => SubtaskRuntimeCurrent | undefined,
+  ): SubtaskRuntimeCurrent | undefined {
     try {
-      const current = this.options.current();
+      const current = read();
       if (
         !current ||
         typeof current.sourceId !== "string" ||
@@ -1866,7 +1880,7 @@ export class SubtaskRuntime {
     sourceId: string,
     usage?: Usage,
   ): void {
-    if (!this.maySaveLateUsage(flight, sourceId)) return;
+    if (!this.maySaveLateUsage(flight, sourceId, true)) return;
     const report = this.reportFailure(identity, ticket, usage);
     const journal =
       report &&
@@ -1880,7 +1894,7 @@ export class SubtaskRuntime {
     if (
       journal &&
       this.commitCandidate(this.store, journal) &&
-      this.maySaveLateUsage(flight, sourceId)
+      this.maySaveLateUsage(flight, sourceId, true)
     )
       this.journal = journal;
   }
@@ -2099,9 +2113,13 @@ export class SubtaskRuntime {
       this.journal = journal;
   }
 
-  private maySaveLateUsage(flight: Flight, sourceId: string): boolean {
+  private maySaveLateUsage(
+    flight: Flight,
+    sourceId: string,
+    report = false,
+  ): boolean {
     if (!this.flightIsCurrent(flight) || this.sourceFenced) return false;
-    const current = this.readCurrent();
+    const current = report ? this.readReportCurrent() : this.readCurrent();
     if (!current || current.sourceId !== sourceId) return false;
     return true;
   }

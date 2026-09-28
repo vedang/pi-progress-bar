@@ -62,6 +62,7 @@ import type { SubtaskProposalRequest } from "../analysis/subtask-proposal";
 import {
   type SubtaskReportBatch,
   subtaskReportBatches,
+  subtaskReportOmissionIdentity,
 } from "../analysis/subtask-report";
 import {
   detailQuestionKeys,
@@ -155,8 +156,10 @@ import {
   type SubtaskReportJob,
 } from "./subtask-journal";
 import {
+  appendSubtaskOmission,
   mergeSubtaskOmissions,
   projectSubtaskOmissions,
+  saturateSubtaskOmissions,
 } from "./subtask-omissions";
 import { mergeSubtaskRestoreHistory } from "./subtask-restore-history";
 import {
@@ -412,7 +415,7 @@ export type SubtaskMonitorSnapshot = Readonly<SubtaskSnapshot>;
 export interface SubtaskDiagnosticsSnapshot {
   dispatches: number;
   exhausted: boolean;
-  semanticOmissions?: {
+  semanticOmissions: {
     total: number;
     byReason: Record<
       SubtaskOmissionSummary["entries"][number]["reason"],
@@ -434,6 +437,11 @@ interface SubtaskDiagnosticAuthority {
   parked: Set<string>;
   permanent: Set<string>;
 }
+
+type SubtaskReportOpportunity =
+  | { kind: "eligible"; source: SourceRef; identity: string }
+  | { kind: "oversized"; parent: HybridTask; source: SourceRef };
+type OversizedSubtaskReportReceipt = "recorded" | "not-recorded" | "stale";
 
 export type AdvisorySettlementReason =
   | "disabled"
@@ -759,6 +767,10 @@ export class Monitor {
   /** Last authority-validated projection; passive views never reopen host history. */
   private subtaskProjection?: SubtaskSnapshot;
   private subtaskFlight?: Promise<void>;
+  /** Generic invalidation may wait for an oversized report receipt. */
+  private subtaskFlightIsReport = false;
+  private subtaskFlightReportParentId?: string;
+  private subtaskFlightReportMayBeSuperseded = false;
   private subtaskOwners: string[] = [];
   private subtaskReportOwners: Array<{
     parentTaskId: string;
@@ -768,6 +780,8 @@ export class Monitor {
     string,
     { source: SourceRef; identity: string }
   >();
+  /** Valid oversized report opportunities suppress generic work for this wake. */
+  private subtaskOversizedReportParents = new Set<string>();
   private subtaskReportBlocked = new Map<string, SourceRef>();
   private subtaskReportFrontiers = new Map<
     string,
@@ -1410,7 +1424,7 @@ export class Monitor {
       if (this.queued.length) {
         this.idleDoneInvalidated = true;
         this.cancelHealth();
-        this.invalidateSubtaskWork();
+        this.invalidateSubtaskWork(this.subtaskFlightIsReport);
       } else this.wakeSubtasks(pass);
       if (healthChanged) this.publish();
       this.drain();
@@ -2530,6 +2544,8 @@ export class Monitor {
     runtimeCheckpoint:
       | Readonly<SubtaskRuntimeCheckpoint>
       | undefined = this.authoritativeSubtaskCheckpoint(),
+    subtaskOmissions: Readonly<SubtaskOmissionSummary> | undefined = this
+      .subtaskOmissions,
   ) {
     const idleDoneTaskId = this.idleDoneTaskIdFor(
       state,
@@ -2567,9 +2583,9 @@ export class Monitor {
         ? { taskDetails: [...taskDetails.values()].map(copyDetailRecord) }
         : {}),
       ...(hasSubtasks ? { subtasks: component } : {}),
-      ...(this.subtaskOmissions === undefined
+      ...(subtaskOmissions === undefined
         ? {}
-        : { subtaskOmissions: structuredClone(this.subtaskOmissions) }),
+        : { subtaskOmissions: structuredClone(subtaskOmissions) }),
     };
   }
 
@@ -2664,6 +2680,13 @@ export class Monitor {
           ? this.subtaskCurrent(this.state)
           : captured;
       },
+      reportCurrent: () => {
+        const captured = this.capturedSubtaskCurrent;
+        if (captured === null) return;
+        return captured === undefined
+          ? this.subtaskReportCurrent(this.state)
+          : captured;
+      },
       gate: (batch, signal, onDispatch, onPhysicalFlight) =>
         this.evaluateSubtaskGate(batch, signal, onDispatch, onPhysicalFlight),
       propose: (request, signal, onDispatch, onPhysicalFlight) => {
@@ -2702,6 +2725,7 @@ export class Monitor {
     this.subtaskReportOwners = [];
     this.subtaskProjection = undefined;
     this.subtaskReportCandidates.clear();
+    this.subtaskOversizedReportParents.clear();
     this.subtaskReportBlocked.clear();
     this.subtaskReportFrontiers.clear();
     this.subtaskActiveReportParents.clear();
@@ -2731,6 +2755,7 @@ export class Monitor {
     pass = this.beginCanonicalPass(),
     restoring = false,
     requireSelectedModel = false,
+    allowOversizedLatest = false,
   ): SubtaskRuntimeCurrent | undefined {
     if (
       !restoring &&
@@ -2738,7 +2763,7 @@ export class Monitor {
         this.processing ||
         this.queued.length > 0 ||
         !!this.state.pending ||
-        this.state.scopeUnresolved)
+        (!allowOversizedLatest && this.state.scopeUnresolved))
     )
       return;
     let selectedModel: string | undefined;
@@ -2757,7 +2782,8 @@ export class Monitor {
       !latest ||
       latest.hash !== cursor.hash ||
       latest.role !== cursor.role ||
-      Buffer.byteLength(latest.text, "utf8") > 12 * 1024
+      (!allowOversizedLatest &&
+        Buffer.byteLength(latest.text, "utf8") > 12 * 1024)
     )
       return;
 
@@ -2827,6 +2853,34 @@ export class Monitor {
     };
   }
 
+  /** Saved report authority may resolve its original bounded source after C grows. */
+  private subtaskReportCurrent(
+    state: HybridState,
+    pass = this.beginCanonicalPass(),
+    restoring = false,
+  ) {
+    const generic = this.subtaskCurrent(state, pass, restoring);
+    if (generic) return generic;
+    const cursor = state.cursor;
+    const latest = cursor ? pass.observation(cursor.id) : undefined;
+    if (
+      !latest ||
+      (!state.scopeUnresolved &&
+        Buffer.byteLength(latest.text, "utf8") <= 12 * 1024)
+    )
+      return;
+    return this.subtaskCurrent(state, pass, restoring, false, true);
+  }
+
+  /** Only an oversized latest report preserves report transport through generic invalidation. */
+  private preserveOversizedReportFlight(pass: CanonicalPass) {
+    const latest = pass.headers.at(-1);
+    const observation = latest ? pass.observation(latest.id) : undefined;
+    return (
+      !!observation && Buffer.byteLength(observation.text, "utf8") > 12 * 1024
+    );
+  }
+
   /** Restore callback uses only validated detached candidate state/group. */
   private subtaskRestoreCurrent(
     record: SubtaskPhaseRecord,
@@ -2845,7 +2899,7 @@ export class Monitor {
     candidate: SubtaskRestoreContext,
     pass: CanonicalPass,
   ) {
-    const current = this.subtaskCurrent(candidate.state, pass, true);
+    const current = this.subtaskReportCurrent(candidate.state, pass, true);
     return (
       !!current && subtaskRuntimeReportIsCurrent(report, current, candidate)
     );
@@ -2858,8 +2912,9 @@ export class Monitor {
     pass: CanonicalPass,
   ): SubtaskRuntimeCheckpoint | undefined {
     const current = this.subtaskCurrent(state, pass, true);
-    const store = current
-      ? this.restoreSubtaskStore(component, current)
+    const reportCurrent = this.subtaskReportCurrent(state, pass, true);
+    const store = reportCurrent
+      ? this.restoreSubtaskStore(component, reportCurrent)
       : undefined;
     const groups = new Map(
       (store?.snapshot().groups ?? []).map((group) => [
@@ -2879,7 +2934,7 @@ export class Monitor {
         );
       },
       (report) => {
-        if (!current) return false;
+        if (!reportCurrent) return false;
         const group = groups.get(report.parentTaskId);
         return this.subtaskRestoreReportCurrent(
           report,
@@ -3228,11 +3283,12 @@ export class Monitor {
     });
   }
 
+  /** Validate one post-admission report opportunity before request construction. */
   private latestSubtaskReportCandidate(
     group: SubtaskSnapshot["groups"][number],
     current: SubtaskRuntimeCurrent,
     pass: CanonicalPass,
-  ): { source: SourceRef; identity: string } | undefined {
+  ): SubtaskReportOpportunity | undefined {
     const admission = pass.indexOf(group.source.entryId);
     const cursor = this.state.cursor ? pass.indexOf(this.state.cursor.id) : -1;
     if (admission < 0 || cursor <= admission) return;
@@ -3240,8 +3296,7 @@ export class Monitor {
     if (
       report.id !== this.state.cursor?.id ||
       report.hash !== this.state.cursor.hash ||
-      report.role !== this.state.cursor.role ||
-      Buffer.byteLength(report.text, "utf8") > 12 * 1024
+      report.role !== this.state.cursor.role
     )
       return;
     const source = this.reportSource(report);
@@ -3252,13 +3307,101 @@ export class Monitor {
         candidate.included,
     );
     if (!parent) return;
+    if (Buffer.byteLength(report.text, "utf8") > 12 * 1024)
+      return { kind: "oversized", parent, source };
     const identity = subtaskReportBatches({
       parent,
       group,
       report,
       resolve: current.resolve,
     })[0]?.jobIdentity;
-    return identity ? { source, identity } : undefined;
+    return identity ? { kind: "eligible", source, identity } : undefined;
+  }
+
+  /** Persist an omission candidate before making it visible to later wakes. */
+  private commitSubtaskOmissionSummary(summary: SubtaskOmissionSummary) {
+    const component = this.authoritativeSubtaskCheckpoint();
+    const metadata = this.subtaskMetadata(
+      this.enabled,
+      this.healthCards,
+      this.state,
+      undefined,
+      this.taskDetails,
+      component,
+      summary,
+    );
+    if (!canCommitSubtaskCheckpoint(this.state, metadata)) return "capacity";
+    const sourceId = this.state.sourceId;
+    const epoch = this.epoch;
+    const saved = commitSubtaskCheckpoint(
+      this.state,
+      metadata,
+      (checkpoint) => {
+        this.persist(checkpoint);
+        return true;
+      },
+    );
+    if (!saved) return "vetoed";
+    if (
+      this.epoch !== epoch ||
+      this.state.sourceId !== sourceId ||
+      this.options.sourceId() !== sourceId
+    )
+      return "stale";
+    this.subtaskOmissions = structuredClone(summary);
+    return "committed";
+  }
+
+  /** Persist oversized receipt before it may replace an eligible report candidate. */
+  private recordOversizedSubtaskReport(
+    group: SubtaskSnapshot["groups"][number],
+    parent: HybridTask,
+    source: SourceRef,
+    sourceId: string,
+  ): OversizedSubtaskReportReceipt {
+    const identity = subtaskReportOmissionIdentity({
+      sourceId,
+      parent,
+      group,
+      reportSource: source,
+    });
+    if (!identity) return "not-recorded";
+    const appended = appendSubtaskOmission(this.subtaskOmissions, {
+      identity,
+      reason: "report-oversized",
+    });
+    if (!appended.changed) return "recorded";
+    const result = this.commitSubtaskOmissionSummary(appended.summary);
+    if (result === "committed") return "recorded";
+    if (result === "stale") return "stale";
+    if (result === "vetoed") return "not-recorded";
+
+    const saturated = saturateSubtaskOmissions(this.subtaskOmissions);
+    if (!saturated.changed) return "not-recorded";
+    const saturation = this.commitSubtaskOmissionSummary(saturated.summary);
+    if (saturation === "committed") return "recorded";
+    return saturation === "stale" ? "stale" : "not-recorded";
+  }
+
+  /** Wake dedupe retains canonical identity, never unbounded observation bodies. */
+  private subtaskWakeKeyFor(current: SubtaskRuntimeCurrent) {
+    return JSON.stringify({
+      sourceId: current.sourceId,
+      latest: {
+        id: current.latest.id,
+        role: current.latest.role,
+        hash: current.latest.hash,
+      },
+      earlier: current.earlier.map((observation) => ({
+        id: observation.id,
+        role: observation.role,
+        hash: observation.hash,
+      })),
+      omissions: current.omissions,
+      parents: current.parents,
+      selectedModel: current.selectedModel,
+      ...(current.evidence === undefined ? {} : { evidence: current.evidence }),
+    });
   }
 
   private restoredSubtaskStore(
@@ -3405,6 +3548,7 @@ export class Monitor {
         return !!parent && parent.revision === group.parentRevision;
       })
       .slice(0, 20);
+    this.subtaskOversizedReportParents.clear();
     const live = new Set(groups.map((group) => group.parentTaskId));
     for (const parentTaskId of this.subtaskReportCandidates.keys())
       if (!live.has(parentTaskId))
@@ -3412,7 +3556,29 @@ export class Monitor {
 
     for (const group of groups) {
       const parentTaskId = group.parentTaskId;
-      const candidate = this.latestSubtaskReportCandidate(group, current, pass);
+      const opportunity = this.latestSubtaskReportCandidate(
+        group,
+        current,
+        pass,
+      );
+      const candidate =
+        opportunity?.kind === "eligible" ? opportunity : undefined;
+      const oversized =
+        opportunity?.kind === "oversized" ? opportunity : undefined;
+      if (oversized) {
+        const receipt = this.recordOversizedSubtaskReport(
+          group,
+          oversized.parent,
+          oversized.source,
+          current.sourceId,
+        );
+        if (receipt === "stale") return;
+        if (receipt === "recorded") {
+          this.subtaskOversizedReportParents.add(parentTaskId);
+          if (this.subtaskFlightReportParentId === parentTaskId)
+            this.subtaskFlightReportMayBeSuperseded = false;
+        }
+      }
       const alreadyRecorded = candidate
         ? known.some((report) => report.identity === candidate.identity)
         : false;
@@ -3421,7 +3587,7 @@ export class Monitor {
         const blocked = this.subtaskReportBlocked.get(parentTaskId);
         if (blocked && !sameSource(blocked, candidate.source))
           this.subtaskReportBlocked.delete(parentTaskId);
-      } else if (!candidate || alreadyRecorded)
+      } else if (!candidate && !oversized)
         this.subtaskReportCandidates.delete(parentTaskId);
 
       const owner = this.reportJobForParent(runtime, parentTaskId);
@@ -3501,6 +3667,14 @@ export class Monitor {
       )
         parents.add(owner.parentTaskId);
     }
+    for (const parentTaskId of this.subtaskOversizedReportParents)
+      if (
+        groups.some((group) => group.parentTaskId === parentTaskId) &&
+        current.parents.some(
+          (parent) => parent.id === parentTaskId && parent.included,
+        )
+      )
+        parents.add(parentTaskId);
     for (const report of runtime?.checkpoint().journal.reports ?? []) {
       if (
         report.state !== "ready" &&
@@ -3656,6 +3830,7 @@ export class Monitor {
     this.subtaskOwners = [];
     this.subtaskReportOwners = [];
     this.subtaskReportCandidates.clear();
+    this.subtaskOversizedReportParents.clear();
     this.subtaskReportBlocked.clear();
     this.subtaskReportFrontiers.clear();
     this.subtaskActiveReportParents.clear();
@@ -3679,11 +3854,15 @@ export class Monitor {
       return;
     }
     const current = this.subtaskCurrent(this.state, pass, false, !hasReports);
-    if (!current) {
+    const reportCurrent = hasReports
+      ? (current ?? this.subtaskReportCurrent(this.state, pass))
+      : undefined;
+    const authority = current ?? reportCurrent;
+    if (!authority) {
       this.blockPendingSubtaskWake();
       return;
     }
-    const store = this.restoreSubtaskStore(checkpoint, current);
+    const store = this.restoreSubtaskStore(checkpoint, authority);
     if (!store) {
       this.blockPendingSubtaskWake();
       return;
@@ -3708,7 +3887,25 @@ export class Monitor {
     const active = new Set<string>();
     for (const group of groups) {
       const parentTaskId = group.parentTaskId;
-      const candidate = this.latestSubtaskReportCandidate(group, current, pass);
+      const opportunity = this.latestSubtaskReportCandidate(
+        group,
+        authority,
+        pass,
+      );
+      const candidate =
+        opportunity?.kind === "eligible" ? opportunity : undefined;
+      const oversized =
+        opportunity?.kind === "oversized" ? opportunity : undefined;
+      if (oversized) {
+        const receipt = this.recordOversizedSubtaskReport(
+          group,
+          oversized.parent,
+          oversized.source,
+          authority.sourceId,
+        );
+        if (receipt === "stale") return;
+        if (receipt === "recorded") active.add(parentTaskId);
+      }
       const owner = checkpoint.journal.reports.find(
         (report) =>
           report.parentTaskId === parentTaskId &&
@@ -3717,8 +3914,8 @@ export class Monitor {
       );
       const ownerCurrent =
         !!owner &&
-        subtaskRuntimeReportIsCurrent(owner, current, {
-          state: { tasks: [...current.parents] },
+        subtaskRuntimeReportIsCurrent(owner, authority, {
+          state: { tasks: [...authority.parents] },
           group,
         });
       const alreadyRecorded = candidate
@@ -3731,7 +3928,7 @@ export class Monitor {
         const blocked = this.subtaskReportBlocked.get(parentTaskId);
         if (blocked && !sameSource(blocked, candidate.source))
           this.subtaskReportBlocked.delete(parentTaskId);
-      } else if (!candidate || alreadyRecorded)
+      } else if (!candidate && !oversized)
         this.subtaskReportCandidates.delete(parentTaskId);
       if (!owner || !ownerCurrent) {
         if (candidate && !alreadyRecorded) active.add(parentTaskId);
@@ -3767,7 +3964,7 @@ export class Monitor {
     }
     const owners = new Set(active);
     const genericParentIds = new Set(
-      current.selectedModel && this.options.proposeSubtasks
+      current?.selectedModel && this.options.proposeSubtasks
         ? current.parents.flatMap((parent) => {
             if (!parent.included) return [];
             if (!owners.has(parent.id) && owners.size >= 20) return [];
@@ -3778,8 +3975,22 @@ export class Monitor {
     );
     this.pendingSubtaskCurrentRevoke?.();
     this.pendingSubtaskCurrentRevoke = undefined;
+    const captureCurrent =
+      Buffer.byteLength(authority.latest.text, "utf8") <= 12 * 1024
+        ? authority
+        : undefined;
+    if (!captureCurrent) {
+      // Receipt is durable, but C's body cannot become detached execution input.
+      this.pendingSubtaskCurrent = null;
+      this.subtaskOwners = [];
+      this.subtaskReportOwners = [];
+      this.subtaskActiveReportParents = active;
+      this.captureSubtaskDiagnosticAuthoritySafely(checkpoint, () => authority);
+      this.subtaskWakeKey = this.subtaskWakeKeyFor(authority);
+      return;
+    }
     const captured = this.capturedPendingSubtaskCurrent(
-      current,
+      captureCurrent,
       checkpoint,
       genericParentIds,
       pass,
@@ -3790,16 +4001,11 @@ export class Monitor {
     }
     this.pendingSubtaskCurrent = captured;
     this.subtaskActiveReportParents = active;
-    this.captureSubtaskDiagnosticAuthoritySafely(checkpoint, () => current);
-    const key = JSON.stringify({
-      sourceId: current.sourceId,
-      latest: current.latest,
-      earlier: current.earlier,
-      omissions: current.omissions,
-      parents: current.parents,
-      selectedModel: current.selectedModel,
-      ...(current.evidence === undefined ? {} : { evidence: current.evidence }),
-    });
+    this.captureSubtaskDiagnosticAuthoritySafely(
+      checkpoint,
+      () => captureCurrent,
+    );
+    const key = this.subtaskWakeKeyFor(captureCurrent);
     if (!force && key === this.subtaskWakeKey) return;
     this.subtaskWakeKey = key;
     this.subtaskOwners = [...genericParentIds];
@@ -3827,33 +4033,30 @@ export class Monitor {
       return;
     }
     const current = this.subtaskCurrent(this.state, pass, false, !hasReports);
-    if (!current) {
+    const reportCurrent = hasReports
+      ? (current ?? this.subtaskReportCurrent(this.state, pass))
+      : undefined;
+    const authority = current ?? reportCurrent;
+    if (!authority) {
       this.subtaskOwners = [];
       this.subtaskReportOwners = [];
+      this.subtaskOversizedReportParents.clear();
       this.subtaskDiagnosticAuthority = undefined;
       return;
     }
-    if (hasReports) this.wakeSubtaskReports(pass, current);
-    this.refreshActiveSubtaskReportParents(current);
+    if (reportCurrent) this.wakeSubtaskReports(pass, reportCurrent);
+    this.refreshActiveSubtaskReportParents(authority);
     this.captureSubtaskDiagnosticAuthoritySafely(
       this.subtaskRuntime?.checkpoint(),
-      () => current,
+      () => authority,
     );
-    const key = JSON.stringify({
-      sourceId: current.sourceId,
-      latest: current.latest,
-      earlier: current.earlier,
-      omissions: current.omissions,
-      parents: current.parents,
-      selectedModel: current.selectedModel,
-      ...(current.evidence === undefined ? {} : { evidence: current.evidence }),
-    });
+    const key = this.subtaskWakeKeyFor(authority);
     if (!force && key === this.subtaskWakeKey) return;
     this.subtaskWakeKey = key;
     const activeReportParents = this.activeSubtaskReportParentIds();
     const owners = new Set(activeReportParents);
     this.subtaskOwners =
-      current.selectedModel && this.options.proposeSubtasks
+      current?.selectedModel && this.options.proposeSubtasks
         ? current.parents.flatMap((parent) => {
             if (!parent.included) return [];
             if (!owners.has(parent.id) && owners.size >= 20) return [];
@@ -3863,8 +4066,13 @@ export class Monitor {
         : [];
   }
 
-  /** Cancel stale generic work without clearing durable access associations. */
-  private invalidateSubtaskWork() {
+  /** Cancel stale generic work without aborting valid saved-report transport. */
+  private invalidateSubtaskWork(preserveReportFlight = false) {
+    if (preserveReportFlight) {
+      this.subtaskFlightReportMayBeSuperseded = this.subtaskFlightIsReport;
+      this.subtaskOwners = [];
+      return;
+    }
     this.pendingSubtaskCurrentRevoke?.();
     this.pendingSubtaskCurrentRevoke = undefined;
     this.pendingSubtaskCurrent = null;
@@ -3877,6 +4085,7 @@ export class Monitor {
     this.subtaskDiagnosticAuthority = undefined;
     this.subtaskOwners = [];
     this.subtaskReportOwners = [];
+    this.subtaskOversizedReportParents.clear();
     this.subtaskScheduleGeneration += 1;
     this.subtaskWakeKey = undefined;
   }
@@ -3958,10 +4167,19 @@ export class Monitor {
       ? runtime.runReport(parentTaskId, report.source)
       : runtime.run(parentTaskId);
     this.subtaskFlight = flight;
+    this.subtaskFlightIsReport = !!report;
+    this.subtaskFlightReportParentId = report?.parentTaskId;
+    this.subtaskFlightReportMayBeSuperseded = false;
     void flight.finally(() => {
       if (this.subtaskFlight !== flight) return;
+      const supersedeReport =
+        !!report && this.subtaskFlightReportMayBeSuperseded;
+      if (supersedeReport) runtime.invalidate();
       this.subtaskFlight = undefined;
-      if (report) {
+      this.subtaskFlightIsReport = false;
+      this.subtaskFlightReportParentId = undefined;
+      this.subtaskFlightReportMayBeSuperseded = false;
+      if (report && !supersedeReport) {
         if (beforeJournal === JSON.stringify(runtime.checkpoint().journal)) {
           const source = report.source ?? before?.source;
           if (source) this.subtaskReportBlocked.set(parentTaskId, source);
@@ -7452,7 +7670,11 @@ export class Monitor {
           this.reconcileHealthCards(pass);
           this.reconcileTaskDetails(pass);
           this.requeue(pass);
-          if (this.queued.length) this.invalidateSubtaskWork();
+          if (this.queued.length)
+            this.invalidateSubtaskWork(
+              this.subtaskFlightIsReport &&
+                this.preserveOversizedReportFlight(pass),
+            );
           else this.wakeSubtasks(pass, true);
         }
         this.publish();

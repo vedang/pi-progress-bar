@@ -212,6 +212,20 @@ interface SubtaskCheckpointMetadata {
   journal: SubtaskJournalCheckpoint;
 }
 
+export type SubtaskOmissionReason =
+  | "report-oversized"
+  | "coalesced"
+  | "capacity";
+
+/** Bounded durable diagnostic receipt; it never carries report content or authority. */
+export interface SubtaskOmissionSummary {
+  entries: Array<{
+    identity: string;
+    reason: SubtaskOmissionReason;
+  }>;
+  saturated: boolean;
+}
+
 /** v11 staged monitor projection. It deliberately has no legacy coverage field. */
 export interface SubtaskMonitorCheckpointMetadata {
   enabled: boolean;
@@ -225,7 +239,14 @@ export interface SubtaskMonitorCheckpointMetadata {
   healthCards?: HealthCard[];
   taskDetails?: unknown[];
   subtasks?: SubtaskCheckpointMetadata;
+  subtaskOmissions?: SubtaskOmissionSummary;
 }
+
+/** Untrusted v11 encoder input; strict validation narrows it to metadata above. */
+type SubtaskMonitorCheckpointInput = Omit<
+  SubtaskMonitorCheckpointMetadata,
+  "subtaskOmissions"
+> & { subtaskOmissions?: unknown };
 
 interface SubtaskCheckpointEnvelope {
   version: typeof SUBTASK_VERSION;
@@ -2185,6 +2206,49 @@ function detachSubtaskData<T extends object>(value: T): T {
   return JSON.parse(subtaskInertJson(value)) as T;
 }
 
+const MAX_SUBTASK_OMISSION_ENTRIES = 64;
+const subtaskOmissionReasonIsValid = (
+  value: unknown,
+): value is SubtaskOmissionReason =>
+  value === "report-oversized" || value === "coalesced" || value === "capacity";
+
+function validSubtaskOmissionSummary(
+  value: unknown,
+): value is SubtaskOmissionSummary {
+  if (
+    !record(value) ||
+    !exactKeys(value, ["entries", "saturated"]) ||
+    !Array.isArray(value.entries) ||
+    value.entries.length > MAX_SUBTASK_OMISSION_ENTRIES ||
+    typeof value.saturated !== "boolean"
+  )
+    return false;
+  const identities = new Set<string>();
+  for (const entry of value.entries) {
+    if (
+      !record(entry) ||
+      !exactKeys(entry, ["identity", "reason"]) ||
+      !hashIsValid(entry.identity) ||
+      !subtaskOmissionReasonIsValid(entry.reason) ||
+      identities.has(entry.identity)
+    )
+      return false;
+    identities.add(entry.identity);
+  }
+  return value.saturated || value.entries.length > 0;
+}
+
+/** Exact shared optional projection. Its JSON bytes include wrapper keys once. */
+function subtaskOptionalProjection(
+  subtasks: SubtaskCheckpointMetadata | undefined,
+  subtaskOmissions: SubtaskOmissionSummary | undefined,
+) {
+  return {
+    ...(subtasks ?? {}),
+    ...(subtaskOmissions === undefined ? {} : { subtaskOmissions }),
+  };
+}
+
 function validSubtaskMonitorMetadata(
   value: unknown,
   state: HybridState,
@@ -2201,6 +2265,7 @@ function validSubtaskMonitorMetadata(
         "healthCards",
         "taskDetails",
         "subtasks",
+        "subtaskOmissions",
       ],
     ) ||
     typeof value.enabled !== "boolean" ||
@@ -2223,7 +2288,9 @@ function validSubtaskMonitorMetadata(
   )
     return false;
 
-  if (Object.hasOwn(value, "subtasks")) {
+  const subtasksPresent = Object.hasOwn(value, "subtasks");
+  const omissionsPresent = Object.hasOwn(value, "subtaskOmissions");
+  if (subtasksPresent) {
     if (
       !record(value.subtasks) ||
       !exactKeys(value.subtasks, ["state", "journal"]) ||
@@ -2233,6 +2300,19 @@ function validSubtaskMonitorMetadata(
     )
       return false;
   }
+  if (omissionsPresent && !validSubtaskOmissionSummary(value.subtaskOmissions))
+    return false;
+  const subtasks = subtasksPresent
+    ? (value.subtasks as SubtaskCheckpointMetadata)
+    : undefined;
+  const subtaskOmissions = omissionsPresent
+    ? (value.subtaskOmissions as SubtaskOmissionSummary)
+    : undefined;
+  if (
+    subtaskByteLength(subtaskOptionalProjection(subtasks, subtaskOmissions)) >
+    MAX_SUBTASK_OPTIONAL_BYTES
+  )
+    return false;
   if (Object.hasOwn(value, "healthCards")) {
     if (
       !Array.isArray(value.healthCards) ||
@@ -2337,7 +2417,7 @@ export function subtaskCheckpointStorageStatus(
 
 function stagedSubtaskCheckpoint(
   state: HybridState,
-  monitor?: SubtaskMonitorCheckpointMetadata,
+  monitor?: SubtaskMonitorCheckpointInput,
 ): SubtaskCheckpointEnvelope {
   const detachedState = strictDetachedData(state);
   const detachedMonitor =
@@ -2366,7 +2446,7 @@ function stagedSubtaskCheckpoint(
 /** Exact v11 byte count before capacity denial; it never invokes v10 codecs. */
 export function subtaskCheckpointBytes(
   state: HybridState,
-  monitor?: SubtaskMonitorCheckpointMetadata,
+  monitor?: SubtaskMonitorCheckpointInput,
 ) {
   return subtaskByteLength(stagedSubtaskCheckpoint(state, monitor));
 }
@@ -2430,7 +2510,7 @@ const subtaskBytesFit = (bytes: number, reserve: number, limit: number) => {
  */
 export function canCommitSubtaskCheckpoint(
   state: HybridState,
-  monitor?: SubtaskMonitorCheckpointMetadata,
+  monitor?: SubtaskMonitorCheckpointInput,
   reserve: SubtaskCheckpointReserve = { storeBytes: 0, journalBytes: 0 },
 ): boolean {
   try {
@@ -2445,6 +2525,20 @@ export function canCommitSubtaskCheckpoint(
     const candidateMonitor = candidate.monitor;
     const component = candidateMonitor?.subtasks;
     if (!component && totalReserve !== 0) return false;
+
+    if (
+      !subtaskBytesFit(
+        subtaskByteLength(
+          subtaskOptionalProjection(
+            component,
+            candidateMonitor?.subtaskOmissions,
+          ),
+        ),
+        totalReserve,
+        MAX_SUBTASK_OPTIONAL_BYTES,
+      )
+    )
+      return false;
 
     if (component) {
       const storeBytes = subtaskByteLength(component.state);
@@ -2507,7 +2601,7 @@ export function canCommitSubtaskCheckpoint(
  */
 export function encodeSubtaskCheckpoint(
   state: HybridState,
-  monitor?: SubtaskMonitorCheckpointMetadata,
+  monitor?: SubtaskMonitorCheckpointInput,
 ): SubtaskCheckpointEnvelope {
   const checkpoint = stagedSubtaskCheckpoint(state, monitor);
   if (subtaskByteLength(checkpoint) > MAX_CHECKPOINT_BYTES)
@@ -2685,7 +2779,7 @@ export function restoreSubtaskCheckpoint(
  */
 export function commitSubtaskCheckpoint(
   state: HybridState,
-  monitor: SubtaskMonitorCheckpointMetadata | undefined,
+  monitor: SubtaskMonitorCheckpointInput | undefined,
   save: (candidate: SubtaskCheckpointEnvelope) => boolean,
 ): SubtaskCheckpointEnvelope | undefined {
   let candidate: SubtaskCheckpointEnvelope;

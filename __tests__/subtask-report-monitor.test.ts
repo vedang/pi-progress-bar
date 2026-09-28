@@ -1723,7 +1723,7 @@ it.each([
   },
 );
 
-it.each(["unchanged", "coalesced", "vetoed"])(
+it.each(["unchanged", "coalesced", "vetoed", "whole-request"])(
   "keeps a real parked report owner ahead of decomposition during a different parent's proposal drain (%s)",
   async (mode) => {
     let selected = false;
@@ -1864,11 +1864,32 @@ it.each(["unchanged", "coalesced", "vetoed"])(
           .groups.find((item) => item.parentTaskId === a.id);
         if (!queuedBefore || !group) throw new Error("Missing pending B/group");
         expect(queuedBefore.source.entryId).toBe("report-b");
+        const text =
+          mode === "whole-request"
+            ? `PRIVATE_PENDING_ESCAPED ${"\\".repeat(9000)} end`
+            : "A third eligible report replaces only never-admitted B.";
+        if (mode === "whole-request") {
+          expect(Buffer.byteLength(text)).toBeLessThanOrEqual(12 * 1024);
+          expect(
+            Buffer.byteLength(JSON.stringify({ text, group })),
+          ).toBeGreaterThan(24 * 1024);
+        }
+        const c = observation("report-c", text, "assistant");
         const omittedIdentity = subtaskReportOmissionIdentity({
           sourceId: h.monitor.state.sourceId,
           parent: a,
           group,
-          reportSource: queuedBefore.source,
+          reportSource:
+            mode === "whole-request"
+              ? {
+                  entryId: c.id,
+                  messageHash: c.hash,
+                  role: c.role,
+                  start: 0,
+                  end: c.text.length,
+                  quoteHash: c.hash,
+                }
+              : queuedBefore.source,
         });
         expect(omittedIdentity).toMatch(/^[a-f0-9]{64}$/);
         expect(
@@ -1881,10 +1902,7 @@ it.each(["unchanged", "coalesced", "vetoed"])(
           if (!allow && (raw as Envelope).monitor?.subtaskOmissions)
             throw new Error("Pending coalescing veto");
         });
-        h.append(
-          "report-c",
-          "A third eligible report replaces only never-admitted B.",
-        );
+        h.append("report-c", text);
         await h.settle("report-c");
         if (!allow) {
           const queued = Reflect.get(
@@ -1899,9 +1917,22 @@ it.each(["unchanged", "coalesced", "vetoed"])(
         }
         const summary = h.checkpoint().monitor?.subtaskOmissions;
         expect(summary).toEqual({
-          entries: [{ identity: omittedIdentity, reason: "coalesced" }],
+          entries: [
+            {
+              identity: omittedIdentity,
+              reason:
+                mode === "whole-request" ? "report-oversized" : "coalesced",
+            },
+          ],
           saturated: false,
         });
+        const queuedAfter = Reflect.get(
+          h.monitor,
+          "subtaskReportCandidates",
+        ) as Map<string, { source: SourceRef }>;
+        expect(queuedAfter.get(a.id)?.source.entryId).toBe(
+          mode === "whole-request" ? "report-b" : "report-c",
+        );
         const firstSummarySave = h.save.mock.calls
           .map(([raw]) => raw as Envelope)
           .find((saved) => saved.monitor?.subtaskOmissions);

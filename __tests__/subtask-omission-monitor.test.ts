@@ -465,70 +465,88 @@ it("preserves real parked report A across oversized C and restore, then retries 
       ),
   ).toMatchObject({ state: "complete" });
 });
-it("keeps eligible B behind held A when newest C is oversized, and retains C's receipt after report commits", async () => {
-  const h = await mapped();
-  const transport = h.fetch.getMockImplementation();
-  if (!transport) throw new Error("Missing transport");
-  let release: (() => void) | undefined;
-  let held = false;
-  h.fetch.mockImplementation(async (url, init) => {
-    const request = JSON.parse(String(init?.body)) as {
-      questions: Record<string, unknown>;
-    };
-    const response = await transport(url, init);
-    if (
-      !held &&
-      Object.keys(request.questions).some((key) =>
-        key.startsWith("subtask:subtask-child:"),
-      )
-    ) {
-      held = true;
-      await new Promise<void>((resolve) => {
-        release = resolve;
-      });
-    }
-    return response;
-  });
-  try {
-    h.append("held-a", "The initial workbook checks remain pending.");
-    await h.settle("held-a");
-    expect(held).toBe(true);
-    h.append(
-      "eligible-b",
-      "A later eligible workbook report still has pending work.",
-    );
-    await h.settle("eligible-b");
-    h.append("oversized-c", largeReport);
-    await h.settle("oversized-c");
-    expect(reportSources(h)).toEqual(["held-a"]);
-    const summary = h.checkpoint().monitor?.subtaskOmissions;
-    expect.soft(summary).toMatchObject({
-      entries: [{ reason: "report-oversized" }],
-      saturated: false,
+it.each(["body", "whole-request"])(
+  "keeps eligible B behind held A when C exceeds %s bytes, and retains C's receipt after report commits",
+  async (limit) => {
+    const h = await mapped();
+    const transport = h.fetch.getMockImplementation();
+    if (!transport) throw new Error("Missing transport");
+    let release: (() => void) | undefined;
+    let held = false;
+    h.fetch.mockImplementation(async (url, init) => {
+      const request = JSON.parse(String(init?.body)) as {
+        questions: Record<string, unknown>;
+      };
+      const response = await transport(url, init);
+      if (
+        !held &&
+        Object.keys(request.questions).some((key) =>
+          key.startsWith("subtask:subtask-child:"),
+        )
+      ) {
+        held = true;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return response;
     });
-    release?.();
-    await vi.advanceTimersByTimeAsync(300);
-    const reports = reportSources(h);
-    expect(reports).not.toContain("oversized-c");
-    expect(reports.filter((id) => id === "held-a")).toHaveLength(2);
-    expect(reports.filter((id) => id === "eligible-b")).toHaveLength(2);
-    expect(reports.indexOf("eligible-b")).toBeGreaterThan(
-      reports.lastIndexOf("held-a"),
-    );
-    expect(h.checkpoint().monitor?.subtaskOmissions).toEqual(summary);
-    expect(
-      h
-        .checkpoint()
-        .monitor?.subtasks?.journal.reports.find(
-          (job) => job.source.entryId === "eligible-b",
-        ),
-    ).toMatchObject({ state: "complete" });
-  } finally {
-    h.monitor.stop();
-    release?.();
-    await vi.advanceTimersByTimeAsync(100);
-  }
-});
+    try {
+      h.append("held-a", "The initial workbook checks remain pending.");
+      await h.settle("held-a");
+      expect(held).toBe(true);
+      h.append(
+        "eligible-b",
+        "A later eligible workbook report still has pending work.",
+      );
+      await h.settle("eligible-b");
+      const text =
+        limit === "body"
+          ? largeReport
+          : `PRIVATE_ESCAPED_REPORT ${"\\".repeat(9000)} end`;
+      if (limit === "whole-request") {
+        expect(Buffer.byteLength(text)).toBeLessThanOrEqual(12 * 1024);
+        expect(
+          Buffer.byteLength(
+            JSON.stringify({
+              text,
+              group: h.monitor.subtaskSnapshot().groups[0],
+            }),
+          ),
+        ).toBeGreaterThan(24 * 1024);
+      }
+      h.append("oversized-c", text);
+      await h.settle("oversized-c");
+      expect(reportSources(h)).toEqual(["held-a"]);
+      const summary = h.checkpoint().monitor?.subtaskOmissions;
+      expect.soft(summary).toMatchObject({
+        entries: [{ reason: "report-oversized" }],
+        saturated: false,
+      });
+      release?.();
+      await vi.advanceTimersByTimeAsync(300);
+      const reports = reportSources(h);
+      expect(reports).not.toContain("oversized-c");
+      expect(reports.filter((id) => id === "held-a")).toHaveLength(2);
+      expect(reports.filter((id) => id === "eligible-b")).toHaveLength(2);
+      expect(reports.indexOf("eligible-b")).toBeGreaterThan(
+        reports.lastIndexOf("held-a"),
+      );
+      expect(h.checkpoint().monitor?.subtaskOmissions).toEqual(summary);
+      expect(
+        h
+          .checkpoint()
+          .monitor?.subtasks?.journal.reports.find(
+            (job) => job.source.entryId === "eligible-b",
+          ),
+      ).toMatchObject({ state: "complete" });
+    } finally {
+      h.monitor.stop();
+      release?.();
+      await vi.advanceTimersByTimeAsync(100);
+    }
+  },
+);
 it("saturates retained omissions once without disabling later valid report admission", async () => {
   const h = await mapped();
   const target = h.checkpoint();
@@ -730,28 +748,61 @@ it("does not count unchanged queued B or parked A as omitted on repeated named w
   expect(reportSources(h)).toEqual(["parked-a"]);
 });
 
-it("does not publish queued C after a successful coalescing save synchronously stops Monitor", async () => {
-  const { h, expected } = await parkedWithQueuedB();
-  let durable: ReturnType<typeof h.checkpoint> | undefined;
-  h.save.mockImplementation((raw: unknown) => {
-    const candidate = raw as ReturnType<typeof h.checkpoint>;
-    if (!durable && candidate.monitor?.subtaskOmissions) {
+it.each(["stop", "off", "restore"])(
+  "retains saved B receipt without publishing C after reentrant %s",
+  async (control) => {
+    const { h, expected } = await parkedWithQueuedB();
+    const wallet = structuredClone(h.checkpoint().monitor?.subtasks?.journal);
+    let durable: ReturnType<typeof h.checkpoint> | undefined;
+    let reentered = false;
+    let restoring: Promise<unknown> | undefined;
+    h.save.mockImplementation((raw: unknown) => {
+      const candidate = raw as ReturnType<typeof h.checkpoint>;
       durable = structuredClone(candidate);
-      h.monitor.stop();
-    }
-  });
-  h.append(
-    "queued-c",
-    "A newer report reaches the reentrant persistence fence.",
-  );
-  await h.settle("queued-c");
-  expect(durable?.monitor?.subtaskOmissions).toEqual(expected);
-  expect(h.monitor.enabled).toBe(false);
-  expect(queuedReport(h)?.source.entryId).not.toBe("queued-c");
-  expect(reportSources(h)).toEqual(["parked-a"]);
-  if (!durable?.monitor) throw new Error("Missing durable omission");
-  durable.monitor.enabled = false;
-  h.save.mockReset();
-  await h.monitor.restore("/nonexistent-hybrid-test", durable, false, h.reader);
-  expect(h.checkpoint().monitor?.subtaskOmissions).toEqual(expected);
-});
+      if (!reentered && candidate.monitor?.subtaskOmissions) {
+        reentered = true;
+        if (control === "stop") h.monitor.stop();
+        else if (control === "off") h.monitor.turnOff();
+        else {
+          const older = h.checkpoint();
+          if (!older.monitor) throw new Error("Missing metadata");
+          older.monitor.enabled = false;
+          restoring = h.monitor.restore(
+            "/nonexistent-hybrid-test",
+            older,
+            false,
+            h.reader,
+          );
+        }
+      }
+    });
+    h.append(
+      "queued-c",
+      "A newer report reaches the reentrant persistence fence.",
+    );
+    await h.settle("queued-c");
+    await restoring;
+    expect(reentered).toBe(true);
+    expect.soft(durable?.monitor?.subtaskOmissions).toEqual(expected);
+    expect(h.monitor.enabled).toBe(false);
+    expect(queuedReport(h)?.source.entryId).not.toBe("queued-c");
+    expect(reportSources(h)).toEqual(["parked-a"]);
+    if (!durable?.monitor) throw new Error("Missing durable omission");
+    durable.monitor.enabled = false;
+    h.save.mockReset();
+    await h.monitor.restore(
+      "/nonexistent-hybrid-test",
+      durable,
+      false,
+      h.reader,
+    );
+    expect(h.checkpoint().monitor?.subtaskOmissions).toEqual(expected);
+    expect(h.checkpoint().monitor?.subtasks?.journal.dispatches).toBe(
+      wallet?.dispatches,
+    );
+    expect(h.checkpoint().monitor?.subtasks?.journal.usage).toEqual(
+      wallet?.usage,
+    );
+    expect(reportSources(h)).toEqual(["parked-a"]);
+  },
+);

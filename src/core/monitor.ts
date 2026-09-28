@@ -765,6 +765,10 @@ export class Monitor {
   /** One adapter-issued capability stays stable until canonical metadata changes. */
   private subtaskEvidence?: SubtaskEvidence;
   private subtaskWakeKey?: string;
+  /** Detached named restore authority used only after a pending drain installs. */
+  private pendingSubtaskCurrent?: SubtaskRuntimeCurrent;
+  /** Captured authority serves target work until a later named host wake. */
+  private capturedSubtaskCurrent?: SubtaskRuntimeCurrent;
   private pendingSubtaskCheckpoint?: SubtaskRuntimeCheckpoint;
 
   private reader?: () => readonly unknown[];
@@ -1680,23 +1684,20 @@ export class Monitor {
           state,
           pass,
         );
-        const metadata = canonicalReset
-          ? this.resetSubtaskMetadata(work.subtaskMetadata)
-          : restored.monitor;
-        if (
-          !component ||
-          !this.commitRestoredSubtaskHistory(
-            state,
-            metadata,
-            component,
-            work.wantEnabled,
-          )
-        ) {
+        const metadata = this.restoredSubtaskMetadata(
+          canonicalReset
+            ? this.resetSubtaskMetadata(work.subtaskMetadata)
+            : restored.monitor,
+          component ?? emptySubtasks,
+          work.wantEnabled,
+          work,
+        );
+        if (!component || !this.commitRestoredSubtaskHistory(state, metadata)) {
           this.refuseRestoredSubtaskHistory(work);
           return;
         }
         if (canonicalReset) {
-          this.mergeTelemetry(work.metadata, work, pass);
+          this.mergeTelemetry(metadata, work, pass);
           this.resetState(work.sourceId, false, component);
         } else {
           this.state = copyState(state);
@@ -1733,19 +1734,17 @@ export class Monitor {
           state,
           pass,
         );
-        if (
-          !component ||
-          !this.commitRestoredSubtaskHistory(
-            state,
-            this.resetSubtaskMetadata(work.subtaskMetadata),
-            component,
-            work.wantEnabled,
-          )
-        ) {
+        const metadata = this.restoredSubtaskMetadata(
+          this.resetSubtaskMetadata(work.subtaskMetadata),
+          component ?? emptySubtasks,
+          work.wantEnabled,
+          work,
+        );
+        if (!component || !this.commitRestoredSubtaskHistory(state, metadata)) {
           this.refuseRestoredSubtaskHistory(work);
           return;
         }
-        this.mergeTelemetry(work.metadata, work, pass);
+        this.mergeTelemetry(metadata, work, pass);
         this.resetState(work.sourceId, false, component);
         this.latchHistoricalCatchup = true;
         work.persisted = true;
@@ -1827,7 +1826,6 @@ export class Monitor {
     preserveControls = false,
     reader?: () => readonly unknown[],
   ) {
-    const priorSubtaskFlight = this.subtaskFlight;
     const storage = subtaskCheckpointStorageStatus(data);
     const prior = this.controlWork;
     const restored =
@@ -1870,9 +1868,6 @@ export class Monitor {
       target: storage === "supported" ? this.restoreTarget(data) : undefined,
     });
     await promise;
-    // A new enabled restore exposes its first persisted optional outcome before
-    // this lifecycle promise resolves. Never wait for a preexisting drain.
-    if (!priorSubtaskFlight && this.subtaskFlight) await this.subtaskFlight;
   }
 
   /** Detached plain projection; it does not read history, persist, or schedule. */
@@ -2600,12 +2595,16 @@ export class Monitor {
   private installSubtaskRuntime(
     initial: SubtaskRuntimeCheckpoint,
     preserveProjection = false,
+    capturedCurrent?: SubtaskRuntimeCurrent,
   ) {
     this.pendingSubtaskCheckpoint = undefined;
+    this.pendingSubtaskCurrent = undefined;
+    this.capturedSubtaskCurrent = capturedCurrent;
     if (!preserveProjection) this.subtaskProjection = undefined;
     this.subtaskRuntime = new SubtaskRuntime({
       initial: structuredClone(initial),
-      current: () => this.subtaskCurrent(this.state),
+      current: () =>
+        this.capturedSubtaskCurrent ?? this.subtaskCurrent(this.state),
       gate: (batch, signal, onDispatch, onPhysicalFlight) =>
         this.evaluateSubtaskGate(batch, signal, onDispatch, onPhysicalFlight),
       propose: (request, signal, onDispatch, onPhysicalFlight) => {
@@ -2626,7 +2625,8 @@ export class Monitor {
       now: () => Date.now(),
       commit: (candidate) => this.commitSubtaskCandidate(candidate),
       onPublish: (snapshot) => {
-        this.subtaskProjection = structuredClone(snapshot);
+        if (!this.pendingSubtaskCheckpoint)
+          this.subtaskProjection = structuredClone(snapshot);
         this.publish();
       },
     });
@@ -2649,6 +2649,8 @@ export class Monitor {
     this.subtaskDiagnosticAuthority = undefined;
     this.subtaskScheduleGeneration += 1;
     this.subtaskWakeKey = undefined;
+    this.capturedSubtaskCurrent = undefined;
+    this.pendingSubtaskCurrent = undefined;
     if (this.subtaskFlight) {
       this.pendingSubtaskCheckpoint = next;
       return;
@@ -2846,13 +2848,14 @@ export class Monitor {
       : undefined;
   }
 
-  /** Preserve strict-v11 omission bytes while substituting merged history. */
+  /** Build detached target metadata before persistence or live metadata adoption. */
   private restoredSubtaskMetadata(
     metadata: SubtaskMonitorCheckpointMetadata | undefined,
     component: Readonly<SubtaskRuntimeCheckpoint>,
     enabled: boolean,
+    work: ControlWork,
   ): SubtaskMonitorCheckpointMetadata {
-    const base = metadata
+    const base: SubtaskMonitorCheckpointMetadata = metadata
       ? structuredClone(metadata)
       : {
           enabled,
@@ -2861,7 +2864,58 @@ export class Monitor {
             extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
           },
         };
-    return { ...base, enabled, subtasks: structuredClone(component) };
+    const preserveTelemetry =
+      work.preserveControls && work.sourceId === work.telemetry.sourceId;
+    const usage = preserveTelemetry
+      ? {
+          jev: {
+            calls: Math.max(
+              base.usage.jev.calls,
+              work.telemetry.usage.jev.calls,
+            ),
+            inputTokens: Math.max(
+              base.usage.jev.inputTokens,
+              work.telemetry.usage.jev.inputTokens,
+            ),
+            outputTokens: Math.max(
+              base.usage.jev.outputTokens,
+              work.telemetry.usage.jev.outputTokens,
+            ),
+          },
+          extraction: {
+            calls: Math.max(
+              base.usage.extraction.calls,
+              work.telemetry.usage.extraction.calls,
+            ),
+            inputTokens: Math.max(
+              base.usage.extraction.inputTokens,
+              work.telemetry.usage.extraction.inputTokens,
+            ),
+            outputTokens: Math.max(
+              base.usage.extraction.outputTokens,
+              work.telemetry.usage.extraction.outputTokens,
+            ),
+          },
+        }
+      : base.usage;
+    const lastJevCallAt = preserveTelemetry
+      ? Math.max(base.lastJevCallAt ?? 0, work.telemetry.lastJevCallAt ?? 0) ||
+        undefined
+      : base.lastJevCallAt;
+    const lastExtractionCallAt = preserveTelemetry
+      ? Math.max(
+          base.lastExtractionCallAt ?? 0,
+          work.telemetry.lastExtractionCallAt ?? 0,
+        ) || undefined
+      : base.lastExtractionCallAt;
+    return {
+      ...base,
+      enabled,
+      usage,
+      ...(lastJevCallAt === undefined ? {} : { lastJevCallAt }),
+      ...(lastExtractionCallAt === undefined ? {} : { lastExtractionCallAt }),
+      subtasks: structuredClone(component),
+    };
   }
 
   /** Canonical reset keeps only nonsemantic strict-v11 fields plus history. */
@@ -2881,18 +2935,11 @@ export class Monitor {
   /** Preflight exact ON/OFF envelopes, then persist before target adoption. */
   private commitRestoredSubtaskHistory(
     state: HybridState,
-    metadata: SubtaskMonitorCheckpointMetadata | undefined,
-    component: Readonly<SubtaskRuntimeCheckpoint>,
-    enabled: boolean,
+    metadata: SubtaskMonitorCheckpointMetadata,
   ) {
-    const candidate = this.restoredSubtaskMetadata(
-      metadata,
-      component,
-      enabled,
-    );
-    if (!canCommitSubtaskCheckpoint(state, candidate)) return false;
+    if (!canCommitSubtaskCheckpoint(state, metadata)) return false;
     return (
-      commitSubtaskCheckpoint(state, candidate, (checkpoint) => {
+      commitSubtaskCheckpoint(state, metadata, (checkpoint) => {
         this.persist(checkpoint);
         return true;
       }) !== undefined
@@ -2947,10 +2994,14 @@ export class Monitor {
         return true;
       },
     );
-    if (saved !== undefined)
-      this.captureSubtaskDiagnosticAuthoritySafely(candidate, () =>
-        this.subtaskCurrent(this.state, this.beginCanonicalPass()),
+    if (saved !== undefined) {
+      const current = this.capturedSubtaskCurrent;
+      this.captureSubtaskDiagnosticAuthoritySafely(
+        candidate,
+        () =>
+          current ?? this.subtaskCurrent(this.state, this.beginCanonicalPass()),
       );
+    }
     return saved !== undefined;
   }
 
@@ -3378,8 +3429,187 @@ export class Monitor {
     }
   }
 
+  /** Detach bounded target references; no post-drain callback can reach host input. */
+  private capturedPendingSubtaskCurrent(
+    current: SubtaskRuntimeCurrent,
+    checkpoint: Readonly<SubtaskRuntimeCheckpoint>,
+    pass: CanonicalPass,
+  ): SubtaskRuntimeCurrent {
+    const entryIds = new Set([
+      current.latest.id,
+      ...current.earlier.map((observation) => observation.id),
+    ]);
+    const collect = (value: unknown) => {
+      if (!value || typeof value !== "object") return;
+      if (Array.isArray(value)) {
+        for (const item of value) collect(item);
+        return;
+      }
+      const source = value as { entryId?: unknown };
+      if (typeof source.entryId === "string") entryIds.add(source.entryId);
+      for (const item of Object.values(value)) collect(item);
+    };
+    collect(checkpoint);
+    collect(current.parents);
+    const observations = new Map(
+      [...entryIds].flatMap((entryId) => {
+        const observation = pass.observation(entryId);
+        return observation ? [[entryId, structuredClone(observation)]] : [];
+      }),
+    );
+    return {
+      sourceId: current.sourceId,
+      enabled: current.enabled,
+      parents: structuredClone(current.parents),
+      latest: structuredClone(current.latest),
+      earlier: structuredClone(current.earlier),
+      omissions: [...current.omissions],
+      ...(current.selectedModel === undefined
+        ? {}
+        : { selectedModel: current.selectedModel }),
+      ...(current.evidence === undefined
+        ? {}
+        : { evidence: structuredClone(current.evidence) }),
+      resolve: (entryId) => {
+        const observation = observations.get(entryId);
+        return observation ? structuredClone(observation) : undefined;
+      },
+    };
+  }
+
+  /** Capture pending target work while canonical authority is still available. */
+  private wakePendingSubtasks(pass: CanonicalPass, force: boolean) {
+    const checkpoint = this.pendingSubtaskCheckpoint;
+    if (!checkpoint) return;
+    const reportParentIds = new Set(
+      checkpoint.state.groups.map((group) => group.parentTaskId),
+    );
+    const hasReports = reportParentIds.size > 0;
+    if (!hasReports && !this.options.proposeSubtasks) {
+      this.subtaskOwners = [];
+      this.subtaskReportOwners = [];
+      this.subtaskReportCandidates.clear();
+      this.subtaskActiveReportParents.clear();
+      this.subtaskDiagnosticAuthority = undefined;
+      return;
+    }
+    const current = this.subtaskCurrent(this.state, pass, false, !hasReports);
+    if (!current) {
+      this.subtaskOwners = [];
+      this.subtaskReportOwners = [];
+      this.subtaskReportCandidates.clear();
+      this.subtaskActiveReportParents.clear();
+      this.subtaskDiagnosticAuthority = undefined;
+      return;
+    }
+    const store = this.restoreSubtaskStore(checkpoint, current);
+    if (!store) return;
+    this.pendingSubtaskCurrent = this.capturedPendingSubtaskCurrent(
+      current,
+      checkpoint,
+      pass,
+    );
+    const snapshot = store.snapshot();
+    this.subtaskProjection = structuredClone(snapshot);
+    const parents = new Map(
+      this.state.tasks
+        .filter((parent) => parent.included)
+        .map((parent) => [parent.id, parent]),
+    );
+    const groups = snapshot.groups
+      .filter((group) => {
+        const parent = parents.get(group.parentTaskId);
+        return !!parent && parent.revision === group.parentRevision;
+      })
+      .slice(0, 20);
+    const live = new Set(groups.map((group) => group.parentTaskId));
+    for (const parentTaskId of this.subtaskReportCandidates.keys())
+      if (!live.has(parentTaskId))
+        this.subtaskReportCandidates.delete(parentTaskId);
+    const active = new Set<string>();
+    for (const group of groups) {
+      const parentTaskId = group.parentTaskId;
+      const candidate = this.latestSubtaskReportCandidate(group, current, pass);
+      const owner = checkpoint.journal.reports.find(
+        (report) =>
+          report.parentTaskId === parentTaskId &&
+          report.state !== "complete" &&
+          report.state !== "superseded",
+      );
+      const ownerCurrent =
+        !!owner &&
+        subtaskRuntimeReportIsCurrent(owner, current, {
+          state: { tasks: [...current.parents] },
+          group,
+        });
+      const alreadyRecorded = candidate
+        ? checkpoint.journal.reports.some(
+            (report) => report.identity === candidate.identity,
+          )
+        : false;
+      if (candidate && !alreadyRecorded) {
+        this.subtaskReportCandidates.set(parentTaskId, candidate);
+        const blocked = this.subtaskReportBlocked.get(parentTaskId);
+        if (blocked && !sameSource(blocked, candidate.source))
+          this.subtaskReportBlocked.delete(parentTaskId);
+      } else if (!candidate || alreadyRecorded)
+        this.subtaskReportCandidates.delete(parentTaskId);
+      if (!owner || !ownerCurrent) {
+        if (candidate && !alreadyRecorded) active.add(parentTaskId);
+        continue;
+      }
+      if (owner.state === "ready") {
+        const blocked = this.subtaskReportBlocked.get(parentTaskId);
+        if (!blocked || !sameSource(blocked, owner.source)) {
+          this.enqueueSubtaskReport(parentTaskId);
+          active.add(parentTaskId);
+        }
+      } else if (owner.state === "parked") {
+        const blocked = this.subtaskReportBlocked.get(parentTaskId);
+        if (
+          (!blocked || !sameSource(blocked, owner.source)) &&
+          owner.parkedUntil !== undefined &&
+          Date.now() >= owner.parkedUntil
+        ) {
+          this.enqueueSubtaskReport(parentTaskId);
+          active.add(parentTaskId);
+        }
+      } else if (owner.state === "permanent" || owner.state === "dispatched") {
+        if (candidate && !alreadyRecorded) active.add(parentTaskId);
+      }
+    }
+    this.subtaskActiveReportParents = active;
+    this.captureSubtaskDiagnosticAuthoritySafely(checkpoint, () => current);
+    const key = JSON.stringify({
+      sourceId: current.sourceId,
+      latest: current.latest,
+      earlier: current.earlier,
+      omissions: current.omissions,
+      parents: current.parents,
+      selectedModel: current.selectedModel,
+      ...(current.evidence === undefined ? {} : { evidence: current.evidence }),
+    });
+    if (!force && key === this.subtaskWakeKey) return;
+    this.subtaskWakeKey = key;
+    const owners = new Set(active);
+    this.subtaskOwners =
+      current.selectedModel && this.options.proposeSubtasks
+        ? current.parents.flatMap((parent) => {
+            if (!parent.included) return [];
+            if (!owners.has(parent.id) && owners.size >= 20) return [];
+            owners.add(parent.id);
+            return [parent.id];
+          })
+        : [];
+  }
+
   /** Named cursor/model/restore wakes only. No timer or self-requeue exists. */
   private wakeSubtasks(pass: CanonicalPass, force = false) {
+    if (this.pendingSubtaskCheckpoint) {
+      this.wakePendingSubtasks(pass, force);
+      return;
+    }
+    this.capturedSubtaskCurrent = undefined;
     const reportParentIds = new Set(
       this.subtaskRuntime
         ?.checkpoint()
@@ -3535,8 +3765,10 @@ export class Monitor {
       }
       if (this.pendingSubtaskCheckpoint) {
         const next = this.pendingSubtaskCheckpoint;
+        const current = this.pendingSubtaskCurrent;
         this.pendingSubtaskCheckpoint = undefined;
-        this.installSubtaskRuntime(next, true);
+        this.pendingSubtaskCurrent = undefined;
+        this.installSubtaskRuntime(next, true, current);
         if (this.enabled) this.subtaskGateway.enable(this.subtaskIdentity());
       }
       if (this.enabled && this.subtaskRuntime) {

@@ -2587,6 +2587,8 @@ export class Monitor {
     ])
       if (
         candidate &&
+        // A resumed outer callback must not mask newer completed history.
+        candidate.serial >= this.latestRestoredSubtaskHistorySerial &&
         candidate.sourceId === this.state.sourceId &&
         candidate.sourceId === this.options.sourceId()
       )

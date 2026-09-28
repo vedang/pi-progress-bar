@@ -10,6 +10,12 @@ Known P2 evidence limitation: no fabricated real-host B/C collision is claimed. 
 
 Fresh C10/N06 semantic QA, combined final gates and owner manual review remain separate requirements.
 
+### N06 first frozen semantic run: blocked
+
+Runner `a694c1f1` froze17 fresh cases and caps17Jev/6drafts before dispatch. First core positive n601 (explicitly authorized, unblocked library checklist drafting) returned `yes` with confidence0.40/probability0.60, below unchanged0.50/0.80. Production accepted no parent; expected parent0. HTTP200,376ms,1437input/44output tokens;1Jev/0drafts,16cases unrun. No continuation was emitted. Manifest and exclusive ledger remain under `.agents/plans/20260929T004241--validate-fresh-semantic-behavior__active/`.
+
+Independent reviewer `0373bce1` confirms a genuine semantic recall false negative, valid expectation, and no identified harness/API/plumbing defect. N06 is **not accepted**; this result cannot establish draft quality or remaining-case safety. Preserve the failure, do not rerun for a pass or tune on observed heldout. Separate calibration/revision and prospectively frozen fresh evaluation require owner approval under the existing QA contract. C10 remains separate.
+
 ## N04 controller API frozen by Main
 
 `ContinuationController` in `src/advisory/continuation-controller.ts` was introduced disconnected in N04 and is now wired by N05. Constructor receives detached capability callbacks `{authority,canStart,gate,draft,emit}`. `authority()` returns fresh N01 projection; `canStart()` permits optional scheduling only when idle and mandatory/health scheduling yields. `gate(batch,signal,admit)` returns a N02 validated result or undefined; `draft(request,signal,admit)` returns N03 adapter result or undefined. `admit()` is a one-shot boolean callback invoked immediately before provider/registry admission; validate freshness/scheduling/caps there, charge on true including subsequent failure/cancellation, reject repeated/late hooks. Result without an admitted attempt is unusable. `emit(appliedDraft)` returns whether transport accepted; false/throw is terminal, no controller send retry. Existing N05 transport alone may retry immutable content.

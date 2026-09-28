@@ -180,13 +180,17 @@ describe("passive continuation settlement receipt", () => {
     expect(h.receipts).toEqual([]);
   });
 
-  it("requires reply to follow the matching question", () => {
-    const h = fixture();
-    h.branch.push(h.reply, h.question);
-    h.delivery.onContext(h.branch);
-    h.delivery.onAgentSettled(h.branch);
-    expect(h.receipts).toEqual([]);
-  });
+  it.each([false, true])(
+    "rejects assistant output before the question (later reply: %s)",
+    (laterReply) => {
+      const h = fixture();
+      h.branch.push({ ...h.reply, id: "earlier-assistant" }, h.question);
+      if (laterReply) h.branch.push(h.reply);
+      h.delivery.onContext(h.branch);
+      h.delivery.onAgentSettled(h.branch);
+      expect(h.receipts).toEqual([]);
+    },
+  );
 
   it("does not revive uncertain settlement when confirmation arrives late", () => {
     const h = fixture();

@@ -747,6 +747,7 @@ it.each([
   { mode: "rpc", choice: "yes", scenario: "input-gate" },
   { mode: "rpc", choice: "yes", scenario: "tree-gate" },
   { mode: "rpc", choice: "yes", scenario: "policy-override" },
+  { mode: "rpc", choice: "yes", scenario: "unrelated-custom" },
 ] as const)(
   "actual Pi $mode production continuation consumes one status-reply root ($choice, $scenario)",
   async ({ mode, choice, scenario }) => {
@@ -833,6 +834,13 @@ it.each([
         fauxAssistantMessage(
           "The parser is pending. No implementation has started.",
         ),
+        ...(scenario === "unrelated-custom"
+          ? [
+              fauxAssistantMessage(
+                "Unrelated custom-triggered run is finished.",
+              ),
+            ]
+          : []),
         fauxAssistantMessage(
           "The parser and regression tests remain pending, authorized and unblocked. No peer owns them; I have not resumed implementation.",
         ),
@@ -888,7 +896,26 @@ it.each([
         ),
       );
       await vi.waitFor(() => expect(deadlines).toHaveLength(1));
-      const deadline = deadlines[0];
+      if (scenario === "unrelated-custom") {
+        h.api.sendMessage(
+          {
+            customType: "unrelated-probe",
+            content: "Report your current status.",
+            display: true,
+          },
+          { triggerTurn: true },
+        );
+        await vi.waitFor(() =>
+          expect(
+            h.trace.filter((entry) => entry.hook === "agent_settled"),
+          ).toHaveLength(2),
+        );
+        await vi.waitFor(() => expect(deadlines).toHaveLength(2));
+        expect(
+          h.trace.filter((entry) => entry.hook === "before_agent_start"),
+        ).toHaveLength(1);
+      }
+      const deadline = deadlines[scenario === "unrelated-custom" ? 1 : 0];
       dateSpy.mockReturnValue(frozen + 60_001);
       clearTimeout(deadline.timer);
       deadline.callback();
@@ -903,21 +930,24 @@ it.each([
             h.trace.filter((entry) => entry.hook === "agent_settled").length,
           ).toBeGreaterThanOrEqual(2),
         );
-        if (scenario === "policy-override") {
+        if (scenario === "policy-override" || scenario === "unrelated-custom") {
           await vi.waitFor(() =>
             expect(
               projections.mock.results.some(
                 (result) =>
                   result.type === "return" &&
-                  !result.value.available &&
-                  result.value.reason === "authority",
+                  (result.value.available ||
+                    result.value.reason === "authority"),
               ),
             ).toBe(true),
           );
+          await new Promise<void>((resolve) => setImmediate(resolve));
           expect(gates).toEqual([]);
           expect(drafts).toEqual([]);
           expect(h.sent).toHaveLength(1);
-          expect(h.faux.state.callCount).toBe(2);
+          expect(h.faux.state.callCount).toBe(
+            scenario === "unrelated-custom" ? 3 : 2,
+          );
           expect(h.errors).toEqual([]);
           return;
         }

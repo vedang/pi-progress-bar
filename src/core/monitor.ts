@@ -373,6 +373,14 @@ interface ControlWork {
   done?: Deferred;
 }
 
+/** Complete same-source history saved before a reentrant control may observe it. */
+interface StagedRestoredSubtaskHistory {
+  sourceId: string;
+  serial: number;
+  component: SubtaskRuntimeCheckpoint;
+  subtaskOmissions?: SubtaskOmissionSummary;
+}
+
 interface CapacityEnvelope {
   boundaries: Record<string, number>;
   maximum: number;
@@ -880,6 +888,12 @@ export class Monitor {
     sourceId: string;
     summary: SubtaskOmissionSummary;
   };
+  /** Complete restore candidate visible while its synchronous save callback runs. */
+  private savingRestoredSubtaskHistory?: StagedRestoredSubtaskHistory;
+  /** Successfully saved same-source history awaiting adoption by a current control. */
+  private restoredSubtaskHistoryFloor?: StagedRestoredSubtaskHistory;
+  private nextRestoredSubtaskHistorySerial = 0;
+  private latestRestoredSubtaskHistorySerial = 0;
 
   constructor(
     private readonly changed: () => void,
@@ -1760,11 +1774,15 @@ export class Monitor {
           pass,
           subtaskOmissions,
         );
-        if (!component || !this.commitRestoredSubtaskHistory(state, metadata)) {
+        const savedHistory = component
+          ? this.commitRestoredSubtaskHistory(state, metadata, component)
+          : undefined;
+        if (!savedHistory) {
           this.refuseRestoredSubtaskHistory(work);
           return;
         }
         if (!this.restoredWorkIsCurrent(work)) return;
+        this.adoptRestoredSubtaskHistory(savedHistory);
         this.subtaskOmissions = subtaskOmissions;
         if (canonicalReset) {
           this.mergeTelemetry(metadata, work, pass);
@@ -1815,11 +1833,15 @@ export class Monitor {
           pass,
           subtaskOmissions,
         );
-        if (!component || !this.commitRestoredSubtaskHistory(state, metadata)) {
+        const savedHistory = component
+          ? this.commitRestoredSubtaskHistory(state, metadata, component)
+          : undefined;
+        if (!savedHistory) {
           this.refuseRestoredSubtaskHistory(work);
           return;
         }
         if (!this.restoredWorkIsCurrent(work)) return;
+        this.adoptRestoredSubtaskHistory(savedHistory);
         this.subtaskOmissions = subtaskOmissions;
         this.mergeTelemetry(metadata, work, pass);
         this.resetState(work.sourceId, false, component);
@@ -2408,7 +2430,11 @@ export class Monitor {
     this.evidence.reset();
     this.beads.clear();
     this.beadsGeneration++;
-    if (sourceChanged) this.subtaskOmissions = undefined;
+    if (sourceChanged) {
+      this.subtaskOmissions = undefined;
+      this.savingRestoredSubtaskHistory = undefined;
+      this.restoredSubtaskHistoryFloor = undefined;
+    }
     if (!resetTelemetry) return;
     this.lastJevCallAt = undefined;
     this.lastExtractionCallAt = undefined;
@@ -2553,14 +2579,33 @@ export class Monitor {
     };
   }
 
+  /** Reentrant controls may read only a same-source restore candidate. */
+  private stagedRestoredSubtaskHistory() {
+    for (const candidate of [
+      this.savingRestoredSubtaskHistory,
+      this.restoredSubtaskHistoryFloor,
+    ])
+      if (
+        candidate &&
+        candidate.sourceId === this.state.sourceId &&
+        candidate.sourceId === this.options.sourceId()
+      )
+        return candidate;
+  }
+
   /** Reentrant OFF/restore writes retain only same-source saved candidates. */
   private durableSubtaskOmissions() {
+    const restored = this.stagedRestoredSubtaskHistory();
+    const prior = restored?.subtaskOmissions
+      ? mergeSubtaskOmissions(this.subtaskOmissions, restored.subtaskOmissions)
+          .summary
+      : this.subtaskOmissions;
     const saving = this.savingSubtaskOmissionSummary;
     return saving &&
       saving.sourceId === this.state.sourceId &&
       saving.sourceId === this.options.sourceId()
-      ? mergeSubtaskOmissions(this.subtaskOmissions, saving.summary).summary
-      : this.subtaskOmissions;
+      ? mergeSubtaskOmissions(prior, saving.summary).summary
+      : prior;
   }
 
   /** Strict-v11 monitor projection; generic sidecar replaces legacy coverage. */
@@ -2668,10 +2713,11 @@ export class Monitor {
     );
   }
 
-  /** Pending committed target is the restore floor until an old flight drains. */
+  /** Pending or saved same-source history is the floor until control adoption. */
   private authoritativeSubtaskCheckpoint(): SubtaskRuntimeCheckpoint {
     return structuredClone(
-      this.pendingSubtaskCheckpoint ??
+      this.stagedRestoredSubtaskHistory()?.component ??
+        this.pendingSubtaskCheckpoint ??
         this.subtaskRuntime?.checkpoint() ??
         this.emptySubtaskCheckpoint(),
     );
@@ -3146,18 +3192,55 @@ export class Monitor {
     };
   }
 
-  /** Preflight exact ON/OFF envelopes, then persist before target adoption. */
+  /** Preflight and stage full history so nested same-source controls retain it. */
   private commitRestoredSubtaskHistory(
     state: HybridState,
     metadata: SubtaskMonitorCheckpointMetadata,
-  ) {
-    if (!canCommitSubtaskCheckpoint(state, metadata)) return false;
-    return (
-      commitSubtaskCheckpoint(state, metadata, (checkpoint) => {
+    component: Readonly<SubtaskRuntimeCheckpoint>,
+  ): StagedRestoredSubtaskHistory | undefined {
+    if (!canCommitSubtaskCheckpoint(state, metadata)) return;
+    const staged: StagedRestoredSubtaskHistory = {
+      sourceId: state.sourceId,
+      serial: ++this.nextRestoredSubtaskHistorySerial,
+      component: structuredClone(component),
+      ...(metadata.subtaskOmissions === undefined
+        ? {}
+        : { subtaskOmissions: structuredClone(metadata.subtaskOmissions) }),
+    };
+    const prior = this.savingRestoredSubtaskHistory;
+    this.savingRestoredSubtaskHistory = staged;
+    let saved: ReturnType<typeof commitSubtaskCheckpoint>;
+    try {
+      saved = commitSubtaskCheckpoint(state, metadata, (checkpoint) => {
         this.persist(checkpoint);
         return true;
-      }) !== undefined
-    );
+      });
+    } finally {
+      if (this.savingRestoredSubtaskHistory === staged)
+        this.savingRestoredSubtaskHistory = prior;
+    }
+    if (!saved) return;
+    if (staged.serial > this.latestRestoredSubtaskHistorySerial) {
+      this.latestRestoredSubtaskHistorySerial = staged.serial;
+      if (
+        staged.sourceId === this.state.sourceId &&
+        staged.sourceId === this.options.sourceId()
+      ) {
+        this.restoredSubtaskHistoryFloor = staged;
+        this.subtaskOmissions = mergeSubtaskOmissions(
+          this.subtaskOmissions,
+          staged.subtaskOmissions,
+        ).summary;
+      }
+    }
+    return staged;
+  }
+
+  /** A current control installs its staged history; stale work leaves no queue. */
+  private adoptRestoredSubtaskHistory(staged: StagedRestoredSubtaskHistory) {
+    const floor = this.restoredSubtaskHistoryFloor;
+    if (floor?.sourceId === staged.sourceId && floor.serial === staged.serial)
+      this.restoredSubtaskHistoryFloor = undefined;
   }
 
   /** Refusal remains locally OFF with prior state/history and no fallback write. */

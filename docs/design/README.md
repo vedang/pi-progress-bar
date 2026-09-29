@@ -1,16 +1,16 @@
 # Progress monitor — review packet
 
-**Current contract: pragmatic hybrid progress, Beads epic `pi-progress-barroot-xkg`.** [PRODUCT.md](../../PRODUCT.md) governs scope; [runtime README](../../README.md) documents the implementation. Read [hybrid acceptance evidence](hybrid-acceptance.md) and [presentation handoff](hybrid-presentation.md) first. Independent full-batch acceptance/publication remains pending until H5 closes.
+**Current contract: pragmatic hybrid progress, Beads epic `pi-progress-barroot-xkg`.** [PRODUCT.md](../../PRODUCT.md) governs scope; [runtime README](../../README.md) documents the implementation. Read [hybrid acceptance evidence](hybrid-acceptance.md) and [presentation handoff](hybrid-presentation.md) first. The current delivery scope is one combined implementation QA/review (C11/N07), then notification for owner testing; see [scope and retained semantic evidence](semantic-qualification-status.md). No release is authorized.
 
 **Historical design packet below:** manual source/Apply/consent/inspector affordances, interval polling, selected Beads-source workflow and span-only/Jev-only task labels are superseded. Retain useful signal semantics and evidence distinctions, not obsolete UX. Historical experimental results are not current release acceptance.
 
 ## Current subtask revision
 
-[Conversation-grounded subtask design](coverage-subtasks.md) supersedes the workbook-bound coverage plan. [Implementation audit and rework map](generic-subtasks-rework.md) separates reusable mechanics from required changes. Generic Jev→LLM development is owner-authorized and underway; historical coverage test passes are not acceptance of the revised requirement.
+[Conversation-grounded subtask design](coverage-subtasks.md) supersedes the workbook-bound coverage plan. [Implementation audit and rework map](generic-subtasks-rework.md) separates reusable mechanics from required changes. Generic Jev→LLM subtasks and strict v11 are implemented; historical coverage test passes are not proof of generic semantic quality. Formal semantic qualification and evaluator tooling are owner-deferred/nonblocking. The [exhaustive test audit](test-audit.md) is complete.
 
 ## Authorized continuation nudge
 
-[Bounded continuation design](continuation-nudge.md), epic `pi-progress-barroot-5dy`, adds one authorization-aware follow-up after a reconciled status reply. This is staged implementation work, not current release acceptance. Its loop/authority constraints are separate from generic subtasks; final QA/handoff joins both tracks.
+[Bounded continuation design](continuation-nudge.md), epic `pi-progress-barroot-5dy`, adds one authorization-aware follow-up after a reconciled status reply. The runtime is implemented, not released. Its loop/authority constraints remain in scope; one combined QA/review covers both tracks, then the owner is notified to test. Formal continuation semantic evaluation is deferred/nonblocking, not passed.
 
 ## Read in this order
 

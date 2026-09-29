@@ -1,6 +1,10 @@
 # Test audit before feature completion
 
-## Current owner order (2026-09-28)
+## Current status (2026-09-29)
+
+The exhaustive audit is **complete**: `pi-progress-barroot-hmv` closed with independent cumulative review `584dfc88` and bookkeeping `d929dcc2`. Subsequent feature repairs and legacy retirement retain their own evidence. The owner now requires one combined implementation QA/review (C11/N07), then notification to test; y86 is superseded, not proof of manual testing. See [current scope](semantic-qualification-status.md). No new audit campaign is required.
+
+## Historical owner order (2026-09-28)
 
 The owner explicitly superseded the earlier post-manual-review audit deferral:
 
@@ -8,7 +12,7 @@ The owner explicitly superseded the earlier post-manual-review audit deferral:
 2. Complete pending generic subtasks and continuation implementation, QA and independent reviews.
 3. Hand off for owner manual review.
 
-`pi-progress-barroot-hmv` is active, no longer blocked by feature epics or manual gate. `pi-progress-barroot-y86` remains open and now follows the audit plus both feature epics. No release, installation, push or branch creation is authorized.
+At that time, `pi-progress-barroot-hmv` became active and was no longer blocked by feature epics or the manual gate. `pi-progress-barroot-y86` then followed the audit plus both feature epics; the current owner scope above supersedes that sequence. No release, installation, push or branch creation is authorized.
 
 Owner also selected **persist omission summaries**: skipped/coalesced/oversized optional subtask analysis must remain visible after reload. Bounded persistence/schema changes are authorized; Main owns design and verification. No raw content retention or automatic retry. `ru7` remains an implementation requirement, not a useless-test exemption.
 

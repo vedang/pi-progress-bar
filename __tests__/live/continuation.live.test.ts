@@ -25,6 +25,11 @@ import {
 } from "../../src/analysis/continuation-gate";
 import { JevGateway } from "../../src/analysis/gateway";
 import type { HybridTask, MutationEvent } from "../../src/core/hybrid-state";
+import {
+  gradeQualification,
+  type QualificationGrade,
+  validateQualificationCases,
+} from "../fixtures/semantic-qualification";
 
 // Separate opt-in prevents ordinary test-live groups from dispatching this gate.
 const mode = process.env.PROGRESS_N06_MODE;
@@ -201,6 +206,12 @@ it.runIf(enabled)(
     const root = resolve(dir);
     const corpusText = readFileSync(join(root, "n06-fresh-cases.json"), "utf8");
     const corpus = JSON.parse(corpusText) as Corpus;
+    const qualificationCases = corpus.cases.map((item) => ({
+      id: item.id,
+      parentCount: item.labels.length,
+      eligible: item.eligible,
+    }));
+    validateQualificationCases(qualificationCases);
     const runtime = await ModelRuntime.create({
       allowModelNetwork: false,
       signal: AbortSignal.timeout(15_000),
@@ -217,11 +228,18 @@ it.runIf(enabled)(
       return batch.request;
     });
     const manifest = {
-      version: 1,
+      version: 2,
+      policy: {
+        positiveTargets: 40,
+        minimumCorrect: 38,
+        maximumUnexpected: 0,
+        completeCorpusRequired: true,
+        independentOutputReviewRequired: true,
+      },
       revision,
       provider,
       model: modelId,
-      caps: { jev: 17, model: 6 },
+      caps: { jev: 80, model: 40 },
       limits: {
         jevRequestBytes: 24576,
         jevResponseBytes: 131072,
@@ -233,6 +251,9 @@ it.runIf(enabled)(
       },
       sourceHashes: sources("src"),
       runnerHash: hash(readFileSync(import.meta.filename, "utf8")),
+      scoringHash: hash(
+        readFileSync("__tests__/fixtures/semantic-qualification.ts", "utf8"),
+      ),
       corpusHash: hash(corpusText),
       corpus,
       gateRequests: requests,
@@ -241,10 +262,7 @@ it.runIf(enabled)(
     };
     const manifestPath = join(root, "n06-manifest.json");
     if (mode === "freeze") {
-      expect(corpus.cases).toHaveLength(17);
-      expect(corpus.cases.filter((item) => item.eligible.length)).toHaveLength(
-        6,
-      );
+      expect(corpus.cases).toHaveLength(80);
       writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), {
         flag: "wx",
       });
@@ -261,6 +279,12 @@ it.runIf(enabled)(
     const record = (data: unknown) =>
       appendFileSync(ledger, `${JSON.stringify(data)}\n`);
     const counts = { jev: 0, model: 0 };
+    const completed = { jev: 0, model: 0 };
+    const failed = { jev: 0, model: 0 };
+    const cancelled = { jev: 0, model: 0 };
+    const grades: QualificationGrade[] = [];
+    const finishedCases: string[] = [];
+    const startedCases: string[] = [];
     let current = "preflight";
     let fatal: string | undefined;
     const fail = (reason: string): never => {
@@ -310,8 +334,11 @@ it.runIf(enabled)(
         });
         if (result.stopReason !== "stop" || Buffer.byteLength(text) > 4096)
           fail("model-result-invalid");
+        completed.model++;
         return result;
       } catch {
+        if (options?.signal?.aborted) cancelled.model++;
+        else failed.model++;
         record({
           type: "model-failure",
           case: current,
@@ -321,11 +348,14 @@ it.runIf(enabled)(
         return fail("model-failure");
       }
     };
-    let outcome = "failed";
+    let outcome = "operational-failure";
     try {
       for (const [i, item] of corpus.cases.entries()) {
         current = item.id;
+        startedCases.push(item.id);
         const authority = authorities[i];
+        let admitted: number[] | undefined;
+        let unexpected: number[] = [];
         let dispatch = () => false;
         let physical = (_drain: Promise<void>) => {};
         const gateway = new JevGateway({
@@ -352,8 +382,11 @@ it.runIf(enabled)(
                 usage: body.usage,
               });
               if (!response.ok) fail("jev-http-failure");
+              completed.jev++;
               return response;
             } catch {
+              if (init?.signal?.aborted) cancelled.jev++;
+              else failed.jev++;
               record({
                 type: "jev-failure",
                 case: current,
@@ -366,6 +399,10 @@ it.runIf(enabled)(
         });
         gateway.enable(item.id);
         const emitted: unknown[] = [];
+        const draft = selectedModelContinuation(() => ({
+          model,
+          modelRegistry: registry,
+        }));
         const controller = new ContinuationController({
           authority: () => authority,
           canStart: () => true,
@@ -381,28 +418,43 @@ it.runIf(enabled)(
                 true,
               );
               const applied = applyContinuationGate(batch, result, authority);
+              if (!applied) return fail("gate-invalid-or-unavailable");
+              admitted = [...applied.acceptedIndices];
+              unexpected = admitted.filter(
+                (index) => !item.eligible.includes(index),
+              );
+              grades.push({ id: item.id, acceptedIndices: admitted });
               record({
                 type: "gate-grade",
                 case: current,
                 expected: item.eligible,
-                actual: applied?.acceptedIndices,
-                assessments: applied?.assessments,
+                actual: admitted,
+                missed: item.eligible.filter(
+                  (index) => !admitted?.includes(index),
+                ),
+                unexpected,
+                assessments: applied.assessments,
               });
-              if (
-                !applied ||
-                JSON.stringify(applied.acceptedIndices) !==
-                  JSON.stringify(item.eligible)
-              )
-                fail("gate-semantic-mismatch");
               return result;
             } finally {
               signal.removeEventListener("abort", abort);
             }
           },
-          draft: selectedModelContinuation(() => ({
-            model,
-            modelRegistry: registry,
-          })),
+          draft: async (...args) => {
+            if (unexpected.length) {
+              record({
+                type: "downstream-fenced",
+                case: item.id,
+                unexpected,
+                phase: "draft",
+                exercised: false,
+              });
+              throw new Error(
+                "Qualification fence: unexpected target admission",
+              );
+            }
+            return draft(...args);
+          },
           emit: (draft) => {
             emitted.push(draft);
             return true;
@@ -420,26 +472,52 @@ it.runIf(enabled)(
           expect(controller.settle(authority.receipt)).toBe(true);
           await controller.wake();
           if (fatal) throw new Error(fatal);
+          if (!admitted) fail("missing-gate-grade");
           record({
             type: "case-result",
             case: current,
             snapshot: controller.snapshot(),
             emitted,
             expectedAction: item.actionExpectation,
-            semanticDraftReview: item.eligible.length
+            semanticDraftReview: emitted.length
               ? "pending-independent-review"
-              : "not-applicable",
+              : "not-exercised",
+            downstreamFenced: unexpected.length > 0,
           });
-          expect(emitted).toHaveLength(item.eligible.length ? 1 : 0);
+          expect(emitted).toHaveLength(
+            !unexpected.length && admitted?.length ? 1 : 0,
+          );
+          finishedCases.push(item.id);
         } finally {
           controller.invalidate();
           gateway.pause();
         }
       }
-      outcome = "gate-pass-draft-review-pending";
+      const score = gradeQualification(qualificationCases, grades);
+      record({ type: "qualification-score", score, acceptance: false });
+      outcome = score.gateCriteriaMet
+        ? "gate-criteria-met-draft-review-pending"
+        : "semantic-gate-failed";
     } finally {
-      record({ type: "summary", outcome, counts, failure: fatal });
+      record({
+        type: "summary",
+        outcome,
+        counts,
+        completed,
+        failed,
+        cancelled,
+        failure: fatal,
+        finishedCases,
+        unrunCases: corpus.cases
+          .filter((item) => !startedCases.includes(item.id))
+          .map((item) => item.id),
+        unfinishedCases: startedCases.filter(
+          (id) => !finishedCases.includes(id),
+        ),
+        acceptance: false,
+      });
     }
+    expect(outcome).toBe("gate-criteria-met-draft-review-pending");
   },
-  900_000,
+  3_600_000,
 );

@@ -160,7 +160,9 @@ it.each([false, true])(
         return response;
       dispatches++;
       if (held && dispatches === 1) {
-        const body = await response.json();
+        const body = (await response.json()) as {
+          answers: Record<string, unknown>;
+        };
         for (const key of Object.keys(body.answers))
           body.answers[key] = {
             type: "choice",

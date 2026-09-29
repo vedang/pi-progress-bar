@@ -5129,7 +5129,9 @@ export class Monitor {
       this.healthGateway.enable(this.identity());
       this.activityGateway.enable(this.identity());
       this.detailGateway.enable(this.identity());
+      this.subtaskGateway.enable(this.subtaskIdentity());
       this.correctionGateway.enable(this.identity());
+      this.continuationGateway.enable(this.identity());
       this.visibilityGateway.enable(this.visibilityIdentity());
       // Rebuild from current canonical branch after discarding stale semantics.
       this.requeue(this.beginCanonicalPass(), true);

@@ -4,7 +4,7 @@
 
 C10 (generic subtasks) and N06 (continuation) formal semantic qualification are **deferred, nonblocking future work**, not passed. The owner explicitly deferred both evaluations while retaining both implemented features and all runtime safeguards. Passing deterministic tests does not establish semantic quality.
 
-One combined implementation QA/review is tracked by `pi-progress-barroot-0wy.12` (C11/N07). It covers the retained feature batch, including pause/OFF, stale-result fencing and no-loop behavior. C12, y86 and Q00 (`y3h.25`) separate handoff/owner-acceptance gates are superseded by the owner's instruction: **“Just let me know and I will test.”** Notify the owner after combined QA; manual testing has not been recorded as performed. No installation, release or push is authorized.
+The combined implementation QA/review `pi-progress-barroot-0wy.12` (C11/N07) is **complete** for candidate `3a03824d5d139179712478990dc497f5d2282068`. Reviewer `3cb98d33` covered the retained feature batch; its canonical-amendment gateway recovery finding was reproduced and resolved by focused RED→GREEN verification (`6daf4e21` → `3a03824d`), accepted by the coordinator. No second full-batch review was claimed. C12, y86 and Q00 (`y3h.25`) separate handoff/owner-acceptance gates are superseded by the owner's instruction: **“Just let me know and I will test.”** The coordinator notified the owner that the candidate is ready for testing; owner testing has **not** been recorded as performed. No installation, release or push is authorized.
 
 This scope decision supersedes earlier semantic prerequisites and staged handoff sequencing in the design documents and embedded Beads plans. Historical evidence and runtime contracts are unchanged.
 
@@ -30,9 +30,11 @@ The owner subsequently approved a **≥95% positive-admission gate with zero neg
 
 ## Verification and remaining work
 
-Main verification after the latest development work: formatting, static checks, **2,009 unit tests and 111 integration tests passed**. Earlier real-host lifecycle evidence remains separately documented; these latest runs do not claim a new host validation.
+Final candidate verification: formatting, static checks, **2,013 unit tests and 111 integration tests passed**, plus package dry-run and **51 existing offline installed-host tests**. Pinned Pi0.84.2/ai0.84.4 and the six-suite installed Pi0.87.1/ai0.87.1 subset used faux providers; this is not model-quality qualification, owner testing or a blanket dual-host promise. Three historical Biome warnings remain. The initial new-test TypeScript failure was corrected and its log retained.
 
-Further calibration did not establish the former zero-miss requirement. No additional calibration, paid evaluation or evaluator repair is required for the current delivery scope. Runtime correctness remains in the single combined QA/review; formal model-quality evaluation and tooling are deferred until later authorization.
+Combined review: `.agents/plans/20260929T085452--verify-retained-feature-batch__active/combined-review.md`. Focused repair and final gate evidence: `.agents/plans/20260929T091718--repair-amendment-gateway-recovery__active/repair-verification.md`. The known N05 B/C competing-chain host-evidence limitation remains nonblocking.
+
+Further calibration did not establish the former zero-miss requirement. No additional calibration, paid evaluation or evaluator repair is required for the current delivery scope. The single combined implementation QA/review is complete; formal model-quality evaluation and tooling remain deferred until later authorization.
 
 Reviewer `18705a11` identified two P1 defects in the **evaluation runners**, not a new runtime finding: schema-valid draft abstain/proposal noop wrongly aborts full-corpus collection; N06 can summarize before physical provider settlement. They are retained in deferred task `pi-progress-barroot-klc` as nonblocking future tooling repairs; C10/N06 depend on that repair only within the deferred evaluation backlog. The runners are not ready for a new qualification run. No new 80-case corpora or paid runs were created under this protocol.
 

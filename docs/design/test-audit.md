@@ -2,7 +2,7 @@
 
 ## Current status (2026-09-29)
 
-The exhaustive audit is **complete**: `pi-progress-barroot-hmv` closed with independent cumulative review `584dfc88` and bookkeeping `d929dcc2`. Subsequent feature repairs and legacy retirement retain their own evidence. The owner now requires one combined implementation QA/review (C11/N07), then notification to test; y86 is superseded, not proof of manual testing. See [current scope](semantic-qualification-status.md). No new audit campaign is required.
+The exhaustive audit is **complete**: `pi-progress-barroot-hmv` closed with independent cumulative review `584dfc88` and bookkeeping `d929dcc2`. Subsequent feature repairs and legacy retirement retain their own evidence. The combined implementation QA/review (C11/N07) is also complete at `3a03824d`, and the coordinator notified the owner that it is ready to test; y86 is superseded, not proof of manual testing. See [current scope](semantic-qualification-status.md). No new audit campaign is required.
 
 ## Historical owner order (2026-09-28)
 

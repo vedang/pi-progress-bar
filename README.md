@@ -105,7 +105,7 @@ The board shows optional child lists and reported progress separately from paren
 
 [Bounded continuation](docs/design/continuation-nudge.md) may issue one conditional reminder after a correlated reconciliation reply leaves authorized, actionable work pending. Pause/OFF, stale-authority checks, ownership boundaries and no-loop safeguards remain mandatory. Direct continuation calls have a separate per-instance budget; a triggered agent response may incur additional ordinary provider charges.
 
-The owner deferred formal subtask/continuation model-quality evaluation and evaluator tooling as nonblocking future work. Prior semantic failures remain failures. One combined implementation QA/review remains, then the owner will be notified to test—no separate owner-acceptance gate or claim of manual testing. See [current scope and evidence](docs/design/semantic-qualification-status.md).
+The owner deferred formal subtask/continuation model-quality evaluation and evaluator tooling as nonblocking future work. Prior semantic failures remain failures. The combined implementation QA/review is complete at `3a03824d`, with 2,013 unit, 111 integration and 51 offline installed-host tests passing, plus static checks and package dry-run. The coordinator notified the owner that it is ready for testing—no installation performed, separate owner-acceptance gate or claim of completed manual testing. See [current scope and evidence](docs/design/semantic-qualification-status.md).
 
 ## Limits and costs
 

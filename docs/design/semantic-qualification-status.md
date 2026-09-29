@@ -18,10 +18,14 @@ Model, confidence/probability thresholds, runtime request/response limits, autho
 
 The current continuation rubric includes the independently reviewed all-supplied-text evidence boundary (`4ce56247`). Generic-subtask production wording remains unchanged. No installation, release or push occurred.
 
-## Verification and next decision
+## Revised prospective policy
+
+The owner subsequently approved a **≥95% positive-admission gate with zero negative admissions**, on newly frozen full corpora, keeping runtime thresholds and safety rules unchanged. This is prospective only: the failures above are not reclassified as passes. C10 and N06 must qualify separately; successful gate recall does not waive grounding, scope or output-quality requirements. No run under the revised policy has qualified yet.
+
+## Verification and remaining work
 
 Main verification after the latest development work: formatting, static checks, **1,998 unit tests and 111 integration tests passed**. Earlier real-host lifecycle evidence remains separately documented; these latest runs do not claim a new host validation.
 
-Further calibration has not demonstrated satisfaction of the strict positive-admission gate. Do not declare either stage complete or advance final acceptance/manual handoff. Changing the evaluator architecture, model, runtime thresholds, or acceptance policy requires an explicit decision; additional calls alone are not acceptance evidence.
+Further calibration did not establish the former zero-miss requirement. Execute the newly approved prospective policy before declaring either stage complete or advancing final acceptance/manual handoff. The approval does not authorize changes to evaluator architecture, model, runtime thresholds or safety rules; additional calls alone are not acceptance evidence.
 
 Detailed immutable artifacts remain under the task folders for `validate-fresh-semantic-behavior`, `calibrate-continuation-decision-quality`, `clarify-generic-subtask-decisions`, and `evaluate-fresh-continuation-semantics` in `.agents/plans/`.

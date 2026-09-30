@@ -153,6 +153,13 @@ import {
 } from "./subtask-runtime";
 import { type SubtaskSnapshot, SubtaskStore } from "./subtasks";
 import type { Ledger } from "./types";
+import {
+  mergeUsageTelemetry,
+  type ProviderUsage,
+  saturatingAdd,
+  UsageMeter,
+  type UsageTelemetry,
+} from "./usage-meter";
 
 export interface SelectedModelResult {
   text: string;
@@ -183,12 +190,6 @@ export interface MonitorOptions {
   onContinuationWake?: () => void;
   /** Accepted correction advice is runtime-only and delivered by the host seam. */
   onCorrection?: (emission: CorrectionEmission) => void;
-}
-
-interface ProviderUsage {
-  calls: number;
-  inputTokens: number;
-  outputTokens: number;
 }
 
 interface RetainedCard {
@@ -321,11 +322,8 @@ interface ActiveWork {
   barrier?: Deferred;
 }
 
-interface Telemetry {
+interface Telemetry extends UsageTelemetry {
   sourceId: string;
-  usage: { jev: ProviderUsage; extraction: ProviderUsage };
-  lastJevCallAt?: number;
-  lastExtractionCallAt?: number;
 }
 
 interface ControlWork {
@@ -469,24 +467,6 @@ const diagnosticLabels: Record<string, string> = {
 
 class RetryableJevError extends RetryableProviderError {}
 
-const copyUsage = (usage: ProviderUsage): ProviderUsage => ({ ...usage });
-const validUsage = (usage: ProviderUsage) => {
-  if (
-    !nonNegativeInteger(usage.calls) ||
-    !nonNegativeInteger(usage.inputTokens) ||
-    !nonNegativeInteger(usage.outputTokens)
-  )
-    throw new Error("Invalid provider usage");
-  return { ...usage };
-};
-/** Never form an unsafe intermediate while preserving monotonic lifetime usage. */
-const saturatingAdd = (current: number, delta: number) => {
-  if (!nonNegativeInteger(current) || !nonNegativeInteger(delta))
-    throw new RetryableProviderError();
-  return delta > Number.MAX_SAFE_INTEGER - current
-    ? Number.MAX_SAFE_INTEGER
-    : current + delta;
-};
 const copyCard = (card: RetainedCard): RetainedCard => ({
   ...card,
   health: { ...card.health },
@@ -665,10 +645,9 @@ export class Monitor {
   private correctionFacts = new Map<string, CorrectionFact>();
   private correctionEpoch = 0;
   readonly evidence = new EvidenceStore();
-  readonly usage = {
-    jev: { calls: 0, inputTokens: 0, outputTokens: 0 },
-    extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
-  };
+  private readonly usageMeter = new UsageMeter();
+  /** Live lifetime counters; the meter owns and mutates this exact object. */
+  readonly usage = this.usageMeter.usage;
   /** Passive host ingress feeds generic subtask evidence and access gates. */
   private coverageAdapter = new CoverageAdapter();
   private coverageAdapterEpoch = 0;
@@ -777,8 +756,6 @@ export class Monitor {
   private beadsGeneration = 0;
   private beadsInFlight = false;
   private beadsRefreshQueued = false;
-  private lastJevCallAt?: number;
-  private lastExtractionCallAt?: number;
   private diagnostics = new Map<string, number>();
   /** A rejected persisted shape remains OFF until a new restore boundary. */
   private restoreRejection?: "unsupported" | "corrupt";
@@ -1345,17 +1322,7 @@ export class Monitor {
   }
 
   private captureTelemetry(sourceId: string): Telemetry {
-    return {
-      sourceId,
-      usage: {
-        jev: copyUsage(this.usage.jev),
-        extraction: copyUsage(this.usage.extraction),
-      },
-      ...(this.lastJevCallAt ? { lastJevCallAt: this.lastJevCallAt } : {}),
-      ...(this.lastExtractionCallAt
-        ? { lastExtractionCallAt: this.lastExtractionCallAt }
-        : {}),
-    };
+    return { sourceId, ...this.usageMeter.telemetry() };
   }
 
   private beginControl(input: Omit<ControlWork, "epoch" | "done">) {
@@ -1453,38 +1420,7 @@ export class Monitor {
       return;
     }
     this.applyMetadata(metadata, pass);
-    this.usage.jev.calls = Math.max(
-      this.usage.jev.calls,
-      work.telemetry.usage.jev.calls,
-    );
-    this.usage.jev.inputTokens = Math.max(
-      this.usage.jev.inputTokens,
-      work.telemetry.usage.jev.inputTokens,
-    );
-    this.usage.jev.outputTokens = Math.max(
-      this.usage.jev.outputTokens,
-      work.telemetry.usage.jev.outputTokens,
-    );
-    this.usage.extraction.calls = Math.max(
-      this.usage.extraction.calls,
-      work.telemetry.usage.extraction.calls,
-    );
-    this.usage.extraction.inputTokens = Math.max(
-      this.usage.extraction.inputTokens,
-      work.telemetry.usage.extraction.inputTokens,
-    );
-    this.usage.extraction.outputTokens = Math.max(
-      this.usage.extraction.outputTokens,
-      work.telemetry.usage.extraction.outputTokens,
-    );
-    this.lastJevCallAt =
-      Math.max(this.lastJevCallAt ?? 0, work.telemetry.lastJevCallAt ?? 0) ||
-      undefined;
-    this.lastExtractionCallAt =
-      Math.max(
-        this.lastExtractionCallAt ?? 0,
-        work.telemetry.lastExtractionCallAt ?? 0,
-      ) || undefined;
+    this.usageMeter.merge(work.telemetry);
   }
 
   private scanContext(
@@ -1800,14 +1736,7 @@ export class Monitor {
         : {}),
       activity: this.activity,
       service: this.service(),
-      usage: {
-        jev: copyUsage(this.usage.jev),
-        extraction: copyUsage(this.usage.extraction),
-      },
-      ...(this.lastJevCallAt ? { lastJevCallAt: this.lastJevCallAt } : {}),
-      ...(this.lastExtractionCallAt
-        ? { lastExtractionCallAt: this.lastExtractionCallAt }
-        : {}),
+      ...this.usageMeter.telemetry(),
     };
   }
 
@@ -2144,14 +2073,7 @@ export class Monitor {
         correctionEpoch !== this.correctionEpoch
       )
         return;
-      this.usage.jev.inputTokens = saturatingAdd(
-        this.usage.jev.inputTokens,
-        result.usage.input_tokens,
-      );
-      this.usage.jev.outputTokens = saturatingAdd(
-        this.usage.jev.outputTokens,
-        result.usage.output_tokens,
-      );
+      this.usageMeter.addJev(result.usage);
       this.save();
       this.publish();
       return result;
@@ -2276,14 +2198,7 @@ export class Monitor {
       this.restoredSubtaskHistoryFloor = undefined;
     }
     if (!resetTelemetry) return;
-    this.lastJevCallAt = undefined;
-    this.lastExtractionCallAt = undefined;
-    this.usage.jev.calls = 0;
-    this.usage.jev.inputTokens = 0;
-    this.usage.jev.outputTokens = 0;
-    this.usage.extraction.calls = 0;
-    this.usage.extraction.inputTokens = 0;
-    this.usage.extraction.outputTokens = 0;
+    this.usageMeter.reset();
   }
 
   /** Reject only persisted shape; canonical amendments remain normal restore reconciliation. */
@@ -2385,14 +2300,7 @@ export class Monitor {
         component.journal.reports.length > 0);
     return {
       enabled,
-      usage: {
-        jev: validUsage(this.usage.jev),
-        extraction: validUsage(this.usage.extraction),
-      },
-      ...(this.lastJevCallAt ? { lastJevCallAt: this.lastJevCallAt } : {}),
-      ...(this.lastExtractionCallAt
-        ? { lastExtractionCallAt: this.lastExtractionCallAt }
-        : {}),
+      ...this.usageMeter.metadata(),
       ...(idleDoneTaskId ? { idleDoneTaskId } : {}),
       ...(healthCards.size
         ? { healthCards: [...healthCards.values()].map(copyHealthCard) }
@@ -2841,48 +2749,9 @@ export class Monitor {
         };
     const preserveTelemetry =
       work.preserveControls && work.sourceId === work.telemetry.sourceId;
-    const usage = preserveTelemetry
-      ? {
-          jev: {
-            calls: Math.max(
-              base.usage.jev.calls,
-              work.telemetry.usage.jev.calls,
-            ),
-            inputTokens: Math.max(
-              base.usage.jev.inputTokens,
-              work.telemetry.usage.jev.inputTokens,
-            ),
-            outputTokens: Math.max(
-              base.usage.jev.outputTokens,
-              work.telemetry.usage.jev.outputTokens,
-            ),
-          },
-          extraction: {
-            calls: Math.max(
-              base.usage.extraction.calls,
-              work.telemetry.usage.extraction.calls,
-            ),
-            inputTokens: Math.max(
-              base.usage.extraction.inputTokens,
-              work.telemetry.usage.extraction.inputTokens,
-            ),
-            outputTokens: Math.max(
-              base.usage.extraction.outputTokens,
-              work.telemetry.usage.extraction.outputTokens,
-            ),
-          },
-        }
-      : base.usage;
-    const lastJevCallAt = preserveTelemetry
-      ? Math.max(base.lastJevCallAt ?? 0, work.telemetry.lastJevCallAt ?? 0) ||
-        undefined
-      : base.lastJevCallAt;
-    const lastExtractionCallAt = preserveTelemetry
-      ? Math.max(
-          base.lastExtractionCallAt ?? 0,
-          work.telemetry.lastExtractionCallAt ?? 0,
-        ) || undefined
-      : base.lastExtractionCallAt;
+    const { usage, lastJevCallAt, lastExtractionCallAt } = preserveTelemetry
+      ? mergeUsageTelemetry(base, work.telemetry)
+      : base;
     const healthCards = (base.healthCards ?? [])
       .filter((card) => this.healthCardMatchesCanonical(card, pass, state))
       .map(copyHealthCard);
@@ -4398,15 +4267,7 @@ export class Monitor {
     this.lastDisplayedTaskId = metadata?.idleDoneTaskId;
     this.idleDoneInvalidated = !this.lastDisplayedTaskId;
     this.syncPresentationCard();
-    this.lastJevCallAt = metadata?.lastJevCallAt;
-    this.lastExtractionCallAt = metadata?.lastExtractionCallAt;
-    const usage = metadata?.usage;
-    this.usage.jev.calls = usage?.jev.calls ?? 0;
-    this.usage.jev.inputTokens = usage?.jev.inputTokens ?? 0;
-    this.usage.jev.outputTokens = usage?.jev.outputTokens ?? 0;
-    this.usage.extraction.calls = usage?.extraction.calls ?? 0;
-    this.usage.extraction.inputTokens = usage?.extraction.inputTokens ?? 0;
-    this.usage.extraction.outputTokens = usage?.extraction.outputTokens ?? 0;
+    this.usageMeter.load(metadata);
   }
 
   /** Reset passive adapter capabilities on control, model, or branch lifecycle changes. */
@@ -5357,14 +5218,7 @@ export class Monitor {
       );
       if (result) {
         // Accepted responses retain usage even when their display generation went stale.
-        this.usage.jev.inputTokens = saturatingAdd(
-          this.usage.jev.inputTokens,
-          result.usage.input_tokens,
-        );
-        this.usage.jev.outputTokens = saturatingAdd(
-          this.usage.jev.outputTokens,
-          result.usage.output_tokens,
-        );
+        this.usageMeter.addJev(result.usage);
         this.save();
       }
       if (!this.activityBatchCurrent(batch)) return;
@@ -6259,19 +6113,11 @@ export class Monitor {
       };
       const previousDetails = this.taskDetails;
       const previousValues = this.detailValues;
-      const previousInputTokens = this.usage.jev.inputTokens;
-      const previousOutputTokens = this.usage.jev.outputTokens;
+      const previousTokens = this.usageMeter.jevTokens();
       this.taskDetails = new Map(previousDetails);
       this.taskDetails.set(updated.taskId, updated);
       this.rebuildDetailValues(pass);
-      this.usage.jev.inputTokens = saturatingAdd(
-        previousInputTokens,
-        result.usage.input_tokens,
-      );
-      this.usage.jev.outputTokens = saturatingAdd(
-        previousOutputTokens,
-        result.usage.output_tokens,
-      );
+      this.usageMeter.addJev(result.usage);
       try {
         // This optional transaction has no semantic state change. Persist the
         // receipt and accepted tokens as one checkpoint or retain neither.
@@ -6290,8 +6136,7 @@ export class Monitor {
       } catch {
         this.taskDetails = previousDetails;
         this.detailValues = previousValues;
-        this.usage.jev.inputTokens = previousInputTokens;
-        this.usage.jev.outputTokens = previousOutputTokens;
+        this.usageMeter.restoreJevTokens(previousTokens);
         this.parkedDetails.add(updated.taskId);
         this.note("saved-state-rejected");
         this.publish();
@@ -7220,8 +7065,7 @@ export class Monitor {
 
   /** Count every transport dispatch, including failed/retried same-ms attempts. */
   private recordJevDispatch(at: number) {
-    this.lastJevCallAt = at;
-    this.usage.jev.calls = saturatingAdd(this.usage.jev.calls, 1);
+    this.usageMeter.recordJevDispatch(at);
     this.save();
     this.publish();
   }
@@ -7229,8 +7073,7 @@ export class Monitor {
   /** Extraction reports dispatch itself; local failures without callback count zero. */
   private recordExtractionDispatch(at: number, epoch: number) {
     if (!this.enabled || epoch !== this.epoch) return;
-    this.lastExtractionCallAt = at;
-    this.usage.extraction.calls = saturatingAdd(this.usage.extraction.calls, 1);
+    this.usageMeter.recordExtractionDispatch(at);
     this.save();
     this.publish();
   }
@@ -7279,14 +7122,7 @@ export class Monitor {
     // above covers barriers installed while its awaits yielded.
     if (this.activeAuthorityBarrier(epoch, owner))
       throw new RetryableProviderError();
-    this.usage.jev.inputTokens = saturatingAdd(
-      this.usage.jev.inputTokens,
-      result.usage.input_tokens,
-    );
-    this.usage.jev.outputTokens = saturatingAdd(
-      this.usage.jev.outputTokens,
-      result.usage.output_tokens,
-    );
+    this.usageMeter.addJev(result.usage);
     this.save();
     this.publish();
     return result;
@@ -7328,14 +7164,7 @@ export class Monitor {
         ? { kind: "paused" }
         : { kind: "terminal" };
     }
-    this.usage.jev.inputTokens = saturatingAdd(
-      this.usage.jev.inputTokens,
-      result.usage.input_tokens,
-    );
-    this.usage.jev.outputTokens = saturatingAdd(
-      this.usage.jev.outputTokens,
-      result.usage.output_tokens,
-    );
+    this.usageMeter.addJev(result.usage);
     this.save();
     this.publish();
     return { result };
@@ -7370,14 +7199,7 @@ export class Monitor {
         !nonNegativeInteger(result.usage.outputTokens)
       )
         throw new RetryableProviderError();
-      this.usage.extraction.inputTokens = saturatingAdd(
-        this.usage.extraction.inputTokens,
-        result.usage.inputTokens,
-      );
-      this.usage.extraction.outputTokens = saturatingAdd(
-        this.usage.extraction.outputTokens,
-        result.usage.outputTokens,
-      );
+      this.usageMeter.addExtraction(result.usage);
       this.save();
       this.publish();
       return result.text;

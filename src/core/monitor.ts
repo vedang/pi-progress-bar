@@ -38,10 +38,10 @@ import {
 } from "../analysis/activity-label";
 import type { ContinuationGateBatch } from "../analysis/continuation-gate";
 import type { ExtractionInput } from "../analysis/extractor";
-import {
-  type EvaluationRequest,
+import type {
+  EvaluationRequest,
   JevGateway,
-  type ValidatedResult,
+  ValidatedResult,
 } from "../analysis/gateway";
 import { type HealthSnapshot, healthSnapshot } from "../analysis/health";
 import { implementationFromResult } from "../analysis/implementation";
@@ -126,6 +126,7 @@ import {
   type SourceRef,
   tasksNewestFirst,
 } from "./hybrid-state";
+import { type GatewayIdentities, JevGatewaySet } from "./jev-gateways";
 import type { SubtaskAccessSnapshot } from "./subtask-access";
 import {
   restoreSubtaskJournal,
@@ -577,44 +578,31 @@ const MAX_PENDING_SUBTASK_CAPTURE_BYTES = 64 * 1024;
  * Atomic host runtime for hybrid transactions. Display reads receive copied
  * projections only; focus is never evidence or tool-ownership authority.
  */
-/** One Jev transport over the shared endpoint and environment API key. */
-const jevGateway = (
-  options: Omit<
-    ConstructorParameters<typeof JevGateway>[0],
-    "fetch" | "getApiKey"
-  >,
-) =>
-  new JevGateway({
-    fetch: (url, init) => globalThis.fetch(url, init),
-    getApiKey: () => process.env.TYPESAFE_API_KEY,
-    ...options,
-  });
-
 export class Monitor {
   state: HybridState;
   enabled = false;
   activity = "Idle";
   /** Safe local status only. Raw provider errors never enter display/persistence. */
   error?: string;
+  private readonly gateways: JevGatewaySet;
+  /** Consent identities are re-read at every enable. */
+  private readonly gatewayIdentities: GatewayIdentities = {
+    identity: () => this.identity(),
+    subtask: () => this.subtaskIdentity(),
+    visibility: () => this.visibilityIdentity(),
+  };
   readonly gateway: JevGateway;
-  /** Optional health has independent retry/permanent-failure state. */
   private readonly healthGateway: JevGateway;
-  /** Optional display-only tool activity never shares semantic transport authority. */
   private readonly activityGateway: JevGateway;
-  /** Optional grounded details never share semantic/health retry state. */
   private readonly detailGateway: JevGateway;
-  /** Generic subtask gate has its own durable runtime admission callback. */
   private readonly subtaskGateway: JevGateway;
   private subtaskGateDispatch?: (at: number) => boolean;
   private subtaskPhysicalFlight?: SubtaskPhysicalFlightObserver;
-  /** Optional corrective binding has its own one-flight transport authority. */
   private readonly correctionGateway: JevGateway;
-  /** Continuation has its own Jev transport; it never borrows semantic capacity. */
   private readonly continuationGateway: JevGateway;
   private continuationGateDispatch?: (at: number) => boolean;
   /** Raw continuation transport drain remains controller-owned across invalidation. */
   private continuationPhysicalFlight?: (drain: Promise<void>) => void;
-  /** Visibility transport and spend are isolated from semantic/advisory telemetry. */
   private readonly visibilityGateway: JevGateway;
   private readonly visibility = new ExecutionVisibilityStore();
   private visibilitySources = new Map<string, VisibilitySource>();
@@ -771,64 +759,74 @@ export class Monitor {
     private readonly options: MonitorOptions,
   ) {
     this.state = emptyState(options.sourceId());
-    this.gateway = jevGateway({
-      onDispatch: (at) => this.recordJevDispatch(at),
-      onPermanentError: () => this.forceOff(),
-    });
-    this.healthGateway = jevGateway({
-      onDispatch: (at) => this.recordJevDispatch(at),
-      // Health is optional: a permanent health transport error cannot turn OFF tracking.
-      onPermanentError: () => this.note("model-unavailable"),
-    });
-    this.activityGateway = jevGateway({
-      onDispatch: (at) => this.recordJevDispatch(at),
-      // Activity is optional display enrichment; it never disables core tracking.
-      onPermanentError: () => this.note("jev-unavailable"),
-    });
-    this.detailGateway = jevGateway({
-      onDispatch: (at) => this.recordJevDispatch(at),
-      onPermanentError: () => this.note("detail-capacity-skipped"),
-    });
-    this.subtaskGateway = jevGateway({
-      // SubtaskRuntime commits dispatch proof before this callback returns true.
-      beforeDispatch: (at) => this.subtaskGateDispatch?.(at) === true,
-      onPhysicalFlight: (drain) => {
-        try {
-          this.subtaskPhysicalFlight?.(drain);
-        } catch {
-          // Observation is never gateway dispatch authority.
-        }
+    this.gateways = new JevGatewaySet({
+      semantic: {
+        onDispatch: (at) => this.recordJevDispatch(at),
+        onPermanentError: () => this.forceOff(),
       },
-      onPermanentError: () => this.note("jev-unavailable"),
-    });
-    this.correctionGateway = jevGateway({
-      onDispatch: (at) => this.recordJevDispatch(at),
-      // Corrections are optional and never disable semantic progress tracking.
-      onPermanentError: () => this.note("model-unavailable"),
-    });
-    this.continuationGateway = jevGateway({
-      beforeDispatch: (at) => this.continuationGateDispatch?.(at) === true,
-      onPhysicalFlight: (drain) => {
-        try {
-          this.continuationPhysicalFlight?.(drain);
-        } catch {
-          // Observation never controls continuation transport admission.
-        }
+      health: {
+        onDispatch: (at) => this.recordJevDispatch(at),
+        // Health is optional: a permanent health transport error cannot turn OFF tracking.
+        onPermanentError: () => this.note("model-unavailable"),
       },
-      // Continuation is optional; availability is surfaced by its controller.
-      onPermanentError: () => this.note("jev-unavailable"),
-    });
-    this.visibilityGateway = jevGateway({
-      onDispatch: () => {
-        this.visibility.recordDispatch();
-        this.publish();
+      activity: {
+        onDispatch: (at) => this.recordJevDispatch(at),
+        // Activity is optional display enrichment; it never disables core tracking.
+        onPermanentError: () => this.note("jev-unavailable"),
       },
-      // Visibility is optional and must never change semantic/advisory availability.
-      onPermanentError: () => {
-        this.visibility.markIncomplete();
-        this.publish();
+      detail: {
+        onDispatch: (at) => this.recordJevDispatch(at),
+        onPermanentError: () => this.note("detail-capacity-skipped"),
+      },
+      subtask: {
+        // SubtaskRuntime commits dispatch proof before this callback returns true.
+        beforeDispatch: (at) => this.subtaskGateDispatch?.(at) === true,
+        onPhysicalFlight: (drain) => {
+          try {
+            this.subtaskPhysicalFlight?.(drain);
+          } catch {
+            // Observation is never gateway dispatch authority.
+          }
+        },
+        onPermanentError: () => this.note("jev-unavailable"),
+      },
+      correction: {
+        onDispatch: (at) => this.recordJevDispatch(at),
+        // Corrections are optional and never disable semantic progress tracking.
+        onPermanentError: () => this.note("model-unavailable"),
+      },
+      continuation: {
+        beforeDispatch: (at) => this.continuationGateDispatch?.(at) === true,
+        onPhysicalFlight: (drain) => {
+          try {
+            this.continuationPhysicalFlight?.(drain);
+          } catch {
+            // Observation never controls continuation transport admission.
+          }
+        },
+        // Continuation is optional; availability is surfaced by its controller.
+        onPermanentError: () => this.note("jev-unavailable"),
+      },
+      visibility: {
+        onDispatch: () => {
+          this.visibility.recordDispatch();
+          this.publish();
+        },
+        // Visibility is optional and must never change semantic/advisory availability.
+        onPermanentError: () => {
+          this.visibility.markIncomplete();
+          this.publish();
+        },
       },
     });
+    this.gateway = this.gateways.semantic;
+    this.healthGateway = this.gateways.health;
+    this.activityGateway = this.gateways.activity;
+    this.detailGateway = this.gateways.detail;
+    this.subtaskGateway = this.gateways.subtask;
+    this.correctionGateway = this.gateways.correction;
+    this.continuationGateway = this.gateways.continuation;
+    this.visibilityGateway = this.gateways.visibility;
     this.correctionController = this.newCorrectionController();
     this.installSubtaskRuntime(this.emptySubtaskCheckpoint());
   }
@@ -1200,7 +1198,7 @@ export class Monitor {
       if (retainReportAuthority)
         this.subtaskGatewayResetAfterReportDrain = true;
       else this.subtaskRuntime?.invalidate();
-      this.pauseGateways(retainReportAuthority);
+      this.gateways.pauseAll(retainReportAuthority);
       this.subtaskGateDispatch = undefined;
       this.subtaskDiagnosticAuthority = undefined;
       this.subtaskOwners = [];
@@ -1209,7 +1207,7 @@ export class Monitor {
       this.continuationGateDispatch = undefined;
       this.dropVisibilityFlight();
       this.clearActivity(false);
-      this.enableGateways(retainReportAuthority);
+      this.gateways.enableAll(this.gatewayIdentities, retainReportAuthority);
       this.wakeHealthFromCurrent("control", true, pass);
       this.waitingForWake = false;
       this.requeue(pass);
@@ -1362,7 +1360,7 @@ export class Monitor {
     this.healthJobs.clear();
     this.healthBackoffWake = undefined;
     this.subtaskRuntime?.invalidate();
-    this.pauseGateways();
+    this.gateways.pauseAll();
     this.subtaskGateDispatch = undefined;
     this.subtaskDiagnosticAuthority = undefined;
     this.subtaskOwners = [];
@@ -1372,30 +1370,6 @@ export class Monitor {
     this.resetCoverageAdapter();
     this.clearActivity(false);
     this.evidence.clearPending();
-  }
-
-  /** Pause every Jev transport; an active subtask report may keep its own. */
-  private pauseGateways(retainSubtask = false) {
-    this.gateway.pause();
-    this.healthGateway.pause();
-    this.activityGateway.pause();
-    this.detailGateway.pause();
-    if (!retainSubtask) this.subtaskGateway.pause();
-    this.correctionGateway.pause();
-    this.continuationGateway.pause();
-    this.visibilityGateway.pause();
-  }
-
-  /** Enable every Jev transport under the current epoch's consent identities. */
-  private enableGateways(retainSubtask = false) {
-    this.gateway.enable(this.identity());
-    this.healthGateway.enable(this.identity());
-    this.activityGateway.enable(this.identity());
-    this.detailGateway.enable(this.identity());
-    if (!retainSubtask) this.subtaskGateway.enable(this.subtaskIdentity());
-    this.correctionGateway.enable(this.identity());
-    this.continuationGateway.enable(this.identity());
-    this.visibilityGateway.enable(this.visibilityIdentity());
   }
 
   private finishControl(work: ControlWork | undefined) {
@@ -1639,7 +1613,7 @@ export class Monitor {
     this.error = undefined;
     this.waitingForWake = false;
     this.epoch++;
-    this.enableGateways();
+    this.gateways.enableAll(this.gatewayIdentities);
     this.wakeHealthFromCurrent("control", true, pass);
     this.rememberVisibilityFrontier(pass);
     this.requeue(pass, true);
@@ -4902,7 +4876,7 @@ export class Monitor {
     this.activity = "Idle";
     if (wasEnabled) {
       this.enabled = true;
-      this.enableGateways();
+      this.gateways.enableAll(this.gatewayIdentities);
       // Rebuild from current canonical branch after discarding stale semantics.
       this.requeue(this.beginCanonicalPass(), true);
       this.drain();

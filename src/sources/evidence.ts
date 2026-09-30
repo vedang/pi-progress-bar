@@ -54,6 +54,10 @@ const assertionFailure = (output: string) =>
     output,
   );
 
+/** Whole-word runner success markers; substrings such as "token" are not passes. */
+const passingOutput = (output: string) =>
+  /\b(?:pass(?:ed|es)?|ok|success(?:ful)?)\b/i.test(output);
+
 /** Live main-session tool fact adapter; never executes or reads missing evidence. */
 export class EvidenceStore {
   private pending = new Map<string, PendingCall>();
@@ -108,7 +112,7 @@ export class EvidenceStore {
               ?.slice(0, 500) ?? "assertion failure",
           revision: this.revision,
         });
-      else if (!result.isError && /(?:pass|ok|success)/i.test(output))
+      else if (!result.isError && passingOutput(output))
         this.push({
           kind: "test-pass",
           callId,

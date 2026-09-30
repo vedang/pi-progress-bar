@@ -49,6 +49,34 @@ describe("passive red-test evidence", () => {
     expect(store.redObservation()).toBeUndefined();
   });
 
+  it.each([
+    ["vitest", "npx vitest run", "Tests  3 passed (3)", true],
+    ["jest", "npm test", "PASS src/parser.test.ts", true],
+    ["go", "go test ./...", "ok  \texample.com/parser\t0.01s", true],
+    ["cargo", "cargo test", "test result: ok. 4 passed; 0 failed", true],
+    [
+      "go without test files",
+      "go test ./...",
+      "?   \texample.com/tokenizer\t[no test files]",
+      false,
+    ],
+  ] as const)(
+    "classifies zero-exit %s runner output",
+    (_name, command, output, passing) => {
+      const store = new EvidenceStore();
+      store.start("call-1", "bash", { command }, 1);
+      store.finish(
+        "call-1",
+        "bash",
+        { content: [{ type: "text", text: output }] },
+        2,
+      );
+      expect(store.snapshot().some((fact) => fact.kind === "test-pass")).toBe(
+        passing,
+      );
+    },
+  );
+
   it("rejects mismatched/spoofed call IDs and keeps Reported red distinct", () => {
     const store = new EvidenceStore();
     store.start("real", "bash", { command: "bun test" }, 1);

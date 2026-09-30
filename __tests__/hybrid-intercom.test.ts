@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CanonicalPass, canonicalMessages } from "../src/sources/messages";
+import { CanonicalPass } from "../src/sources/messages";
 import { monitorHarness } from "./fixtures/hybrid-monitor";
 
 const text =
@@ -39,7 +39,7 @@ function fixture() {
 
 describe("intercom canonical task intake", () => {
   it("admits host custom_message records with distinct intercom provenance", () => {
-    expect(canonicalMessages([incoming()])).toEqual([
+    expect(new CanonicalPass([incoming()]).page().page).toEqual([
       { id: "goal", role: "intercom", text, hash: digest(text) },
     ]);
   });
@@ -49,7 +49,9 @@ describe("intercom canonical task intake", () => {
       incoming("cancel", "Cancel the delegated parser task."),
     ];
     expect(
-      canonicalMessages(entries).map(({ id, role }) => ({ id, role })),
+      new CanonicalPass(entries)
+        .page()
+        .page.map(({ id, role }) => ({ id, role })),
     ).toEqual([
       { id: "reply", role: "intercom" },
       { id: "cancel", role: "intercom" },
@@ -57,7 +59,7 @@ describe("intercom canonical task intake", () => {
   });
   it("keeps arbitrary custom messages, audit receipts, tools and malformed records excluded", () => {
     expect(
-      canonicalMessages([
+      new CanonicalPass([
         { ...incoming(), customType: "pi-progress-bar" },
         { ...incoming(), customType: "other_extension" },
         {
@@ -73,7 +75,7 @@ describe("intercom canonical task intake", () => {
         },
         { ...incoming(), id: "" },
         { ...incoming(), content: [] },
-      ]),
+      ]).page().page,
     ).toEqual([]);
   });
   it("uses intercom records in paging and bounded preceding context", () => {

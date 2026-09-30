@@ -481,15 +481,3 @@ export class CanonicalPass {
     return result("terminal", false, index, true);
   }
 }
-
-/**
- * Return only whole visible user/assistant messages. Tool, custom, failed and
- * aborted records never become semantic input. Use CanonicalPass for monitor
- * boundaries so payload reads stay coherent.
- */
-export function canonicalMessages(entries: readonly unknown[]): Observation[] {
-  return canonicalHeaders(entries).flatMap((header) => {
-    const observation = canonicalObservation(header);
-    return observation ? [observation] : [];
-  });
-}

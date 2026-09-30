@@ -6,7 +6,7 @@ import type {
 } from "../src/analysis/gateway";
 import { processObservation } from "../src/core/hybrid";
 import { emptyState } from "../src/core/hybrid-state";
-import { canonicalMessages } from "../src/sources/messages";
+import { CanonicalPass } from "../src/sources/messages";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const message = (
@@ -504,18 +504,18 @@ describe("canonical whole-message observations", () => {
   it("preserves dotted paths and Unicode as whole canonical messages, not split task labels", () => {
     const text =
       "Read .agents/plans/2026/plan.md and https://example.test/v1.2. Use 🧪 and café.";
-    const found = canonicalMessages([
+    const found = new CanonicalPass([
       {
         type: "message",
         id: "canonical",
         parentId: null,
         message: { role: "user", content: text },
       },
-    ]);
+    ]).page().page;
     expect(found).toEqual([message("canonical", text)]);
   });
   it("excludes tool/custom/error/aborted records and preserves eligible order", () => {
-    const found = canonicalMessages([
+    const found = new CanonicalPass([
       {
         type: "custom",
         id: "monitor",
@@ -562,7 +562,7 @@ describe("canonical whole-message observations", () => {
           stopReason: "stop",
         },
       },
-    ]);
+    ]).page().page;
     expect(found).toEqual([
       message("user", "Request"),
       message("assistant", "Visible result", "assistant"),

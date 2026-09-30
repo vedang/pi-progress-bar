@@ -41,17 +41,23 @@ it.each([
   { unexpected: "x" },
   { title: { quote: 5 } },
 ])("malformed optional %j never rejects mandatory structure", (details) => {
-  expect(extractor.parsePatch(JSON.stringify(raw(details)))).toEqual(clean());
+  expect(extractor.parseExtraction(JSON.stringify(raw(details))).patch).toEqual(
+    clean(),
+  );
   expect(parse(details).patch).toEqual(clean());
   expect(parse(details).detailDrafts).toEqual([]);
 });
 it("missing details stays optional; unrelated structural extras still fail closed", () => {
-  expect(extractor.parsePatch(JSON.stringify(clean()))).toEqual(clean());
+  expect(extractor.parseExtraction(JSON.stringify(clean())).patch).toEqual(
+    clean(),
+  );
   const value = raw({ title: { quote: "Implement parser" } });
   const operation = value.add[0];
   if (!operation) throw new Error("Missing add fixture");
   Object.assign(operation, { injected: true });
-  expect(() => extractor.parsePatch(JSON.stringify(value))).toThrow();
+  expect(
+    () => extractor.parseExtraction(JSON.stringify(value)).patch,
+  ).toThrow();
 });
 it("independently preserves description and valid criteria despite malformed title/items", () => {
   expect(
@@ -181,12 +187,13 @@ it("revise/restore drafts retain operation-index identity; archive never accepts
     { operation: "revise", index: 0 },
     { operation: "restore", index: 0 },
   ]);
-  expect(() =>
-    extractor.parsePatch(
-      JSON.stringify({
-        ...clean(),
-        archive: [{ id: "task:1", quote: "Implement parser", details: {} }],
-      }),
-    ),
+  expect(
+    () =>
+      extractor.parseExtraction(
+        JSON.stringify({
+          ...clean(),
+          archive: [{ id: "task:1", quote: "Implement parser", details: {} }],
+        }),
+      ).patch,
   ).toThrow();
 });

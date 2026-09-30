@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import {
   groundPatch,
-  parsePatch,
+  parseExtraction,
   type ScopePatch,
 } from "../src/analysis/extractor";
 import { type AdmissionPlan, processObservation } from "../src/core/hybrid";
@@ -181,7 +181,7 @@ it.each(["archive-add-revise", "archive-restore-revise"])(
             })),
           };
     // Assert fixture is a legal parser outcome, not an oversized provider envelope.
-    expect(parsePatch(JSON.stringify(patch))).toEqual(patch);
+    expect(parseExtraction(JSON.stringify(patch)).patch).toEqual(patch);
     let admitted = 0;
     const saved: HybridState[] = [];
     const p = Object.assign(
@@ -299,20 +299,21 @@ it.each([false, true])(
 it.each(["bad\nlabel", "bad\u200blabel"])(
   "rejects checkpoint-ineligible generated label %j before mutation",
   (label) => {
-    expect(() =>
-      parsePatch(
-        JSON.stringify({
-          ...noPatch(),
-          add: [
-            {
-              label,
-              kind: "action",
-              basis: "explicit",
-              quote: "unique instruction",
-            },
-          ],
-        }),
-      ),
+    expect(
+      () =>
+        parseExtraction(
+          JSON.stringify({
+            ...noPatch(),
+            add: [
+              {
+                label,
+                kind: "action",
+                basis: "explicit",
+                quote: "unique instruction",
+              },
+            ],
+          }),
+        ).patch,
     ).toThrow();
   },
 );
@@ -321,11 +322,11 @@ it.each([
   ["界界界", "界界"],
 ])("rejects overlapping repeated quote in %s", (text, quote) => {
   const message = observation("overlap", text);
-  const patch = parsePatch(
+  const patch = parseExtraction(
     JSON.stringify({
       ...noPatch(),
       add: [{ label: "Work", kind: "action", basis: "explicit", quote }],
     }),
-  );
+  ).patch;
   expect(() => groundPatch(patch, message, new Set())).toThrow();
 });

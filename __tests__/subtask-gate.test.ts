@@ -8,13 +8,8 @@ import {
 import {
   applySubtaskGate,
   buildSubtaskGate,
-  reusableSubtaskGate,
 } from "../src/analysis/subtask-gate";
 import type { Observation } from "../src/core/hybrid-state";
-import {
-  type SubtaskJournalCheckpoint,
-  subtaskJournalIsValid,
-} from "../src/core/subtask-journal";
 import { SubtaskStore } from "../src/core/subtasks";
 import {
   subtaskAdmission,
@@ -418,44 +413,6 @@ describe("conversation-grounded per-parent subtask gate", () => {
       },
     };
     expect(buildSubtaskGate(options)?.identity).toBe(batch.identity);
-  });
-  it("reuses restored exact-context positive or negative receipts without provider activity", () => {
-    for (const negative of [false, true]) {
-      const { options, batch, result } = fixture();
-      if (negative)
-        result.answers[Object.keys(result.answers)[0]] = {
-          type: "choice",
-          choice: "no",
-          confidence: 1,
-          probabilities: { yes: 0, no: 1, uncertain: 0 },
-        };
-      const record = applySubtaskGate(batch, result, options, ticket);
-      if (!record) throw new Error("Expected receipt");
-      const journal: SubtaskJournalCheckpoint = {
-        version: 1,
-        dispatches: 1,
-        usage: {
-          jev: { calls: 1, inputTokens: 3, outputTokens: 5 },
-          extraction: { calls: 0, inputTokens: 0, outputTokens: 0 },
-        },
-        records: [record],
-        reports: [],
-      };
-      expect(reusableSubtaskGate(structuredClone(journal), batch)).toEqual(
-        record,
-      );
-      const retired = structuredClone(journal);
-      Object.assign(retired.records[0], { state: "superseded" });
-      expect(subtaskJournalIsValid(retired)).toBe(true);
-      expect(reusableSubtaskGate(retired, batch)).toBeUndefined();
-      options.latest.text += " New requirement.";
-      options.latest.hash = subtaskHash(options.latest.text);
-      const next = buildSubtaskGate(options);
-      if (!next) throw new Error("Expected changed-context gate");
-      expect(next.identity).not.toBe(batch.identity);
-      expect(reusableSubtaskGate(journal, next)).toBeUndefined();
-    }
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
   it.each(["missing", "model", "extra", "distribution", "usage", "ticket"])(
     "rejects malformed result/proof %s atomically",

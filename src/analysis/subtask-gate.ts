@@ -1,10 +1,6 @@
 import { createHash } from "node:crypto";
 import type { HybridTask, Observation, SourceRef } from "../core/hybrid-state";
-import type {
-  SubtaskJournalCheckpoint,
-  SubtaskPhaseRecord,
-} from "../core/subtask-journal";
-import { subtaskJournalIsValid } from "../core/subtask-journal";
+import type { SubtaskPhaseRecord } from "../core/subtask-journal";
 import type { SubtaskSnapshot } from "../core/subtasks";
 import {
   isCurrentSubtaskEvidence,
@@ -983,62 +979,6 @@ const validTicket = (value: unknown): value is GateTicket =>
   value.dispatch <= MAX_DISPATCH &&
   finiteNonNegative(value.at);
 
-const cloneRecord = (record: SubtaskPhaseRecord): SubtaskPhaseRecord => ({
-  identity: record.identity,
-  parentTaskId: record.parentTaskId,
-  parentRevision: record.parentRevision,
-  parentSourceDigest: record.parentSourceDigest,
-  listRevision: record.listRevision,
-  source: cloneSource(record.source),
-  contextHash: record.contextHash,
-  triggerHash: record.triggerHash,
-  gateModel: record.gateModel,
-  selectedModel: record.selectedModel,
-  phase: record.phase,
-  state: record.state,
-  ...(record.parkedUntil === undefined
-    ? {}
-    : { parkedUntil: record.parkedUntil }),
-  ...(record.gate === undefined
-    ? {}
-    : {
-        gate: {
-          requestHash: record.gate.requestHash,
-          dispatch: record.gate.dispatch,
-          at: record.gate.at,
-          outcome: record.gate.outcome,
-          ...(record.gate.outcome === "decided"
-            ? {
-                choice: record.gate.choice,
-                confidence: record.gate.confidence,
-                probability: record.gate.probability,
-              }
-            : {}),
-          usage: {
-            inputTokens: record.gate.usage.inputTokens,
-            outputTokens: record.gate.usage.outputTokens,
-          },
-        },
-      }),
-  ...(record.proposal === undefined
-    ? {}
-    : {
-        proposal: {
-          requestHash: record.proposal.requestHash,
-          dispatch: record.proposal.dispatch,
-          at: record.proposal.at,
-          outcome: record.proposal.outcome,
-          ...(record.proposal.outcome === "accepted"
-            ? { listRevision: record.proposal.listRevision }
-            : {}),
-          usage: {
-            inputTokens: record.proposal.usage.inputTokens,
-            outputTokens: record.proposal.usage.outputTokens,
-          },
-        },
-      }),
-});
-
 /**
  * Build one immutable Jev request for one included parent. This layer owns no
  * transport, journal, scheduler, parent, or list mutation.
@@ -1105,41 +1045,6 @@ export const applySubtaskGate = (
         usage: { ...validated.usage },
       },
     };
-  } catch {
-    return;
-  }
-};
-
-/**
- * Return only an exact, validated prior gate decision. A copied receipt grants
- * no currentness by itself; C05/C07 retain runtime and durable admission work.
- */
-export const reusableSubtaskGate = (
-  journal: SubtaskJournalCheckpoint,
-  batch: SubtaskGateBatch,
-): SubtaskPhaseRecord | undefined => {
-  try {
-    if (!validBatch(batch) || !subtaskJournalIsValid(journal)) return;
-    const record = journal.records.find(
-      (item) => item.identity === batch.identity,
-    );
-    if (!record || record.state === "superseded") return;
-    if (
-      record.phase !== "gate-decided" ||
-      record.parentTaskId !== batch.parentTaskId ||
-      record.parentRevision !== batch.parentRevision ||
-      record.parentSourceDigest !== batch.parentSourceDigest ||
-      record.listRevision !== batch.listRevision ||
-      !sameSource(record.source, batch.source) ||
-      record.contextHash !== batch.contextHash ||
-      record.triggerHash !== batch.triggerHash ||
-      record.gateModel !== MODEL ||
-      record.selectedModel !== batch.selectedModel ||
-      record.gate?.outcome !== "decided" ||
-      record.gate.requestHash !== batch.requestHash
-    )
-      return;
-    return cloneRecord(record);
   } catch {
     return;
   }

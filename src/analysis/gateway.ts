@@ -272,12 +272,6 @@ export class JevGateway {
     this.status = "Paused";
     this.outcome = "paused";
   }
-  resume() {
-    if (!this.identity) return;
-    this.paused = false;
-    this.status = "Ready";
-    this.outcome = "idle";
-  }
 
   private safeRetryDelay(deadline: number): number | undefined {
     try {

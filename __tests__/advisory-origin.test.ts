@@ -11,7 +11,7 @@ import {
   restoreSubtaskCheckpoint,
 } from "../src/core/hybrid-checkpoint";
 import type { HybridState } from "../src/core/hybrid-state";
-import { canonicalMessages } from "../src/sources/messages";
+import { CanonicalPass } from "../src/sources/messages";
 import {
   backend,
   initial,
@@ -53,7 +53,7 @@ it("H1 excludes advisory custom/state entries but admits exact correlated assist
     },
     answerEntry(content),
   ];
-  const observations = canonicalMessages(entries);
+  const observations = new CanonicalPass(entries).page().page;
   expect(observations).toEqual([observation("answer-1", content, "assistant")]);
   // No host details/run correlation or excluded spans survive canonical intake.
   expect(Object.keys(observations[0] ?? {}).sort()).toEqual([

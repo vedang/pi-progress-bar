@@ -344,10 +344,6 @@ export function parseExtraction(raw: string): {
   return { patch, detailDrafts };
 }
 
-export function parsePatch(raw: string): ScopePatch {
-  return parseExtraction(raw).patch;
-}
-
 export function boundedEarlier(
   preceding: readonly Observation[],
 ): Observation[] {

@@ -610,6 +610,19 @@ const MAX_PENDING_SUBTASK_CAPTURE_BYTES = 64 * 1024;
  * Atomic host runtime for hybrid transactions. Display reads receive copied
  * projections only; focus is never evidence or tool-ownership authority.
  */
+/** One Jev transport over the shared endpoint and environment API key. */
+const jevGateway = (
+  options: Omit<
+    ConstructorParameters<typeof JevGateway>[0],
+    "fetch" | "getApiKey"
+  >,
+) =>
+  new JevGateway({
+    fetch: (url, init) => globalThis.fetch(url, init),
+    getApiKey: () => process.env.TYPESAFE_API_KEY,
+    ...options,
+  });
+
 export class Monitor {
   state: HybridState;
   enabled = false;
@@ -789,35 +802,25 @@ export class Monitor {
     private readonly options: MonitorOptions,
   ) {
     this.state = emptyState(options.sourceId());
-    this.gateway = new JevGateway({
-      fetch: (url, init) => globalThis.fetch(url, init),
-      getApiKey: () => process.env.TYPESAFE_API_KEY,
+    this.gateway = jevGateway({
       onDispatch: (at) => this.recordJevDispatch(at),
       onPermanentError: () => this.forceOff(),
     });
-    this.healthGateway = new JevGateway({
-      fetch: (url, init) => globalThis.fetch(url, init),
-      getApiKey: () => process.env.TYPESAFE_API_KEY,
+    this.healthGateway = jevGateway({
       onDispatch: (at) => this.recordJevDispatch(at),
       // Health is optional: a permanent health transport error cannot turn OFF tracking.
       onPermanentError: () => this.note("model-unavailable"),
     });
-    this.activityGateway = new JevGateway({
-      fetch: (url, init) => globalThis.fetch(url, init),
-      getApiKey: () => process.env.TYPESAFE_API_KEY,
+    this.activityGateway = jevGateway({
       onDispatch: (at) => this.recordJevDispatch(at),
       // Activity is optional display enrichment; it never disables core tracking.
       onPermanentError: () => this.note("jev-unavailable"),
     });
-    this.detailGateway = new JevGateway({
-      fetch: (url, init) => globalThis.fetch(url, init),
-      getApiKey: () => process.env.TYPESAFE_API_KEY,
+    this.detailGateway = jevGateway({
       onDispatch: (at) => this.recordJevDispatch(at),
       onPermanentError: () => this.note("detail-capacity-skipped"),
     });
-    this.subtaskGateway = new JevGateway({
-      fetch: (url, init) => globalThis.fetch(url, init),
-      getApiKey: () => process.env.TYPESAFE_API_KEY,
+    this.subtaskGateway = jevGateway({
       // SubtaskRuntime commits dispatch proof before this callback returns true.
       beforeDispatch: (at) => this.subtaskGateDispatch?.(at) === true,
       onPhysicalFlight: (drain) => {
@@ -829,16 +832,12 @@ export class Monitor {
       },
       onPermanentError: () => this.note("jev-unavailable"),
     });
-    this.correctionGateway = new JevGateway({
-      fetch: (url, init) => globalThis.fetch(url, init),
-      getApiKey: () => process.env.TYPESAFE_API_KEY,
+    this.correctionGateway = jevGateway({
       onDispatch: (at) => this.recordJevDispatch(at),
       // Corrections are optional and never disable semantic progress tracking.
       onPermanentError: () => this.note("model-unavailable"),
     });
-    this.continuationGateway = new JevGateway({
-      fetch: (url, init) => globalThis.fetch(url, init),
-      getApiKey: () => process.env.TYPESAFE_API_KEY,
+    this.continuationGateway = jevGateway({
       beforeDispatch: (at) => this.continuationGateDispatch?.(at) === true,
       onPhysicalFlight: (drain) => {
         try {
@@ -850,9 +849,7 @@ export class Monitor {
       // Continuation is optional; availability is surfaced by its controller.
       onPermanentError: () => this.note("jev-unavailable"),
     });
-    this.visibilityGateway = new JevGateway({
-      fetch: (url, init) => globalThis.fetch(url, init),
-      getApiKey: () => process.env.TYPESAFE_API_KEY,
+    this.visibilityGateway = jevGateway({
       onDispatch: () => {
         this.visibility.recordDispatch();
         this.publish();
@@ -1230,38 +1227,21 @@ export class Monitor {
       this.extractionController?.abort();
       this.cancelHealth();
       this.invalidateCorrections();
-      this.gateway.pause();
-      this.healthGateway.pause();
-      this.activityGateway.pause();
-      this.detailGateway.pause();
       const retainReportAuthority = this.subtaskFlightIsReport;
       if (retainReportAuthority)
         this.subtaskGatewayResetAfterReportDrain = true;
-      else {
-        this.subtaskRuntime?.invalidate();
-        this.subtaskGateway.pause();
-      }
+      else this.subtaskRuntime?.invalidate();
+      this.pauseGateways(retainReportAuthority);
       this.subtaskGateDispatch = undefined;
       this.subtaskDiagnosticAuthority = undefined;
       this.subtaskOwners = [];
       this.subtaskWakeKey = undefined;
       this.resetCoverageAdapter();
-      this.correctionGateway.pause();
-      this.continuationGateway.pause();
       this.continuationGateDispatch = undefined;
       this.dropVisibilityFlight();
-      this.visibilityGateway.pause();
       this.clearActivity(false);
-      this.gateway.enable(this.identity());
-      this.healthGateway.enable(this.identity());
+      this.enableGateways(retainReportAuthority);
       this.wakeHealthFromCurrent("control", true, pass);
-      this.activityGateway.enable(this.identity());
-      this.detailGateway.enable(this.identity());
-      if (!retainReportAuthority)
-        this.subtaskGateway.enable(this.subtaskIdentity());
-      this.correctionGateway.enable(this.identity());
-      this.continuationGateway.enable(this.identity());
-      this.visibilityGateway.enable(this.visibilityIdentity());
       this.waitingForWake = false;
       this.requeue(pass);
       if (!this.queued.length) this.wakeSubtasks(pass, true);
@@ -1422,23 +1402,41 @@ export class Monitor {
     this.invalidateCorrections();
     this.healthJobs.clear();
     this.healthBackoffWake = undefined;
-    this.gateway.pause();
-    this.healthGateway.pause();
-    this.activityGateway.pause();
-    this.detailGateway.pause();
     this.subtaskRuntime?.invalidate();
-    this.subtaskGateway.pause();
+    this.pauseGateways();
     this.subtaskGateDispatch = undefined;
     this.subtaskDiagnosticAuthority = undefined;
     this.subtaskOwners = [];
     this.subtaskWakeKey = undefined;
-    this.correctionGateway.pause();
-    this.continuationGateway.pause();
     this.continuationGateDispatch = undefined;
     this.resetVisibility();
     this.resetCoverageAdapter();
     this.clearActivity(false);
     this.evidence.clearPending();
+  }
+
+  /** Pause every Jev transport; an active subtask report may keep its own. */
+  private pauseGateways(retainSubtask = false) {
+    this.gateway.pause();
+    this.healthGateway.pause();
+    this.activityGateway.pause();
+    this.detailGateway.pause();
+    if (!retainSubtask) this.subtaskGateway.pause();
+    this.correctionGateway.pause();
+    this.continuationGateway.pause();
+    this.visibilityGateway.pause();
+  }
+
+  /** Enable every Jev transport under the current epoch's consent identities. */
+  private enableGateways(retainSubtask = false) {
+    this.gateway.enable(this.identity());
+    this.healthGateway.enable(this.identity());
+    this.activityGateway.enable(this.identity());
+    this.detailGateway.enable(this.identity());
+    if (!retainSubtask) this.subtaskGateway.enable(this.subtaskIdentity());
+    this.correctionGateway.enable(this.identity());
+    this.continuationGateway.enable(this.identity());
+    this.visibilityGateway.enable(this.visibilityIdentity());
   }
 
   private finishControl(work: ControlWork | undefined) {
@@ -1713,15 +1711,8 @@ export class Monitor {
     this.error = undefined;
     this.waitingForWake = false;
     this.epoch++;
-    this.gateway.enable(this.identity());
-    this.healthGateway.enable(this.identity());
+    this.enableGateways();
     this.wakeHealthFromCurrent("control", true, pass);
-    this.activityGateway.enable(this.identity());
-    this.detailGateway.enable(this.identity());
-    this.subtaskGateway.enable(this.subtaskIdentity());
-    this.correctionGateway.enable(this.identity());
-    this.continuationGateway.enable(this.identity());
-    this.visibilityGateway.enable(this.visibilityIdentity());
     this.rememberVisibilityFrontier(pass);
     this.requeue(pass, true);
     if (this.queued.length) this.idleDoneInvalidated = true;
@@ -5117,14 +5108,7 @@ export class Monitor {
     this.activity = "Idle";
     if (wasEnabled) {
       this.enabled = true;
-      this.gateway.enable(this.identity());
-      this.healthGateway.enable(this.identity());
-      this.activityGateway.enable(this.identity());
-      this.detailGateway.enable(this.identity());
-      this.subtaskGateway.enable(this.subtaskIdentity());
-      this.correctionGateway.enable(this.identity());
-      this.continuationGateway.enable(this.identity());
-      this.visibilityGateway.enable(this.visibilityIdentity());
+      this.enableGateways();
       // Rebuild from current canonical branch after discarding stale semantics.
       this.requeue(this.beginCanonicalPass(), true);
       this.drain();

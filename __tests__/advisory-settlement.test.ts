@@ -48,14 +48,21 @@ function withField(
   value: unknown,
   check: () => void,
 ) {
-  // A moved field would silently make the blocker assertion vacuous.
-  expect(field in h.monitor, `Missing monitor field ${field}`).toBe(true);
-  const before = Reflect.get(h.monitor, field);
-  Reflect.set(h.monitor, field, value);
+  // Dotted paths reach monitor-owned collaborators; a moved field would
+  // otherwise silently make the blocker assertion vacuous.
+  const path = field.split(".");
+  const key = path.pop() ?? field;
+  const owner = path.reduce<object>(
+    (target, name) => Reflect.get(target, name),
+    h.monitor,
+  );
+  expect(key in owner, `Missing monitor field ${field}`).toBe(true);
+  const before = Reflect.get(owner, key);
+  Reflect.set(owner, key, value);
   try {
     check();
   } finally {
-    Reflect.set(h.monitor, field, before);
+    Reflect.set(owner, key, before);
   }
 }
 
@@ -190,7 +197,7 @@ it.each([
   "activityQueued",
   "activityDeclaration",
   "activityFocus",
-  "beadsInFlight",
+  "beads.inFlight",
 ])("ignores optional %s when semantic state is settled", async (field) => {
   const h = await settled();
   const before = snapshot(h);

@@ -67,11 +67,7 @@ import {
 } from "../analysis/task-details";
 import { nonNegativeInteger, sameSource } from "../shared/guards";
 import { sha256 } from "../shared/hash";
-import {
-  type BeadsPresentation,
-  beadsPresentation,
-  readBeadsExport,
-} from "../sources/beads";
+import type { BeadsPresentation } from "../sources/beads";
 import {
   CoverageAdapter,
   isCurrentSubtaskEvidence,
@@ -83,6 +79,7 @@ import {
   type CanonicalHealthReportContext,
   CanonicalPass,
 } from "../sources/messages";
+import { BeadsPresenter } from "./beads-presenter";
 import {
   type BoardDetailRecord,
   type BoardSnapshot,
@@ -546,16 +543,6 @@ const boundedHealthText = (text: string, maxBytes: number) => {
   return `${bounded}\n[bounded canonical text omitted]`;
 };
 
-const sameBeads = (
-  left: ReadonlyMap<string, BeadsPresentation>,
-  right: ReadonlyMap<string, BeadsPresentation>,
-) =>
-  left.size === right.size &&
-  [...left].every(([taskId, value]) => {
-    const candidate = right.get(taskId);
-    return !!candidate && JSON.stringify(candidate) === JSON.stringify(value);
-  });
-
 const healthRequirements = (answer: ValidatedResult["answers"][string]) => {
   if (answer?.type !== "score") return "unknown";
   if (answer.score < 1) return "unclear";
@@ -752,10 +739,15 @@ export class Monitor {
   private lastDisplayedTaskId?: string;
   /** New unclassified work immediately disqualifies retained idle DONE display. */
   private idleDoneInvalidated = false;
-  private beads = new Map<string, BeadsPresentation>();
-  private beadsGeneration = 0;
-  private beadsInFlight = false;
-  private beadsRefreshQueued = false;
+  private readonly beads = new BeadsPresenter({
+    cwd: () => this.cwd,
+    enabled: () => this.enabled,
+    epoch: () => this.epoch,
+    sourceId: () => this.state.sourceId,
+    tasks: () => this.state.tasks,
+    note: (code) => this.note(code),
+    publish: () => this.publish(),
+  });
   private diagnostics = new Map<string, number>();
   /** A rejected persisted shape remains OFF until a new restore boundary. */
   private restoreRejection?: "unsupported" | "corrupt";
@@ -1654,7 +1646,7 @@ export class Monitor {
     if (this.queued.length) this.idleDoneInvalidated = true;
     else this.wakeSubtasks(pass, true);
     this.save();
-    this.refreshBeads();
+    this.beads.refresh();
     this.publish();
     this.drain();
     this.finishControl(work);
@@ -1686,7 +1678,6 @@ export class Monitor {
     this.catchingUp = false;
     this.catchupTarget = undefined;
     this.beads.clear();
-    this.beadsGeneration++;
     this.evidence.reset();
     this.diagnostics.clear();
     const sourceId = this.options.sourceId();
@@ -2191,7 +2182,6 @@ export class Monitor {
     this.latchHistoricalCatchup = false;
     this.evidence.reset();
     this.beads.clear();
-    this.beadsGeneration++;
     if (sourceChanged) {
       this.subtaskOmissions = undefined;
       this.savingRestoredSubtaskHistory = undefined;
@@ -4562,63 +4552,6 @@ export class Monitor {
     );
   }
 
-  /** Async Beads reads enrich copied display data only, never hybrid state. */
-  private refreshBeads() {
-    const cwd = this.cwd;
-    if (!cwd || !this.enabled) return;
-    const generation = ++this.beadsGeneration;
-    if (this.beadsInFlight) {
-      this.beadsRefreshQueued = true;
-      return;
-    }
-    const epoch = this.epoch;
-    const sourceId = this.state.sourceId;
-    this.beadsInFlight = true;
-    void readBeadsExport(cwd)
-      .then((source) => {
-        if (
-          generation !== this.beadsGeneration ||
-          !this.enabled ||
-          epoch !== this.epoch ||
-          sourceId !== this.state.sourceId
-        )
-          return;
-        const next = new Map<string, BeadsPresentation>();
-        if (source.complete) {
-          for (const task of this.state.tasks) {
-            const beads = beadsPresentation(
-              task.label,
-              task.status === "done",
-              source,
-            );
-            if (beads) next.set(task.id, beads);
-          }
-        } else this.note("beads-unavailable");
-        const changed = !sameBeads(this.beads, next);
-        if (changed) this.beads = next;
-        if (!source.complete || changed) this.publish();
-      })
-      .catch(() => {
-        if (
-          generation !== this.beadsGeneration ||
-          !this.enabled ||
-          epoch !== this.epoch ||
-          sourceId !== this.state.sourceId
-        )
-          return;
-        this.beads.clear();
-        this.note("beads-unavailable");
-        this.publish();
-      })
-      .finally(() => {
-        this.beadsInFlight = false;
-        if (this.beadsRefreshQueued) {
-          this.beadsRefreshQueued = false;
-          this.refreshBeads();
-        }
-      });
-  }
-
   private cancelHealth() {
     this.currentHealthProofs.clear();
     const flight = this.healthFlight;
@@ -6131,7 +6064,7 @@ export class Monitor {
         );
         this.persist(checkpoint);
         this.parkedDetails.delete(updated.taskId);
-        this.refreshBeads();
+        this.beads.refresh();
         this.publish();
       } catch {
         this.taskDetails = previousDetails;
@@ -7057,7 +6990,7 @@ export class Monitor {
     } catch {
       this.note("saved-state-rejected");
     }
-    this.refreshBeads();
+    this.beads.refresh();
     this.publish();
     // Commit advances canonical cursor/frontier; do not rely on UI rendering.
     this.options.onContinuationWake?.();

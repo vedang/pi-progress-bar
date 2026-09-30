@@ -99,6 +99,15 @@ export default function progressBar(pi: ExtensionAPI): void {
     controller?.dispose();
     controller = undefined;
   };
+  /** Lifecycle boundaries (OFF, session, branch, input) revoke all advisory ownership. */
+  const revokeAdvisoryAuthority = () => {
+    resetCorrections();
+    activeCorrectionRun = undefined;
+    activeCorrectionSource = undefined;
+    pendingCorrectionPolicy = undefined;
+    invalidateContinuation();
+    clearOpportunity();
+  };
   const render = () => {
     const ctx = context;
     if (!ctx) return;
@@ -108,12 +117,7 @@ export default function progressBar(pi: ExtensionAPI): void {
       // Cancelling here adds no advisory-specific command or preference.
       reconciliation?.cancel();
       delivery?.onMasterOff();
-      resetCorrections();
-      activeCorrectionRun = undefined;
-      activeCorrectionSource = undefined;
-      pendingCorrectionPolicy = undefined;
-      invalidateContinuation();
-      clearOpportunity();
+      revokeAdvisoryAuthority();
     }
     if (ctx.mode === "tui" && presentation.enabled) {
       const snapshot = {
@@ -255,18 +259,20 @@ export default function progressBar(pi: ExtensionAPI): void {
     if (!controller || !binding) return;
     const phase = controller.snapshot().phase;
     if (phase === "idle" || phase === "consumed") return;
+    // Release the root once its phases are consumed and no delivery holds it.
+    const wakeUntilConsumed = () =>
+      void controller.wake().finally(() => {
+        if (
+          continuationBinding === binding &&
+          controller.snapshot().phase === "consumed" &&
+          !continuationDeliveryActive
+        )
+          releaseContinuationRoot();
+      });
     const authority = currentContinuationAuthority(binding);
     if (!authority?.available) {
       if (authority?.reason !== "frontier") invalidateContinuation();
-      else
-        void controller.wake().finally(() => {
-          if (
-            continuationBinding === binding &&
-            controller.snapshot().phase === "consumed" &&
-            !continuationDeliveryActive
-          )
-            releaseContinuationRoot();
-        });
+      else wakeUntilConsumed();
       return;
     }
     if (
@@ -277,14 +283,7 @@ export default function progressBar(pi: ExtensionAPI): void {
       return;
     }
     continuationFingerprint ??= authority.fingerprint;
-    void controller.wake().finally(() => {
-      if (
-        continuationBinding === binding &&
-        controller.snapshot().phase === "consumed" &&
-        !continuationDeliveryActive
-      )
-        releaseContinuationRoot();
-    });
+    wakeUntilConsumed();
   }
 
   continuationController = new ContinuationController({
@@ -515,69 +514,44 @@ export default function progressBar(pi: ExtensionAPI): void {
     // Session replacement normally sends shutdown first. Repeat disposal here
     // for a direct host start boundary; no old timer may survive either path.
     delivery?.onSessionShutdown();
-    resetCorrections();
     reconciliation?.cancel();
     sessionEpoch++;
     branchEpoch++;
     runEpoch = 0;
-    activeCorrectionRun = undefined;
-    activeCorrectionSource = undefined;
-    pendingCorrectionPolicy = undefined;
-    invalidateContinuation();
-    clearOpportunity();
+    revokeAdvisoryAuthority();
     await restore(ctx, false);
   });
   pi.on("session_before_tree", () => {
     monitor.invalidateVisibility();
     delivery?.onNavigation();
-    resetCorrections();
     monitor.invalidateCorrections();
     reconciliation?.cancel();
-    activeCorrectionRun = undefined;
-    activeCorrectionSource = undefined;
-    pendingCorrectionPolicy = undefined;
-    invalidateContinuation();
-    clearOpportunity();
+    revokeAdvisoryAuthority();
   });
   pi.on("session_tree", async (_event, ctx) => {
     // Real hosts fire session_before_tree first; repeat cancellation so this
-    monitor.invalidateVisibility();
     // post-navigation boundary is also safe when delivered alone.
+    monitor.invalidateVisibility();
     delivery?.onNavigation();
-    resetCorrections();
     monitor.invalidateCorrections();
     reconciliation?.cancel();
     branchEpoch++;
-    activeCorrectionRun = undefined;
-    activeCorrectionSource = undefined;
-    pendingCorrectionPolicy = undefined;
-    invalidateContinuation();
-    clearOpportunity();
+    revokeAdvisoryAuthority();
     await restore(ctx, true);
   });
   pi.on("session_shutdown", () => {
     disposeController();
     delivery?.onSessionShutdown();
-    resetCorrections();
     reconciliation?.cancel();
-    activeCorrectionRun = undefined;
-    activeCorrectionSource = undefined;
-    pendingCorrectionPolicy = undefined;
-    invalidateContinuation();
-    clearOpportunity();
+    revokeAdvisoryAuthority();
     monitor.stop();
     context = undefined;
   });
   pi.on("input", () => {
     delivery?.onInput();
-    resetCorrections();
     monitor.invalidateCorrections();
     reconciliation?.clearPendingIntent();
-    activeCorrectionRun = undefined;
-    activeCorrectionSource = undefined;
-    pendingCorrectionPolicy = undefined;
-    invalidateContinuation();
-    clearOpportunity();
+    revokeAdvisoryAuthority();
   });
   // Canonical active branch is authoritative for semantic tracking. Tool activity
   // captures only safe runtime metadata from the post-listener assistant message.

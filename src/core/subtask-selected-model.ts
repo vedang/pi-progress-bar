@@ -221,13 +221,22 @@ export function selectedModelSubtasks(
       }
       const response = await Promise.race([physical, deadline, aborted]);
       if (signal.aborted || controller.signal.aborted) throw unavailable();
-      const afterResponse = bindContext(currentContext, request);
+      const output = responseText(response);
+      const usage = responseUsage(response);
+      // Selected-model drift fences the proposal, not the provider charge:
+      // report the dispatched model's usage with text no proposal can parse.
+      let current = true;
+      try {
+        bindContext(currentContext, request);
+      } catch {
+        current = false;
+      }
       return {
-        text: responseText(response),
-        model: afterResponse.id,
-        provider: afterResponse.provider,
+        text: current ? output : "",
+        model: beforeDispatch.id,
+        provider: beforeDispatch.provider,
         requestHash: request.requestHash,
-        usage: responseUsage(response),
+        usage,
       };
     } catch {
       throw unavailable();

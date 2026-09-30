@@ -1,6 +1,12 @@
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { SubtaskProposalRequest } from "../src/analysis/subtask-proposal";
 import { subtaskCheckpointStorageStatus } from "../src/core/hybrid-checkpoint";
-import { subtaskMetadataMonitor } from "./fixtures/subtask-metadata-monitor";
+import { selectedModelSubtasks } from "../src/core/subtask-selected-model";
+import {
+  metadataProposalText,
+  subtaskMetadataMonitor,
+} from "./fixtures/subtask-metadata-monitor";
 
 const running: ReturnType<typeof subtaskMetadataMonitor>[] = [];
 beforeEach(() => {
@@ -134,6 +140,60 @@ it.each(["gate", "proposal", "report"] as const)(
       mandatory: 0,
       extraction: 0,
     });
+  },
+);
+
+it.each([false, true])(
+  "charges selected-model proposal usage when the host model drifts before the response (drift=%s)",
+  async (drift) => {
+    const h = subtaskMetadataMonitor();
+    running.push(h);
+    const context = {
+      model: { provider: "fixture", id: "selected" },
+      modelRegistry: {
+        complete: vi.fn(
+          async (
+            _model: unknown,
+            prompt: { messages: Array<{ content: Array<{ text: string }> }> },
+          ) => {
+            const input = JSON.parse(
+              prompt.messages[0].content[0].text,
+            ) as SubtaskProposalRequest["input"];
+            // The host switches models after the provider already billed.
+            if (drift) context.model.id = "other";
+            return {
+              content: [{ type: "text", text: metadataProposalText(input) }],
+              stopReason: "stop",
+              usage: { input: 70, output: 90 },
+            };
+          },
+        ),
+      },
+    };
+    h.proposeSubtasks.mockImplementation(
+      selectedModelSubtasks(
+        () =>
+          context as unknown as Pick<
+            ExtensionContext,
+            "model" | "modelRegistry"
+          >,
+      ),
+    );
+    h.start();
+    await h.settle("goal");
+    await h.map();
+    expect(context.modelRegistry.complete).toHaveBeenCalledTimes(1);
+    const journal = h.checkpoint().monitor?.subtasks?.journal;
+    expect(journal?.usage.extraction).toEqual({
+      calls: 1,
+      inputTokens: 70,
+      outputTokens: 90,
+    });
+    expect(journal?.records.at(-1)?.proposal).toMatchObject({
+      outcome: drift ? "failed" : "accepted",
+      usage: { inputTokens: 70, outputTokens: 90 },
+    });
+    expect(h.monitor.subtaskSnapshot().groups).toHaveLength(drift ? 0 : 1);
   },
 );
 

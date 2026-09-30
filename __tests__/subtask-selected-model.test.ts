@@ -290,13 +290,19 @@ describe("host-selected generic subtask proposer", () => {
     expect(h.complete).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
-  it("discards a completed result after model drift", async () => {
+  it("discards a completed proposal after model drift but keeps its charged usage", async () => {
     const h = fixture();
     h.complete.mockImplementation(async () => {
       h.context.model.id = "other";
       return h.response;
     });
-    await expect(h.run(h.request, h.controller.signal)).rejects.toThrow();
+    expect(await h.run(h.request, h.controller.signal)).toEqual({
+      text: "",
+      model: "selected",
+      provider: "fixture",
+      requestHash: h.request.requestHash,
+      usage: { inputTokens: 7, outputTokens: 9 },
+    });
   });
   it("contains cancellation of an ignoring provider with no retry", async () => {
     const h = fixture();

@@ -14,6 +14,39 @@ export const metadataCommand = "unzip -p docs/plan.xlsx xl/workbook.xml";
 export const metadataXml = `<workbook><sheets>${coverageNames.map((name) => `<sheet name="${name}"/>`).join("")}</sheets></workbook>`;
 export type MetadataEnvelope = ReturnType<typeof encodeSubtaskCheckpoint>;
 
+/** Grounded22-child proposal for the metadata request, as a provider would return it. */
+export function metadataProposalText(input: SubtaskProposalRequest["input"]) {
+  const contextIndex = input.context.findIndex(
+    (item) => item.id === "goal" && item.text === metadataGoal,
+  );
+  const resourceIndex = input.evidence?.resources.findIndex(
+    (resource) => resource.source.entryId === "result-manifest",
+  );
+  expect(contextIndex).toBeGreaterThanOrEqual(0);
+  expect(resourceIndex).toBeGreaterThanOrEqual(0);
+  expect(
+    input.evidence?.resources[resourceIndex ?? -1].items.map(
+      (item) => item.label,
+    ),
+  ).toEqual(coverageNames);
+  return JSON.stringify({
+    proposals: [
+      {
+        parentIndex: 0,
+        complete: true,
+        knownTotal: 22,
+        removals: [],
+        children: coverageNames.map((label, itemIndex) => ({
+          kind: "add",
+          label,
+          evidence: [{ contextIndex, start: 0, end: metadataGoal.length }],
+          association: { resourceIndex, itemIndex },
+        })),
+      },
+    ],
+  });
+}
+
 /** Live public Monitor ingress. No seeded generic store or direct child admission. */
 export function subtaskMetadataMonitor(sourceId = () => "session:test") {
   const requests: EvaluationRequest[] = [];
@@ -32,42 +65,12 @@ export function subtaskMetadataMonitor(sourceId = () => "session:test") {
         throw new Error("Proposal dispatch vetoed");
       onPhysicalFlight?.(Promise.resolve());
       proposalNetwork();
-      const contextIndex = request.input.context.findIndex(
-        (item) => item.id === "goal" && item.text === metadataGoal,
-      );
-      const resourceIndex = request.input.evidence?.resources.findIndex(
-        (resource) => resource.source.entryId === "result-manifest",
-      );
-      expect(contextIndex).toBeGreaterThanOrEqual(0);
-      expect(resourceIndex).toBeGreaterThanOrEqual(0);
-      expect(
-        request.input.evidence?.resources[resourceIndex ?? -1].items.map(
-          (item) => item.label,
-        ),
-      ).toEqual(coverageNames);
       return {
         provider: "fixture",
         model: "selected",
         requestHash: request.requestHash,
         usage: { inputTokens: 3, outputTokens: 2 },
-        text: JSON.stringify({
-          proposals: [
-            {
-              parentIndex: 0,
-              complete: true,
-              knownTotal: 22,
-              removals: [],
-              children: coverageNames.map((label, itemIndex) => ({
-                kind: "add",
-                label,
-                evidence: [
-                  { contextIndex, start: 0, end: metadataGoal.length },
-                ],
-                association: { resourceIndex, itemIndex },
-              })),
-            },
-          ],
-        }),
+        text: metadataProposalText(request.input),
       };
     },
   );

@@ -8,7 +8,9 @@ export interface EvidenceLink {
 interface PendingCall {
   callId: string;
   toolName: string;
-  args: unknown;
+  /** Only the fields evidence reads; raw tool arguments are never retained. */
+  command: string;
+  path: string;
   order: number;
   entryId?: string;
   link?: EvidenceLink;
@@ -76,7 +78,8 @@ export class EvidenceStore {
     this.pending.set(callId, {
       callId,
       toolName,
-      args,
+      command: commandOf(args),
+      path: pathOf(args).slice(0, 500),
       order,
       entryId,
       ...(link ? { link: { ...link } } : {}),
@@ -94,7 +97,7 @@ export class EvidenceStore {
     )
       return;
     const output = textContent(result.content);
-    if (toolName === "bash" && testCommand(commandOf(call.args))) {
+    if (toolName === "bash" && testCommand(call.command)) {
       if (assertionFailure(output))
         this.push({
           kind: "observed-red",
@@ -133,7 +136,7 @@ export class EvidenceStore {
         order,
         ...(call.entryId ? { entryId: call.entryId } : {}),
         ...(call.link ? { link: { ...call.link } } : {}),
-        summary: pathOf(call.args).slice(0, 500) || "bounded file mutation",
+        summary: call.path || "bounded file mutation",
         revision: this.revision,
       });
     }

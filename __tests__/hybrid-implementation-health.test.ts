@@ -224,7 +224,6 @@ it.each([
     expect(
       h.monitor.state.tasks.every((task) => task.status === "not-started"),
     ).toBe(true);
-    expect(h.monitor.evidenceLink()).toBeUndefined();
     expect(
       h.monitor.evidence.snapshot().every((fact) => fact.link === undefined),
     ).toBe(true);
@@ -296,7 +295,6 @@ it("keeps unrelated evidence insufficient rather than assigning tools by display
   expect(h.monitor.presentationSnapshot().card?.health.implementation).toBe(
     "unverified",
   );
-  expect(h.monitor.evidenceLink()).toBeUndefined();
 });
 
 it("assesses final implementation evidence when all work completes in the same observation", async () => {

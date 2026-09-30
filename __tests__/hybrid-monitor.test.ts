@@ -197,7 +197,6 @@ describe("integrated hybrid monitor", () => {
     h.start();
     await h.settle("goal");
     expect(h.monitor.state.focusTaskId).toBeDefined();
-    expect(h.monitor.evidenceLink()).toBeUndefined();
     h.monitor.observeToolStart("unlinked", "bash", { command: "npm test" });
     h.monitor.observeToolEnd(
       "unlinked",

@@ -875,11 +875,6 @@ export class Monitor {
     this.installSubtaskRuntime(this.emptySubtaskCheckpoint());
   }
 
-  /** Display focus never establishes tool evidence authority. */
-  evidenceLink() {
-    return undefined;
-  }
-
   /** Runtime tool start is candidate-only until later canonical confirmation. */
   observeCoverageToolStart(
     callId: string,

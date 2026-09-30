@@ -203,11 +203,6 @@ async function readBounded(
 /** One transport authority; identities scope consent, input hashes suppress retries. */
 export class JevGateway {
   status = "Disabled: consent required";
-  /** Actual HTTP dispatch for this enabled runtime; never a tick/cache/result time. */
-  private lastDispatchAt?: number;
-  get lastCallAt() {
-    return this.lastDispatchAt;
-  }
   /** Read-only retry boundary for the scheduler's single one-shot wakeup. */
   get retryDelayMs(): number | undefined {
     const deadline = Math.max(this.nextAttempt, this.retryAfter);
@@ -250,7 +245,6 @@ export class JevGateway {
   enable(identity: string) {
     this.pause();
     this.identity = identity;
-    this.lastDispatchAt = undefined;
     this.paused = false;
     this.failures = 0;
     this.nextAttempt = -Infinity;
@@ -418,11 +412,11 @@ export class JevGateway {
     let observedRetryableHttp = false;
     try {
       const work = async () => {
-        // This is transport truth: update immediately before fetch, so failed
+        // This is transport truth: stamp immediately before fetch, so failed
         // HTTP responses, throws and timeouts remain visible as real attempts.
-        this.lastDispatchAt = this.now();
+        const dispatchedAt = this.now();
         try {
-          if (this.options.beforeDispatch?.(this.lastDispatchAt) === false) {
+          if (this.options.beforeDispatch?.(dispatchedAt) === false) {
             this.status = "Paused: optional dispatch rejected";
             this.outcome = "suppressed";
             return;
@@ -433,7 +427,7 @@ export class JevGateway {
           return;
         }
         try {
-          this.options.onDispatch?.(this.lastDispatchAt);
+          this.options.onDispatch?.(dispatchedAt);
         } catch {
           // Display observers never control transport admission.
         }

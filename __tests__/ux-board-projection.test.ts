@@ -281,7 +281,6 @@ describe("task source provenance", () => {
     // A validated evidence generation is a named health wake, not ownership.
     await vi.advanceTimersByTimeAsync(100);
     expect(h.fetch).toHaveBeenCalledTimes(calls + 3);
-    expect(h.monitor.evidenceLink()).toBeUndefined();
   });
 
   it("publishes no old-source widget health at intermediate revised commit before completion settles", async () => {

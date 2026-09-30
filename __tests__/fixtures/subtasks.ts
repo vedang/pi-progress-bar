@@ -43,18 +43,3 @@ export const subtaskAdmission = (
   removals: [],
   complete: false,
 });
-
-/** Tuning only. The separate held-out corpus is not added here after failures. */
-export const subtaskTuning = [
-  {
-    id: "st1",
-    text: "Compare the deployment options and recommend an approach.",
-    need: "yes",
-  },
-  { id: "st2", text: "What is 6 times 7?", need: "no" },
-  {
-    id: "st3",
-    text: "I compared operational tradeoffs; the recommendation is still pending.",
-    completed: ["Compare operational tradeoffs"],
-  },
-];

@@ -65,7 +65,6 @@ it("health follows new open focus B rather than just-completed old focus A", asy
     retained: false,
     replacementPending: false,
   });
-  expect(h.monitor.evidenceLink()).toBeUndefined();
 });
 it.each(["none", "concurrent", "uncertain"])(
   "refreshes health with %s activity without inferring current focus",
@@ -198,5 +197,4 @@ it("late health for A cannot replace selected B and tool callbacks never own foc
   );
   await vi.advanceTimersByTimeAsync(50);
   expect(h.monitor.state.focusTaskId).toBe(before);
-  expect(h.monitor.evidenceLink()).toBeUndefined();
 });

@@ -669,7 +669,7 @@ export class Monitor {
       health: {
         onDispatch: (at) => this.recordJevDispatch(at),
         // Health is optional: a permanent health transport error cannot turn OFF tracking.
-        onPermanentError: () => this.note("model-unavailable"),
+        onPermanentError: () => this.note("jev-unavailable"),
       },
       activity: {
         onDispatch: (at) => this.recordJevDispatch(at),
@@ -678,7 +678,7 @@ export class Monitor {
       },
       detail: {
         onDispatch: (at) => this.recordJevDispatch(at),
-        onPermanentError: () => this.note("detail-capacity-skipped"),
+        onPermanentError: () => this.note("jev-unavailable"),
       },
       subtask: {
         // SubtaskRuntime commits dispatch proof before this callback returns true.
@@ -695,7 +695,7 @@ export class Monitor {
       correction: {
         onDispatch: (at) => this.recordJevDispatch(at),
         // Corrections are optional and never disable semantic progress tracking.
-        onPermanentError: () => this.note("model-unavailable"),
+        onPermanentError: () => this.note("jev-unavailable"),
       },
       continuation: {
         beforeDispatch: (at) => this.continuationGate.beforeDispatch(at),

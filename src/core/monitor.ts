@@ -19,15 +19,6 @@ import type {
   ReconciliationSubtaskSummary,
   ReconciliationUncertainActivity,
 } from "../advisory/reconciliation";
-import {
-  buildLabelBindingRequest,
-  buildLabelSelectionRequest,
-  type LabelCandidateBundle,
-  type LabelSelections,
-  readLabelBindings,
-  readLabelSelections,
-  type VisibilityTask,
-} from "../analysis/activity-label";
 import type { ContinuationGateBatch } from "../analysis/continuation-gate";
 import type { ExtractionInput } from "../analysis/extractor";
 import type {
@@ -77,13 +68,8 @@ import {
   type BoardDetailRecord,
   type BoardSnapshot,
   projectBoard,
-  visibilityTaskSourceDigest,
 } from "./board-projection";
-import {
-  type ExecutionVisibilitySnapshot,
-  ExecutionVisibilityStore,
-  type VisibilityToolPhase,
-} from "./execution-visibility";
+import type { ExecutionVisibilitySnapshot } from "./execution-visibility";
 import {
   type AcceptedSaveOptions,
   type AdmissionPlan,
@@ -151,6 +137,7 @@ import {
   UsageMeter,
   type UsageTelemetry,
 } from "./usage-meter";
+import { ExecutionVisibilityCoordinator } from "./visibility-coordinator";
 
 export interface SelectedModelResult {
   text: string;
@@ -244,28 +231,6 @@ interface CorrectionFact extends CorrectionRedFact {
   healthIdentity: string;
   /** Digest binds the fact to its accepted task-local health receipt. */
   snapshotHash: string;
-}
-
-interface VisibilityCanonicalFrontier {
-  length: number;
-  digest: string;
-  lastId?: string;
-  lastRole?: string;
-}
-
-interface VisibilitySource {
-  bundle: LabelCandidateBundle;
-  frontier: VisibilityCanonicalFrontier;
-  selections?: LabelSelections;
-  confirmed: boolean;
-  stage2: "unseen" | "queued" | "in-flight" | "terminal";
-}
-
-interface VisibilityFlight {
-  token: string;
-  stage: 1 | 2;
-  epoch: number;
-  generation: number;
 }
 
 interface ContextTarget {
@@ -526,26 +491,6 @@ const healthRequirements = (answer: ValidatedResult["answers"][string]) => {
   return answer.score === 3 ? "clear" : "unknown";
 };
 
-const record = (value: unknown): Record<string, unknown> | undefined =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-
-/** Exact assistant-visible prose only; tool blocks and other roles are ineligible. */
-const assistantVisibleText = (message: unknown) => {
-  const value = record(message);
-  if (value?.role !== "assistant") return;
-  if (typeof value.content === "string") return value.content;
-  if (!Array.isArray(value.content)) return;
-  const text: string[] = [];
-  for (const part of value.content) {
-    const item = record(part);
-    if (item?.type === "text" && typeof item.text === "string")
-      text.push(item.text);
-  }
-  return text.join("");
-};
-
 const MAX_PENDING_SUBTASK_CAPTURE_BYTES = 64 * 1024;
 
 /**
@@ -563,7 +508,7 @@ export class Monitor {
   private readonly gatewayIdentities: GatewayIdentities = {
     identity: () => this.identity(),
     subtask: () => this.subtaskIdentity(),
-    visibility: () => this.visibilityIdentity(),
+    visibility: () => this.visibility.identity(),
   };
   readonly gateway: JevGateway;
   private readonly healthGateway: JevGateway;
@@ -576,15 +521,7 @@ export class Monitor {
   private continuationGateDispatch?: (at: number) => boolean;
   /** Raw continuation transport drain remains controller-owned across invalidation. */
   private continuationPhysicalFlight?: (drain: Promise<void>) => void;
-  private readonly visibilityGateway: JevGateway;
-  private readonly visibility = new ExecutionVisibilityStore();
-  private visibilitySources = new Map<string, VisibilitySource>();
-  /** Last branch frontier observed before a one-argument live capture. */
-  private visibilityCanonicalFrontier?: VisibilityCanonicalFrontier;
-  private visibilityLatestToken?: string;
-  private visibilityStage1?: string;
-  private visibilityStage2: string[] = [];
-  private visibilityFlight?: VisibilityFlight;
+  private readonly visibility: ExecutionVisibilityCoordinator;
   /** Monitor-owned correction admission count gates optional visibility drain. */
   private correctionActive = 0;
   private correctionActivityGeneration = 0;
@@ -775,15 +712,9 @@ export class Monitor {
         onPermanentError: () => this.note("jev-unavailable"),
       },
       visibility: {
-        onDispatch: () => {
-          this.visibility.recordDispatch();
-          this.publish();
-        },
+        onDispatch: () => this.visibility.recordDispatch(),
         // Visibility is optional and must never change semantic/advisory availability.
-        onPermanentError: () => {
-          this.visibility.markIncomplete();
-          this.publish();
-        },
+        onPermanentError: () => this.visibility.markUnavailable(),
       },
     });
     this.gateway = this.gateways.semantic;
@@ -792,7 +723,15 @@ export class Monitor {
     this.subtaskGateway = this.gateways.subtask;
     this.correctionGateway = this.gateways.correction;
     this.continuationGateway = this.gateways.continuation;
-    this.visibilityGateway = this.gateways.visibility;
+    this.visibility = new ExecutionVisibilityCoordinator({
+      enabled: () => this.enabled,
+      epoch: () => this.epoch,
+      identity: () => this.identity(),
+      ready: () => this.visibilityReady(),
+      tasks: () => this.state.tasks,
+      gateway: this.gateways.visibility,
+      publish: () => this.publish(),
+    });
     this.activityController = new ActivityFocusController({
       enabled: () => this.enabled,
       cwd: () => this.cwd,
@@ -949,18 +888,12 @@ export class Monitor {
 
   /** Start a live run without restoring or changing runtime history. */
   visibilityRunStarted(): void {
-    if (!this.enabled) return;
-    this.visibility.startRun();
-    this.publish();
+    this.visibility.runStarted();
   }
 
   /** Settlement clears current display; a confirmed history flight may still finish. */
   visibilityRunSettled(): void {
-    if (!this.enabled) return;
-    this.visibility.settle();
-    if (this.visibilityFlight?.stage === 1) this.dropVisibilityFlight();
-    this.visibilityStage1 = undefined;
-    this.publish();
+    this.visibility.runSettled();
   }
 
   /**
@@ -971,64 +904,12 @@ export class Monitor {
     message: unknown,
     branch?: readonly unknown[],
   ): void {
-    if (!this.enabled) return;
-    const value = record(message);
-    if (value?.role !== "assistant") return;
-    // Every assistant ingress clears older provisional current and its pending
-    // Stage 1 before this message can abstain, overflow, or be rejected.
-    this.supersedeVisibilityMessage();
-    if (value.stopReason === "error" || value.stopReason === "aborted") {
-      this.visibility.markIncomplete();
-      this.publish();
-      return;
-    }
-    const frontier = this.visibilityFrontier(branch);
-    const text = assistantVisibleText(message);
-    if (!frontier || text === undefined) {
-      this.visibility.markIncomplete();
-      this.publish();
-      return;
-    }
-    const bundle = this.visibility.capture(text);
-    if (!bundle) {
-      this.publish();
-      return;
-    }
-    this.visibilitySources.set(bundle.liveToken, {
-      bundle,
-      frontier,
-      confirmed: false,
-      stage2: "unseen",
-    });
-    this.visibilityLatestToken = bundle.liveToken;
-    this.visibilityStage1 = bundle.liveToken;
-    while (this.visibilitySources.size > 8) {
-      const token = this.visibilitySources.keys().next().value as
-        | string
-        | undefined;
-      if (!token) break;
-      this.dropVisibilitySource(token);
-    }
-    this.drainVisibility();
-    this.publish();
+    this.visibility.observeMessage(message, branch);
   }
 
   /** Match only a new canonical assistant entry after this source's frontier. */
   confirmVisibilityBranch(branch: readonly unknown[]): void {
-    if (!this.enabled || !this.visibilityLatestToken) return;
-    const token = this.visibilityLatestToken;
-    const source = this.visibilitySources.get(token);
-    if (!source) return;
-    const pass = new CanonicalPass(branch);
-    const canonical = this.visibilityCanonicalAfter(pass, source.frontier);
-    if (!this.visibility.confirm(token, canonical?.text ?? "")) {
-      this.dropVisibilitySource(token);
-    } else {
-      source.confirmed = true;
-      if (source.selections) this.enqueueVisibilityStage2(token);
-    }
-    this.drainVisibility();
-    this.publish();
+    this.visibility.confirmBranch(branch);
   }
 
   /** Finite local tool phase only; no path, argument, output, or tool name escapes. */
@@ -1037,16 +918,12 @@ export class Monitor {
     toolName: string,
     args: unknown,
   ): void {
-    if (!this.enabled) return;
-    this.visibility.toolStart(callId, this.visibilityPhase(toolName, args));
-    this.publish();
+    this.visibility.toolStart(callId, toolName, args);
   }
 
   /** A terminal tool event only clears its matching local phase. */
   observeVisibilityToolEnd(callId: string): void {
-    if (!this.enabled) return;
     this.visibility.toolEnd(callId);
-    this.publish();
   }
 
   /** Detached runtime-only visibility projection; never semantic/checkpoint data. */
@@ -1056,7 +933,7 @@ export class Monitor {
 
   /** Navigation is a lifetime boundary; no volatile report survives a tree change. */
   invalidateVisibility(): void {
-    this.resetVisibility();
+    this.visibility.reset();
     this.publish();
   }
 
@@ -1128,7 +1005,7 @@ export class Monitor {
   modelSelected() {
     if (this.controlWork || !this.enabled) return;
     const pass = this.beginCanonicalPass();
-    this.rememberVisibilityFrontier(pass);
+    this.visibility.rememberFrontier(pass);
     const authority = this.reconcileAuthority(pass);
     if (authority === "amended") this.resetForCanonicalAmendment();
     else if (authority === "incomplete") this.scheduleCanonicalWake();
@@ -1151,7 +1028,7 @@ export class Monitor {
       this.subtaskWakeKey = undefined;
       this.resetCoverageAdapter();
       this.continuationGateDispatch = undefined;
-      this.dropVisibilityFlight();
+      this.visibility.dropFlight();
       this.activityController.clear(false);
       this.gateways.enableAll(this.gatewayIdentities, retainReportAuthority);
       this.wakeHealthFromCurrent("control", true, pass);
@@ -1169,7 +1046,7 @@ export class Monitor {
     // Keep a host-observed canonical frontier for the one-argument test seam;
     // it is never inferred from arbitrary historical assistant prose.
     const pass = this.beginCanonicalPass();
-    this.rememberVisibilityFrontier(pass);
+    this.visibility.rememberFrontier(pass);
     if (this.controlWork || !this.enabled) return;
     const authority = this.reconcileAuthority(pass);
     if (authority === "amended") this.resetForCanonicalAmendment();
@@ -1312,7 +1189,7 @@ export class Monitor {
     this.subtaskOwners = [];
     this.subtaskWakeKey = undefined;
     this.continuationGateDispatch = undefined;
-    this.resetVisibility();
+    this.visibility.reset();
     this.resetCoverageAdapter();
     this.activityController.clear(false);
     this.evidence.clearPending();
@@ -1561,7 +1438,7 @@ export class Monitor {
     this.epoch++;
     this.gateways.enableAll(this.gatewayIdentities);
     this.wakeHealthFromCurrent("control", true, pass);
-    this.rememberVisibilityFrontier(pass);
+    this.visibility.rememberFrontier(pass);
     this.requeue(pass, true);
     if (this.queued.length) this.idleDoneInvalidated = true;
     else this.wakeSubtasks(pass, true);
@@ -1701,7 +1578,7 @@ export class Monitor {
    * health, detail, activity, and Beads enrichment never affect readiness.
    */
   advisorySettlementSnapshot(): AdvisorySettlementSnapshot {
-    const uncertainActivities = this.visibilityUncertainActivities();
+    const uncertainActivities = this.visibility.uncertainActivities();
     const subtasks = this.reconciliationSubtasks();
     return {
       enabled: this.enabled,
@@ -1848,7 +1725,7 @@ export class Monitor {
     return this.correctionController.observe(attempt, source).finally(() => {
       if (generation !== this.correctionActivityGeneration) return;
       this.correctionActive = Math.max(0, this.correctionActive - 1);
-      this.drainVisibility();
+      this.visibility.drain();
     });
   }
 
@@ -1970,7 +1847,7 @@ export class Monitor {
     if (!this.enabled) return;
     // A prepared correction is mandatory advisory work. Abort optional stage 1/2
     // before its own dispatch; do not wait for visibility cancellation to settle.
-    this.dropVisibilityFlight();
+    this.visibility.dropFlight();
     try {
       const result = await this.correctionGateway.evaluate(
         request,
@@ -4971,10 +4848,6 @@ export class Monitor {
     );
   }
 
-  private visibilityIdentity() {
-    return `${this.identity()}:visibility:${this.visibility.snapshot().generation}`;
-  }
-
   /** Optional visibility may run only after all semantic/advisory admission is quiet. */
   private visibilityReady() {
     return (
@@ -4990,18 +4863,6 @@ export class Monitor {
       this.correctionActive === 0 &&
       this.correctionGateway.status !== "Pending"
     );
-  }
-
-  private visibilityTasks(): VisibilityTask[] | undefined {
-    const tasks = this.state.tasks
-      .filter((task) => task.included)
-      .map((task) => ({
-        id: task.id,
-        label: task.label,
-        revision: task.revision,
-        sourceDigest: visibilityTaskSourceDigest(task),
-      }));
-    return tasks.length > 0 && tasks.length <= 20 ? tasks : undefined;
   }
 
   /**
@@ -5115,312 +4976,6 @@ export class Monitor {
     return observed > 0 ? observed : undefined;
   }
 
-  /**
-   * Copy only still-open exact MAYBE task receipts into the established
-   * reconciliation snapshot. Generic semantic replies never clear them: no
-   * semantic reducer is an ownership validator for a reported activity.
-   */
-  private visibilityUncertainActivities(): ReconciliationUncertainActivity[] {
-    const current = new Map(
-      (this.visibilityTasks() ?? []).map((task) => [task.id, task]),
-    );
-    const open = new Set(
-      this.state.tasks
-        .filter((task) => task.included && task.status !== "done")
-        .map((task) => task.id),
-    );
-    return this.visibility
-      .maybeAssociations()
-      .flatMap((activity) => {
-        const task = current.get(activity.task.id);
-        if (
-          !task ||
-          !open.has(task.id) ||
-          task.label !== activity.task.label ||
-          task.revision !== activity.task.revision ||
-          task.sourceDigest !== activity.task.sourceDigest
-        )
-          return [];
-        return [
-          {
-            id: activity.id,
-            quote: activity.quote,
-            taskId: task.id,
-            taskLabel: task.label,
-            revision: task.revision,
-            confidence: activity.assessment.confidence,
-            probability: activity.assessment.probability,
-          },
-        ];
-      })
-      .slice(0, 8);
-  }
-
-  private visibilityPhase(
-    toolName: string,
-    args: unknown,
-  ): VisibilityToolPhase {
-    if (["read", "grep", "find", "search"].includes(toolName))
-      return "Inspecting code";
-    if (["edit", "write"].includes(toolName)) return "Editing code";
-    if (toolName !== "bash") return "Using a tool";
-    const command = record(args)?.command;
-    if (typeof command !== "string") return "Using a tool";
-    const first = command.trim().split(/\s+/, 1)[0] ?? "";
-    if (
-      ["bun", "npm", "pnpm", "yarn", "vitest", "jest", "pytest"].includes(
-        first,
-      ) &&
-      /(?:^|\s)(?:test|vitest|jest|pytest)(?:\s|$)/.test(command)
-    )
-      return "Running test command";
-    if (
-      ["make", "bun", "npm", "pnpm", "yarn"].includes(first) &&
-      /(?:^|\s)(?:build|compile)(?:\s|$)/.test(command)
-    )
-      return "Running build command";
-    return "Using a tool";
-  }
-
-  private visibilityFrontier(
-    branch?: readonly unknown[],
-  ): VisibilityCanonicalFrontier | undefined {
-    if (branch) return this.frontierFor(new CanonicalPass(branch));
-    return this.visibilityCanonicalFrontier
-      ? { ...this.visibilityCanonicalFrontier }
-      : undefined;
-  }
-
-  private frontierFor(pass: CanonicalPass): VisibilityCanonicalFrontier {
-    const headers = pass.headers.map((header) => [header.id, header.role]);
-    const last = pass.headers.at(-1);
-    return {
-      length: headers.length,
-      digest: sha256(JSON.stringify(headers)),
-      ...(last ? { lastId: last.id, lastRole: last.role } : {}),
-    };
-  }
-
-  /** Cache only a canonical frontier for one-argument test/host fallback. */
-  private rememberVisibilityFrontier(pass: CanonicalPass): void {
-    this.visibilityCanonicalFrontier = this.frontierFor(pass);
-  }
-
-  private visibilityCanonicalAfter(
-    pass: CanonicalPass,
-    frontier: VisibilityCanonicalFrontier,
-  ) {
-    if (pass.headers.length <= frontier.length) return;
-    const prefix = pass.headers
-      .slice(0, frontier.length)
-      .map((header) => [header.id, header.role]);
-    if (sha256(JSON.stringify(prefix)) !== frontier.digest) return;
-    const header = pass.headers
-      .slice(frontier.length)
-      .reverse()
-      .find((candidate) => candidate.role === "assistant");
-    return header ? pass.observation(header.id) : undefined;
-  }
-
-  /** Retain confirmed history while removing stale provisional current/Stage 1. */
-  private supersedeVisibilityMessage() {
-    const prior = this.visibilityLatestToken;
-    this.visibility.supersede();
-    this.visibilityLatestToken = undefined;
-    this.visibilityStage1 = undefined;
-    if (this.visibilityFlight?.stage === 1) this.dropVisibilityFlight();
-    if (prior && !this.visibilitySources.get(prior)?.confirmed)
-      this.visibilitySources.delete(prior);
-  }
-
-  private terminalVisibilityStage2(token: string) {
-    const source = this.visibilitySources.get(token);
-    if (source) source.stage2 = "terminal";
-    this.visibilityStage2 = this.visibilityStage2.filter((id) => id !== token);
-  }
-
-  private dropVisibilitySource(token: string) {
-    const source = this.visibilitySources.get(token);
-    if (source) source.stage2 = "terminal";
-    if (this.visibilityFlight?.token === token) this.dropVisibilityFlight();
-    this.visibilitySources.delete(token);
-    if (this.visibilityLatestToken === token)
-      this.visibilityLatestToken = undefined;
-    if (this.visibilityStage1 === token) this.visibilityStage1 = undefined;
-    this.visibilityStage2 = this.visibilityStage2.filter((id) => id !== token);
-    this.visibility.markIncomplete();
-  }
-
-  private resetVisibility() {
-    this.visibilityGateway.pause();
-    this.visibility.reset();
-    this.visibilitySources.clear();
-    this.visibilityCanonicalFrontier = undefined;
-    this.visibilityLatestToken = undefined;
-    this.visibilityStage1 = undefined;
-    this.visibilityStage2 = [];
-    this.visibilityFlight = undefined;
-  }
-
-  /** Cancel optional work without retries when a newer mandatory boundary wins. */
-  private dropVisibilityFlight() {
-    const flight = this.visibilityFlight;
-    if (!flight) return;
-    if (flight.stage === 2) this.terminalVisibilityStage2(flight.token);
-    this.visibilityGateway.invalidate();
-    this.visibility.markIncomplete();
-    this.visibilityFlight = undefined;
-  }
-
-  private enqueueVisibilityStage2(token: string) {
-    const source = this.visibilitySources.get(token);
-    if (source?.stage2 !== "unseen") return;
-    if (this.visibilityStage2.length >= 4) {
-      const dropped = this.visibilityStage2.shift();
-      if (dropped) this.dropVisibilitySource(dropped);
-      this.visibility.markIncomplete();
-    }
-    source.stage2 = "queued";
-    this.visibilityStage2.push(token);
-  }
-
-  private visibilityFlightCurrent(flight: VisibilityFlight) {
-    return (
-      this.visibilityFlight === flight &&
-      flight.epoch === this.epoch &&
-      flight.generation === this.visibility.snapshot().generation &&
-      this.enabled
-    );
-  }
-
-  private drainVisibility() {
-    if (!this.visibilityReady() || this.visibilityFlight) return;
-    const stage1 = this.visibilityStage1;
-    if (stage1) {
-      this.visibilityStage1 = undefined;
-      const source = this.visibilitySources.get(stage1);
-      const request = source && buildLabelSelectionRequest(source.bundle);
-      if (
-        !source ||
-        !request ||
-        this.visibility.snapshot().budgetRemaining < 1
-      ) {
-        this.visibility.markIncomplete();
-        this.publish();
-        return;
-      }
-      const flight: VisibilityFlight = {
-        token: stage1,
-        stage: 1,
-        epoch: this.epoch,
-        generation: this.visibility.snapshot().generation,
-      };
-      this.visibilityFlight = flight;
-      void this.runVisibilityStage1(flight, request);
-      return;
-    }
-    const stage2 = this.visibilityStage2.shift();
-    if (!stage2) return;
-    const source = this.visibilitySources.get(stage2);
-    if (source?.stage2 !== "queued") {
-      this.terminalVisibilityStage2(stage2);
-      this.visibility.markIncomplete();
-      this.publish();
-      return;
-    }
-    const tasks = this.visibilityTasks();
-    const request =
-      source.confirmed && source.selections && tasks
-        ? buildLabelBindingRequest(
-            source.bundle,
-            source.selections,
-            tasks,
-            source.bundle.messageHash,
-          )
-        : undefined;
-    if (!tasks || !request || this.visibility.snapshot().budgetRemaining < 1) {
-      this.terminalVisibilityStage2(stage2);
-      this.visibility.markIncomplete();
-      this.publish();
-      return;
-    }
-    source.stage2 = "in-flight";
-    const flight: VisibilityFlight = {
-      token: stage2,
-      stage: 2,
-      epoch: this.epoch,
-      generation: this.visibility.snapshot().generation,
-    };
-    this.visibilityFlight = flight;
-    void this.runVisibilityStage2(flight, request, tasks);
-  }
-
-  private async runVisibilityStage1(
-    flight: VisibilityFlight,
-    request: EvaluationRequest,
-  ) {
-    try {
-      const result = await this.visibilityGateway.evaluate(
-        request,
-        this.visibilityIdentity(),
-      );
-      if (!this.visibilityFlightCurrent(flight)) return;
-      if (!result) {
-        this.visibility.markIncomplete();
-        return;
-      }
-      this.visibility.recordUsage(result.usage);
-      const source = this.visibilitySources.get(flight.token);
-      if (!source) {
-        this.visibility.markIncomplete();
-        return;
-      }
-      const selections = readLabelSelections(source.bundle, result);
-      source.selections = selections;
-      this.visibility.acceptSelections(flight.token, selections);
-      if (source.confirmed) this.enqueueVisibilityStage2(flight.token);
-    } finally {
-      if (this.visibilityFlight === flight) this.visibilityFlight = undefined;
-      this.publish();
-      this.drainVisibility();
-    }
-  }
-
-  private async runVisibilityStage2(
-    flight: VisibilityFlight,
-    request: EvaluationRequest,
-    tasks: readonly VisibilityTask[],
-  ) {
-    try {
-      const result = await this.visibilityGateway.evaluate(
-        request,
-        this.visibilityIdentity(),
-      );
-      if (!this.visibilityFlightCurrent(flight)) return;
-      if (!result) {
-        this.visibility.markIncomplete();
-        return;
-      }
-      this.visibility.recordUsage(result.usage);
-      const source = this.visibilitySources.get(flight.token);
-      if (!source?.selections) {
-        this.visibility.markIncomplete();
-        return;
-      }
-      const currentTasks = this.visibilityTasks();
-      this.visibility.acceptBindings(
-        flight.token,
-        readLabelBindings(source.selections, tasks, result),
-        currentTasks ?? [],
-      );
-    } finally {
-      this.terminalVisibilityStage2(flight.token);
-      if (this.visibilityFlight === flight) this.visibilityFlight = undefined;
-      this.publish();
-      this.drainVisibility();
-    }
-  }
-
   private drain() {
     if (
       !this.enabled ||
@@ -5433,7 +4988,7 @@ export class Monitor {
     if (observation) {
       const epoch = this.epoch;
       // Canonical work preempts optional activity before durable semantic admission.
-      this.dropVisibilityFlight();
+      this.visibility.dropFlight();
       this.activityController.clear();
       // Any newly processed canonical work invalidates retained idle completion.
       this.idleDoneInvalidated = true;
@@ -5448,7 +5003,7 @@ export class Monitor {
       void this.processOne(active);
       return;
     }
-    this.drainVisibility();
+    this.visibility.drain();
     // Ready health is older than optional details. Parked/paused health is not.
     const health = this.nextReadyHealthJob();
     if (health && !this.healthFlight) {
@@ -6755,7 +6310,7 @@ export class Monitor {
       }
     }
     this.state = copyState(state);
-    this.visibility.reconcileCurrentTasks(this.visibilityTasks() ?? []);
+    this.visibility.reconcileCurrentTasks();
     this.rebuildDetailValues();
     try {
       this.persist(checkpoint);

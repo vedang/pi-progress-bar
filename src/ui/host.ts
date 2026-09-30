@@ -67,7 +67,10 @@ class ExtensionUiHost implements UiHost {
       this.ctx.ui.setWidget(
         widgetName,
         (tui, theme) => {
-          this.captureEditor(tui);
+          if (!this.disposed && isFocusTui(tui)) {
+            this.tui = tui;
+            this.captureEditor();
+          }
           return factory(tui, theme);
         },
         { placement: "belowEditor" },
@@ -86,11 +89,12 @@ class ExtensionUiHost implements UiHost {
       this.ctx.mode !== "tui" ||
       !this.attached ||
       !this.tui ||
-      !this.editor ||
       !matchesKey(data, "right") ||
       isKeyRelease(data)
     )
       return false;
+    this.captureEditor();
+    if (!this.editor) return false;
     try {
       return (
         !this.tui.hasOverlay() &&
@@ -104,19 +108,19 @@ class ExtensionUiHost implements UiHost {
   }
 
   onInput(listener: TerminalInputHandler): () => void {
-    if (
-      this.disposed ||
-      this.ctx.mode !== "tui" ||
-      !this.attached ||
-      !this.tui ||
-      !this.editor
-    )
+    if (this.disposed || this.ctx.mode !== "tui" || !this.attached || !this.tui)
       return noop;
     let active = true;
-    const unsubscribe = this.ctx.ui.onTerminalInput((data) => {
-      if (!active || this.disposed) return;
-      return listener(data);
-    });
+    let unsubscribe: () => void;
+    try {
+      unsubscribe = this.ctx.ui.onTerminalInput((data) => {
+        if (!active || this.disposed) return;
+        return listener(data);
+      });
+    } catch {
+      // Missing/unstable host capability fails closed.
+      return noop;
+    }
     const stop = () => {
       if (!active) return;
       active = false;
@@ -199,14 +203,15 @@ class ExtensionUiHost implements UiHost {
     }
   }
 
-  private captureEditor(tui: TUI): void {
-    if (this.disposed || this.tui || !isFocusTui(tui)) return;
+  /** Capture the default editor once it is focused with no overlay or replacement. */
+  private captureEditor(): void {
+    const tui = this.tui;
+    if (this.disposed || this.editor || !tui) return;
     try {
       if (tui.hasOverlay() || this.ctx.ui.getEditorComponent() !== undefined)
         return;
       const editor = tui.getFocusedComponent();
       if (!(editor instanceof CustomEditor)) return;
-      this.tui = tui;
       this.editor = editor;
     } catch {
       // Missing/unstable host capability fails closed.

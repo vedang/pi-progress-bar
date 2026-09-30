@@ -144,13 +144,17 @@ describe("passive host adapter contract", () => {
     expect(host.canActivate("\x1b[C")).toBe(false);
   });
 
-  it("does not capture an editor through a competing overlay", async () => {
+  it("captures the default editor only after a competing overlay closes", async () => {
     const f = fixture();
     f.state.overlay = true;
     const host = await create(f.ctx);
     host.attach(() => f.component);
-    f.state.overlay = false;
+    const listener = vi.fn(() => ({ consume: true }));
+    host.onInput(listener);
     expect(host.canActivate("\x1b[C")).toBe(false);
+    f.state.overlay = false;
+    expect(host.canActivate("\x1b[C")).toBe(true);
+    expect([...f.listeners][0]?.("\x1b[C")).toEqual({ consume: true });
   });
 
   it.each(["a", "\x1b[D", "\x1b[1;5C", "\x1b[1;1:3C"])(

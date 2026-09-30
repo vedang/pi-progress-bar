@@ -69,6 +69,7 @@ import {
   type BoardSnapshot,
   projectBoard,
 } from "./board-projection";
+import { ContinuationGateRunner } from "./continuation-gate-runner";
 import type { ExecutionVisibilitySnapshot } from "./execution-visibility";
 import {
   type AcceptedSaveOptions,
@@ -517,10 +518,7 @@ export class Monitor {
   private subtaskGateDispatch?: (at: number) => boolean;
   private subtaskPhysicalFlight?: SubtaskPhysicalFlightObserver;
   private readonly correctionGateway: JevGateway;
-  private readonly continuationGateway: JevGateway;
-  private continuationGateDispatch?: (at: number) => boolean;
-  /** Raw continuation transport drain remains controller-owned across invalidation. */
-  private continuationPhysicalFlight?: (drain: Promise<void>) => void;
+  private readonly continuationGate: ContinuationGateRunner;
   private readonly visibility: ExecutionVisibilityCoordinator;
   /** Monitor-owned correction admission count gates optional visibility drain. */
   private correctionActive = 0;
@@ -700,14 +698,9 @@ export class Monitor {
         onPermanentError: () => this.note("model-unavailable"),
       },
       continuation: {
-        beforeDispatch: (at) => this.continuationGateDispatch?.(at) === true,
-        onPhysicalFlight: (drain) => {
-          try {
-            this.continuationPhysicalFlight?.(drain);
-          } catch {
-            // Observation never controls continuation transport admission.
-          }
-        },
+        beforeDispatch: (at) => this.continuationGate.beforeDispatch(at),
+        onPhysicalFlight: (drain) =>
+          this.continuationGate.observePhysicalFlight(drain),
         // Continuation is optional; availability is surfaced by its controller.
         onPermanentError: () => this.note("jev-unavailable"),
       },
@@ -722,7 +715,11 @@ export class Monitor {
     this.detailGateway = this.gateways.detail;
     this.subtaskGateway = this.gateways.subtask;
     this.correctionGateway = this.gateways.correction;
-    this.continuationGateway = this.gateways.continuation;
+    this.continuationGate = new ContinuationGateRunner({
+      canStart: () => this.continuationCanStart(),
+      identity: () => this.identity(),
+      gateway: this.gateways.continuation,
+    });
     this.visibility = new ExecutionVisibilityCoordinator({
       enabled: () => this.enabled,
       epoch: () => this.epoch,
@@ -1027,7 +1024,7 @@ export class Monitor {
       this.subtaskOwners = [];
       this.subtaskWakeKey = undefined;
       this.resetCoverageAdapter();
-      this.continuationGateDispatch = undefined;
+      this.continuationGate.revoke();
       this.visibility.dropFlight();
       this.activityController.clear(false);
       this.gateways.enableAll(this.gatewayIdentities, retainReportAuthority);
@@ -1188,7 +1185,7 @@ export class Monitor {
     this.subtaskDiagnosticAuthority = undefined;
     this.subtaskOwners = [];
     this.subtaskWakeKey = undefined;
-    this.continuationGateDispatch = undefined;
+    this.continuationGate.revoke();
     this.visibility.reset();
     this.resetCoverageAdapter();
     this.activityController.clear(false);
@@ -1635,38 +1632,23 @@ export class Monitor {
   }
 
   /** One optional Jev admission, fenced by the controller at fetch boundary. */
-  async evaluateContinuationGate(
+  evaluateContinuationGate(
     batch: ContinuationGateBatch,
     signal: AbortSignal,
     admit: () => boolean,
     onPhysicalFlight: (drain: Promise<void>) => void,
   ): Promise<ValidatedResult | undefined> {
-    if (!this.continuationCanStart() || signal.aborted) return;
-    const dispatch = (_at: number) => !signal.aborted && admit();
-    this.continuationGateDispatch = dispatch;
-    this.continuationPhysicalFlight = onPhysicalFlight;
-    const abort = () => this.continuationGateway.invalidate();
-    signal.addEventListener("abort", abort, { once: true });
-    try {
-      const result = await this.continuationGateway.evaluate(
-        batch.request,
-        this.identity(),
-        true,
-      );
-      return signal.aborted ? undefined : result;
-    } finally {
-      signal.removeEventListener("abort", abort);
-      if (this.continuationGateDispatch === dispatch)
-        this.continuationGateDispatch = undefined;
-      if (this.continuationPhysicalFlight === onPhysicalFlight)
-        this.continuationPhysicalFlight = undefined;
-    }
+    return this.continuationGate.evaluate(
+      batch,
+      signal,
+      admit,
+      onPhysicalFlight,
+    );
   }
 
   /** Input/lifecycle invalidation aborts only continuation's own Jev flight. */
   invalidateContinuation(): void {
-    this.continuationGateway.invalidate();
-    this.continuationGateDispatch = undefined;
+    this.continuationGate.invalidate();
   }
 
   /**

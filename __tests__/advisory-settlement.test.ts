@@ -48,6 +48,8 @@ function withField(
   value: unknown,
   check: () => void,
 ) {
+  // A moved field would silently make the blocker assertion vacuous.
+  expect(field in h.monitor, `Missing monitor field ${field}`).toBe(true);
   const before = Reflect.get(h.monitor, field);
   Reflect.set(h.monitor, field, value);
   try {
@@ -182,7 +184,6 @@ it("waits for a real pending extraction journal and resumes readiness after comm
 });
 
 it.each([
-  "healthObservation",
   "healthFlight",
   "detailFlight",
   "activityFlight",

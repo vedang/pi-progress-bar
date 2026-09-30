@@ -256,9 +256,15 @@ export class JevGateway {
   invalidate() {
     this.generation++;
     const flight = this.flight;
+    if (!flight) return;
     this.flight = undefined;
-    flight?.controller.abort();
-    flight?.cancel();
+    flight.controller.abort();
+    flight.cancel();
+    // A cancelled flight settles without touching status; do not leave it Pending.
+    if (this.outcome === "in-flight") {
+      this.status = "Ready";
+      this.outcome = "idle";
+    }
   }
   pause() {
     this.invalidate();

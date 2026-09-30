@@ -32,6 +32,28 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe("shared Jev gateway", () => {
+  it("returns to Ready when invalidation cancels an in-flight request", async () => {
+    let release = () => {};
+    const fetcher = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(Response.json(result));
+        }),
+    );
+    const gateway = new JevGateway({
+      fetch: fetcher,
+      getApiKey: () => "fixture-key",
+    });
+    gateway.enable("cancel");
+    const outcome = gateway.evaluate(request, "cancel");
+    expect(gateway.status).toBe("Pending");
+    gateway.invalidate();
+    expect(await outcome).toBeUndefined();
+    expect(gateway.status).toBe("Ready");
+    expect(gateway.lastOutcome).toBe("idle");
+    release();
+  });
+
   it("does not let inherited serialization hooks hide oversized evidence", async () => {
     const responseText = JSON.stringify(result);
     const fetcher = vi.fn(async () => new Response(responseText));

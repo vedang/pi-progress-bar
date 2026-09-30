@@ -193,10 +193,10 @@ it("waits for a real pending extraction journal and resumes readiness after comm
 it.each([
   "healthFlight",
   "detailFlight",
-  "activityFlight",
-  "activityQueued",
-  "activityDeclaration",
-  "activityFocus",
+  "activityController.flight",
+  "activityController.queued",
+  "activityController.declaration",
+  "activityController.focus",
   "beads.inFlight",
 ])("ignores optional %s when semantic state is settled", async (field) => {
   const h = await settled();

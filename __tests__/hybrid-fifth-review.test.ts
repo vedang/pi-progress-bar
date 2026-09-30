@@ -91,6 +91,30 @@ it.each([false, true])(
   },
 );
 
+it("model selection during a bounded scan still reaches the visible suffix", async () => {
+  const goal = branchEntry(
+    "goal",
+    "Implement parser, add regression, and validate it.",
+  );
+  const h = monitorHarness([goal]);
+  running.push(h);
+  h.start();
+  await h.settle("goal");
+  const tail = Array.from({ length: 2_000 }, (_, index) => ({
+    type: "message",
+    id: `invisible-${index}`,
+    message: { role: "assistant", content: [{ type: "text", text: "   " }] },
+  }));
+  const suffix = branchEntry("suffix", "Please report current work.", "user");
+  h.replace([goal, ...tail, suffix]);
+  h.monitor.modelSelected();
+  for (let step = 0; step < 500; step++) {
+    await vi.advanceTimersByTimeAsync(1);
+    if (h.monitor.state.cursor?.id === "suffix") break;
+  }
+  expect(h.monitor.state.cursor?.id).toBe("suffix");
+});
+
 it("restores exact pending context across skipped candidates without unbounded reads or rebilling the gate", async () => {
   const goal = branchEntry(
     "goal",

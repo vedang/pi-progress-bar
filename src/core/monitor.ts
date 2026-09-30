@@ -722,6 +722,7 @@ export class Monitor {
   private settledContext: Observation[] = [];
   private pendingScan?: ContextScan;
   private canonicalWakeTimer?: ReturnType<typeof setTimeout>;
+  private canonicalWakeEpoch = 0;
   private controlWork?: ControlWork;
   private queued: Observation[] = [];
   private processing = false;
@@ -4342,8 +4343,13 @@ export class Monitor {
 
   /** One bounded wake, rescheduled only by a named advancing frontier. */
   private scheduleCanonicalWake() {
-    if (this.canonicalWakeTimer) return;
+    if (this.canonicalWakeTimer) {
+      // A timer from an older epoch exits without rescheduling; replace it.
+      if (this.canonicalWakeEpoch === this.epoch) return;
+      clearTimeout(this.canonicalWakeTimer);
+    }
     const epoch = this.epoch;
+    this.canonicalWakeEpoch = epoch;
     this.canonicalWakeTimer = setTimeout(() => {
       this.canonicalWakeTimer = undefined;
       if (epoch !== this.epoch) return;

@@ -56,8 +56,7 @@ interface BoardTask {
   /** Safe lifecycle names only; source payloads never enter presentation. */
   transitions: { kind: string }[];
   /** Optional display payload; callers must tolerate its disabled omission. */
-  // biome-ignore lint/suspicious/noExplicitAny: dynamic disabled/absent board field is test-facing.
-  details?: any;
+  details?: BoardTaskDetails;
 }
 
 export interface BoardDetailRecord {

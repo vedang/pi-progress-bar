@@ -137,11 +137,6 @@ const entryAnchor = (entry: unknown) => {
   return typeof entry.id === "string" ? entry.id : entry;
 };
 
-const sameAnchor = (left: unknown, right: unknown) =>
-  typeof left === "string" && typeof right === "string"
-    ? left === right
-    : left === right;
-
 const isExternalEntry = (entry: unknown) => {
   if (!plainObject(entry)) return false;
   if (
@@ -499,10 +494,7 @@ export class ReconciliationDelivery {
   ): boolean {
     return (
       branch.length >= chain.baselineLength &&
-      sameAnchor(
-        entryAnchor(branch[chain.baselineLength - 1]),
-        chain.baselineAnchor,
-      )
+      entryAnchor(branch[chain.baselineLength - 1]) === chain.baselineAnchor
     );
   }
 

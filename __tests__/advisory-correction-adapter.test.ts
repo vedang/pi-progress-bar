@@ -127,14 +127,12 @@ it("observes named review without launching or nudging before a correlated runni
       "/repo",
     ),
   ).toBeUndefined();
-  expect(adapter.update("call-1", "subagent", receipt())).toBeUndefined();
   expect(adapter.end("call-1", "subagent", receipt(), false)).toEqual({
     kind: "review",
     id: "call-1",
     toolName: "subagent",
     runId: "workflow-1",
   });
-  expect(adapter.update("call-1", "subagent", receipt())).toBeUndefined();
 });
 it.each(["raw-script", "agent-name", "foreground", "spoofed-source"])(
   "does not infer review purpose from %s",
@@ -195,11 +193,11 @@ it("clears outstanding review correlation on lifecycle reset", async () => {
   adapter.start(
     "call-1",
     "subagent",
-    { workflow: "review", args: { task: "review" }, async: false },
+    { workflow: "review", args: { task: "review" }, async: true },
     "/repo",
   );
   adapter.reset();
-  expect(adapter.update("call-1", "subagent", receipt())).toBeUndefined();
+  expect(adapter.end("call-1", "subagent", receipt(), false)).toBeUndefined();
 });
 
 it("tracks only successfully admitted async workflow until observed completion", async () => {

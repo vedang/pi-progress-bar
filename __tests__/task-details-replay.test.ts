@@ -395,7 +395,7 @@ it.each([
     await h.settle("goal");
     await vi.advanceTimersByTimeAsync(100);
     const task = required(h.monitor.boardSnapshot().tasks[0]);
-    const details = Reflect.get(task, "details");
+    const details = task.details;
     if (visible) {
       expect(details).toMatchObject({
         title: { text: "Implement parser" },
@@ -405,10 +405,9 @@ it.each([
       expect(JSON.stringify(details)).not.toMatch(
         /quoteHash|messageHash|entryId|taskSource/,
       );
-      details.title.text = "consumer mutation";
+      required(details?.title).text = "consumer mutation";
       expect(
-        Reflect.get(required(h.monitor.boardSnapshot().tasks[0]), "details")
-          .title.text,
+        required(h.monitor.boardSnapshot().tasks[0]?.details?.title).text,
       ).toBe("Implement parser");
     } else expect(details).toBeUndefined();
     const calls = h.fetch.mock.calls.length,

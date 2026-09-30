@@ -1,5 +1,10 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { ContinuationSnapshot } from "../advisory/continuation-controller";
+import {
+  MAX_DISPATCHES,
+  MAX_DRAFT_DISPATCHES,
+  MAX_GATE_DISPATCHES,
+} from "../advisory/continuation-controller";
 import type { Monitor } from "../core/monitor";
 
 const commands = `How to use:
@@ -28,7 +33,7 @@ Jev requests: ${view.usage.jev.calls} actual dispatched requests • ${view.usag
 Extraction requests: ${view.usage.extraction.calls} actual dispatched requests • ${view.usage.extraction.inputTokens} input tokens • ${view.usage.extraction.outputTokens} output tokens
 Request counts are session-wide transport dispatches, not questions or tasks.
 Continuation: ${continuationStatus}
-Continuation dispatches: ${continuation.gateDispatches + continuation.draftDispatches}/64 (Jev ${continuation.gateDispatches}/32, draft ${continuation.draftDispatches}/32)
+Continuation dispatches: ${continuation.gateDispatches + continuation.draftDispatches}/${MAX_DISPATCHES} (Jev ${continuation.gateDispatches}/${MAX_GATE_DISPATCHES}, draft ${continuation.draftDispatches}/${MAX_DRAFT_DISPATCHES})
 Continuation tokens: ${continuation.usage.inputTokens} input • ${continuation.usage.outputTokens} output
 Continuation direct caps apply per extension instance and reset on reload; triggered turns use separate provider limits.
 

@@ -716,15 +716,6 @@ export default function progressBar(pi: ExtensionAPI): void {
       reviewSources.set(event.toolCallId, { ...source, action });
     }
   });
-  pi.on("tool_execution_update", (event, ctx) => {
-    context = ctx;
-    // No C authority comes from foreground partial results or child progress.
-    correctionAdapter.update(
-      event.toolCallId,
-      event.toolName,
-      event.partialResult,
-    );
-  });
   pi.on("tool_execution_end", (event, ctx) => {
     context = ctx;
     const source = reviewSources.get(event.toolCallId);

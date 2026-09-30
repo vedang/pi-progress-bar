@@ -15,9 +15,9 @@ import {
 } from "./continuation-draft";
 import type { ReconciliationSettlement } from "./delivery";
 
-const MAX_GATE_DISPATCHES = 32;
-const MAX_DRAFT_DISPATCHES = 32;
-const MAX_DISPATCHES = 64;
+export const MAX_GATE_DISPATCHES = 32;
+export const MAX_DRAFT_DISPATCHES = 32;
+export const MAX_DISPATCHES = 64;
 const MAX_RECEIPT_REPLIES = 16;
 const MAX_RECEIPT_IDENTIFIER_BYTES = 12 * 1024;
 const MAX_RECEIPT_SERIALIZED_BYTES = 24 * 1024;

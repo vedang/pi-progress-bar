@@ -435,15 +435,6 @@ export class CorrectionAdapter {
     return;
   }
 
-  update(
-    _callId: string,
-    _toolName: string,
-    _partialResult: unknown,
-  ): CorrectionAttempt | undefined {
-    // Foreground updates cannot prove an installed child run identity.
-    return;
-  }
-
   /**
    * Async named workflow admission exists only in successful terminal tool
    * receipt. This observes it; it never starts, waits on, or controls review.

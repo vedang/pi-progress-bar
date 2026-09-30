@@ -171,15 +171,19 @@ describe("host-selected continuation adapter", () => {
     expect(h.complete).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
-  it("discards provider result after selected-model drift", async () => {
+  it("discards a drafted result after model drift but keeps its charged usage", async () => {
     const h = fixture();
     h.complete.mockImplementation(async () => {
       h.context.model = { id: "other", provider: "fixture" };
       return h.response;
     });
-    await expect(
-      h.run(h.request, h.controller.signal, h.dispatch),
-    ).rejects.toThrow();
+    expect(await h.run(h.request, h.controller.signal, h.dispatch)).toEqual({
+      text: "",
+      model: "selected",
+      provider: "fixture",
+      requestHash: h.request.requestHash,
+      usage: { inputTokens: 7, outputTokens: 9 },
+    });
   });
   it("contains already-started cancellation without retry", async () => {
     const h = fixture();

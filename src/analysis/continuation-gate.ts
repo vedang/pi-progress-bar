@@ -1,7 +1,15 @@
-import { createHash } from "node:crypto";
-
 import type { ContinuationAuthorityProjection } from "../advisory/continuation-authority";
 import { taskLabelIsValid } from "../core/hybrid-state";
+import {
+  deepFreeze,
+  deeplyFrozen,
+  exactKeys,
+  record,
+  safeInteger,
+  unit,
+  validHash,
+} from "../shared/guards";
+import { json, jsonBytes, requestHash, sha256 } from "../shared/hash";
 import {
   type EvaluationRequest,
   MAX_REQUEST_BYTES,
@@ -15,7 +23,6 @@ const MAX_CONTEXT_BYTES = 12 * 1024;
 const MAX_POLICY_BYTES = 8 * 1024;
 const MAX_MODEL_BYTES = 4 * 1024;
 const MAX_IDENTIFIER_BYTES = 12 * 1024;
-const SHA256 = /^[a-f0-9]{64}$/;
 const choices = ["yes", "no", "uncertain"] as const;
 type ContinuationChoice = (typeof choices)[number];
 
@@ -52,76 +59,10 @@ type ChoiceAnswer = {
   yesProbability: number;
 };
 
-const record = (value: unknown): value is RecordValue =>
-  !!value && typeof value === "object" && !Array.isArray(value);
-
-const exactKeys = (value: RecordValue, keys: readonly string[]) => {
-  const actual = Object.keys(value);
-  return (
-    actual.length === keys.length &&
-    keys.every((key) => Object.hasOwn(value, key))
-  );
-};
-
-const safeInteger = (value: unknown, minimum = 0): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= minimum;
-
-const unit = (value: unknown): value is number =>
-  typeof value === "number" &&
-  Number.isFinite(value) &&
-  value >= 0 &&
-  value <= 1;
-
 const nonblankString = (value: unknown, limit = MAX_IDENTIFIER_BYTES) =>
   typeof value === "string" &&
   !!value.trim() &&
   Buffer.byteLength(value, "utf8") <= limit;
-
-const validHash = (value: unknown): value is string =>
-  typeof value === "string" && SHA256.test(value);
-
-const sha256 = (value: string) =>
-  createHash("sha256").update(value, "utf8").digest("hex");
-
-const json = (value: unknown): string | undefined => {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return;
-  }
-};
-
-const requestHash = (request: unknown): string | undefined => {
-  const serialized = json(request);
-  return serialized === undefined ? undefined : sha256(serialized);
-};
-
-const jsonBytes = (value: unknown): number | undefined => {
-  const serialized = json(value);
-  return serialized === undefined
-    ? undefined
-    : Buffer.byteLength(serialized, "utf8");
-};
-
-const deepFreeze = <Value>(
-  value: Value,
-  seen = new WeakSet<object>(),
-): Value => {
-  if (!value || typeof value !== "object" || seen.has(value)) return value;
-  seen.add(value);
-  for (const child of Object.values(value)) deepFreeze(child, seen);
-  return Object.freeze(value);
-};
-
-const deeplyFrozen = (
-  value: unknown,
-  seen = new WeakSet<object>(),
-): boolean => {
-  if (!value || typeof value !== "object" || seen.has(value)) return true;
-  if (!Object.isFrozen(value)) return false;
-  seen.add(value);
-  return Object.values(value).every((child) => deeplyFrozen(child, seen));
-};
 
 const validRole = (value: unknown) =>
   value === "user" || value === "assistant" || value === "intercom";

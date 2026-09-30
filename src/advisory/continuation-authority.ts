@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   type Cursor,
   type HybridTask,
@@ -9,9 +8,13 @@ import {
   type SourceRef,
   taskLabelIsValid,
 } from "../core/hybrid-state";
-import type { ReconciliationSettlement } from "./delivery";
+import { exactKeys, record, safeInteger, validHash } from "../shared/guards";
+import { sha256 } from "../shared/hash";
+import {
+  ADVISORY_CUSTOM_TYPE,
+  type ReconciliationSettlement,
+} from "./delivery";
 
-const ADVISORY_CUSTOM_TYPE = "pi-progress-advisory";
 const MAX_QUESTION_BYTES = 24 * 1024;
 const MAX_CONTEXT_OBSERVATIONS = 16;
 const MAX_CONTEXT_BYTES = 12 * 1024;
@@ -21,7 +24,6 @@ const MAX_OUTPUT_BYTES = 24 * 1024;
 const MAX_MODEL_BYTES = 4 * 1024;
 const MAX_IDENTIFIER_BYTES = 12 * 1024;
 const HASH_PLACEHOLDER = "0".repeat(64);
-const SHA256 = /^[a-f0-9]{64}$/;
 const observationRoles = new Set<ObservationRole>([
   "user",
   "assistant",
@@ -136,23 +138,6 @@ const unavailable = (
   reason: ContinuationAuthorityReason,
 ): ContinuationAuthorityUnavailable => ({ available: false, reason });
 
-const sha256 = (text: string) =>
-  createHash("sha256").update(text, "utf8").digest("hex");
-
-const record = (value: unknown): value is RecordValue =>
-  !!value && typeof value === "object" && !Array.isArray(value);
-
-const exactKeys = (value: RecordValue, keys: readonly string[]) => {
-  const actual = Object.keys(value);
-  return (
-    actual.length === keys.length &&
-    keys.every((key) => Object.hasOwn(value, key))
-  );
-};
-
-const safeInteger = (value: unknown, minimum = 0): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= minimum;
-
 const boundedString = (
   value: unknown,
   limit = MAX_IDENTIFIER_BYTES,
@@ -163,9 +148,6 @@ const nonblankString = (
   value: unknown,
   limit = MAX_IDENTIFIER_BYTES,
 ): value is string => boundedString(value, limit) && !!value.trim();
-
-const validHash = (value: unknown): value is string =>
-  typeof value === "string" && SHA256.test(value);
 
 const validRole = (value: unknown): value is ObservationRole =>
   typeof value === "string" && observationRoles.has(value as ObservationRole);

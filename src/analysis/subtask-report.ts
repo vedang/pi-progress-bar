@@ -1,6 +1,14 @@
-import { createHash } from "node:crypto";
 import type { HybridTask, Observation, SourceRef } from "../core/hybrid-state";
 import type { SubtaskGroupSnapshot, SubtaskReport } from "../core/subtasks";
+import {
+  cloneSource,
+  nonNegativeInteger,
+  positiveInteger,
+  sameSource,
+  unit,
+  validHash,
+} from "../shared/guards";
+import { sha256 } from "../shared/hash";
 import {
   type EvaluationRequest,
   MAX_REQUEST_BYTES,
@@ -16,7 +24,6 @@ const MAX_QUESTIONS = 20;
 const MAX_ACTIVE_CHILDREN = 64;
 const MAX_RETAINED_CHILDREN = 200;
 const MAX_OMISSIONS = 2;
-const digest = /^[a-f0-9]{64}$/;
 const parentId = /^task:[1-9]\d*$/;
 const groupId = /^subtask-group:[1-9]\d*$/;
 const childId = /^subtask-child:[1-9]\d*$/;
@@ -128,32 +135,12 @@ interface BatchProof {
 
 const batchProofs = new WeakMap<object, BatchProof>();
 
-const sha256 = (value: string) =>
-  createHash("sha256").update(value, "utf8").digest("hex");
-
-const cloneSource = (source: SourceRef): SourceRef => ({
-  entryId: source.entryId,
-  messageHash: source.messageHash,
-  role: source.role,
-  start: source.start,
-  end: source.end,
-  quoteHash: source.quoteHash,
-});
-
 const cloneObservation = (observation: Observation): Observation => ({
   id: observation.id,
   role: observation.role,
   text: observation.text,
   hash: observation.hash,
 });
-
-const sameSource = (left: SourceRef, right: SourceRef) =>
-  left.entryId === right.entryId &&
-  left.messageHash === right.messageHash &&
-  left.role === right.role &&
-  left.start === right.start &&
-  left.end === right.end &&
-  left.quoteHash === right.quoteHash;
 
 const sameObservation = (left: Observation, right: Observation) =>
   left.id === right.id &&
@@ -213,15 +200,6 @@ const validText = (value: unknown, maximumBytes: number): value is string =>
 
 const validLabel = (value: unknown) =>
   validText(value, 1024) && Array.from(value).length <= 240;
-
-const validHash = (value: unknown): value is string =>
-  typeof value === "string" && digest.test(value);
-
-const positiveInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
-
-const nonNegativeInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
 const validRole = (value: unknown) =>
   value === "user" || value === "assistant" || value === "intercom";
@@ -972,12 +950,6 @@ const distributionTolerance = (probabilities: readonly number[]) => {
   );
   return cents ? Math.min(0.02, probabilities.length * 0.005 + 1e-9) : 0.001;
 };
-
-const unit = (value: unknown): value is number =>
-  typeof value === "number" &&
-  Number.isFinite(value) &&
-  value >= 0 &&
-  value <= 1;
 
 interface ValidAnswer {
   choice: ReportChoice;

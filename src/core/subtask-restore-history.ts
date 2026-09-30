@@ -1,3 +1,4 @@
+import { sameSource } from "../shared/guards";
 import {
   acceptedSubtaskRecordMatchesGroup,
   type SubtaskJournalCheckpoint,
@@ -86,17 +87,6 @@ const detachedCheckpoint = (value: unknown): SubtaskCheckpoint | undefined => {
   const copy = structuredClone(value);
   return subtaskCheckpointIsValid(copy) ? copy : undefined;
 };
-
-const sameSource = (
-  left: SubtaskPhaseRecord["source"],
-  right: SubtaskPhaseRecord["source"],
-) =>
-  left.entryId === right.entryId &&
-  left.messageHash === right.messageHash &&
-  left.role === right.role &&
-  left.start === right.start &&
-  left.end === right.end &&
-  left.quoteHash === right.quoteHash;
 
 const sameRecordBindings = (
   left: SubtaskPhaseRecord,

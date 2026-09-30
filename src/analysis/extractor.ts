@@ -7,6 +7,7 @@ import type {
   TaskKind,
 } from "../core/hybrid-state";
 import { taskLabelIsValid } from "../core/hybrid-state";
+import { exactKeys, record } from "../shared/guards";
 import type { DetailCandidate, DetailKey } from "./task-details";
 
 const MAX_EXTRACTION_INPUT_BYTES = 24 * 1024;
@@ -114,12 +115,6 @@ export class ExtractionInputOverflowError extends Error {
   }
 }
 
-const record = (value: unknown): value is Record<string, unknown> =>
-  !!value && typeof value === "object" && !Array.isArray(value);
-
-const exactKeys = (value: Record<string, unknown>, keys: string[]) =>
-  Object.keys(value).length === keys.length &&
-  keys.every((key) => Object.hasOwn(value, key));
 const exactKeysWithOptional = (
   value: Record<string, unknown>,
   keys: string[],

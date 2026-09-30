@@ -6,6 +6,7 @@ import {
   type ObservationRole,
   observationRef,
 } from "../core/hybrid-state";
+import { record } from "../shared/guards";
 
 const MAX_CANONICAL_PAGE_MESSAGES = 64;
 const MAX_CANONICAL_PAGE_BYTES = 256 * 1024;
@@ -17,9 +18,6 @@ const MAX_HEALTH_REPORT_BYTES = 4 * 1024;
 const MAX_EXPLORATORY_HEADERS = MAX_CANONICAL_PAGE_MESSAGES;
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
-
-const record = (value: unknown): value is Record<string, unknown> =>
-  !!value && typeof value === "object" && !Array.isArray(value);
 
 function visibleText(content: unknown): string | undefined {
   if (typeof content === "string") return content;

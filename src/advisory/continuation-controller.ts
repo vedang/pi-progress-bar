@@ -4,6 +4,8 @@ import {
   type ContinuationGateBatch,
 } from "../analysis/continuation-gate";
 import type { ValidatedResult } from "../analysis/gateway";
+import { exactKeys, record, safeInteger, UUID_V4 } from "../shared/guards";
+import { json } from "../shared/hash";
 import type { ContinuationAuthorityProjection } from "./continuation-authority";
 import {
   type AppliedContinuationDraft,
@@ -20,8 +22,6 @@ const MAX_RECEIPT_REPLIES = 16;
 const MAX_RECEIPT_IDENTIFIER_BYTES = 12 * 1024;
 const MAX_RECEIPT_SERIALIZED_BYTES = 24 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/;
-const UUID_V4 =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export type ContinuationPhase =
   | "idle"
@@ -85,21 +85,6 @@ type AvailableProjection = Extract<
   { available: true }
 >;
 type ProviderKind = "gate" | "draft";
-type RecordValue = Record<string, unknown>;
-
-const record = (value: unknown): value is RecordValue =>
-  !!value && typeof value === "object" && !Array.isArray(value);
-
-const exactKeys = (value: RecordValue, keys: readonly string[]) => {
-  const actual = Object.keys(value);
-  return (
-    actual.length === keys.length &&
-    keys.every((key) => Object.hasOwn(value, key))
-  );
-};
-
-const safeInteger = (value: unknown, minimum = 0): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= minimum;
 
 const nonblank = (value: unknown): value is string =>
   typeof value === "string" && !!value.trim();
@@ -161,14 +146,6 @@ const sameReceipt = (
       reply.role === other.role
     );
   });
-};
-
-const json = (value: unknown): string | undefined => {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return;
-  }
 };
 
 const sameJson = (left: unknown, right: unknown) => {

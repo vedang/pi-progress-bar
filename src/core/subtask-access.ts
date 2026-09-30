@@ -3,6 +3,7 @@ import {
   type ResolvedSubtaskAssociationPlan,
   resolveSubtaskAssociationPlan,
 } from "../analysis/subtask-proposal";
+import { deepFreeze } from "../shared/guards";
 import {
   isCurrentSubtaskAccessEvidence,
   type SubtaskAccessEvidence,
@@ -63,16 +64,6 @@ const resourceItemKey = (resourceKey: string, itemKey: string) =>
 
 const childKey = (groupId: string, childId: string) =>
   `${groupId}\u0000${childId}`;
-
-const deepFreeze = <Value>(
-  value: Value,
-  seen = new WeakSet<object>(),
-): Value => {
-  if (!value || typeof value !== "object" || seen.has(value)) return value;
-  seen.add(value);
-  for (const child of Object.values(value)) deepFreeze(child, seen);
-  return Object.freeze(value);
-};
 
 const sameRegistration = (
   registration: RegisteredGroup,

@@ -1,8 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import type { ObservationRef } from "../core/hybrid-state";
+import { exactOwnKeys, UUID_V4 } from "../shared/guards";
+import { sha256 } from "../shared/hash";
 
-const ADVISORY_CUSTOM_TYPE = "pi-progress-advisory" as const;
+export const ADVISORY_CUSTOM_TYPE = "pi-progress-advisory" as const;
 const RECONCILIATION_KIND = "reconciliation" as const;
 const CORRECTION_KINDS = new Set(["test-correction", "review-correction"]);
 const MAX_ATTEMPTS = 3;
@@ -14,8 +16,6 @@ const MAX_SETTLEMENT_SUFFIX_ENTRIES = 64;
 const MAX_SETTLEMENT_REPLIES = 16;
 const MAX_SETTLEMENT_VISIBLE_BYTES = 12 * 1024;
 const RECEIPT_HASH_PLACEHOLDER = "0".repeat(64);
-const UUID_V4 =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export type SettlementOrigin =
   | "advisory-only"
@@ -126,21 +126,10 @@ const validUuid = (value: unknown): value is string =>
   Buffer.byteLength(value, "utf8") === 36 &&
   UUID_V4.test(value);
 
-const sha256 = (text: string) =>
-  createHash("sha256").update(text).digest("hex");
-
 const plainObject = (value: unknown): value is Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
-};
-
-const exactKeys = (value: Record<string, unknown>, keys: readonly string[]) => {
-  const actual = Reflect.ownKeys(value);
-  return (
-    actual.length === keys.length &&
-    actual.every((key) => typeof key === "string" && keys.includes(key))
-  );
 };
 
 const entryAnchor = (entry: unknown) => {
@@ -751,7 +740,7 @@ export class ReconciliationDelivery {
       candidate.customType !== ADVISORY_CUSTOM_TYPE ||
       candidate.display !== true ||
       !plainObject(candidate.details) ||
-      !exactKeys(candidate.details, ["kind", "opportunityId", "sendId"])
+      !exactOwnKeys(candidate.details, ["kind", "opportunityId", "sendId"])
     )
       return false;
     if (

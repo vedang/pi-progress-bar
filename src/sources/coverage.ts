@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
-
 import { ownDataJson } from "../analysis/own-data-json";
+import { deepFreeze, record } from "../shared/guards";
+import { sha256 } from "../shared/hash";
 
 /** Passive adapter inventory; it never assigns or completes generic subtasks. */
 interface CoverageInventory {
@@ -129,16 +129,6 @@ export const isCurrentSubtaskAccessEvidence = (value: unknown): boolean => {
   } catch {
     return false;
   }
-};
-
-const deepFreeze = <Value>(
-  value: Value,
-  seen = new WeakSet<object>(),
-): Value => {
-  if (!value || typeof value !== "object" || seen.has(value)) return value;
-  seen.add(value);
-  for (const child of Object.values(value)) deepFreeze(child, seen);
-  return Object.freeze(value);
 };
 
 interface CanonicalHeader {
@@ -281,9 +271,6 @@ interface MappingState {
   ambiguousFiles: Set<string>;
 }
 
-const sha256 = (value: string) =>
-  createHash("sha256").update(value).digest("hex");
-
 /** Internal serializer never reads inherited or own serialization hooks. */
 const ownDataText = (value: unknown): string | undefined =>
   ownDataJson(value)?.json;
@@ -302,9 +289,6 @@ const ownDataBytes = (value: unknown) => {
 };
 
 const uniqueItemKeys = (itemKeys: readonly string[]) => [...new Set(itemKeys)];
-
-const record = (value: unknown): value is Record<string, unknown> =>
-  !!value && typeof value === "object" && !Array.isArray(value);
 
 const safeText = (value: unknown, maxBytes = 1024): value is string =>
   typeof value === "string" &&

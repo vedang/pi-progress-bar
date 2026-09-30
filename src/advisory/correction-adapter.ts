@@ -1,3 +1,4 @@
+import { exactOwnKeys } from "../shared/guards";
 import type {
   CorrectionActionProjection,
   CorrectionAttempt,
@@ -41,14 +42,6 @@ const record = (value: unknown): value is RecordValue => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
-};
-
-const exactKeys = (value: RecordValue, keys: readonly string[]) => {
-  const actual = Reflect.ownKeys(value);
-  return (
-    actual.length === keys.length &&
-    actual.every((key) => typeof key === "string" && keys.includes(key))
-  );
 };
 
 const safeId = (value: unknown): value is string =>
@@ -116,14 +109,14 @@ const builtinTool = (value: unknown, name: TestToolName) => {
   const properties = parameters.properties;
   if (name === "write")
     return (
-      exactKeys(properties, ["path", "content"]) &&
+      exactOwnKeys(properties, ["path", "content"]) &&
       stringSchema(properties.path) &&
       stringSchema(properties.content) &&
       requiredProperties(parameters, ["path", "content"])
     );
   const edits = properties.edits;
   return (
-    exactKeys(properties, ["path", "edits"]) &&
+    exactOwnKeys(properties, ["path", "edits"]) &&
     stringSchema(properties.path) &&
     record(edits) &&
     schemaKeys(edits, ["type", "items"]) &&
@@ -132,7 +125,7 @@ const builtinTool = (value: unknown, name: TestToolName) => {
     schemaKeys(edits.items, ["type", "properties", "required"]) &&
     edits.items.type === "object" &&
     record(edits.items.properties) &&
-    exactKeys(edits.items.properties, ["oldText", "newText"]) &&
+    exactOwnKeys(edits.items.properties, ["oldText", "newText"]) &&
     stringSchema(edits.items.properties.oldText) &&
     stringSchema(edits.items.properties.newText) &&
     requiredProperties(edits.items, ["oldText", "newText"]) &&
@@ -202,13 +195,14 @@ const testStart = (
   if (!record(args)) return;
   const valid =
     toolName === "write"
-      ? exactKeys(args, ["path", "content"]) && typeof args.content === "string"
-      : exactKeys(args, ["path", "edits"]) &&
+      ? exactOwnKeys(args, ["path", "content"]) &&
+        typeof args.content === "string"
+      : exactOwnKeys(args, ["path", "edits"]) &&
         Array.isArray(args.edits) &&
         args.edits.every(
           (edit) =>
             record(edit) &&
-            exactKeys(edit, ["oldText", "newText"]) &&
+            exactOwnKeys(edit, ["oldText", "newText"]) &&
             typeof edit.oldText === "string" &&
             typeof edit.newText === "string",
         );
@@ -219,7 +213,7 @@ const testStart = (
 
 const namedReviewStart = (args: unknown) =>
   record(args) &&
-  exactKeys(args, ["workflow", "args", "async"]) &&
+  exactOwnKeys(args, ["workflow", "args", "async"]) &&
   args.workflow === "review" &&
   record(args.args) &&
   // The installed named foreground route cannot expose a live workflow ID.

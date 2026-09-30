@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { HybridTask, Observation, SourceRef } from "../core/hybrid-state";
 import {
   nextSubtaskPhase,
@@ -12,6 +11,17 @@ import {
   type SubtaskSnapshot,
   SubtaskStore,
 } from "../core/subtasks";
+import {
+  cloneSource,
+  deepFreeze,
+  deeplyFrozen,
+  hasExactKeys,
+  nonNegativeInteger,
+  plainDataRecord,
+  positiveInteger,
+  sameSource,
+} from "../shared/guards";
+import { sha256 } from "../shared/hash";
 import {
   isCurrentSubtaskEvidence,
   type SubtaskEvidence,
@@ -134,9 +144,6 @@ interface AssociationPlan {
 const requestProofs = new WeakMap<object, ProposalRequestProof>();
 const associationPlans = new WeakMap<object, AssociationPlan>();
 
-const sha256 = (value: string) =>
-  createHash("sha256").update(value, "utf8").digest("hex");
-
 /** Shared own-data serialization. No caller getter or toJSON hook is invoked. */
 const serialized = (value: unknown, maximumBytes = MAX_CAPTURE_BYTES) => {
   const result = ownDataJson(value, maximumBytes);
@@ -152,34 +159,6 @@ const detached = <Value>(value: unknown, maximumBytes = MAX_CAPTURE_BYTES) => {
   } catch {
     return;
   }
-};
-
-const plainDataRecord = (value: unknown): value is RecordValue => {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Object.getPrototypeOf(value) !== Object.prototype
-  )
-    return false;
-  return Object.values(Object.getOwnPropertyDescriptors(value)).every(
-    (descriptor) => "value" in descriptor && descriptor.enumerable,
-  );
-};
-
-const hasExactKeys = (
-  value: unknown,
-  required: readonly string[],
-  optional: readonly string[] = [],
-): value is RecordValue => {
-  if (!plainDataRecord(value)) return false;
-  const allowed = new Set([...required, ...optional]);
-  const keys = Reflect.ownKeys(value);
-  return (
-    keys.length >= required.length &&
-    required.every((key) => Object.hasOwn(value, key)) &&
-    keys.every((key) => typeof key === "string" && allowed.has(key))
-  );
 };
 
 const denseArray = (
@@ -203,12 +182,6 @@ const denseArray = (
   }
   return true;
 };
-
-const positiveInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
-
-const nonNegativeInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
 const validLabel = (value: unknown): value is string => {
   if (typeof value !== "string" || !value.length || value.length > 480)
@@ -234,23 +207,6 @@ const validLabel = (value: unknown): value is string => {
   }
   return nonblank;
 };
-
-const cloneSource = (source: SourceRef): SourceRef => ({
-  entryId: source.entryId,
-  messageHash: source.messageHash,
-  role: source.role,
-  start: source.start,
-  end: source.end,
-  quoteHash: source.quoteHash,
-});
-
-const sameSource = (left: SourceRef, right: SourceRef) =>
-  left.entryId === right.entryId &&
-  left.messageHash === right.messageHash &&
-  left.role === right.role &&
-  left.start === right.start &&
-  left.end === right.end &&
-  left.quoteHash === right.quoteHash;
 
 const cloneGateReceipt = (record: SubtaskPhaseRecord): SubtaskPhaseRecord => ({
   identity: record.identity,
@@ -307,26 +263,6 @@ const cloneGateReceipt = (record: SubtaskPhaseRecord): SubtaskPhaseRecord => ({
         },
       }),
 });
-
-const deepFreeze = <Value>(
-  value: Value,
-  seen = new WeakSet<object>(),
-): Value => {
-  if (!value || typeof value !== "object" || seen.has(value)) return value;
-  seen.add(value);
-  for (const child of Object.values(value)) deepFreeze(child, seen);
-  return Object.freeze(value);
-};
-
-const deeplyFrozen = (
-  value: unknown,
-  seen = new WeakSet<object>(),
-): boolean => {
-  if (!value || typeof value !== "object" || seen.has(value)) return true;
-  if (!Object.isFrozen(value)) return false;
-  seen.add(value);
-  return Object.values(value).every((child) => deeplyFrozen(child, seen));
-};
 
 const proposalInstructions =
   "Return only one JSON object matching schema. Assess supplied parent index 0 only. " +

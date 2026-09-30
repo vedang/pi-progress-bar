@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
+import { record } from "../shared/guards";
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_RECORDS = 10_000;
@@ -25,8 +26,6 @@ export interface BeadsPresentation {
   issueType?: string;
   conflict: boolean;
 }
-const record = (value: unknown): value is Record<string, unknown> =>
-  !!value && typeof value === "object" && !Array.isArray(value);
 
 /** Bounded stable read of conventional beads_rust JSONL; no CLI or database access. */
 export async function readBeadsExport(cwd: string): Promise<BeadsExport> {

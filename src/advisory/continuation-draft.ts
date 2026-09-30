@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
 import {
   applyContinuationGate,
   type ContinuationGateBatch,
 } from "../analysis/continuation-gate";
 import type { ValidatedResult } from "../analysis/gateway";
+import { deepFreeze, deeplyFrozen, exactKeys, record } from "../shared/guards";
+import { json, jsonBytes, requestHash } from "../shared/hash";
 import type { ContinuationAuthorityProjection } from "./continuation-authority";
 
 const MAX_INPUT_BYTES = 24 * 1024;
@@ -58,7 +59,6 @@ type AvailableProjection = Extract<
   ContinuationAuthorityProjection,
   { available: true }
 >;
-type RecordValue = Record<string, unknown>;
 type DraftSchema = typeof DRAFT_SCHEMA;
 
 interface ContinuationDraftInput {
@@ -102,65 +102,11 @@ const exactGateBindings = new WeakMap<
   ExactGateBinding
 >();
 
-const record = (value: unknown): value is RecordValue =>
-  !!value && typeof value === "object" && !Array.isArray(value);
-
-const exactKeys = (value: RecordValue, keys: readonly string[]) => {
-  const actual = Object.keys(value);
-  return (
-    actual.length === keys.length &&
-    keys.every((key) => Object.hasOwn(value, key))
-  );
-};
-
 const safeIndex = (value: unknown): value is number =>
   typeof value === "number" &&
   Number.isSafeInteger(value) &&
   value >= 0 &&
   !Object.is(value, -0);
-
-const sha256 = (value: string) =>
-  createHash("sha256").update(value, "utf8").digest("hex");
-
-const json = (value: unknown): string | undefined => {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return;
-  }
-};
-
-const jsonBytes = (value: unknown): number | undefined => {
-  const serialized = json(value);
-  return serialized === undefined
-    ? undefined
-    : Buffer.byteLength(serialized, "utf8");
-};
-
-const requestHash = (input: unknown): string | undefined => {
-  const serialized = json(input);
-  return serialized === undefined ? undefined : sha256(serialized);
-};
-
-const deepFreeze = <Value>(
-  value: Value,
-  seen = new WeakSet<object>(),
-): Value => {
-  if (!value || typeof value !== "object" || seen.has(value)) return value;
-  seen.add(value);
-  for (const child of Object.values(value)) deepFreeze(child, seen);
-  return Object.freeze(value);
-};
-
-const deeplyFrozen = (
-  value: unknown,
-  seen = new WeakSet<object>(),
-): boolean => {
-  if (!value || typeof value !== "object" || seen.has(value)) return true;
-  if (!Object.isFrozen(value)) return false;
-  seen.add(value);
-  return Object.values(value).every((child) => deeplyFrozen(child, seen));
-};
 
 const sameNumberArray = (left: readonly number[], right: readonly number[]) =>
   left.length === right.length &&

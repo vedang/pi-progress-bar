@@ -1,7 +1,19 @@
-import { createHash } from "node:crypto";
 import type { HybridTask, Observation, SourceRef } from "../core/hybrid-state";
 import type { SubtaskPhaseRecord } from "../core/subtask-journal";
 import type { SubtaskSnapshot } from "../core/subtasks";
+import {
+  cloneSource,
+  deepFreeze,
+  deeplyFrozen,
+  hasExactKeys,
+  nonNegativeInteger,
+  plainDataRecord,
+  positiveInteger,
+  sameSource,
+  unit,
+  validHash,
+} from "../shared/guards";
+import { sha256 } from "../shared/hash";
 import {
   isCurrentSubtaskEvidence,
   type SubtaskEvidence,
@@ -28,7 +40,6 @@ const MAX_NUMERIC_ID_CODE_UNITS = 32;
 const MAX_DISPATCH = 1024;
 const GATE_RUBRIC_VERSION = "subtask-need-v1";
 const QUESTION_ID = "subtask:0";
-const digest = /^[a-f0-9]{64}$/;
 const taskId = /^task:[1-9]\d*$/;
 const groupId = /^subtask-group:[1-9]\d*$/;
 const childId = /^subtask-child:[1-9]\d*$/;
@@ -88,34 +99,6 @@ interface ChoiceAnswer {
   probability: number;
 }
 
-const plainDataRecord = (value: unknown): value is RecordValue => {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Object.getPrototypeOf(value) !== Object.prototype
-  )
-    return false;
-  return Object.values(Object.getOwnPropertyDescriptors(value)).every(
-    (descriptor) => "value" in descriptor && descriptor.enumerable,
-  );
-};
-
-const hasExactKeys = (
-  value: unknown,
-  required: readonly string[],
-  optional: readonly string[] = [],
-): value is RecordValue => {
-  if (!plainDataRecord(value)) return false;
-  const allowed = new Set([...required, ...optional]);
-  const keys = Reflect.ownKeys(value);
-  return (
-    keys.length >= required.length &&
-    required.every((key) => Object.hasOwn(value, key)) &&
-    keys.every((key) => typeof key === "string" && allowed.has(key))
-  );
-};
-
 const densePlainArray = (
   value: unknown,
   minimumLength: number,
@@ -140,9 +123,6 @@ const densePlainArray = (
   return true;
 };
 
-const sha256 = (value: string) =>
-  createHash("sha256").update(value, "utf8").digest("hex");
-
 /** Shared exact wire serialization: own data only, never a caller hook. */
 const inertJson = (value: unknown) => {
   const serialized = ownDataJson(value);
@@ -153,23 +133,8 @@ const inertJson = (value: unknown) => {
 const inertBytes = (value: unknown) =>
   Buffer.byteLength(inertJson(value), "utf8");
 
-const validHash = (value: unknown): value is string =>
-  typeof value === "string" && value.length === 64 && digest.test(value);
-
-const positiveInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
-
-const nonNegativeInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-
 const finiteNonNegative = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0;
-
-const unit = (value: unknown): value is number =>
-  typeof value === "number" &&
-  Number.isFinite(value) &&
-  value >= 0 &&
-  value <= 1;
 
 const validRole = (value: unknown) =>
   value === "user" || value === "assistant" || value === "intercom";
@@ -222,23 +187,6 @@ const validSource = (value: unknown): value is SourceRef =>
   positiveInteger(value.end) &&
   value.end > value.start &&
   validHash(value.quoteHash);
-
-const cloneSource = (source: SourceRef): SourceRef => ({
-  entryId: source.entryId,
-  messageHash: source.messageHash,
-  role: source.role,
-  start: source.start,
-  end: source.end,
-  quoteHash: source.quoteHash,
-});
-
-const sameSource = (left: SourceRef, right: SourceRef) =>
-  left.entryId === right.entryId &&
-  left.messageHash === right.messageHash &&
-  left.role === right.role &&
-  left.start === right.start &&
-  left.end === right.end &&
-  left.quoteHash === right.quoteHash;
 
 const sourceDigest = (source: SourceRef) =>
   sha256(
@@ -796,26 +744,6 @@ const buildBatch = (state: SubtaskGateState): SubtaskGateBatch | undefined => {
     request,
     ...binding,
   });
-};
-
-const deepFreeze = <Value>(
-  value: Value,
-  seen = new WeakSet<object>(),
-): Value => {
-  if (!value || typeof value !== "object" || seen.has(value)) return value;
-  seen.add(value);
-  for (const child of Object.values(value)) deepFreeze(child, seen);
-  return Object.freeze(value);
-};
-
-const deeplyFrozen = (
-  value: unknown,
-  seen = new WeakSet<object>(),
-): boolean => {
-  if (!value || typeof value !== "object" || seen.has(value)) return true;
-  if (!Object.isFrozen(value)) return false;
-  seen.add(value);
-  return Object.values(value).every((child) => deeplyFrozen(child, seen));
 };
 
 const validQuestion = (value: unknown): boolean => {

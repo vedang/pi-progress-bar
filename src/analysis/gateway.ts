@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { exactKeys, record, unit } from "../shared/guards";
 import { ownDataJson } from "./own-data-json";
 
 export const MODEL = "jev-1.13.0";
@@ -84,16 +85,6 @@ interface Options {
   onPhysicalFlight?: (drain: Promise<void>) => void;
   onPermanentError?: (message: string) => void;
 }
-const record = (value: unknown): value is Record<string, unknown> =>
-  !!value && typeof value === "object" && !Array.isArray(value);
-const unit = (value: unknown): value is number =>
-  typeof value === "number" &&
-  Number.isFinite(value) &&
-  value >= 0 &&
-  value <= 1;
-const keysEqual = (value: Record<string, unknown>, keys: string[]) =>
-  Object.keys(value).length === keys.length &&
-  keys.every((key) => Object.hasOwn(value, key));
 
 /**
  * Jev may serialize a distribution to cents. Permit only error explainable by
@@ -111,7 +102,7 @@ function validate(value: unknown, request: EvaluationRequest): ValidatedResult {
     !record(value) ||
     value.model !== MODEL ||
     !record(value.answers) ||
-    !keysEqual(value.answers, Object.keys(request.questions)) ||
+    !exactKeys(value.answers, Object.keys(request.questions)) ||
     !record(value.usage)
   )
     throw new InvalidGatewayResponseError("Invalid response");
@@ -133,7 +124,7 @@ function validate(value: unknown, request: EvaluationRequest): ValidatedResult {
     const probabilities = answer.probabilities;
     const values = Object.values(probabilities) as number[];
     if (
-      !keysEqual(probabilities, keys) ||
+      !exactKeys(probabilities, keys) ||
       !values.every(unit) ||
       Math.abs(values.reduce((sum, probability) => sum + probability, 0) - 1) >
         distributionTolerance(values)
@@ -153,7 +144,7 @@ function validate(value: unknown, request: EvaluationRequest): ValidatedResult {
         answer.score < 0 ||
         answer.score > keys.length - 1 ||
         !record(answer.legend) ||
-        !keysEqual(answer.legend, keys)
+        !exactKeys(answer.legend, keys)
       )
         throw new InvalidGatewayResponseError("Invalid score");
       const legend = answer.legend;

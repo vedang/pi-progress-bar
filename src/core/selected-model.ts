@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ExtractionInput } from "../analysis/extractor";
+import { record } from "../shared/guards";
 import { RetryableProviderError } from "./hybrid";
 import type { MonitorOptions, SelectedModelResult } from "./monitor";
 
@@ -14,9 +15,6 @@ const usageNumber = (value: unknown) => {
     throw new RetryableProviderError();
   return value;
 };
-
-const record = (value: unknown): value is Record<string, unknown> =>
-  !!value && typeof value === "object" && !Array.isArray(value);
 
 const textBlock = (value: unknown): value is { text: string } =>
   record(value) && value.type === "text" && typeof value.text === "string";

@@ -1,4 +1,14 @@
 import { createHash } from "node:crypto";
+import {
+  cloneSource,
+  hasExactKeys,
+  nonNegativeInteger,
+  plainDataRecord,
+  positiveInteger,
+  sameSource,
+  unit,
+  validHash,
+} from "../shared/guards";
 import type { Assessment, HybridTask, SourceRef } from "./hybrid-state";
 
 const MAX_ACTIVE_CHILDREN = 64;
@@ -12,7 +22,6 @@ const MAX_OMISSIONS = 2;
 const MAX_OMISSION_SCALARS = 512;
 const MAX_NUMERIC_ID_CODE_UNITS = 32;
 
-const digest = /^[a-f0-9]{64}$/;
 const taskId = /^task:[1-9]\d*$/;
 const groupId = /^subtask-group:([1-9]\d*)$/;
 const childId = /^subtask-child:([1-9]\d*)$/;
@@ -141,34 +150,6 @@ interface ParentAuthority {
   sourceDigest: string;
 }
 
-const plainDataRecord = (value: unknown): value is Record<string, unknown> => {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Object.getPrototypeOf(value) !== Object.prototype
-  )
-    return false;
-  return Object.values(Object.getOwnPropertyDescriptors(value)).every(
-    (descriptor) => "value" in descriptor && descriptor.enumerable,
-  );
-};
-
-const hasExactKeys = (
-  value: unknown,
-  required: readonly string[],
-  optional: readonly string[] = [],
-): value is Record<string, unknown> => {
-  if (!plainDataRecord(value)) return false;
-  const allowed = new Set([...required, ...optional]);
-  const keys = Reflect.ownKeys(value);
-  return (
-    keys.length >= required.length &&
-    required.every((key) => Object.hasOwn(value, key)) &&
-    keys.every((key) => typeof key === "string" && allowed.has(key))
-  );
-};
-
 const densePlainArray = (
   value: unknown,
   minimumLength: number,
@@ -204,9 +185,6 @@ const numericIdIsValid = (value: unknown, pattern: RegExp): value is string =>
   typeof value === "string" &&
   value.length <= MAX_NUMERIC_ID_CODE_UNITS &&
   pattern.test(value);
-
-const validHash = (value: unknown): value is string =>
-  typeof value === "string" && value.length === 64 && digest.test(value);
 
 const textWithinScalarLimit = (value: unknown, limit: number): boolean => {
   if (typeof value !== "string" || !value.length) return false;
@@ -259,23 +237,11 @@ const labelValidity = (value: unknown): "valid" | AdmissionFailure => {
   return nonblank ? "valid" : "invalid";
 };
 
-const positiveInteger = (value: unknown): value is number =>
-  Number.isSafeInteger(value) && (value as number) >= 1;
-
-const nonNegativeInteger = (value: unknown): value is number =>
-  Number.isSafeInteger(value) && (value as number) >= 0;
-
 const safeIncrement = (value: number, increment = 1) =>
   Number.isSafeInteger(value + increment);
 
 const validRole = (value: unknown) =>
   value === "user" || value === "assistant" || value === "intercom";
-
-const unit = (value: unknown): value is number =>
-  typeof value === "number" &&
-  Number.isFinite(value) &&
-  value >= 0 &&
-  value <= 1;
 
 const validObservationRef = (value: unknown) =>
   hasExactKeys(value, ["entryId", "messageHash", "role"]) &&
@@ -477,15 +443,6 @@ const statusIsValid = (value: unknown): value is SubtaskChildStatus =>
   value === "reported-completed" ||
   value === "reported-blocked";
 
-const cloneSource = (source: SourceRef): SourceRef => ({
-  entryId: source.entryId,
-  messageHash: source.messageHash,
-  role: source.role,
-  start: source.start,
-  end: source.end,
-  quoteHash: source.quoteHash,
-});
-
 const cloneProof = (proof: SubtaskProof): SubtaskProof => ({
   contextHash: proof.contextHash,
   gateRequestHash: proof.gateRequestHash,
@@ -684,14 +641,6 @@ const omissionList = (
   }
   return omissions;
 };
-
-const sameSource = (left: SourceRef, right: SourceRef) =>
-  left.entryId === right.entryId &&
-  left.messageHash === right.messageHash &&
-  left.role === right.role &&
-  left.start === right.start &&
-  left.end === right.end &&
-  left.quoteHash === right.quoteHash;
 
 const sameChild = (left: SubtaskChildSnapshot, right: SubtaskChildSnapshot) =>
   left.id === right.id &&

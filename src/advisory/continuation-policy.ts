@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
+import { exactKeys, record } from "../shared/guards";
 
 const MAX_SERIALIZED_POLICY_BYTES = 8 * 1024;
-const sha256 = /^[a-f0-9]{64}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
 
 type CompleteContinuationPolicy = {
   coverage: "complete";
@@ -17,13 +18,6 @@ type ContinuationPolicy =
 const unknownPolicy = (): UnknownContinuationPolicy => ({
   coverage: "unknown",
 });
-
-const record = (value: unknown): value is Record<string, unknown> =>
-  !!value && typeof value === "object" && !Array.isArray(value);
-
-const hasExactKeys = (value: Record<string, unknown>, keys: string[]) =>
-  Object.keys(value).length === keys.length &&
-  keys.every((key) => Object.hasOwn(value, key));
 
 const nonblankText = (value: unknown): value is string =>
   typeof value === "string" && !!value.trim();
@@ -51,10 +45,10 @@ const validCompletePolicy = (
   value: unknown,
 ): value is CompleteContinuationPolicy =>
   record(value) &&
-  hasExactKeys(value, ["coverage", "promptHash", "text"]) &&
+  exactKeys(value, ["coverage", "promptHash", "text"]) &&
   value.coverage === "complete" &&
   typeof value.promptHash === "string" &&
-  sha256.test(value.promptHash) &&
+  SHA256.test(value.promptHash) &&
   nonblankText(value.text) &&
   value.promptHash === promptHash(value.text) &&
   serializedBytes({
@@ -65,7 +59,7 @@ const validCompletePolicy = (
 
 const validUnknownPolicy = (value: unknown) =>
   record(value) &&
-  hasExactKeys(value, ["coverage"]) &&
+  exactKeys(value, ["coverage"]) &&
   value.coverage === "unknown";
 
 /** Capture full rendered system policy before a provider-context override can occur. */

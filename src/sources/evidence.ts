@@ -1,3 +1,4 @@
+import { record } from "../shared/guards";
 export interface EvidenceLink {
   sourceId: string;
   taskId: string;
@@ -29,8 +30,6 @@ interface ToolResult {
   isError?: boolean;
   excludeFromContext?: boolean;
 }
-const record = (value: unknown): value is Record<string, unknown> =>
-  !!value && typeof value === "object" && !Array.isArray(value);
 const textContent = (content: unknown): string =>
   Array.isArray(content)
     ? content

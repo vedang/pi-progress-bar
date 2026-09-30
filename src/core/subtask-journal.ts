@@ -1,3 +1,12 @@
+import {
+  cloneSource,
+  hasExactKeys,
+  nonNegativeInteger,
+  plainDataRecord,
+  positiveInteger,
+  unit,
+  validHash,
+} from "../shared/guards";
 import type { SourceRef } from "./hybrid-state";
 
 const JOURNAL_VERSION = 1;
@@ -9,7 +18,6 @@ const MAX_JOURNAL_BYTES = 64 * 1024;
 const MAX_TEXT_SCALARS = 512;
 const MAX_NUMERIC_ID_CODE_UNITS = 32;
 
-const digest = /^[a-f0-9]{64}$/;
 const taskId = /^task:[1-9]\d*$/;
 const groupId = /^subtask-group:[1-9]\d*$/;
 const childId = /^subtask-child:[1-9]\d*$/;
@@ -142,34 +150,6 @@ export interface SubtaskJournalCheckpoint {
   reports: SubtaskReportJob[];
 }
 
-const plainDataRecord = (value: unknown): value is Record<string, unknown> => {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Object.getPrototypeOf(value) !== Object.prototype
-  )
-    return false;
-  return Object.values(Object.getOwnPropertyDescriptors(value)).every(
-    (descriptor) => "value" in descriptor && descriptor.enumerable,
-  );
-};
-
-const hasExactKeys = (
-  value: unknown,
-  required: readonly string[],
-  optional: readonly string[] = [],
-): value is Record<string, unknown> => {
-  if (!plainDataRecord(value)) return false;
-  const allowed = new Set([...required, ...optional]);
-  const keys = Reflect.ownKeys(value);
-  return (
-    keys.length >= required.length &&
-    required.every((key) => Object.hasOwn(value, key)) &&
-    keys.every((key) => typeof key === "string" && allowed.has(key))
-  );
-};
-
 const densePlainArray = (
   value: unknown,
   minimumLength: number,
@@ -198,15 +178,6 @@ const numericIdIsValid = (value: unknown, pattern: RegExp): value is string =>
   typeof value === "string" &&
   value.length <= MAX_NUMERIC_ID_CODE_UNITS &&
   pattern.test(value);
-
-const validHash = (value: unknown): value is string =>
-  typeof value === "string" && value.length === 64 && digest.test(value);
-
-const positiveInteger = (value: unknown): value is number =>
-  Number.isSafeInteger(value) && (value as number) >= 1;
-
-const nonNegativeInteger = (value: unknown): value is number =>
-  Number.isSafeInteger(value) && (value as number) >= 0;
 
 const finiteNonNegative = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -331,12 +302,6 @@ const validProposalReceipt = (
     value.outcome === "failed"
   );
 };
-
-const unit = (value: unknown): value is number =>
-  typeof value === "number" &&
-  Number.isFinite(value) &&
-  value >= 0 &&
-  value <= 1;
 
 const validReportAssessment = (
   value: unknown,
@@ -806,15 +771,6 @@ export const subtaskJournalIsValid = (
     return false;
   }
 };
-
-const cloneSource = (source: SourceRef): SourceRef => ({
-  entryId: source.entryId,
-  messageHash: source.messageHash,
-  role: source.role,
-  start: source.start,
-  end: source.end,
-  quoteHash: source.quoteHash,
-});
 
 const cloneReceiptUsage = (
   usage: SubtaskReceiptUsage,

@@ -9,6 +9,12 @@ import type {
   TaskDetailRecord,
 } from "../analysis/task-details";
 import {
+  nonNegativeInteger,
+  positiveInteger,
+  record,
+  unit,
+} from "../shared/guards";
+import {
   acceptedCompletionIds,
   applyCompletionRecord,
   applyFocusRecord,
@@ -165,8 +171,6 @@ export type CheckpointStorageStatus =
   | "corrupt";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
-const record = (value: unknown): value is Record<string, unknown> =>
-  !!value && typeof value === "object" && !Array.isArray(value);
 const exactKeys = (
   value: Record<string, unknown>,
   required: readonly string[],
@@ -193,15 +197,6 @@ const eventIdIsValid = (value: unknown): value is string =>
   numericIdIsValid(value, /^event:[1-9]\d*$/);
 const roleIsValid = (value: unknown): value is ObservationRole =>
   value === "user" || value === "assistant" || value === "intercom";
-const unit = (value: unknown): value is number =>
-  typeof value === "number" &&
-  Number.isFinite(value) &&
-  value >= 0 &&
-  value <= 1;
-const positiveInteger = (value: unknown): value is number =>
-  Number.isSafeInteger(value) && (value as number) >= 1;
-const nonNegativeInteger = (value: unknown): value is number =>
-  Number.isSafeInteger(value) && (value as number) >= 0;
 const safeLabel = taskLabelIsValid;
 const safeHealthLabel = (value: unknown) =>
   typeof value === "string" &&

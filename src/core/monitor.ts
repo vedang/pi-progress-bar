@@ -65,6 +65,8 @@ import {
   taskDetailRequest,
   uncoveredDetailKeys,
 } from "../analysis/task-details";
+import { nonNegativeInteger, sameSource } from "../shared/guards";
+import { sha256 } from "../shared/hash";
 import {
   type BeadsPresentation,
   beadsPresentation,
@@ -468,22 +470,18 @@ const diagnosticLabels: Record<string, string> = {
 class RetryableJevError extends RetryableProviderError {}
 
 const copyUsage = (usage: ProviderUsage): ProviderUsage => ({ ...usage });
-const sha256 = (value: string) =>
-  createHash("sha256").update(value).digest("hex");
-const safeUsageValue = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const validUsage = (usage: ProviderUsage) => {
   if (
-    !safeUsageValue(usage.calls) ||
-    !safeUsageValue(usage.inputTokens) ||
-    !safeUsageValue(usage.outputTokens)
+    !nonNegativeInteger(usage.calls) ||
+    !nonNegativeInteger(usage.inputTokens) ||
+    !nonNegativeInteger(usage.outputTokens)
   )
     throw new Error("Invalid provider usage");
   return { ...usage };
 };
 /** Never form an unsafe intermediate while preserving monotonic lifetime usage. */
 const saturatingAdd = (current: number, delta: number) => {
-  if (!safeUsageValue(current) || !safeUsageValue(delta))
+  if (!nonNegativeInteger(current) || !nonNegativeInteger(delta))
     throw new RetryableProviderError();
   return delta > Number.MAX_SAFE_INTEGER - current
     ? Number.MAX_SAFE_INTEGER
@@ -545,13 +543,6 @@ const copyHealthCard = (card: HealthCard): HealthCard => ({
     requestHashes: [...card.provenance.requestHashes],
   },
 });
-const sameSource = (left: HybridTask["source"], right: HybridTask["source"]) =>
-  left.entryId === right.entryId &&
-  left.messageHash === right.messageHash &&
-  left.role === right.role &&
-  left.start === right.start &&
-  left.end === right.end &&
-  left.quoteHash === right.quoteHash;
 const presentationCard = (
   card: RetainedCard,
   beads?: BeadsPresentation,
@@ -7391,8 +7382,8 @@ export class Monitor {
       if (this.activeAuthorityBarrier(epoch, owner))
         throw new RetryableProviderError();
       if (
-        !safeUsageValue(result.usage.inputTokens) ||
-        !safeUsageValue(result.usage.outputTokens)
+        !nonNegativeInteger(result.usage.inputTokens) ||
+        !nonNegativeInteger(result.usage.outputTokens)
       )
         throw new RetryableProviderError();
       this.usage.extraction.inputTokens = saturatingAdd(

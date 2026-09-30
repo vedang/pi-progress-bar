@@ -18,6 +18,7 @@ import {
   subtaskReportBatches,
   subtaskReportDecisions,
 } from "../analysis/subtask-report";
+import { deepFreeze, sameSource } from "../shared/guards";
 import type { SubtaskEvidence } from "../sources/coverage";
 import type {
   HybridState,
@@ -186,16 +187,6 @@ const emptyJournal = (): SubtaskJournalCheckpoint => ({
   reports: [],
 });
 
-const deepFreeze = <Value>(
-  value: Value,
-  seen = new WeakSet<object>(),
-): Value => {
-  if (!value || typeof value !== "object" || seen.has(value)) return value;
-  seen.add(value);
-  for (const child of Object.values(value)) deepFreeze(child, seen);
-  return Object.freeze(value);
-};
-
 const detached = <Value>(value: Value): Value => structuredClone(value);
 
 /** Preserve durable report history when decomposition records are replaced. */
@@ -203,14 +194,6 @@ const copyReportAttempts = (
   attempts: readonly SubtaskReportAttempt[],
 ): SubtaskReportAttempt[] =>
   structuredClone(attempts) as SubtaskReportAttempt[];
-
-const sameSource = (left: SourceRef, right: SourceRef) =>
-  left.entryId === right.entryId &&
-  left.messageHash === right.messageHash &&
-  left.role === right.role &&
-  left.start === right.start &&
-  left.end === right.end &&
-  left.quoteHash === right.quoteHash;
 
 const withoutGroup = (options: SubtaskGateOptions): SubtaskGateOptions => {
   const { group: _group, ...bare } = options;

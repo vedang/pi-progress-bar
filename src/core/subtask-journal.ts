@@ -983,7 +983,7 @@ const finished = (state: SubtaskPhaseState | SubtaskReportState) =>
   state === "complete" || state === "superseded";
 
 /**
- * [tag:subtask_capacity_eviction] Under capacity pressure only, remove the
+ * [ref:subtask_capacity_eviction] Under capacity pressure only, remove the
  * oldest finished history until `fits` accepts a valid journal. Evictable means
  * complete/superseded records and report jobs, except `keep` (the owner being
  * committed) and accepted records backing an admitted store group. Unfinished

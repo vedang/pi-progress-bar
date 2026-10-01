@@ -29,6 +29,7 @@ import type {
 import { SubtaskAccess, type SubtaskAccessSnapshot } from "./subtask-access";
 import {
   acceptedSubtaskRecordMatchesGroup,
+  evictSubtaskJournalHistory,
   nextSubtaskPhase,
   pruneIncoherentAcceptedSubtaskRecords,
   restoreSubtaskJournal,
@@ -157,6 +158,16 @@ type ReportBatchSelection =
   | { kind: "unavailable" };
 
 type ReportCommitAdmission = "accepted" | "capacity" | "unavailable";
+
+/** Commit candidate after capacity eviction, or why none exists. */
+type FittedJournal =
+  | { kind: "fitted"; journal: SubtaskJournalCheckpoint }
+  | { kind: "capacity" | "unavailable" };
+
+const NO_RESERVE: SubtaskReportCommitReserve = {
+  storeBytes: 0,
+  journalBytes: 0,
+};
 
 interface Flight {
   controller: AbortController;
@@ -561,12 +572,14 @@ export class SubtaskRuntime {
             record,
             batch.parentTaskId,
           );
-          if (!journal || !this.commitCandidate(this.store, journal))
-            return false;
+          const saved =
+            journal &&
+            this.commitCandidate(this.store, journal, record.identity);
+          if (!saved) return false;
 
           // This proof is durable even when the synchronous save callback
           // fences transport. Keep it locally to prevent a hidden retry.
-          this.journal = journal;
+          this.journal = saved;
           if (
             !this.exactBatch(
               batch,
@@ -627,7 +640,9 @@ export class SubtaskRuntime {
     }
 
     const journal = this.finalJournal("jev", decision, usage);
-    if (!journal || !this.commitCandidate(this.store, journal)) {
+    const saved =
+      journal && this.commitCandidate(this.store, journal, decision.identity);
+    if (!saved) {
       this.saveGateFailure(
         batch,
         ticket,
@@ -646,7 +661,7 @@ export class SubtaskRuntime {
       )
     )
       return;
-    this.journal = journal;
+    this.journal = saved;
 
     if (decision.state === "ready") {
       const next = this.exactBatch(
@@ -710,12 +725,14 @@ export class SubtaskRuntime {
             record,
             batch.parentTaskId,
           );
-          if (!journal || !this.commitCandidate(this.store, journal))
-            return false;
+          const saved =
+            journal &&
+            this.commitCandidate(this.store, journal, record.identity);
+          if (!saved) return false;
 
           // Charged proof survives a post-save fence; only transport admission
           // is revoked by the renewed identity check.
-          this.journal = journal;
+          this.journal = saved;
           if (
             !this.exactBatch(
               batch,
@@ -780,7 +797,9 @@ export class SubtaskRuntime {
     if (applied.status === "noop") {
       const record = this.proposalFinal(gateRecord, request, ticket, "noop");
       const journal = this.finalJournal("extraction", record, usage);
-      if (!journal || !this.commitCandidate(this.store, journal)) {
+      const saved =
+        journal && this.commitCandidate(this.store, journal, record.identity);
+      if (!saved) {
         this.saveProposalFailure(
           gateRecord,
           request,
@@ -800,7 +819,7 @@ export class SubtaskRuntime {
         )
       )
         return;
-      this.journal = journal;
+      this.journal = saved;
       return;
     }
 
@@ -837,7 +856,9 @@ export class SubtaskRuntime {
       admitted.listRevision,
     );
     const journal = this.finalJournal("extraction", record, usage);
-    if (!journal || !this.commitCandidate(candidate, journal)) {
+    const saved =
+      journal && this.commitCandidate(candidate, journal, record.identity);
+    if (!saved) {
       this.saveProposalFailure(
         gateRecord,
         request,
@@ -862,7 +883,7 @@ export class SubtaskRuntime {
     // stable authoritative store so existing runtime-only links for other
     // groups remain resolvable; never expose a candidate before this point.
     if (!this.store.admit(applied.admission).accepted) return;
-    this.journal = journal;
+    this.journal = saved;
     // `applied` is the original accepted result carrying the private C04 plan.
     // Binding is optional and cannot change durable admission or journal state.
     this.access.bind(applied);
@@ -997,10 +1018,14 @@ export class SubtaskRuntime {
           const report = this.reportDispatched(owner, batch, nextTicket);
           const journal = this.chargedReportJournal(report);
           if (!journal) return false;
-          const admission = this.reportCanCommit(journal, batch);
-          if (admission !== "accepted") {
+          const fitted = this.reportDispatchJournal(
+            journal,
+            batch,
+            owner.identity,
+          );
+          if (fitted.kind !== "fitted") {
             if (
-              admission === "capacity" &&
+              fitted.kind === "capacity" &&
               !this.journal.reports.some(
                 (job) => job.identity === owner.identity,
               )
@@ -1022,9 +1047,14 @@ export class SubtaskRuntime {
             )
           )
             return false;
-          if (!this.commitCandidate(this.store, journal)) return false;
+          const saved = this.commitCandidate(
+            this.store,
+            fitted.journal,
+            owner.identity,
+          );
+          if (!saved) return false;
           // Keep charge locally before transport can leave callback.
-          this.journal = journal;
+          this.journal = saved;
           if (
             !this.exactReport(
               batch,
@@ -1053,17 +1083,17 @@ export class SubtaskRuntime {
       if (retryUntil === undefined) return;
       const parked = this.reportParked(owner, retryUntil);
       const journal = this.parkedReportJournal(parked);
-      if (
+      const saved =
         journal &&
         this.exactReport(
           batch,
           prepared.parent.id,
           flight,
           prepared.current.sourceId,
-        ) &&
-        this.commitCandidate(this.store, journal)
-      )
-        this.journal = journal;
+        )
+          ? this.commitCandidate(this.store, journal, parked.identity)
+          : undefined;
+      if (saved) this.journal = saved;
       return;
     }
 
@@ -1094,9 +1124,10 @@ export class SubtaskRuntime {
           const journal = report
             ? this.finalReportJournal(report, completeDecisions.receipt.usage)
             : undefined;
+          const saved =
+            journal && this.commitCandidate(candidate, journal, owner.identity);
           if (
-            journal &&
-            this.commitCandidate(candidate, journal) &&
+            saved &&
             this.exactReport(
               batch,
               prepared.parent.id,
@@ -1106,7 +1137,7 @@ export class SubtaskRuntime {
           ) {
             for (const decision of completeDecisions.reports)
               if (!this.store.report(decision).accepted) return;
-            this.journal = journal;
+            this.journal = saved;
             try {
               this.options.onPublish(this.snapshot());
             } catch {
@@ -1119,13 +1150,16 @@ export class SubtaskRuntime {
     } else if (outcome?.kind === "retryable" && retryUntil !== undefined) {
       const parked = this.reportRetry(owner.identity, ticket, retryUntil);
       const journal = parked && this.replaceReport(parked);
-      if (
+      const saved =
         journal &&
-        this.maySaveLateUsage(flight, prepared.current.sourceId, true) &&
-        this.commitCandidate(this.store, journal) &&
+        this.maySaveLateUsage(flight, prepared.current.sourceId, true)
+          ? this.commitCandidate(this.store, journal, owner.identity)
+          : undefined;
+      if (
+        saved &&
         this.maySaveLateUsage(flight, prepared.current.sourceId, true)
       ) {
-        this.journal = journal;
+        this.journal = saved;
         return;
       }
     }
@@ -1279,9 +1313,13 @@ export class SubtaskRuntime {
         unavailable = true;
         continue;
       }
-      const admission = this.reportCanCommit(journal, batch);
-      if (admission === "accepted") return { kind: "batch", batch };
-      if (admission === "capacity") measuredCapacity = true;
+      const fitted = this.reportDispatchJournal(
+        journal,
+        batch,
+        report.identity,
+      );
+      if (fitted.kind === "fitted") return { kind: "batch", batch };
+      if (fitted.kind === "capacity") measuredCapacity = true;
       else unavailable = true;
     }
     return measuredCapacity && !unavailable
@@ -1385,25 +1423,78 @@ export class SubtaskRuntime {
     return Number.isSafeInteger(deadline) ? deadline : undefined;
   }
 
-  private reportCanCommit(
+  private reportDispatchJournal(
     journal: SubtaskJournalCheckpoint,
-    batch?: SubtaskReportBatch,
-  ): ReportCommitAdmission {
-    if (!this.options.canCommit) return "unavailable";
-    const candidate = this.candidateCheckpoint(this.store, journal);
-    if (!candidate) return "unavailable";
-    const serializedSource = batch && ownDataJson(batch.source);
-    if (batch && !serializedSource) return "unavailable";
+    batch: SubtaskReportBatch,
+    identity: string,
+  ): FittedJournal {
+    if (!this.options.canCommit) return { kind: "unavailable" };
+    const serializedSource = ownDataJson(batch.source);
+    if (!serializedSource) return { kind: "unavailable" };
     // Preserve prior 3-byte-per-code-unit worst-case reserve without invoking
     // ambient `toJSON`; source refs are part of every final store receipt.
-    const sourceBytes = serializedSource
-      ? serializedSource.json.length * 3
-      : 1024;
-    const children = batch?.childIds.length ?? 1;
-    const reserve = {
+    const sourceBytes = serializedSource.json.length * 3;
+    const children = batch.childIds.length;
+    return this.dispatchJournal(journal, identity, {
       storeBytes: (sourceBytes + 512) * children + 2048,
       journalBytes: (sourceBytes + 256) * children + 2048,
-    };
+    });
+  }
+
+  /**
+   * Dispatch evicts only what its own charged write needs, after proving that
+   * evicting further oldest finished history leaves `reserve` for the final
+   * write, so a paid result never lacks reachable room.
+   */
+  private dispatchJournal(
+    journal: SubtaskJournalCheckpoint,
+    identity: string,
+    reserve: SubtaskReportCommitReserve,
+  ): FittedJournal {
+    const feasible = this.fitJournal(this.store, journal, identity, reserve);
+    if (feasible.kind !== "fitted") return feasible;
+    return this.fitJournal(this.store, journal, identity);
+  }
+
+  /** [ref:subtask_capacity_eviction] Evict oldest finished history only to fit. */
+  private fitJournal(
+    store: SubtaskStore,
+    journal: SubtaskJournalCheckpoint,
+    keep: string,
+    reserve: SubtaskReportCommitReserve = NO_RESERVE,
+  ): FittedJournal {
+    let groups: SubtaskCheckpoint["groups"];
+    try {
+      groups = store.checkpoint().groups;
+    } catch {
+      return { kind: "unavailable" };
+    }
+    // Closure assignment: the last preflight reached the all-evicted candidate.
+    let admission = "capacity" as ReportCommitAdmission;
+    const fitted = evictSubtaskJournalHistory(
+      journal,
+      groups,
+      [keep],
+      (candidate) => {
+        admission = this.commitAdmission(store, candidate, reserve);
+        return admission === "accepted";
+      },
+    );
+    if (fitted === undefined) return { kind: "unavailable" };
+    if (fitted === "capacity")
+      return { kind: admission === "unavailable" ? "unavailable" : "capacity" };
+    return { kind: "fitted", journal: fitted };
+  }
+
+  /** Without Monitor preflight, journal validity remains the only local bound. */
+  private commitAdmission(
+    store: SubtaskStore,
+    journal: SubtaskJournalCheckpoint,
+    reserve: SubtaskReportCommitReserve,
+  ): ReportCommitAdmission {
+    const candidate = this.candidateCheckpoint(store, journal);
+    if (!candidate) return "unavailable";
+    if (!this.options.canCommit) return "accepted";
     try {
       const admitted = this.options.canCommit(candidate, reserve);
       return admitted === true
@@ -1941,7 +2032,7 @@ export class SubtaskRuntime {
       return;
     journal.dispatches += 1;
     journal.usage.jev.calls += 1;
-    return subtaskJournalIsValid(journal) ? journal : undefined;
+    return journal;
   }
 
   private parkedReportJournal(
@@ -1966,7 +2057,7 @@ export class SubtaskRuntime {
       )
     )
       return;
-    return subtaskJournalIsValid(journal) ? journal : undefined;
+    return journal;
   }
 
   private finalReportJournal(
@@ -1981,7 +2072,7 @@ export class SubtaskRuntime {
       !Number.isSafeInteger(journal.usage.jev.outputTokens)
     )
       return;
-    return subtaskJournalIsValid(journal) ? journal : undefined;
+    return journal;
   }
 
   private saveReportFailure(
@@ -2002,12 +2093,10 @@ export class SubtaskRuntime {
           outputTokens: 0,
         },
       );
-    if (
-      journal &&
-      this.commitCandidate(this.store, journal) &&
-      this.maySaveLateUsage(flight, sourceId, true)
-    )
-      this.journal = journal;
+    const saved =
+      journal && this.commitCandidate(this.store, journal, identity);
+    if (saved && this.maySaveLateUsage(flight, sourceId, true))
+      this.journal = saved;
   }
 
   private chargedJournal(
@@ -2038,7 +2127,7 @@ export class SubtaskRuntime {
       return;
     journal.dispatches += 1;
     journal.usage[bucket].calls += 1;
-    return subtaskJournalIsValid(journal) ? journal : undefined;
+    return journal;
   }
 
   private finalJournal(
@@ -2058,7 +2147,7 @@ export class SubtaskRuntime {
     const receipt = bucket === "jev" ? stored?.gate : stored?.proposal;
     if (!receipt) return;
     receipt.usage = { ...usage };
-    return subtaskJournalIsValid(journal) ? journal : undefined;
+    return journal;
   }
 
   private replaceRecord(record: SubtaskPhaseRecord): SubtaskJournalCheckpoint {
@@ -2168,16 +2257,22 @@ export class SubtaskRuntime {
     return deepFreeze({ state, journal: detached(journal) });
   }
 
+  /** Save one owner's write; returns the committed (possibly evicted) journal. */
   private commitCandidate(
     store: SubtaskStore,
     journal: SubtaskJournalCheckpoint,
-  ): boolean {
-    const candidate = this.candidateCheckpoint(store, journal);
-    if (!candidate) return false;
+    keep: string,
+  ): SubtaskJournalCheckpoint | undefined {
+    const fitted = this.fitJournal(store, journal, keep);
+    if (fitted.kind !== "fitted") return;
+    const candidate = this.candidateCheckpoint(store, fitted.journal);
+    if (!candidate) return;
     try {
-      return this.options.commit(candidate) === true;
+      return this.options.commit(candidate) === true
+        ? fitted.journal
+        : undefined;
     } catch {
-      return false;
+      return;
     }
   }
 
@@ -2194,12 +2289,9 @@ export class SubtaskRuntime {
       this.gateFailure(batch, ticket),
       usage,
     );
-    if (
-      journal &&
-      this.commitCandidate(this.store, journal) &&
-      this.maySaveLateUsage(flight, sourceId)
-    )
-      this.journal = journal;
+    const saved =
+      journal && this.commitCandidate(this.store, journal, batch.identity);
+    if (saved && this.maySaveLateUsage(flight, sourceId)) this.journal = saved;
   }
 
   private saveProposalFailure(
@@ -2216,12 +2308,9 @@ export class SubtaskRuntime {
       this.proposalFailure(gateRecord, request, ticket),
       usage,
     );
-    if (
-      journal &&
-      this.commitCandidate(this.store, journal) &&
-      this.maySaveLateUsage(flight, sourceId)
-    )
-      this.journal = journal;
+    const saved =
+      journal && this.commitCandidate(this.store, journal, gateRecord.identity);
+    if (saved && this.maySaveLateUsage(flight, sourceId)) this.journal = saved;
   }
 
   private maySaveLateUsage(

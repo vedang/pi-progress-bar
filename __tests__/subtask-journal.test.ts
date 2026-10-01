@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  evictSubtaskJournalHistory,
   nextSubtaskPhase,
   restoreSubtaskJournal,
   type SubtaskJournalCheckpoint,
@@ -408,5 +409,135 @@ describe("durable generic decomposition phases", () => {
     });
     expect(subtaskJournalIsValid(data)).toBe(false);
     expect(touched).toBe(0);
+  });
+});
+
+// [ref:subtask_capacity_eviction]
+describe("capacity eviction of finished history", () => {
+  const named = (name: string, parent: number): SubtaskPhaseRecord => ({
+    ...record(),
+    identity: subtaskHash(name),
+    parentTaskId: `task:${parent}`,
+  });
+  const negative = (name: string, dispatch: number): SubtaskPhaseRecord => ({
+    ...named(name, 9),
+    phase: "gate-decided",
+    state: "complete",
+    gate: {
+      requestHash: subtaskHash(`${name}-gate`),
+      dispatch,
+      at: dispatch,
+      outcome: "decided",
+      choice: "no",
+      confidence: 1,
+      probability: 1,
+      usage: { inputTokens: 1, outputTokens: 1 },
+    },
+  });
+  /** Unfinished, admitted-group and kept owners hold the oldest ordinals. */
+  function pressured(): SubtaskJournalCheckpoint {
+    const accepted: SubtaskPhaseRecord = {
+      ...negative("accepted", 1),
+      parentTaskId: "task:2",
+      phase: "proposal-decided",
+      proposal: {
+        requestHash: subtaskHash("accepted-proposal"),
+        dispatch: 2,
+        at: 2,
+        outcome: "accepted",
+        listRevision: 1,
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    };
+    if (accepted.gate)
+      Object.assign(accepted.gate, { choice: "yes", probability: 1 });
+    return {
+      version: 1,
+      dispatches: 8,
+      usage: {
+        jev: { calls: 7, inputTokens: 9, outputTokens: 9 },
+        extraction: { calls: 1, inputTokens: 1, outputTokens: 1 },
+      },
+      // Array order is deliberately not ordinal order.
+      records: [
+        negative("newest", 8),
+        named("unfinished", 1),
+        negative("old-5", 5),
+        accepted,
+        negative("old-4", 4),
+        { ...named("receipt-free", 3), state: "superseded" },
+        negative("kept", 3),
+        negative("old-6", 6),
+        negative("old-7", 7),
+      ],
+      reports: [],
+    };
+  }
+  const group = { parentTaskId: "task:2", parentRevision: 1, listRevision: 1 };
+  const names = (data: SubtaskJournalCheckpoint) =>
+    data.records.map((item) => item.identity);
+
+  it("never evicts while a commit fits", () => {
+    const data = pressured();
+    expect(subtaskJournalIsValid(data)).toBe(true);
+    expect(evictSubtaskJournalHistory(data, [group], [])).toEqual(data);
+  });
+  it("evicts only the oldest finished history, keeping unfinished, admitted and committed owners", () => {
+    const data = pressured();
+    const before = structuredClone(data);
+    const fitted = evictSubtaskJournalHistory(
+      data,
+      [group],
+      [subtaskHash("kept")],
+      (candidate) => candidate.records.length <= 6,
+    );
+    if (!fitted || fitted === "capacity") throw new Error("Expected fit");
+    expect(data).toEqual(before);
+    expect(subtaskJournalIsValid(fitted)).toBe(true);
+    // Receipt-free history first, then lowest dispatch ordinals.
+    expect(names(fitted)).toEqual(
+      names(before).filter(
+        (identity) =>
+          ![
+            subtaskHash("receipt-free"),
+            subtaskHash("old-4"),
+            subtaskHash("old-5"),
+          ].includes(identity),
+      ),
+    );
+    // Lifetime wallet keeps evicted charges; retained ordinals become sparse.
+    expect({ dispatches: fitted.dispatches, usage: fitted.usage }).toEqual({
+      dispatches: before.dispatches,
+      usage: before.usage,
+    });
+    expect(
+      evictSubtaskJournalHistory(
+        data,
+        [group],
+        [subtaskHash("kept")],
+        // Unfinished, admitted-group and committed owners alone are three.
+        (candidate) => candidate.records.length <= 2,
+      ),
+    ).toBe("capacity");
+  });
+  it("evicts minimally to journal count and byte bounds by default", () => {
+    const data = journal();
+    data.records = Array.from({ length: 201 }, (_, i) => ({
+      ...named(`superseded:${i}`, 1),
+      state: "superseded" as const,
+    }));
+    expect(subtaskJournalIsValid(data)).toBe(false);
+    const fitted = evictSubtaskJournalHistory(data, [], []);
+    if (!fitted || fitted === "capacity") throw new Error("Expected fit");
+    expect(subtaskJournalIsValid(fitted)).toBe(true);
+    const retained = new Set(names(fitted));
+    const next = data.records
+      .filter((item) => !retained.has(item.identity))
+      .sort((a, b) => (a.identity < b.identity ? -1 : 1))
+      .at(-1);
+    if (!next) throw new Error("Expected evicted history");
+    expect(
+      subtaskJournalIsValid({ ...fitted, records: [...fitted.records, next] }),
+    ).toBe(false);
   });
 });

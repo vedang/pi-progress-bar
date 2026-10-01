@@ -4,7 +4,6 @@ import {
   subtaskReportOmissionIdentity,
 } from "../src/analysis/subtask-report";
 import * as codec from "../src/core/hybrid-checkpoint";
-import type { SubtaskPhaseRecord } from "../src/core/subtask-journal";
 import { CanonicalPass } from "../src/sources/messages";
 import { observation } from "./fixtures/hybrid";
 import { subtaskMetadataMonitor } from "./fixtures/subtask-metadata-monitor";
@@ -42,37 +41,22 @@ it.each(["wallet", "bytes", "adaptive-bytes"])(
     if (limit === "wallet") {
       component.journal.usage.jev.calls += 1024 - component.journal.dispatches;
       component.journal.dispatches = 1024;
-    } else {
-      const base = component.journal.records[0];
-      if (!base) throw new Error("Missing real phase record");
-      // Supplied terminal diagnostic history, not forged dispatch/admission proof.
-      const {
-        gate: _gate,
-        proposal: _proposal,
-        parkedUntil: _parked,
-        ...fields
-      } = base;
-      for (
-        let n = 1;
-        Buffer.byteLength(JSON.stringify(component)) < 60000;
-        n++
-      ) {
-        if (n > 190) throw new Error("Fixture failed to reach byte boundary");
-        const record: SubtaskPhaseRecord = {
-          ...fields,
-          identity: n.toString(16).padStart(64, "0"),
-          phase: "gate-ready",
-          state: "superseded",
-        };
-        component.journal.records.push(record);
-      }
     }
     expect(codec.subtaskCheckpointStorageStatus(saved)).toBe("supported");
     await h.monitor.restore("/nonexistent-hybrid-test", saved, false, h.reader);
     await vi.advanceTimersByTimeAsync(100);
     const before = h.checkpoint().monitor?.subtasks?.journal;
     const callsBefore = h.counts();
-    const capacity = vi.spyOn(codec, "canCommitSubtaskCheckpoint"); // observe real predicate
+    const measure = codec.canCommitSubtaskCheckpoint;
+    const capacity = vi.spyOn(codec, "canCommitSubtaskCheckpoint");
+    // Finished history is evictable; model storage whose remainder is all
+    // protected, so no eviction can free a report's reserved final room.
+    if (limit !== "wallet")
+      capacity.mockImplementation((state, monitor, reserve) =>
+        (reserve?.storeBytes ?? 0) > 0
+          ? false
+          : measure(state, monitor, reserve),
+      );
     const text = "The workbook review has more unconfirmed work.".repeat(
       limit === "adaptive-bytes" ? 140 : 1,
     );
@@ -195,3 +179,85 @@ it.each(["credentials", "persistence", "off"])(
     );
   },
 );
+
+it("evicts oldest finished history so a long session keeps charging new gates and reports", async () => {
+  const h = await mapped();
+  const mappedJournal = h.checkpoint().monitor?.subtasks?.journal;
+  const accepted = mappedJournal?.records.find(
+    (record) => record.proposal?.outcome === "accepted",
+  );
+  if (!mappedJournal || !accepted) throw new Error("Missing accepted proof");
+  const identities = (journal: typeof mappedJournal) => [
+    ...journal.records.map((record) => record.identity),
+    ...journal.reports.map((report) => report.identity),
+  ];
+  let older: ReturnType<typeof h.checkpoint> | undefined;
+  let olderBranch: unknown[] = [];
+  for (let n = 0; n < 16; n++) {
+    const before = h.counts();
+    h.append(`turn-${n}`, `Progress note ${n}: the workbook review continues.`);
+    await h.settle(`turn-${n}`);
+    // Each distinct turn is a new exact question; capacity never refuses it.
+    expect(h.counts().gate - before.gate, `turn ${n} gate`).toBe(1);
+    expect(
+      h.counts().report - before.report,
+      `turn ${n} report`,
+    ).toBeGreaterThan(0);
+    if (n === 0) {
+      older = h.checkpoint();
+      olderBranch = structuredClone(h.reader());
+    }
+  }
+
+  const journal = h.checkpoint().monitor?.subtasks?.journal;
+  const first = older?.monitor?.subtasks?.journal;
+  if (!journal || !older || !first)
+    throw new Error("Missing long-session journal");
+  // Map-time and first-turn gate records and report jobs are the oldest.
+  const oldest = identities(first).filter(
+    (identity) => identity !== accepted.identity,
+  );
+  expect(first.reports.length).toBeGreaterThan(0);
+  const calls = h.counts();
+  const jevCalls = calls.gate + calls.report;
+  // Lifetime wallet still counts every evicted receipt.
+  expect(journal.dispatches).toBe(jevCalls + calls.proposal);
+  expect(journal.usage).toEqual({
+    jev: { calls: jevCalls, inputTokens: 2 * jevCalls, outputTokens: jevCalls },
+    extraction: {
+      calls: calls.proposal,
+      inputTokens: 3 * calls.proposal,
+      outputTokens: 2 * calls.proposal,
+    },
+  });
+  const retained = identities(journal);
+  expect(retained).toEqual(expect.not.arrayContaining(oldest));
+  expect(journal.records).toContainEqual(accepted);
+  expect(
+    journal.records.flatMap((record) =>
+      [record.gate, record.proposal].filter(Boolean),
+    ).length + journal.reports.flatMap((report) => report.attempts).length,
+  ).toBeLessThan(journal.dispatches);
+  expect(h.monitor.subtaskSnapshot().groups[0]?.children).toHaveLength(22);
+  expect(h.monitor.subtaskDiagnosticsSnapshot().semanticOmissions.total).toBe(
+    0,
+  );
+
+  // Older same-source copy still holds evicted history; the merge re-applies
+  // the same eviction instead of refusing or re-growing past capacity.
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    older,
+    false,
+    () => olderBranch,
+  );
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.monitor.state.cursor?.id).toBe("turn-0");
+  const restored = h.checkpoint().monitor?.subtasks?.journal;
+  expect(restored?.dispatches).toBeGreaterThanOrEqual(journal.dispatches);
+  expect(restored?.usage.jev.calls).toBeGreaterThanOrEqual(jevCalls);
+  // Restore may retire its authority, but never evicts the admitted group's proof.
+  expect(
+    restored?.records.find((record) => record.identity === accepted.identity),
+  ).toMatchObject({ gate: accepted.gate, proposal: accepted.proposal });
+}, 30000);

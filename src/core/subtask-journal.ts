@@ -634,9 +634,15 @@ const validRecord = (value: unknown): value is SubtaskPhaseRecord => {
   }
 };
 
+/**
+ * `bounded: false` checks everything except history capacity (record/receipt
+ * counts); capacity eviction uses it to tell oversized from malformed history.
+ */
 const validJournalShape = (
   value: unknown,
+  bounded = true,
 ): value is SubtaskJournalCheckpoint => {
+  const maxOwners = bounded ? MAX_RECORDS : Number.MAX_SAFE_INTEGER;
   if (
     !hasExactKeys(value, [
       "version",
@@ -652,11 +658,11 @@ const validJournalShape = (
     !validUsage(value.usage.jev) ||
     !validUsage(value.usage.extraction) ||
     value.usage.jev.calls + value.usage.extraction.calls !== value.dispatches ||
-    !densePlainArray(value.records, 0, MAX_RECORDS) ||
+    !densePlainArray(value.records, 0, maxOwners) ||
     !value.records.every(validRecord) ||
-    !densePlainArray(value.reports, 0, MAX_RECORDS) ||
+    !densePlainArray(value.reports, 0, maxOwners) ||
     !value.reports.every(validReportJob) ||
-    value.records.length + value.reports.length > MAX_RECORDS
+    value.records.length + value.reports.length > maxOwners
   )
     return false;
 
@@ -694,7 +700,7 @@ const validJournalShape = (
       report.attempts.map((attempt) => ["jev", attempt] as const),
     ),
   ];
-  if (receipts.length > MAX_RECEIPTS) return false;
+  if (bounded && receipts.length > MAX_RECEIPTS) return false;
 
   const ordinals = new Set<number>();
   let gateInputTokens = 0;
@@ -957,6 +963,97 @@ export const pruneIncoherentAcceptedSubtaskRecords = (
       return acceptedSubtaskRecordMatchesGroup(record, groups);
     });
     return subtaskJournalIsValid(pruned) ? pruned : undefined;
+  } catch {
+    return;
+  }
+};
+
+/** Lowest charged dispatch ordinal; receipt-free history sorts first. */
+const oldestOrdinal = (owner: SubtaskPhaseRecord | SubtaskReportJob) => {
+  const ordinals =
+    "attempts" in owner
+      ? owner.attempts.map((attempt) => attempt.dispatch)
+      : [owner.gate?.dispatch ?? 0, owner.proposal?.dispatch ?? 0].filter(
+          (ordinal) => ordinal > 0,
+        );
+  return ordinals.length ? Math.min(...ordinals) : 0;
+};
+
+const finished = (state: SubtaskPhaseState | SubtaskReportState) =>
+  state === "complete" || state === "superseded";
+
+/**
+ * [tag:subtask_capacity_eviction] Under capacity pressure only, remove the
+ * oldest finished history until `fits` accepts a valid journal. Evictable means
+ * complete/superseded records and report jobs, except `keep` (the owner being
+ * committed) and accepted records backing an admitted store group. Unfinished
+ * owners (ready/dispatched/parked/permanent) are never evicted. Oldest is the
+ * lowest charged dispatch ordinal (receipt-free history first), ties by
+ * identity, so live commits and restore merges evict identically. Lifetime
+ * `dispatches`/usage never change; retained ordinals may become sparse.
+ * Returns the unchanged clone when it already fits, `"capacity"` when evicting
+ * all evictable history is not enough, and undefined for malformed input.
+ */
+export const evictSubtaskJournalHistory = (
+  journal: SubtaskJournalCheckpoint,
+  groups: readonly SubtaskAcceptedGroupFrontier[],
+  keep: readonly string[],
+  fits: (candidate: SubtaskJournalCheckpoint) => boolean = () => true,
+): SubtaskJournalCheckpoint | "capacity" | undefined => {
+  try {
+    if (!validJournalShape(journal, false)) return;
+    const source = cloneJournal(journal);
+    const evictable = [
+      ...source.records.filter(
+        (record) =>
+          !acceptedSubtaskRecordMatchesGroup(record, groups) &&
+          finished(record.state),
+      ),
+      ...source.reports.filter((report) => finished(report.state)),
+    ]
+      .filter((owner) => !keep.includes(owner.identity))
+      .map((owner) => ({
+        identity: owner.identity,
+        ordinal: oldestOrdinal(owner),
+      }))
+      .sort((left, right) =>
+        left.ordinal !== right.ordinal
+          ? left.ordinal - right.ordinal
+          : left.identity < right.identity
+            ? -1
+            : left.identity > right.identity
+              ? 1
+              : 0,
+      );
+    const without = (count: number): SubtaskJournalCheckpoint => {
+      const evicted = new Set(
+        evictable.slice(0, count).map((owner) => owner.identity),
+      );
+      const candidate = cloneJournal(source);
+      candidate.records = candidate.records.filter(
+        (record) => !evicted.has(record.identity),
+      );
+      candidate.reports = candidate.reports.filter(
+        (report) => !evicted.has(report.identity),
+      );
+      return candidate;
+    };
+    const accepts = (candidate: SubtaskJournalCheckpoint) =>
+      subtaskJournalIsValid(candidate) && fits(cloneJournal(candidate));
+
+    const unchanged = without(0);
+    if (accepts(unchanged)) return unchanged;
+    if (!evictable.length || !accepts(without(evictable.length)))
+      return "capacity";
+    // Fit is monotone in evicted count: find the shortest oldest prefix.
+    let low = 1;
+    let high = evictable.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (accepts(without(middle))) high = middle;
+      else low = middle + 1;
+    }
+    return without(low);
   } catch {
     return;
   }

@@ -1290,6 +1290,7 @@ export class Monitor {
             : (targetStore ?? emptySubtasks.state),
           state,
           pass,
+          subtaskOmissions,
         );
         const metadata = this.restoredSubtaskMetadata(
           canonicalReset
@@ -1351,6 +1352,7 @@ export class Monitor {
           emptySubtasks.state,
           state,
           pass,
+          subtaskOmissions,
         );
         const metadata = this.restoredSubtaskMetadata(
           this.resetSubtaskMetadata(work.subtaskMetadata),
@@ -2207,7 +2209,7 @@ export class Monitor {
       report: (batch, signal, onDispatch, onPhysicalFlight) =>
         this.evaluateSubtaskReport(batch, signal, onDispatch, onPhysicalFlight),
       canCommit: (candidate, reserve) =>
-        this.canCommitSubtaskReport(candidate, reserve),
+        this.canCommitSubtaskCandidate(candidate, reserve),
       onReportCapacityRefusal: ({ group, parent, source, sourceId }) => {
         this.recordSubtaskReportOmission(
           group,
@@ -2469,11 +2471,22 @@ export class Monitor {
     targetStore: Readonly<SubtaskRuntimeCheckpoint["state"]>,
     state: HybridState,
     pass: CanonicalPass,
+    omissions: Readonly<SubtaskOmissionSummary> | undefined,
   ): SubtaskRuntimeCheckpoint | undefined {
     const merged = mergeSubtaskRestoreHistory({
       live,
       incoming,
       targetStore,
+      // Shared optional projection appends `,"subtaskOmissions":<summary>`.
+      ...(omissions === undefined
+        ? {}
+        : {
+            reservedBytes:
+              Buffer.byteLength(
+                JSON.stringify({ subtaskOmissions: omissions }),
+                "utf8",
+              ) - 1,
+          }),
     });
     return merged.kind === "merged"
       ? this.normalizeRestoredSubtaskHistory(merged.component, state, pass)
@@ -2649,6 +2662,7 @@ export class Monitor {
         this.subtaskRuntime?.checkpoint() ??
         this.emptySubtaskCheckpoint(),
     );
+    const omissions = this.durableSubtaskOmissions();
     const component =
       live &&
       this.mergedRestoredSubtaskHistory(
@@ -2657,12 +2671,12 @@ export class Monitor {
         current.state,
         this.state,
         pass,
+        omissions,
       );
     if (!component) {
       this.refuseRestoredSubtaskHistory(work);
       return false;
     }
-    const omissions = this.durableSubtaskOmissions();
     const metadata = this.subtaskMetadata(
       work.wantEnabled,
       this.healthCards,
@@ -2702,8 +2716,8 @@ export class Monitor {
     this.publish();
   }
 
-  /** Report preflight shares real v11 component and ON/OFF envelope limits. */
-  private canCommitSubtaskReport(
+  /** Runtime preflight measures the same v11 metadata its commit would save. */
+  private canCommitSubtaskCandidate(
     candidate: SubtaskRuntimeCheckpoint,
     reserve: { storeBytes: number; journalBytes: number },
   ): true | "capacity" | false {
@@ -2717,6 +2731,7 @@ export class Monitor {
           undefined,
           this.taskDetails,
           candidate,
+          this.durableSubtaskOmissions(),
         ),
         reserve,
       )

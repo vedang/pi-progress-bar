@@ -255,20 +255,48 @@ describe("bounded same-source restore history", () => {
       }
     },
   );
-  it("refuses an oversized history union instead of evicting valid records", () => {
-    const live = component();
-    const incoming = component();
-    for (let i = 0; i < 70; i++) {
-      live.journal.records.push({ ...ready(`live-${i}`), state: "superseded" });
-      incoming.journal.records.push({
-        ...ready(`incoming-${i}`),
-        state: "superseded",
+  // [ref:subtask_capacity_eviction]
+  it("reapplies oldest-finished eviction to an oversized union from either side", () => {
+    const count = 45;
+    const history = (side: "live" | "incoming") => {
+      const data = component(2 * count);
+      data.journal.records = Array.from({ length: count }, (_, i) => {
+        const dispatch = 2 * i + (side === "live" ? 1 : 2);
+        const item = decided(`${side}-${i}`).journal.records[0];
+        return { ...item, gate: { ...item.gate, dispatch } } as typeof item;
       });
-    }
-    expect(merge(live, incoming)).toEqual({
-      kind: "refused",
-      reason: "capacity",
+      return data;
+    };
+    const live = history("live");
+    // Receipt-free unfinished owner sorts first but is never evictable.
+    live.journal.records.push({ ...ready("owner"), parentTaskId: "task:2" });
+    const incoming = history("incoming");
+    const merged = merge(live, incoming);
+    const swapped = merge(incoming, live);
+    if (merged.kind !== "merged" || swapped.kind !== "merged")
+      throw new Error("Expected eviction, not refusal");
+    const retained = (journal: SubtaskRuntimeCheckpoint["journal"]) =>
+      journal.records
+        .map((item) => item.gate?.dispatch ?? 0)
+        .sort((a, b) => a - b);
+    const kept = retained(merged.component.journal);
+    expect(kept.length).toBeLessThan(2 * count + 1);
+    expect(kept[0]).toBe(0);
+    // A contiguous newest suffix survives; every older finished record went.
+    const oldest = kept[1] ?? 0;
+    expect(kept.slice(1)).toEqual(
+      Array.from({ length: 2 * count + 1 - oldest }, (_, i) => oldest + i),
+    );
+    expect(retained(swapped.component.journal).slice(1)).toEqual(kept.slice(1));
+    expect(merged.component.journal.usage).toEqual(live.journal.usage);
+    const reserved = mergeSubtaskRestoreHistory({
+      live,
+      incoming,
+      targetStore: incoming.state,
+      reservedBytes: 4096,
     });
+    if (reserved.kind !== "merged") throw new Error("Expected reserved fit");
+    expect(reserved.component.journal.records.length).toBeLessThan(kept.length);
   });
   it("rejects accessor inputs without executing them", () => {
     const live = component();

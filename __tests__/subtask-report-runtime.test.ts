@@ -471,9 +471,9 @@ it("adaptively fits one child using real candidates and conservative final growt
   const [dispatchCandidate, reserve] =
     h.canCommit.mock.calls
       .filter(
-        ([candidate]) =>
+        ([candidate, reserve]) =>
           candidate.journal.reports.at(-1)?.attempts.at(-1)?.outcome ===
-          "dispatched",
+            "dispatched" && reserve.storeBytes > 0,
       )
       .at(-1) ?? [];
   if (!dispatchCandidate || !reserve)

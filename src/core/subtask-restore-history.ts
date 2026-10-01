@@ -1,6 +1,7 @@
 import { sameSource } from "../shared/guards";
 import {
   acceptedSubtaskRecordMatchesGroup,
+  evictSubtaskJournalHistory,
   type SubtaskJournalCheckpoint,
   type SubtaskPhaseRecord,
   type SubtaskReportAttempt,
@@ -13,8 +14,6 @@ import type { SubtaskRuntimeCheckpoint } from "./subtask-runtime";
 import { type SubtaskCheckpoint, subtaskCheckpointIsValid } from "./subtasks";
 
 const MAX_COMPONENT_BYTES = 64 * 1024;
-const MAX_HISTORY_OWNERS = 200;
-const MAX_RECEIPTS = 200;
 
 type RefusalReason =
   | "invalid-history"
@@ -408,7 +407,6 @@ const receiptAccounting = (journal: SubtaskJournalCheckpoint) => {
   let extractionCalls = 0;
   let extractionInputTokens = 0;
   let extractionOutputTokens = 0;
-  let receiptCount = 0;
 
   const recordReceipt = (
     bucket: "jev" | "extraction",
@@ -417,7 +415,6 @@ const receiptAccounting = (journal: SubtaskJournalCheckpoint) => {
       usage: { inputTokens: number; outputTokens: number };
     },
   ) => {
-    receiptCount += 1;
     if (ordinals.has(receipt.dispatch)) return false;
     ordinals.add(receipt.dispatch);
     if (bucket === "jev") {
@@ -442,7 +439,6 @@ const receiptAccounting = (journal: SubtaskJournalCheckpoint) => {
       if (!recordReceipt("jev", attempt)) return;
 
   return {
-    receiptCount,
     ordinals,
     jevCalls,
     jevInputTokens,
@@ -505,10 +501,25 @@ export function mergeSubtaskRestoreHistory(input: {
   live: Readonly<SubtaskRuntimeCheckpoint>;
   incoming: Readonly<SubtaskRuntimeCheckpoint>;
   targetStore: Readonly<SubtaskCheckpoint>;
+  /** Sibling optional bytes (omission summary) sharing the 64KiB budget. */
+  reservedBytes?: number;
 }): RestoreHistoryResult {
   try {
-    if (!exactOwnKeys(input, ["live", "incoming", "targetStore"]))
+    const reserved = plainOwnData(input)
+      ? ownValue(input, "reservedBytes")
+      : undefined;
+    if (
+      !exactOwnKeys(
+        input,
+        reserved === undefined
+          ? ["live", "incoming", "targetStore"]
+          : ["live", "incoming", "targetStore", "reservedBytes"],
+      ) ||
+      (reserved !== undefined &&
+        (!Number.isSafeInteger(reserved) || (reserved as number) < 0))
+    )
       return refused("invalid-history");
+    const reservedBytes = (reserved as number | undefined) ?? 0;
     const live = detachedRuntimeData(ownValue(input, "live"));
     const incoming = detachedRuntimeData(ownValue(input, "incoming"));
     const targetStore = detachedCheckpoint(ownValue(input, "targetStore"));
@@ -564,9 +575,6 @@ export function mergeSubtaskRestoreHistory(input: {
       }
     }
 
-    if (records.length + reports.length > MAX_HISTORY_OWNERS)
-      return refused("capacity");
-
     const journal: SubtaskJournalCheckpoint = {
       version: 1,
       dispatches: selectedWallet.dispatches,
@@ -576,7 +584,6 @@ export function mergeSubtaskRestoreHistory(input: {
     };
     const receipts = receiptAccounting(journal);
     if (!receipts) return refused("proof-conflict");
-    if (receipts.receiptCount > MAX_RECEIPTS) return refused("capacity");
     if (!walletCoversReceipts(journal, receipts))
       return refused("accounting-conflict");
 
@@ -595,8 +602,6 @@ export function mergeSubtaskRestoreHistory(input: {
     }
 
     if (!unfinishedOwnersAreUnique(journal)) return refused("owner-conflict");
-    if (encodedBytes(journal) > MAX_COMPONENT_BYTES) return refused("capacity");
-    if (!subtaskJournalIsValid(journal)) return refused("proof-conflict");
 
     const state: SubtaskCheckpoint = {
       ...targetStore,
@@ -616,10 +621,21 @@ export function mergeSubtaskRestoreHistory(input: {
       return encodedBytes(state) > MAX_COMPONENT_BYTES
         ? refused("capacity")
         : refused("invalid-history");
-    if (encodedBytes({ state, journal }) > MAX_COMPONENT_BYTES)
-      return refused("capacity");
+    // [ref:subtask_capacity_eviction] The union may resurrect history either
+    // side already evicted; reapply the same oldest-finished eviction order.
+    const fitted = evictSubtaskJournalHistory(
+      journal,
+      state.groups,
+      [],
+      (candidate) =>
+        encodedBytes({ state, journal: candidate }) + reservedBytes <=
+        MAX_COMPONENT_BYTES,
+    );
+    if (fitted === "capacity") return refused("capacity");
+    if (!fitted || !subtaskJournalIsValid(fitted))
+      return refused("proof-conflict");
 
-    return { kind: "merged", component: { state, journal } };
+    return { kind: "merged", component: { state, journal: fitted } };
   } catch {
     return refused("invalid-history");
   }

@@ -261,3 +261,42 @@ it("evicts oldest finished history so a long session keeps charging new gates an
     restored?.records.find((record) => record.identity === accepted.identity),
   ).toMatchObject({ gate: accepted.gate, proposal: accepted.proposal });
 }, 30000);
+
+it("records an unfittable gate dispatch as a durable capacity omission instead of paying", async () => {
+  const h = subtaskMetadataMonitor();
+  running.push(h);
+  h.start();
+  await h.settle("goal");
+  const before = h.checkpoint().monitor?.subtasks?.journal;
+  const calls = h.counts();
+  const measure = codec.canCommitSubtaskCheckpoint;
+  // Everything retained is protected: no eviction leaves final-write room.
+  vi.spyOn(codec, "canCommitSubtaskCheckpoint").mockImplementation(
+    (state, monitor, reserve) =>
+      (reserve?.journalBytes ?? 0) > 0
+        ? false
+        : measure(state, monitor, reserve),
+  );
+  h.append("gate-capacity", "Please also check the workbook formulas.", "user");
+  await h.settle("gate-capacity");
+  expect(h.counts()).toMatchObject({
+    gate: calls.gate,
+    proposal: calls.proposal,
+    report: calls.report,
+  });
+  expect(h.checkpoint().monitor?.subtasks?.journal).toEqual(before);
+  const summary = h.checkpoint().monitor?.subtaskOmissions;
+  expect(summary?.entries).toEqual([
+    { identity: expect.stringMatching(/^[a-f0-9]{64}$/), reason: "capacity" },
+  ]);
+  h.monitor.turnOff();
+  await h.monitor.restore(
+    "/nonexistent-hybrid-test",
+    h.checkpoint(),
+    false,
+    h.reader,
+  );
+  expect(
+    h.monitor.subtaskDiagnosticsSnapshot().semanticOmissions,
+  ).toMatchObject({ total: 1, byReason: { capacity: 1 } });
+});

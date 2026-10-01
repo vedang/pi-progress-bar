@@ -88,6 +88,7 @@ import {
   MAX_CHECKPOINT_BYTES,
   restoreSubtaskCheckpoint,
   type SubtaskMonitorCheckpointMetadata,
+  type SubtaskOmissionReason,
   type SubtaskOmissionSummary,
   type SubtaskRestoreContext,
   subtaskCheckpointBytes,
@@ -2219,6 +2220,22 @@ export class Monitor {
           "capacity",
         );
       },
+      onDecompositionCapacityRefusal: ({ sourceId, phase, identity }) => {
+        if (
+          sourceId !== this.state.sourceId ||
+          sourceId !== this.options.sourceId()
+        )
+          return;
+        // Content-free hook-free identity of the refused exact question.
+        this.recordSubtaskOmission(
+          sha256(
+            ["subtask-decomposition-omission:v1", sourceId, phase, identity]
+              .map((part) => JSON.stringify(part))
+              .join(","),
+          ),
+          "capacity",
+        );
+      },
       now: () => Date.now(),
       commit: (candidate) => this.commitSubtaskCandidate(candidate),
       onPublish: (snapshot) => {
@@ -3005,6 +3022,14 @@ export class Monitor {
       reportSource: source,
     });
     if (!identity) return "not-recorded";
+    return this.recordSubtaskOmission(identity, reason);
+  }
+
+  /** Append one durable omission, falling back to saturation when it cannot fit. */
+  private recordSubtaskOmission(
+    identity: string,
+    reason: SubtaskOmissionReason,
+  ): SubtaskReportOmissionReceipt {
     const appended = appendSubtaskOmission(this.subtaskOmissions, {
       identity,
       reason,

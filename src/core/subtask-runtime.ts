@@ -103,6 +103,13 @@ interface SubtaskReportCapacityRefusal {
 
 type SubtaskReportCommitAdmission = boolean | "capacity";
 
+interface SubtaskDecompositionCapacityRefusal {
+  sourceId: string;
+  phase: "gate" | "proposal";
+  /** Content-free exact gate batch identity whose dispatch was refused. */
+  identity: string;
+}
+
 export interface SubtaskRuntimeOptions {
   initial: SubtaskRuntimeCheckpoint;
   current: () => SubtaskRuntimeCurrent | undefined;
@@ -128,6 +135,10 @@ export interface SubtaskRuntimeOptions {
   ) => SubtaskReportCommitAdmission;
   /** Measured report refusal only; it never reports stale or transport failures. */
   onReportCapacityRefusal?: (refusal: SubtaskReportCapacityRefusal) => void;
+  /** Measured gate/proposal refusal after eviction could not reserve final room. */
+  onDecompositionCapacityRefusal?: (
+    refusal: SubtaskDecompositionCapacityRefusal,
+  ) => void;
   now?: () => number;
   commit: (candidate: SubtaskRuntimeCheckpoint) => boolean;
   onPublish: (snapshot: Readonly<SubtaskSnapshot>) => void;
@@ -167,6 +178,16 @@ type FittedJournal =
 const NO_RESERVE: SubtaskReportCommitReserve = {
   storeBytes: 0,
   journalBytes: 0,
+};
+/** Final gate receipt: choice/confidence/probability plus 16-digit usage. */
+const GATE_FINAL_RESERVE: SubtaskReportCommitReserve = {
+  storeBytes: 0,
+  journalBytes: 512,
+};
+/** Accepted proposal adds one group, bounded by the 32KiB admission projection. */
+const PROPOSAL_FINAL_RESERVE: SubtaskReportCommitReserve = {
+  storeBytes: 32 * 1024,
+  journalBytes: 512,
 };
 
 interface Flight {
@@ -572,9 +593,26 @@ export class SubtaskRuntime {
             record,
             batch.parentTaskId,
           );
-          const saved =
-            journal &&
-            this.commitCandidate(this.store, journal, record.identity);
+          const fitted = this.decompositionDispatchJournal(
+            journal,
+            record.identity,
+            GATE_FINAL_RESERVE,
+          );
+          if (fitted.kind !== "fitted") {
+            if (fitted.kind === "capacity")
+              this.decompositionCapacityRefused(
+                "gate",
+                batch,
+                prepared,
+                flight,
+              );
+            return false;
+          }
+          const saved = this.commitCandidate(
+            this.store,
+            fitted.journal,
+            record.identity,
+          );
           if (!saved) return false;
 
           // This proof is durable even when the synchronous save callback
@@ -725,9 +763,26 @@ export class SubtaskRuntime {
             record,
             batch.parentTaskId,
           );
-          const saved =
-            journal &&
-            this.commitCandidate(this.store, journal, record.identity);
+          const fitted = this.decompositionDispatchJournal(
+            journal,
+            record.identity,
+            PROPOSAL_FINAL_RESERVE,
+          );
+          if (fitted.kind !== "fitted") {
+            if (fitted.kind === "capacity")
+              this.decompositionCapacityRefused(
+                "proposal",
+                batch,
+                prepared,
+                flight,
+              );
+            return false;
+          }
+          const saved = this.commitCandidate(
+            this.store,
+            fitted.journal,
+            record.identity,
+          );
           if (!saved) return false;
 
           // Charged proof survives a post-save fence; only transport admission
@@ -1454,6 +1509,41 @@ export class SubtaskRuntime {
     const feasible = this.fitJournal(this.store, journal, identity, reserve);
     if (feasible.kind !== "fitted") return feasible;
     return this.fitJournal(this.store, journal, identity);
+  }
+
+  private decompositionDispatchJournal(
+    journal: SubtaskJournalCheckpoint | undefined,
+    identity: string,
+    reserve: SubtaskReportCommitReserve,
+  ): FittedJournal {
+    return journal
+      ? this.dispatchJournal(journal, identity, reserve)
+      : { kind: "unavailable" };
+  }
+
+  /** Revalidate exact gate authority before passing measured capacity to Monitor. */
+  private decompositionCapacityRefused(
+    phase: SubtaskDecompositionCapacityRefusal["phase"],
+    batch: SubtaskGateBatch,
+    prepared: CurrentParent,
+    flight: Flight,
+  ) {
+    const current = this.exactBatch(
+      batch,
+      prepared.parent.id,
+      flight,
+      prepared.current.sourceId,
+    );
+    if (!current) return;
+    try {
+      this.options.onDecompositionCapacityRefusal?.({
+        sourceId: current.current.sourceId,
+        phase,
+        identity: batch.identity,
+      });
+    } catch {
+      // Capacity reporting cannot alter dispatch, journal, or runtime authority.
+    }
   }
 
   /** [ref:subtask_capacity_eviction] Evict oldest finished history only to fit. */

@@ -3,10 +3,14 @@ import { MODEL, type ValidatedResult } from "../src/analysis/gateway";
 import type { SubtaskGateBatch } from "../src/analysis/subtask-gate";
 import type { buildSubtaskProposal } from "../src/analysis/subtask-proposal";
 import type { SubtaskJournalCheckpoint } from "../src/core/subtask-journal";
-import { SubtaskRuntime } from "../src/core/subtask-runtime";
+import {
+  SubtaskRuntime,
+  type SubtaskRuntimeOptions,
+} from "../src/core/subtask-runtime";
 import { SubtaskStore } from "../src/core/subtasks";
 import { subtaskAccessFixture } from "./fixtures/subtask-access";
 import { subtaskProposalFixture } from "./fixtures/subtask-proposal";
+import { subtaskHash } from "./fixtures/subtasks";
 
 type Component = {
   state: ReturnType<SubtaskStore["checkpoint"]>;
@@ -139,8 +143,22 @@ function fixture(expectedProposalDispatch: number | (() => number) = 2) {
       };
     },
   );
-  const create = (initial = empty()) =>
-    new SubtaskRuntime({ initial, current, gate, propose, commit, onPublish });
+  const create = (
+    initial = empty(),
+    storage: Pick<
+      SubtaskRuntimeOptions,
+      "canCommit" | "onDecompositionCapacityRefusal"
+    > = {},
+  ) =>
+    new SubtaskRuntime({
+      initial,
+      current,
+      gate,
+      propose,
+      commit,
+      onPublish,
+      ...storage,
+    });
   return {
     ...h,
     saved,
@@ -881,4 +899,72 @@ describe("durable generic subtask runtime", () => {
     await runtime.run(h.parent.id);
     expect(h.gate).toHaveBeenCalledTimes(1);
   });
+  // [ref:subtask_capacity_eviction]
+  it.each(["protected", "evictable"] as const)(
+    "reserves final proposal room before paying when remaining history is %s",
+    async (history) => {
+      const h = fixture();
+      h.propose.mockImplementationOnce(async () => {
+        throw new Error("No proposal dispatch yet");
+      });
+      const first = h.create();
+      await first.run(h.parent.id);
+      const ready = structuredClone(first.checkpoint());
+      expect(ready.journal.records[0]).toMatchObject({
+        phase: "gate-decided",
+        state: "ready",
+      });
+      const gateRecord = ready.journal.records[0];
+      const { gate: _gate, ...bare } = gateRecord;
+      const seeded = history === "evictable" ? 60 : 0;
+      for (let i = 0; i < seeded; i++)
+        ready.journal.records.push({
+          ...bare,
+          identity: subtaskHash(`history:${i}`),
+          parentTaskId: "task:9",
+          phase: "gate-ready",
+          state: "superseded",
+        });
+      const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+      // Room for the charged dispatch receipt, never for an accepted group.
+      const limit = size(ready) + 600;
+      const refusal = vi.fn();
+      const runtime = h.create(ready, {
+        canCommit: (candidate, reserve) =>
+          size(candidate) + reserve.storeBytes + reserve.journalBytes <= limit
+            ? true
+            : "capacity",
+        onDecompositionCapacityRefusal: refusal,
+      });
+      await runtime.run(h.parent.id);
+      const journal = runtime.checkpoint().journal;
+      if (history === "protected") {
+        // No paid-and-discarded proposal: no network, no extraction charge.
+        expect(h.network.mock.calls).toEqual([["gate"]]);
+        expect(journal.usage.extraction.calls).toBe(0);
+        expect(journal.records).toEqual([gateRecord]);
+        expect(refusal.mock.calls).toEqual([
+          [
+            {
+              sourceId: "runtime-fixture",
+              phase: "proposal",
+              identity: gateRecord.identity,
+            },
+          ],
+        ]);
+        expect(runtime.snapshot().groups).toEqual([]);
+      } else {
+        expect(h.network.mock.calls).toEqual([["gate"], ["proposal"]]);
+        expect(journal.usage.extraction).toEqual({
+          calls: 1,
+          inputTokens: 7,
+          outputTokens: 9,
+        });
+        expect(journal.records[0]?.proposal?.outcome).toBe("accepted");
+        expect(runtime.snapshot().groups[0]?.children).toHaveLength(2);
+        expect(journal.records.length).toBeLessThan(seeded + 1);
+        expect(refusal).not.toHaveBeenCalled();
+      }
+    },
+  );
 });
